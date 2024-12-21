@@ -226,6 +226,9 @@ pub trait BulkMerge<T> {
 
 impl<T: Clone + Ord> BulkMerge<T> for Vec<Arc<GSSNode<T>>> {
     fn bulk_merge(&mut self) {
+        // todo: should be possible to avoid cloning T in some cases by using &T in this map,
+        //  but we need to be careful about lifetimes. If we use `node.as_ref().value`, then node
+        //  will go out of bounds while the reference to its value is still inside `groups`.
         let mut groups: BTreeMap<T, HashMap<_, Arc<GSSNode<T>>>> = BTreeMap::new();
         for node in self.drain(..) {
             groups.entry(node.value.clone()).or_default().entry(Arc::as_ptr(&node)).or_insert(node);

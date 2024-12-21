@@ -230,6 +230,7 @@ fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Resu
 }
 
 fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
+    // todo: remove this
     stage_4_table
 }
 
@@ -265,6 +266,7 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
                     }
                 }
             } else {
+                // If there's only one production ID, we can optimize by storing it directly
                 if production_ids.len() == 1 {
                     shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Reduce(production_ids.iter().next().unwrap().clone()));
                 } else {
@@ -363,6 +365,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     crate::debug!(2, "Validating");
     validate(productions).expect("Validation error");
 
+    // todo: this is messy
     assign_eof_terminal_id(&mut terminal_map);
 
     crate::debug!(2, "Stage 1");

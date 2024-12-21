@@ -35,6 +35,8 @@ pub enum StopReason {
     GotoNotFound,
 }
 
+
+// TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
 #[derive(Clone)]
 pub struct GLRParser {
     pub stage_7_table: Stage7Table,

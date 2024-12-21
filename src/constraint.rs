@@ -103,10 +103,14 @@ impl<'a, T: Tokenizer> GrammarConstraintState<T> {
         
         for (parse_state, tokenizer_state_ids) in &self.states {
             for tokenizer_state_id in tokenizer_state_ids {
+                // todo: should be able to do the below loop more efficiently by optimising the precomputed
+                //  stuff for earlier llm token lookup
                 TrieNode::special_map(
                     Arc::new(Mutex::new(self.parent.precomputed[tokenizer_state_id].clone())),
                     vec![parse_state.clone()],
+                    // todo: it's messy that we need to access the value in dst_node here.
                     |current_parse_states, token_id, _dst_node| {
+                        // todo: this is introducing redundancy... ?
                         let mut glr_parse_state = self.parent.parser.init_glr_parser_from_parse_states(current_parse_states.clone());
                         glr_parse_state.step(TerminalID(*token_id));
                         glr_parse_state.active_states
