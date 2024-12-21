@@ -1,5 +1,5 @@
 use crate::glr::grammar::{Production, Symbol};
-use std::collections::{BTreeMap, BTreeSet, Vec};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Item {
@@ -10,9 +10,9 @@ pub struct Item {
 pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BTreeSet<Item> {
     crate::debug!(0, "Computing closure");
     let mut closure = items.clone();
-    let mut worklist: Vec<Item> = items.iter().cloned().collect();
+    let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
 
-    while let Some(item) = worklist.pop() {
+    while let Some(item) = worklist.pop_front() {
         if let Some(Symbol::NonTerminal(nt)) = item.production.rhs.get(item.dot_position) {
             for prod in productions.iter().filter(|p| p.lhs == *nt) {
                 let new_item = Item {
@@ -20,7 +20,7 @@ pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BT
                     dot_position: 0,
                 };
                 if closure.insert(new_item.clone()) {
-                    worklist.push(new_item);
+                    worklist.push_back(new_item);
                 }
             }
         }
