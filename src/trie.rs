@@ -1,9 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use kdam::term::init;
 
 #[derive(Debug, Clone)]
 pub struct TrieNode<E, T> {
@@ -22,17 +20,11 @@ impl<T, E: Ord> TrieNode<E, T> {
     }
 
     pub fn insert(&mut self, edge: E, child: Arc<Mutex<TrieNode<E, T>>>) -> Option<Arc<Mutex<TrieNode<E, T>>>> {
-        // crate::dbgprintln2!("TrieNode::insert: begin");
-        // Get the raw pointer to the current TrieNode
-        // assert!(!child.try_lock().unwrap().can_reach(self), "TrieNode::insert: cycle detected");
         child.try_lock().unwrap().num_parents += 1;
         if let Some(existing_child) = self.children.insert(edge, child) {
-            // println!("warning: replacing existing node");
             existing_child.try_lock().unwrap().num_parents -= 1;
-            // crate::dbgprintln2!("TrieNode::insert: replacing existing node");
             Some(existing_child)
         } else {
-            // crate::dbgprintln2!("TrieNode::insert: new node");
             None
         }
     }
@@ -108,7 +100,6 @@ impl<T, E: Ord> TrieNode<E, T> {
     where
         T: Clone,
         E: Clone,
-        // todo: is it 'proper' to use `Copy` here?
         F: Copy + Fn(T) -> U,
     {
         let mut active_states: Vec<(Arc<Mutex<TrieNode<E, T>>>, Arc<Mutex<TrieNode<E, U>>>)> = Vec::new();
@@ -185,10 +176,6 @@ impl<T, E: Ord> TrieNode<E, T> {
                 return true;
             }
 
-            // Safety: We need to ensure that the pointer is valid.
-            // In this context, it's assumed that the TrieNode instances
-            // are managed such that pointers to them remain valid as long
-            // as they are reachable from the root.
             unsafe {
                 if let Some(current) = current_ptr.as_ref() {
                     for child in current.children.values() {
@@ -206,7 +193,7 @@ impl<T, E: Ord> TrieNode<E, T> {
 }
 
 impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
-pub fn special_map<V>(
+    pub fn special_map<V>(
         initial_node: Arc<Mutex<TrieNode<E, T>>>,
         initial_value: V,
         mut step: impl FnMut(&V, &E, &TrieNode<E, T>) -> V,
@@ -216,53 +203,36 @@ pub fn special_map<V>(
         V: Clone,
         E: Ord,
     {
-        // A queue of active states (node and its associated value of type V)
         let mut active_states: VecDeque<(Arc<Mutex<TrieNode<E, T>>>, V)> = VecDeque::new();
-
-        // A map of dormant states (node ID to a vector of values of type V)
         let mut dormant_states: HashMap<*const TrieNode<E, T>, Vec<V>> = HashMap::new();
 
-        // Initialize the queue with the root node and the default initial value
         active_states.push_back((initial_node.clone(), initial_value));
 
         while let Some((node_arc, value)) = active_states.pop_front() {
             let node = node_arc.try_lock().unwrap();
 
-            // Process
             process(&node.value, &value);
 
-            // Traverse each child of the current node
             for (edge, child_arc) in &node.children {
                 let child = child_arc.try_lock().unwrap();
-
-                // Apply the step function to compute the new value
                 let new_value = step(&value, edge, &child);
-
-                // Get the raw pointer to the child node for identification
                 let child_ptr = &*child as *const TrieNode<E, T>;
-
-                // Update the dormant state map
                 let entry = dormant_states.entry(child_ptr).or_default();
                 entry.push(new_value.clone());
 
-                // Check if we've visited all parents of this child
                 if entry.len() == child.num_parents {
-                    // Merge the values and push the result to the active states queue
                     let merged_value = merge(entry.clone());
-                    dormant_states.remove(&child_ptr); // Remove the entry from dormant states
+                    dormant_states.remove(&child_ptr);
                     active_states.push_back((child_arc.clone(), merged_value));
                 }
             }
         }
 
-        // At the end, if there are any dormant states left, something went wrong
         if !dormant_states.is_empty() {
-            // dump_structure(initial_node);
             for (node_ptr, values) in &dormant_states {
                 println!("dormant state: {:?}", node_ptr)
             }
             panic!("Leftover dormant states");
-            // println!("Leftover dormant states");
         }
     }
 
@@ -275,17 +245,9 @@ pub fn special_map<V>(
     where
         T2: Clone,
     {
-        // println!("node structure (before)");
-        // dump_structure(node.clone());
-        // println!("other structure (before)");
-        // dump_structure(other.clone());
-
-        // A map to track the mapping of nodes from `other` to `self`
         let mut node_map: HashMap<*const TrieNode<E, T2>, Arc<Mutex<TrieNode<E, T>>>> = HashMap::new();
-
         let mut already_merged_values: HashSet<*const TrieNode<E, T>> = HashSet::new();
 
-        // Special case: merge T for the root node
         let existing_value = node.try_lock().unwrap().value.clone();
         let new_value = t_merge(existing_value, other.try_lock().unwrap().value.clone());
         node.try_lock().unwrap().value = new_value;
@@ -293,31 +255,25 @@ pub fn special_map<V>(
         TrieNode::special_map(
             other.clone(),
             vec![node.clone()],
-            // Step function
             |current_nodes: &Vec<Arc<Mutex<TrieNode<E, T>>>>, edge: &E, dest_other_node: &TrieNode<E, T2>| {
                 let mut new_nodes = Vec::new();
 
                 for current_self_node in current_nodes {
                     let mut current_self_node_guard = current_self_node.try_lock().unwrap();
 
-                    // Check if the current node has an equivalent edge
                     if let Some(child) = current_self_node_guard.get(edge) {
                         if !already_merged_values.contains(&(&*child.try_lock().unwrap() as *const TrieNode<E, T>)) {
-                            // Merge the values
                             let child_value = child.try_lock().unwrap().value.clone();
                             let merged_value = t_merge(child_value, dest_other_node.value.clone());
                             child.try_lock().unwrap().value = merged_value;
                         }
                         new_nodes.push(child);
                     } else {
-                        // Check if the `other` node is already mapped
                         let other_node_ptr = dest_other_node as *const TrieNode<E, T2>;
                         if let Some(mapped_node) = node_map.get(&other_node_ptr) {
-                            // Add the mapped node as a child
                             current_self_node_guard.insert(edge.clone(), mapped_node.clone());
                             new_nodes.push(mapped_node.clone());
                         } else {
-                            // Create a new node and map it
                             let new_node = Arc::new(Mutex::new(TrieNode::new(t_merge(t_init(), dest_other_node.value.clone()))));
                             current_self_node_guard.insert(edge.clone(), new_node.clone());
                             node_map.insert(other_node_ptr, new_node.clone());
@@ -328,9 +284,7 @@ pub fn special_map<V>(
 
                 new_nodes
             },
-            // Merge function
             |values: Vec<Vec<Arc<Mutex<TrieNode<E, T>>>>>| {
-                // Flatten the vectors and remove duplicates
                 let mut merged_nodes = Vec::new();
                 let mut seen = HashSet::new();
 
@@ -345,22 +299,12 @@ pub fn special_map<V>(
 
                 merged_nodes
             },
-            // Process function
             |_, _| {}
         );
     }
 }
 
-// pub trait TrieNodeTrait<E, T> {
-//     fn insert(self, edge: E, value: T) -> Option<Arc<Mutex<TrieNode<E, T>>>> {
-//         let new_node = TrieNode::new(value);
-//         self.insert(edge, Arc::new(Mutex::new(new_node)));
-//     }
-// }
-
 pub(crate) fn dump_structure<E, T>(root: Arc<Mutex<TrieNode<E, T>>>) where E: Debug, T: Debug {
-    // TODO: modify this to use letter names "a" "b" "c"... for nodes rather than raw pointers.
-    // TODO: make it possible to print edge value and node's internal value if they implement Debug
     let mut queue: VecDeque<Arc<Mutex<TrieNode<E, T>>>> = VecDeque::new();
     let mut seen: HashSet<*const TrieNode<E, T>> = HashSet::new();
 

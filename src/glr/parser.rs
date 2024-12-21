@@ -35,8 +35,6 @@ pub enum StopReason {
     GotoNotFound,
 }
 
-
-// TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
 #[derive(Clone)]
 pub struct GLRParser {
     pub stage_7_table: Stage7Table,
@@ -111,10 +109,8 @@ impl GLRParser {
     }
 }
 
-
 impl Debug for GLRParser {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        // Use Display
         write!(f, "{}", self)
     }
 }
@@ -140,12 +136,8 @@ impl Display for GLRParser {
                         write!(f, " •")?;
                     }
                     match symbol {
-                        Symbol::Terminal(terminal) => {
-                            write!(f, " {:?}", terminal.0)?;
-                        }
-                        Symbol::NonTerminal(non_terminal) => {
-                            write!(f, " {}", non_terminal.0)?;
-                        }
+                        Symbol::Terminal(terminal) => write!(f, " {:?}", terminal.0)?,
+                        Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
                     }
                 }
                 if item.dot_position == item.production.rhs.len() {
@@ -206,7 +198,6 @@ impl Display for GLRParser {
     }
 }
 
-
 #[derive(Clone)]
 pub struct GLRParserState<'a> {
     pub parser: &'a GLRParser,
@@ -214,8 +205,6 @@ pub struct GLRParserState<'a> {
     pub inactive_states: BTreeMap<usize, Vec<ParseState>>,
     pub input_pos: usize,
 }
-
-
 
 impl<'a> GLRParserState<'a> {
     pub fn parse(&mut self, input: &[TerminalID]) {
@@ -232,7 +221,6 @@ impl<'a> GLRParserState<'a> {
     pub fn parse_eof(&mut self) {
         self.step(self.parser.eof_terminal_id);
     }
-
 
     pub fn step(&mut self, token_id: TerminalID) {
         let mut next_active_states = Vec::new();

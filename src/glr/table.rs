@@ -27,10 +27,6 @@ struct Stage2Row {
 struct Stage3Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-    /// Split the reduce items by lookahead.
-    /// For LR(0), all possible terminals map to the entire reduce item set.
-    /// But there are various cleverer and more selective ways to compute lookaheads.
-    /// For simplicity, use LALR.
     reduces: BTreeMap<Terminal, BTreeSet<Item>>,
 }
 #[derive(Debug)]
@@ -58,7 +54,6 @@ enum Stage6ShiftsAndReduces {
 
 #[derive(Debug, Clone)]
 pub enum Stage7ShiftsAndReduces {
-    /// Map each item set to a unique ID, and do the same for terminals and nonterminals.
     Shift(StateID),
     Reduce { production_id: ProductionID, nonterminal_id: NonTerminalID, len: usize },
     Split {
@@ -69,7 +64,6 @@ pub enum Stage7ShiftsAndReduces {
 
 #[derive(Debug, Clone)]
 pub struct Stage7Row {
-    /// Map each item set to a unique ID, and do the same for terminals and nonterminals.
     pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
     pub gotos: BTreeMap<NonTerminalID, StateID>,
 }
@@ -82,8 +76,6 @@ pub struct ProductionID(pub usize);
 pub struct NonTerminalID(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TerminalID(pub usize);
-
-
 
 type Stage1Result = Stage1Table;
 type Stage2Result = Stage2Table;
@@ -141,7 +133,6 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
 
         for item in &item_set {
             if item.dot_position >= item.production.rhs.len() {
-                // Reduce item
                 reduces.insert(item.clone());
             }
         }
@@ -170,7 +161,6 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
     }
     stage_2_table
 }
-
 
 fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
     let follow_sets = compute_follow_sets(productions);
@@ -240,7 +230,6 @@ fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Resu
 }
 
 fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
-    // todo: remove this
     stage_4_table
 }
 
@@ -276,7 +265,6 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
                     }
                 }
             } else {
-                // If there's only one production ID, we can optimize by storing it directly
                 if production_ids.len() == 1 {
                     shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Reduce(production_ids.iter().next().unwrap().clone()));
                 } else {
@@ -299,11 +287,8 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
 
 fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
     let mut item_set_map = BiBTreeMap::new();
-    let mut next_terminal_id = 0;
-    let mut next_non_terminal_id = 0;
     let mut next_state_id = 0;
 
-    // Collect all terminals, non-terminals, and states
     let mut terminals = BTreeSet::new();
     let mut non_terminals = BTreeSet::new();
 
@@ -378,7 +363,6 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     crate::debug!(2, "Validating");
     validate(productions).expect("Validation error");
 
-    // todo: this is messy
     assign_eof_terminal_id(&mut terminal_map);
 
     crate::debug!(2, "Stage 1");

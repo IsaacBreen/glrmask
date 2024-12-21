@@ -1,11 +1,8 @@
 use std::collections::BTreeMap;
 
-/// Represents a generic tree-like node structure for precomputation
 #[derive(Debug, Clone)]
 pub(crate) enum PrecomputeGSSNode<GrammarToken, Leaf> {
-    /// An internal node with child nodes mapped by tokens
     Internal(BTreeMap<GrammarToken, PrecomputeGSSNode<GrammarToken, Leaf>>),
-    /// A leaf node containing a value
     Leaf(Leaf),
 }
 
@@ -14,14 +11,12 @@ where
     GrammarToken: Clone + Ord,
     Leaf: Clone,
 {
-    /// Flattens the tree structure into a map of token sequences to leaf values
     pub(crate) fn flatten(&self) -> BTreeMap<Vec<GrammarToken>, Leaf> {
         let mut result = BTreeMap::new();
         self.flatten_recursive(&mut result, Vec::new());
         result
     }
 
-    /// Recursive helper method for flattening the tree
     fn flatten_recursive(
         &self,
         result: &mut BTreeMap<Vec<GrammarToken>, Leaf>,
@@ -41,7 +36,6 @@ where
         }
     }
     
-    /// Maps leaf values using a provided transformation function
     pub(crate) fn map<F, U>(&self, f: F) -> PrecomputeGSSNode<GrammarToken, U>
     where
         F: Copy + Fn(&Leaf) -> U,

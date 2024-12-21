@@ -1,8 +1,7 @@
-// python/src/lib.rs
 use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq};
 use sep1::finite_automata::Regex;
 use pyo3::prelude::*;
-use pyo3::types::{PyByteArray, PyBytes, PyDict};
+use pyo3::types::{PyDict};
 use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use sep1::glr::parser::GLRParser;
 use sep1::glr::table::{generate_glr_parser, StateID};
@@ -157,8 +156,8 @@ impl PyRegexGroups {
         }
     }
 
-    fn build(&self) -> PyResult<PyRegex> { // &self, not self
-        Ok(PyRegex { inner: self.inner.clone().build() }) // clone the inner RegexExpr
+    fn build(&self) -> PyResult<PyRegex> {
+        Ok(PyRegex { inner: self.inner.clone().build() })
     }
 }
 
@@ -170,7 +169,6 @@ pub struct PyRegex {
 
 #[pymethods]
 impl PyRegex {
-    // Add methods here as needed to expose Regex functionality to Python
 }
 
 
@@ -213,7 +211,6 @@ pub struct PyGrammarConstraint {
 impl PyGrammarConstraint {
     #[new]
     fn new(py: Python, grammar: PyGrammar, token_to_id: &PyDict, eof_llm_token_id: usize, max_llm_token_id: usize) -> PyResult<Self> {
-        // Convert the Python dictionary into a BiBTreeMap
         let mut llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = BiBTreeMap::new();
         for (key, value) in token_to_id.iter() {
             let token = key.extract::<&[u8]>()?;
@@ -243,10 +240,10 @@ impl PyGrammarConstraintState {
         Self { inner: grammar_constraint.inner.init() }
     }
 
-    fn get_mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> { // Correct return type
+    fn get_mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
         let bitset = self.inner.get_mask();
         let bools: Vec<bool> = bitset.iter().map(|bit_ref| *bit_ref).collect();
-        let array = bools.into_pyarray_bound(py); // Correct usage
+        let array = bools.into_pyarray_bound(py);
         Ok(array)
     }
 
@@ -255,9 +252,6 @@ impl PyGrammarConstraintState {
     }
 }
 
-
-
-/// A Python module implemented in Rust.
 #[pymodule]
 fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGrammarExpr>()?;

@@ -2,12 +2,9 @@ use crate::glr::grammar::{nt, prod, t, Terminal};
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{generate_glr_parser, TerminalID};
 
-/// Creates a simple parser for testing basic parsing scenarios
 fn create_simple_parser() -> GLRParser {
     let productions = vec![
-        // S -> A
         prod("S", vec![nt("A")]),
-        // A -> A a | b
         prod("A", vec![nt("A"), t("a")]),
         prod("A", vec![t("b")]),
     ];
@@ -15,29 +12,20 @@ fn create_simple_parser() -> GLRParser {
     generate_glr_parser(&productions, 0)
 }
 
-/// Creates a parser for parsing simple arithmetic expressions
 fn create_expression_parser() -> GLRParser {
     let productions = vec![
-        // S -> E
         prod("S", vec![nt("E")]),
-        // E -> E + T
         prod("E", vec![nt("E"), t("+"), nt("T")]),
-        // E -> T
         prod("E", vec![nt("T")]),
-        // T -> T * F
         prod("T", vec![nt("T"), t("*"), nt("F")]),
-        // T -> F
         prod("T", vec![nt("F")]),
-        // F -> ( E )
         prod("F", vec![t("("), nt("E"), t(")")]),
-        // F -> i
         prod("F", vec![t("i")]),
     ];
 
     generate_glr_parser(&productions, 0)
 }
 
-/// Tokenizes an input string into terminal IDs for a given parser
 fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
     input.chars()
         .filter_map(|c| parser.terminal_map.get_by_left(&Terminal(c.to_string())).copied())

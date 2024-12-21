@@ -1,38 +1,31 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Represents a non-terminal symbol in a grammar
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NonTerminal(pub String);
 
-/// Represents a terminal symbol in a grammar
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Terminal(pub String);
 
-/// Represents a symbol in a grammar production
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Symbol {
     Terminal(Terminal),
     NonTerminal(NonTerminal),
 }
 
-/// Represents a production rule in a grammar
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Production {
     pub lhs: NonTerminal,
     pub rhs: Vec<Symbol>,
 }
 
-/// Creates a non-terminal symbol
 pub fn nt(name: &str) -> Symbol {
     Symbol::NonTerminal(NonTerminal(name.to_string()))
 }
 
-/// Creates a terminal symbol
 pub fn t(name: &str) -> Symbol {
     Symbol::Terminal(Terminal(name.to_string()))
 }
 
-/// Creates a production rule
 pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {
     Production {
         lhs: NonTerminal(name.to_string()),
@@ -40,7 +33,6 @@ pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {
     }
 }
 
-/// Computes the set of non-terminals that can derive an empty string (epsilon)
 pub fn compute_epsilon_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
     let mut epsilon_nonterminals = BTreeSet::new();
     let mut changed = true;
@@ -64,12 +56,10 @@ pub fn compute_epsilon_nonterminals(productions: &[Production]) -> BTreeSet<NonT
     epsilon_nonterminals
 }
 
-/// Computes the FIRST sets for each non-terminal
 pub fn compute_first_sets(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
     let epsilon_nonterminals = compute_epsilon_nonterminals(productions);
     let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 
-    // Initialize first sets
     for production in productions {
         let lhs = &production.lhs;
         first_sets.entry(lhs.clone()).or_default();
@@ -119,18 +109,15 @@ pub fn compute_first_sets(productions: &[Production]) -> BTreeMap<NonTerminal, B
     first_sets
 }
 
-/// Computes the FOLLOW sets for each non-terminal
 pub fn compute_follow_sets(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
     let first_sets = compute_first_sets(productions);
     let epsilon_nonterminals = compute_epsilon_nonterminals(productions);
     let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
 
-    // Initialize follow sets
     for production in productions {
         follow_sets.entry(production.lhs.clone()).or_default();
     }
 
-    // Add EOF marker to the start symbol
     if let Some(start_symbol) = productions.first() {
         follow_sets
             .get_mut(&start_symbol.lhs)

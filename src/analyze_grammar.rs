@@ -1,8 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
-use crate::glr::grammar::{prod, NonTerminal, Production, Symbol};
+use crate::glr::grammar::{NonTerminal, Production, Symbol};
 
 pub fn validate(productions: &[Production]) -> Result<(), String> {
-    // Ensure all nonterminals have a productions
     let mut lhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
     let mut rhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
 
@@ -26,16 +25,18 @@ pub fn validate(productions: &[Production]) -> Result<(), String> {
 
 pub fn drop_dead(productions: &[Production]) -> Vec<Production> {
     // todo: this function is broken
-    // Ensure all nonterminals have a productions
     let mut nt_reachables: BTreeMap<&NonTerminal, BTreeSet<&NonTerminal>> = BTreeMap::new();
 
     for prod in productions {
-        let mut rhs_nonterms = BTreeSet::new();
-        for symbol in &prod.rhs {
-            if let Symbol::NonTerminal(nt) = symbol {
-                rhs_nonterms.insert(nt);
-            }
-        }
+        let rhs_nonterms: BTreeSet<_> = prod.rhs.iter()
+            .filter_map(|symbol| {
+                if let Symbol::NonTerminal(nt) = symbol {
+                    Some(nt)
+                } else {
+                    None
+                }
+            })
+            .collect();
         nt_reachables.insert(&prod.lhs, rhs_nonterms);
     }
 
@@ -68,16 +69,11 @@ pub fn drop_dead(productions: &[Production]) -> Vec<Production> {
         }
     }
 
-    let mut new_productions = vec![start_prod.clone()];
-    // crate::debug!(2, "Keeping production {:?}", start_prod);
-    for prod in productions.iter().skip(1) {
-        if reachable_from_start.contains(&prod.lhs) {
-            // crate::debug!(2, "Keeping production {:?}", prod);
-            new_productions.push(prod.clone())
-        } else {
-            // crate::debug!(2, "Removing production {:?}", prod);
-        }
-    }
+    let new_productions: Vec<_> = productions.iter()
+        .filter(|prod| reachable_from_start.contains(&prod.lhs) || prod == start_prod)
+        .cloned()
+        .collect();
+
     crate::debug!(2, "Dropped {} productions", productions.len() - new_productions.len());
 
     new_productions

@@ -1,7 +1,6 @@
 use crate::glr::grammar::{Production, Symbol};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Item {
     pub production: Production,
@@ -20,7 +19,6 @@ pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BT
                     production: prod.clone(),
                     dot_position: 0,
                 };
-                // Directly add the new item without checking for existence
                 if closure.insert(new_item.clone()) {
                     worklist.push_back(new_item);
                 }
@@ -32,7 +30,6 @@ pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BT
     closure
 }
 
-/// Computes the GOTO function for a set of LR(0) items.
 pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
     let mut result = BTreeSet::new();
     for item in items {
@@ -46,7 +43,6 @@ pub fn compute_goto(items: &BTreeSet<Item>) -> BTreeSet<Item> {
     result
 }
 
-/// Splits a set of LR(0) items based on the symbol after the dot.
 pub fn split_on_dot(items: &BTreeSet<Item>) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
     let mut result: BTreeMap<Option<Symbol>, BTreeSet<Item>> = BTreeMap::new();
     for item in items {
@@ -57,4 +53,3 @@ pub fn split_on_dot(items: &BTreeSet<Item>) -> BTreeMap<Option<Symbol>, BTreeSet
     }
     result
 }
-// src/glr/items.rs

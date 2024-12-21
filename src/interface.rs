@@ -1,4 +1,3 @@
-// src/interface.rs
 use crate::finite_automata::{greedy_group, groups, non_greedy_group, ExprGroup, ExprGroups};
 use crate::finite_automata::{Expr, Regex};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
@@ -36,12 +35,8 @@ impl<T> Debug for Grammar<T> where T: Debug {
             write!(f, "    {} -> ", production.lhs.0)?;
             for (i, symbol) in production.rhs.iter().enumerate() {
                 match symbol {
-                    Symbol::Terminal(terminal) => {
-                        write!(f, "{}", terminal.0)?;
-                    }
-                    Symbol::NonTerminal(non_terminal) => {
-                        write!(f, "{}", non_terminal.0)?;
-                    }
+                    Symbol::Terminal(terminal) => write!(f, "{}", terminal.0)?,
+                    Symbol::NonTerminal(non_terminal) => write!(f, "{}", non_terminal.0)?,
                 }
                 if i < production.rhs.len() - 1 {
                     write!(f, " ")?;
@@ -120,8 +115,6 @@ impl<T> Grammar<T> {
 }
 
 impl Grammar<Regex> {
-    /// Constructs a `Grammar` and `Regex` tokenizer from a list of grammar expressions.
-    /// The first non-terminal in the list is treated as the start symbol.
     pub fn from_exprs(exprs: Vec<(String, GrammarExpr)>) -> Self {
         let mut productions = Vec::new();
         let mut literal_map = BTreeMap::new();
@@ -129,8 +122,6 @@ impl Grammar<Regex> {
         let mut terminal_expr_to_group_id = BiBTreeMap::new();
         let mut next_terminal_id = 0;
 
-        // Add a start production.
-        // make sure the start production name is not already taken by adding apostrophes to it until it's unique.
         let mut start_production_name = "start'".to_string();
         let nonterminals: HashSet<&str> = exprs.iter().map(|(name, _)| name.as_str()).collect();
         while nonterminals.contains(&start_production_name.as_str()) {
@@ -150,21 +141,14 @@ impl Grammar<Regex> {
             literal_map: &mut BTreeMap<String, String>,
             tokens: &mut BTreeMap<String, Expr>,
             terminal_name_to_group_id: &mut BiBTreeMap<String, usize>,
-            // todo: make this `terminal_group_id_to_expr` instead
             terminal_expr_to_group_id: &mut BiBTreeMap<Expr, usize>,
             next_terminal_id: &mut usize,
         ) -> Vec<Symbol> {
-            // TODO: define a function that makes us a unique name for an internal rule, with an appropriate prefix.
-            //  e.g. Option0, Repeat0, etc. Make sure there's no existing rule with that name (and there won't be one later either).
-            //  i.e. collect all nonterminals in the grammar upfront and pass it to convert_expr.
             match expr {
                 GrammarExpr::RegexExpr(regex_expr) => {
-                    // TODO: what if this is already in the map (e.g. the user happens to create a rule with name `__regex_0`?
-                    //  We need to generate a unique regex name.
                     if let Some(terminal_id) = terminal_expr_to_group_id.get_by_left(&regex_expr) {
                         vec![Symbol::Terminal(Terminal(format!("__regex_{}", terminal_id)))]
                     } else {
-                        // Create a unique terminal name for this regex expression
                         let terminal_id = *next_terminal_id;
                         let terminal_name = format!("__regex_{}", terminal_id);
                         terminal_name_to_group_id.insert(terminal_name.clone(), terminal_id);
@@ -174,9 +158,7 @@ impl Grammar<Regex> {
                         vec![Symbol::Terminal(Terminal(terminal_name))]
                     }
                 }
-                GrammarExpr::Ref(name) => {
-                    vec![Symbol::NonTerminal(NonTerminal(name.clone()))]
-                }
+                GrammarExpr::Ref(name) => vec![Symbol::NonTerminal(NonTerminal(name.clone()))],
                 GrammarExpr::Sequence(exprs) => exprs
                     .iter()
                     .flat_map(|e| {
@@ -197,8 +179,6 @@ impl Grammar<Regex> {
                     let new_nonterminal = format!("Choice{}", *next_non_terminal_id);
                     let nt = NonTerminal(new_nonterminal.clone());
 
-                    // TODO: what if this is already in the map (e.g. the user happens to create a rule with name `Choice0`?
-                    //  We need to generate a unique nonterminal name.
                     if !non_terminal_map.contains_left(&nt) {
                         non_terminal_map.insert(nt.clone(), NonTerminalID(*next_non_terminal_id));
                         *next_non_terminal_id += 1;
@@ -225,7 +205,6 @@ impl Grammar<Regex> {
                     vec![Symbol::NonTerminal(nt)]
                 }
                 GrammarExpr::Optional(expr) => {
-                    // TODO: name the internal rule here Option{} or something rather than Choice{}.
                     convert_expr(
                         &GrammarExpr::Choice(vec![*expr.clone(), GrammarExpr::Sequence(vec![])]),
                         productions,
@@ -239,7 +218,6 @@ impl Grammar<Regex> {
                     )
                 }
                 GrammarExpr::Repeat(expr) => {
-                    // TODO: same as above, make sure it's unique.
                     let nonterminal_id = *next_non_terminal_id;
                     let nonterminal_name = format!("Repeat{}", nonterminal_id);
                     non_terminal_map.insert(NonTerminal(nonterminal_name.clone()), NonTerminalID(nonterminal_id));
@@ -286,10 +264,6 @@ impl Grammar<Regex> {
             });
         }
 
-        // TODO: this is bad. prob remove this.
-        // crate::debug!(2, "Dropping dead productions");
-        // let productions = drop_dead(&productions);
-
         let tokenizer_exprs_vec: Vec<ExprGroup> = tokens
             .into_iter()
             .map(|(_, expr)| greedy_group(expr))
@@ -322,16 +296,8 @@ impl<T: Tokenizer> GrammarConstraint<T> {
         let mut precomputed = precompute(&grammar.tokenizer, &llm_tokens, LLMTokenID(eof_llm_token_id), max_llm_token_id);
         debug!(2, "precomputed.len(): {}", precomputed.len());
         crate::precompute::precompute_add_eof(&mut precomputed, LLMTokenID(eof_llm_token_id), parser.eof_terminal_id.0, max_llm_token_id);
-        // precompute_add_eof(&mut precomputed, LLMTokenID(eof_llm_token_id), llm_tokens.len(), max_llm_token_id);
         debug!(2, "precomputed.len(): {}", precomputed.len());
         debug!(2, "Done precomputing");
-
-        // // todo: remove this
-        // debug!(2, "GrammarConstraint::from_grammar");
-        // let terminal_map = grammar.terminal_name_to_group_id.iter().map(|(name, group_id)| { (Terminal(name.clone()), TerminalID(*group_id)) }).collect();
-        // let non_terminal_map = assign_non_terminal_ids(&grammar.productions);
-        // debug!(2, "Generating GLR parser");
-        // let parser = generate_glr_parser_with_maps(&grammar.productions, grammar.start_production_id, terminal_map, non_terminal_map);
 
         Self {
             tokenizer: grammar.tokenizer,
@@ -429,42 +395,27 @@ mod tests {
             debug!(3, "Tokenizer state: {}", tokenizer_state.0);
             for node in TrieNode::all_nodes(Arc::new(Mutex::new(root.clone()))) {
                 debug!(3, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-                // print edge values and destination addresses
                 for (edge, dest) in node.try_lock().unwrap().children() {
                     debug!(3, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
                 }
             }
         }
 
-        // Get the mask.
-        // The valid LLM tokens initially are ["i", "(", "(i"].
         let mask = grammar_constraint_state.get_mask();
         let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"i", b"(", b"(i"));
         assert_eq!(mask, expected_mask);
 
-        // Simulate generating from a LLM with the grammar constraint.
-        // We may have some 'prefill' we want to pass to the parser before we generate the first new LLM token.
-        // Let's say the prefill is "(i+i*i".
-        // This would be best tokenized as ["(i", "+", "i", "*", "i"].
-        //
-        // Take note of the ambiguity in the LLM tokens; we could the prefill as ["(", "i", "+", "i", "*", "i"],
-        // i.e. break the "(i" token into "(" and "i". But that's a waste of a token.
-        // A good LLM tokenizer would greedily emit the longest possible token at each step.
         let prefill: Vec<_> = llm_token_vec!(b"(i", b"+i", b"*", b"i").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
         grammar_constraint_state.commit_many(&prefill);
 
-        // Get the mask.
-        // The valid LLM tokens right now are ["+", "*", ")", "+i)"].
         let mask = grammar_constraint_state.get_mask();
         let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"+", b"*", b")", b"+i"));
         assert_eq!(mask, expected_mask);
 
-        // Finish it
         let terminals: Vec<_> = llm_token_vec!(b")").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
         grammar_constraint_state.commit_many(&terminals);
         let mask = grammar_constraint_state.get_mask();
         let mut expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"+", b"*", b"+i"));
-        // Add the EOF token
         expected_mask.set(llm_tokens.len(), true);
         assert_eq!(mask, expected_mask);
 
@@ -499,7 +450,6 @@ mod tests {
             debug!(1, "Tokenizer state: {}", tokenizer_state.0);
             for node in TrieNode::all_nodes(Arc::new(Mutex::new(root.clone()))) {
                 debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-                // print edge values and destination addresses
                 for (edge, dest) in node.try_lock().unwrap().children() {
                     debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
                 }
@@ -516,16 +466,13 @@ mod tests {
             }
         }
 
-        // Get the mask.
         let mask = grammar_constraint_state.get_mask();
         let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"a"));
         assert_eq!(mask, expected_mask);
 
-        // Commit "a"
         let terminals: Vec<_> = llm_token_vec!(b"a").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
         grammar_constraint_state.commit_many(&terminals);
 
-        // Get the mask.
         let mask = grammar_constraint_state.get_mask();
         let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"b"));
         assert_eq!(mask, expected_mask);
@@ -559,7 +506,6 @@ mod tests {
             debug!(1, "Tokenizer state: {}", tokenizer_state.0);
             for node in TrieNode::all_nodes(Arc::new(Mutex::new(root.clone()))) {
                 debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-                // print edge values and destination addresses
                 for (edge, dest) in node.try_lock().unwrap().children() {
                     debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
                 }
@@ -576,42 +522,21 @@ mod tests {
             }
         }
 
-        // Get the mask.
         let mask = grammar_constraint_state.get_mask();
         let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"a"));
         assert_eq!(mask, expected_mask);
 
-        // Commit "a"
         let terminals: Vec<_> = llm_token_vec!(b"a").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
         grammar_constraint_state.commit_many(&terminals);
 
-        // Get the mask.
         let mask = grammar_constraint_state.get_mask();
         let mut expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!());
-        // Add the EOF token
         expected_mask.set(llm_tokens.len(), true);
         assert_eq!(mask, expected_mask);
     }
 
     #[test]
     fn test_precompute_for_python_name_token() {
-        // ignore = rep(choice([
-        //     eat_u8(ord(" ")),
-        //     seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]),
-        // ]))
-        // digit = choice([eat_u8(c) for c in range(ord("0"), ord("9") + 1)])
-        // alph_lower = choice([eat_u8(c) for c in range(ord("a"), ord("z") + 1)])
-        // alph_upper = choice([eat_u8(c) for c in range(ord("A"), ord("Z") + 1)])
-        //
-        // name_start = choice([
-        //     alph_lower,
-        //     alph_upper,
-        //     eat_u8(ord("_"))
-        // ])
-        // name_middle = choice([
-        //     name_start,
-        //     digit,
-        // ])
         let ignore = repeat0_fast(choice_fast!(eat_u8_fast(b' '), seq_fast!(eat_u8_fast(b'#'), repeat0_fast(eat_u8_negation_fast(b'\n')), eat_u8_fast(b'\n'))));
 
         let digit = eat_u8_range_fast(b'0', b'9');
@@ -625,7 +550,6 @@ mod tests {
         let tokenizer = name.build();
         dbg!(&tokenizer);
 
-        // // Define LLM tokens
         let llm_tokens: Vec<Vec<u8>> = (0..2).map(|i| format!("abcdefghijk{}", i).as_bytes().to_vec()).collect();
         let llm_tokens_slices: Vec<&[u8]> = llm_tokens.iter().map(|token| &token[..]).collect();
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
@@ -634,32 +558,15 @@ mod tests {
         let precomputed = precompute(&tokenizer, &llm_token_map, LLMTokenID(eof_llm_token_id), max_llm_token_id);
         print_precomputed(&precomputed);
         println!("Done precomputing");
-        // print_precomputed(&precomputed);
     }
 
     #[test]
     fn test_precompute_explosion() {
-        // let tokenizer = groups![
-        //     seq_fast![eat_u8(b'a'), eat_u8(b'a'), eat_u8(b'a')],
-        //     seq_fast![eat_u8(b'a'), eat_u8(b'b'), eat_u8(b'a')],
-        //     seq_fast![eat_u8(b'b'), eat_u8(b'a'), eat_u8(b'a')],
-        //     seq_fast![eat_u8(b'b'), eat_u8(b'a'), eat_u8(b'b')],
-        //     seq_fast![eat_u8(b'a'), eat_u8(b'a')],
-        //     seq_fast![eat_u8(b'b'), eat_u8(b'a')],
-        //     seq_fast![eat_u8(b'b'), eat_u8(b'b')],
-        //     repeat0_fast(seq_fast![eat_u8(b'a'), eat_u8(b'a')]),
-        //     repeat0_fast(eat_u8(b'a')),
-        //     // eat_u8(b'a'),
-        //     eat_u8(b'a'),
-        //     eat_u8(b'b'),
-        // ].build();
         let tokenizer = groups![
             eat_u8(b'a'),
             eat_u8(b'a'),
         ].build();
 
-        // Define the LLM token as 32 'a's
-        // let llm_tokens: Vec<Vec<u8>> = vec![b"ab".to_vec(), b"aaaaaaaa".to_vec(), b"babababa".to_vec(), b"aabbaabb".to_vec()];
         let llm_tokens: Vec<Vec<u8>> = vec![b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec()];
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let eof_llm_token_id = llm_tokens.len();

@@ -1,20 +1,16 @@
 use crate::glr::parser::{GLRParser, GLRParserState, InsertWith, ParseState, ParseStateKey};
 use crate::glr::table::{StateID, TerminalID};
 use crate::{precompute, debug};
-use crate::precompute::{LLMTokenID, Token, TokenID, Tokenizer};
+use crate::precompute::{LLMTokenID, Tokenizer};
 use bitvec::prelude::*;
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use crate::trie::TrieNode;
 
-/// Type alias for a token represented as a byte vector
 type LLMToken = Vec<u8>;
-
-/// Type alias for mapping LLM tokens to their unique identifiers
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
 
-/// Represents a constraint on grammar generation
 #[derive(Debug, Clone)]
 pub struct GrammarConstraint<T: Tokenizer> {
     pub(crate) tokenizer: T,
@@ -23,7 +19,6 @@ pub struct GrammarConstraint<T: Tokenizer> {
     pub(crate) max_llm_token_id: usize,
 }
 
-/// Represents the current state of a grammar constraint
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintState<T: Tokenizer> {
     parent: GrammarConstraint<T>,
@@ -31,7 +26,6 @@ pub struct GrammarConstraintState<T: Tokenizer> {
 }
 
 impl<T: Tokenizer> GrammarConstraint<T> {
-    /// Creates a new grammar constraint
     pub fn new(
         tokenizer: T, 
         parser: GLRParser, 
@@ -50,7 +44,6 @@ impl<T: Tokenizer> GrammarConstraint<T> {
         }
     }
 
-    /// Initializes the grammar constraint state
     pub fn init(self) -> GrammarConstraintState<T> {
         let parser_initial_state = self.parser.init_parse_state();
         let tokenizer_initial_state_id = StateID(self.tokenizer.initial_state_id());
@@ -63,7 +56,6 @@ impl<T: Tokenizer> GrammarConstraint<T> {
 }
 
 impl<'a, T: Tokenizer> GrammarConstraintState<T> {
-    /// Generates a mask of valid next tokens
     pub fn get_mask(&self) -> BitVec {
         let mut result = bitvec![0; self.parent.max_llm_token_id + 1];
 
@@ -89,8 +81,7 @@ impl<'a, T: Tokenizer> GrammarConstraintState<T> {
                         if glr_parse_state.is_ok() {
                             for (possible_next_grammar_token, bitset) in bitsets {
                                 let mut new_glr_parse_state = glr_parse_state.clone();
-                                let possible_next_grammar_token_id = TerminalID(*possible_next_grammar_token);
-                                new_glr_parse_state.step(possible_next_grammar_token_id);
+                                new_glr_parse_state.step(TerminalID(*possible_next_grammar_token));
 
                                 if new_glr_parse_state.is_ok() {
                                     result |= bitset;
@@ -107,20 +98,15 @@ impl<'a, T: Tokenizer> GrammarConstraintState<T> {
         result
     }
 
-    /// Commits a token to the current state
     pub fn commit(&mut self, llm_token_id: LLMTokenID) {
         let mut new_states: BTreeMap<(ParseStateKey, BTreeSet<StateID>), ParseState> = BTreeMap::new();
         
         for (parse_state, tokenizer_state_ids) in &self.states {
             for tokenizer_state_id in tokenizer_state_ids {
-                // todo: should be able to do the below loop more efficiently by optimising the precomputed
-                //  stuff for earlier llm token lookup
                 TrieNode::special_map(
                     Arc::new(Mutex::new(self.parent.precomputed[tokenizer_state_id].clone())),
                     vec![parse_state.clone()],
-                    // todo: it's messy that we need to access the value in dst_node here.
                     |current_parse_states, token_id, _dst_node| {
-                        // todo: this is introducing redundancy... ?
                         let mut glr_parse_state = self.parent.parser.init_glr_parser_from_parse_states(current_parse_states.clone());
                         glr_parse_state.step(TerminalID(*token_id));
                         glr_parse_state.active_states
@@ -154,14 +140,12 @@ impl<'a, T: Tokenizer> GrammarConstraintState<T> {
         }).collect();
     }
 
-    /// Commits multiple tokens sequentially
     pub fn commit_many(&mut self, llm_token_ids: &[LLMTokenID]) {
         for &llm_token_id in llm_token_ids {
             self.commit(llm_token_id);
         }
     }
 
-    /// Getter for precomputed field
     pub fn get_precomputed(&self) -> &BTreeMap<StateID, TrieNode<TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>> {
         &self.parent.precomputed
     }
