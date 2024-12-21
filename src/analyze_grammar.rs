@@ -70,7 +70,7 @@ pub fn drop_dead(productions: &[Production]) -> Vec<Production> {
     }
 
     let new_productions: Vec<_> = productions.iter()
-        .filter(|prod| reachable_from_start.contains(&prod.lhs) || prod == start_prod)
+        .filter(|prod| reachable_from_start.contains(&prod.lhs) || *prod == start_prod)
         .cloned()
         .collect();
 

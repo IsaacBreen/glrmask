@@ -1,7 +1,7 @@
 use crate::glr::parser::{GLRParser, GLRParserState, InsertWith, ParseState, ParseStateKey};
 use crate::glr::table::{StateID, TerminalID};
 use crate::{precompute, debug};
-use crate::precompute::{LLMTokenID, Tokenizer};
+use crate::precompute::{LLMTokenID, TokenID, Tokenizer};
 use bitvec::prelude::*;
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};
