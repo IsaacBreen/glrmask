@@ -333,11 +333,44 @@ impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
     }
 
     pub fn max_depth(&self) -> usize {
-        let mut max_child_depth = 0;
-        for child in self.children.values() {
-            max_child_depth = std::cmp::max(max_child_depth, child.try_lock().unwrap().max_depth());
+        Self::_max_depth(Arc::new(Mutex::new(self.clone())))
+    }
+
+    fn _max_depth(root: Arc<Mutex<TrieNode<E, T>>>) -> usize {
+        // A map to store the maximum depth of each node we've already visited
+        let mut depth_cache: HashMap<*const TrieNode<E, T>, usize> = HashMap::new();
+        Self::compute_max_depth(&root, &mut depth_cache)
+    }
+
+    fn compute_max_depth(
+        node: &Arc<Mutex<TrieNode<E, T>>>,
+        depth_cache: &mut HashMap<*const TrieNode<E, T>, usize>,
+    ) -> usize {
+        let node_ptr = {
+            let node_guard = node.try_lock().unwrap();
+            &*node_guard as *const TrieNode<E, T>
+        };
+
+        // If we've already computed the depth for this node, return it
+        if let Some(&cached_depth) = depth_cache.get(&node_ptr) {
+            return cached_depth;
         }
-        max_child_depth + 1
+
+        // Compute the depth of the current node
+        let node_guard = node.try_lock().unwrap();
+        let max_child_depth = node_guard
+            .children
+            .values()
+            .map(|child| Self::compute_max_depth(child, depth_cache))
+            .max()
+            .unwrap_or(0); // If there are no children, depth is 0
+
+        let current_depth = 1 + max_child_depth;
+
+        // Cache the computed depth for this node
+        depth_cache.insert(node_ptr, current_depth);
+
+        current_depth
     }
 }
 
