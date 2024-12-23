@@ -232,6 +232,7 @@ if __name__ == "__main__":
 
     llm_token_to_id = {token.replace("Ġ", " ").encode(): i for token, i in tokenizer.vocab.items()}
     llm_tokens = list(tokenizer.vocab.keys())
+    print("vocab size:", len(llm_tokens))
 
 #     ts = ['Paris', 'London']
 #     llm_tokens = [x.encode() for x in ts]
