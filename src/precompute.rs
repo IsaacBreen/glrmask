@@ -187,6 +187,13 @@ pub fn precompute<'a>(
         result.insert(glr::table::StateID(state_id), state_map_root);
     }
 
+    let mut max_depth_frequency: BTreeMap<usize, usize> = BTreeMap::new();
+    for (llm_token_id, max_depth) in max_depths {
+        *max_depth_frequency.entry(max_depth).or_default() += 1;
+    }
+    for (max_depth, frequency) in max_depth_frequency {
+        println!("Max depth {} occurred {} times", max_depth, frequency);
+    }
     result
 }
 
