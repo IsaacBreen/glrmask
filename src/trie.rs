@@ -331,6 +331,14 @@ impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
             |_, _| {}
         );
     }
+
+    pub fn max_depth(&self) -> usize {
+        let mut max_child_depth = 0;
+        for child in self.children.values() {
+            max_child_depth = std::cmp::max(max_child_depth, child.try_lock().unwrap().max_depth());
+        }
+        max_child_depth + 1
+    }
 }
 
 pub(crate) fn dump_structure<E, T>(root: Arc<Mutex<TrieNode<E, T>>>) where E: Debug, T: Debug {
@@ -396,5 +404,24 @@ mod tests {
         dump_structure(a.clone());
         println!("a2 structure (after)e");
         dump_structure(a2.clone());
+
+        assert_eq!(a.lock().unwrap().max_depth(), 3);
+    }
+
+    #[test]
+    fn test_max_depth() {
+        let root = Arc::new(Mutex::new(TrieNode::new("root")));
+        let child1 = Arc::new(Mutex::new(TrieNode::new("child1")));
+        let child2 = Arc::new(Mutex::new(TrieNode::new("child2")));
+        let grandchild1 = Arc::new(Mutex::new(TrieNode::new("grandchild1")));
+
+        root.lock().unwrap().insert("r->c1", child1.clone());
+        root.lock().unwrap().insert("r->c2", child2.clone());
+        child1.lock().unwrap().insert("c1->gc1", grandchild1.clone());
+
+        assert_eq!(root.lock().unwrap().max_depth(), 3);
+        assert_eq!(child1.lock().unwrap().max_depth(), 2);
+        assert_eq!(child2.lock().unwrap().max_depth(), 1);
+        assert_eq!(grandchild1.lock().unwrap().max_depth(), 1);
     }
 }
