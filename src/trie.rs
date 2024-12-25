@@ -268,22 +268,10 @@ impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
                         }
                     }
                 }
-
-                new_nodes
+                ()
             },
-            |values: Vec<Vec<Arc<Mutex<TrieNode<E, T>>>>>| {
-                let mut merged_nodes = Vec::new();
-                let mut seen = HashSet::new();
-
-                for value in values {
-                    for node in value {
-                        let node_ptr = Arc::as_ptr(&node);
-                        if seen.insert(node_ptr) {
-                            merged_nodes.push(node);
-                        }
-                    }
-                }
-                merged_nodes
+            |_: Vec<()>| {
+                ()
             },
             // Process function
             |_, _| {}
