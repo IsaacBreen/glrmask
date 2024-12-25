@@ -52,6 +52,7 @@ pub trait Tokenizer: Sized {
         max_llm_token_id: usize,
     ) {
         let mut queue: BTreeMap<(usize, Option<usize>), BTreeMap<_, _>> = BTreeMap::new();
+        // TODO: Should this be a bimap?
         let mut queue_positions: BTreeMap<*const Mutex<TrieNode<GroupID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>, (usize, Option<usize>)> = BTreeMap::new();
         let mut new_nodes_for_positions: BTreeMap<(usize, Option<usize>), Arc<Mutex<TrieNode<GroupID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>>> = BTreeMap::new();
 
@@ -167,20 +168,20 @@ pub fn precompute<'a>(
 
             // TOOD: remove this
             // Compute maximum depth for this state and LLM token
-            let mut temp_root_arc = Arc::new(Mutex::new(TrieNode::new((BTreeMap::new(), BTreeMap::new(), None))));
-            tokenizer.execute_all_from_state(
-                llm_token,
-                state_id,
-                temp_root_arc.clone(),
-                *llm_token_id,
-                max_llm_token_id,
-            );
-            let max_depth = temp_root_arc.try_lock().unwrap().max_depth();
-            if let Some(existing_depth) = max_depths.get_mut(llm_token_id) {
-                *existing_depth = std::cmp::max(*existing_depth, max_depth);
-            } else {
-                max_depths.insert(*llm_token_id, max_depth);
-            }
+            // let mut temp_root_arc = Arc::new(Mutex::new(TrieNode::new((BTreeMap::new(), BTreeMap::new(), None))));
+            // tokenizer.execute_all_from_state(
+            //     llm_token,
+            //     state_id,
+            //     temp_root_arc.clone(),
+            //     *llm_token_id,
+            //     max_llm_token_id,
+            // );
+            // let max_depth = temp_root_arc.try_lock().unwrap().max_depth();
+            // if let Some(existing_depth) = max_depths.get_mut(llm_token_id) {
+            //     *existing_depth = std::cmp::max(*existing_depth, max_depth);
+            // } else {
+            //     max_depths.insert(*llm_token_id, max_depth);
+            // }
         }
 
         let state_map_root = state_map_root_arc.try_lock().unwrap().clone();
