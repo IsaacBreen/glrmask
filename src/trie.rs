@@ -138,23 +138,31 @@ impl<T, E: Ord> TrieNode<E, T> {
     }
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug)]
 struct QueueItem<E, T, V> {
     max_depth: usize,
     node: Arc<Mutex<TrieNode<E, T>>>,
     value: V,
 }
 
-impl<E, T, V: Ord> Ord for QueueItem<E, T, V> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse order for min-heap
-        other.max_depth.cmp(&self.max_depth)
+impl<E, T, V> PartialEq for QueueItem<E, T, V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.max_depth == other.max_depth
     }
 }
 
-impl<E, T, V: Ord> PartialOrd for QueueItem<E, T, V> {
+impl<E, T, V> Eq for QueueItem<E, T, V> {}
+
+impl<E, T, V> PartialOrd for QueueItem<E, T, V> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl<E, T, V> Ord for QueueItem<E, T, V> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Reverse order for min-heap
+        other.max_depth.cmp(&self.max_depth)
     }
 }
 
@@ -167,7 +175,7 @@ impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
         mut merge: impl FnMut(Vec<V>) -> V,
         mut process: impl FnMut(&T, &V),
     ) where
-        V: Clone + Ord,
+        V: Clone,
         E: Ord,
     {
         // Priority queue ordered by max_depth (min heap)
@@ -226,10 +234,11 @@ impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
 
         TrieNode::special_map(
             other.clone(),
-            vec![node.clone()],
+            (),
             // Step function
-            |current_nodes: &Vec<Arc<Mutex<TrieNode<E, T>>>>, edge: &E, dest_other_node: &TrieNode<E, T2>| {
+            |current_nodes: &(), edge: &E, dest_other_node: &TrieNode<E, T2>| {
                 let mut new_nodes = Vec::new();
+                let current_nodes = vec![node.clone()];
 
                 for current_self_node in current_nodes {
                     let mut current_self_node_guard = current_self_node.try_lock().unwrap();
