@@ -117,8 +117,6 @@ impl<T, E: Ord> TrieNode<E, T> {
     pub fn max_depth(&self) -> usize {
         self.max_depth
     }
-
-    // ... other methods remain mostly the same, but remove num_parents related code
 }
 
 impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
@@ -168,7 +166,81 @@ impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
         }
     }
 
-    // ... other methods remain the same
+    pub fn merge<T2>(
+        node: Arc<Mutex<TrieNode<E, T>>>,
+        other: Arc<Mutex<TrieNode<E, T2>>>,
+        t_merge: impl Fn(T, T2) -> T,
+        t_init: impl Fn() -> T,
+    )
+    where
+        T2: Clone,
+    {
+        // A map to track the mapping of nodes from `other` to `self`
+        let mut node_map: HashMap<*const TrieNode<E, T2>, Arc<Mutex<TrieNode<E, T>>>> = HashMap::new();
+        let mut already_merged_values: HashSet<*const TrieNode<E, T>> = HashSet::new();
+
+        // Special case: merge T for the root node
+        let existing_value = node.try_lock().unwrap().value.clone();
+        let new_value = t_merge(existing_value, other.try_lock().unwrap().value.clone());
+        node.try_lock().unwrap().value = new_value;
+
+        TrieNode::special_map(
+            other.clone(),
+            vec![node.clone()],
+            // Step function
+            |current_nodes: &Vec<Arc<Mutex<TrieNode<E, T>>>>, edge: &E, dest_other_node: &TrieNode<E, T2>| {
+                let mut new_nodes = Vec::new();
+
+                for current_self_node in current_nodes {
+                    let mut current_self_node_guard = current_self_node.try_lock().unwrap();
+
+                    // Check if the current node has an equivalent edge
+                    if let Some(child) = current_self_node_guard.get(edge) {
+                        if !already_merged_values.contains(&(&*child.try_lock().unwrap() as *const TrieNode<E, T>)) {
+                            // Merge the values
+                            let child_value = child.try_lock().unwrap().value.clone();
+                            let merged_value = t_merge(child_value, dest_other_node.value.clone());
+                            child.try_lock().unwrap().value = merged_value;
+                        }
+                        new_nodes.push(child);
+                    } else {
+                        // Check if the `other` node is already mapped
+                        let other_node_ptr = dest_other_node as *const TrieNode<E, T2>;
+                        if let Some(mapped_node) = node_map.get(&other_node_ptr) {
+                            // Add the mapped node as a child
+                            current_self_node_guard.insert(edge.clone(), mapped_node.clone());
+                            new_nodes.push(mapped_node.clone());
+                        } else {
+                            // Create a new node and map it
+                            let new_node = Arc::new(Mutex::new(TrieNode::new(t_merge(t_init(), dest_other_node.value.clone()))));
+                            current_self_node_guard.insert(edge.clone(), new_node.clone());
+                            node_map.insert(other_node_ptr, new_node.clone());
+                            new_nodes.push(new_node);
+                        }
+                    }
+                }
+
+                new_nodes
+            },
+            |values: Vec<Vec<Arc<Mutex<TrieNode<E, T>>>>>| {
+                let mut merged_nodes = Vec::new();
+                let mut seen = HashSet::new();
+
+                for value in values {
+                    for node in value {
+                        let node_ptr = Arc::as_ptr(&node);
+                        if seen.insert(node_ptr) {
+                            merged_nodes.push(node);
+                        }
+                    }
+                }
+
+                merged_nodes
+            },
+            // Process function
+            |_, _| {}
+        );
+    }
 }
 
 pub(crate) fn dump_structure<E, T>(root: Arc<Mutex<TrieNode<E, T>>>) where E: Debug, T: Debug {
