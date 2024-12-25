@@ -51,85 +51,86 @@ pub trait Tokenizer: Sized {
         llm_token_id: LLMTokenID,
         max_llm_token_id: usize,
     ) {
-        let mut queue: BTreeMap<(usize, Option<usize>), BTreeMap<_, _>> = BTreeMap::new();
-        // TODO: Should this be a bimap?
-        let mut queue_positions: BTreeMap<*const Mutex<TrieNode<GroupID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>, (usize, Option<usize>)> = BTreeMap::new();
-        let mut new_nodes_for_positions: BTreeMap<(usize, Option<usize>), Arc<Mutex<TrieNode<GroupID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>>> = BTreeMap::new();
-
-        let root = state_map_root_arc.clone();
-
-        // Initialize the queue with the starting state
-        queue.insert((0, Some(state)), BTreeMap::from([(Arc::as_ptr(&root), root.clone())]));
-        queue_positions.insert(Arc::as_ptr(&root), (0, Some(state)));
-
-        while let Some(((position, maybe_state), nodes)) = queue.pop_first() {
-            for (_, node) in nodes {
-                if position == text.len() {
-                    let mut node_guard = node.try_lock().unwrap();
-                    assert!(!node_guard.value.0.contains_key(&llm_token_id));
-                    node_guard.value.0.insert(llm_token_id, maybe_state.map(StateID));
-                    if let Some(state) = maybe_state {
-                        for possible_grammar_token_id in &self.tokens_accessible_from_state(state) {
-                            node_guard.value.1.entry(*possible_grammar_token_id).or_insert_with(|| {
-                                let mut bitset = BitVec::new();
-                                bitset.resize(max_llm_token_id + 1, false);
-                                bitset
-                            }).set(llm_token_id.0, true);
-                        }
-                    } else {
-                        node_guard.value.2.get_or_insert_with(|| {
-                            let mut bitset = BitVec::new();
-                            bitset.resize(max_llm_token_id + 1, false);
-                            bitset
-                        }).set(llm_token_id.0, true);
-                    }
-                    continue;
-                }
-
-                let remaining_text = &text[position..];
-                let execute_result = self.execute_from_state(remaining_text, maybe_state.unwrap_or(0));
-
-                // Process all matches
-                for token in &execute_result.matches {
-                    let new_position = position + token.width;
-                    assert_ne!(token.width, 0);
-                    assert!(new_position <= text.len());
-                    let new_state: Option<usize> = None;
-                    let mut node_guard = node.try_lock().unwrap();
-                    if let Some(child) = node_guard.get(&token.id) {
-                        let child_ptr = Arc::as_ptr(&child);
-                        if let Some(&(child_position, child_state)) = queue_positions.get(&child_ptr) {
-                            if (child_position, child_state) != (new_position, new_state) {
-                                // Child exists and is already queued with different position or state
-                                // Need to replace the child with a clone
-                                let new_child = node_guard.replace_child_with_clone(&token.id);
-                                queue_positions.insert(Arc::as_ptr(&new_child), (new_position, new_state));
-                                queue.entry((new_position, new_state)).or_default().insert(Arc::as_ptr(&new_child), new_child.clone());
-                            }
-                        } else {
-                            // Child exists but is not already queued
-                            // Need to add it to the queue
-                            queue_positions.insert(child_ptr, (new_position, new_state));
-                            queue.entry((new_position, new_state)).or_default().insert(child_ptr, child.clone());
-                        }
-                    } else {
-                        if let Some(new_node) = new_nodes_for_positions.get(&(new_position, new_state)) {
-                            // A new node already exists for this position and state
-                            // Add an edge from the current node to the new node
-                            node_guard.insert(token.id, new_node.clone());
-                        } else {
-                            // A new node does not exist for this position and state
-                            // Create a new node and add an edge from the current node to the new node
-                            let new_node = Arc::new(Mutex::new(TrieNode::new((BTreeMap::new(), BTreeMap::new(), None))));
-                            new_nodes_for_positions.insert((new_position, new_state), new_node.clone());
-                            node_guard.insert(token.id, new_node.clone());
-                            queue_positions.insert(Arc::as_ptr(&new_node), (new_position, new_state));
-                            queue.entry((new_position, new_state)).or_default().insert(Arc::as_ptr(&new_node), new_node.clone());
-                        }
-                    }
-                }
-            }
-        }
+        todo!()
+        // let mut queue: BTreeMap<(usize, Option<usize>), BTreeMap<_, _>> = BTreeMap::new();
+        // // TODO: Should this be a bimap?
+        // let mut queue_positions: BTreeMap<*const Mutex<TrieNode<GroupID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>, (usize, Option<usize>)> = BTreeMap::new();
+        // let mut new_nodes_for_positions: BTreeMap<(usize, Option<usize>), Arc<Mutex<TrieNode<GroupID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>>> = BTreeMap::new();
+        //
+        // let root = state_map_root_arc.clone();
+        //
+        // // Initialize the queue with the starting state
+        // queue.insert((0, Some(state)), BTreeMap::from([(Arc::as_ptr(&root), root.clone())]));
+        // queue_positions.insert(Arc::as_ptr(&root), (0, Some(state)));
+        //
+        // while let Some(((position, maybe_state), nodes)) = queue.pop_first() {
+        //     for (_, node) in nodes {
+        //         if position == text.len() {
+        //             let mut node_guard = node.try_lock().unwrap();
+        //             assert!(!node_guard.value.0.contains_key(&llm_token_id));
+        //             node_guard.value.0.insert(llm_token_id, maybe_state.map(StateID));
+        //             if let Some(state) = maybe_state {
+        //                 for possible_grammar_token_id in &self.tokens_accessible_from_state(state) {
+        //                     node_guard.value.1.entry(*possible_grammar_token_id).or_insert_with(|| {
+        //                         let mut bitset = BitVec::new();
+        //                         bitset.resize(max_llm_token_id + 1, false);
+        //                         bitset
+        //                     }).set(llm_token_id.0, true);
+        //                 }
+        //             } else {
+        //                 node_guard.value.2.get_or_insert_with(|| {
+        //                     let mut bitset = BitVec::new();
+        //                     bitset.resize(max_llm_token_id + 1, false);
+        //                     bitset
+        //                 }).set(llm_token_id.0, true);
+        //             }
+        //             continue;
+        //         }
+        //
+        //         let remaining_text = &text[position..];
+        //         let execute_result = self.execute_from_state(remaining_text, maybe_state.unwrap_or(0));
+        //
+        //         // Process all matches
+        //         for token in &execute_result.matches {
+        //             let new_position = position + token.width;
+        //             assert_ne!(token.width, 0);
+        //             assert!(new_position <= text.len());
+        //             let new_state: Option<usize> = None;
+        //             let mut node_guard = node.try_lock().unwrap();
+        //             if let Some(child) = node_guard.get(&token.id) {
+        //                 let child_ptr = Arc::as_ptr(&child);
+        //                 if let Some(&(child_position, child_state)) = queue_positions.get(&child_ptr) {
+        //                     if (child_position, child_state) != (new_position, new_state) {
+        //                         // Child exists and is already queued with different position or state
+        //                         // Need to replace the child with a clone
+        //                         let new_child = node_guard.replace_child_with_clone(&token.id);
+        //                         queue_positions.insert(Arc::as_ptr(&new_child), (new_position, new_state));
+        //                         queue.entry((new_position, new_state)).or_default().insert(Arc::as_ptr(&new_child), new_child.clone());
+        //                     }
+        //                 } else {
+        //                     // Child exists but is not already queued
+        //                     // Need to add it to the queue
+        //                     queue_positions.insert(child_ptr, (new_position, new_state));
+        //                     queue.entry((new_position, new_state)).or_default().insert(child_ptr, child.clone());
+        //                 }
+        //             } else {
+        //                 if let Some(new_node) = new_nodes_for_positions.get(&(new_position, new_state)) {
+        //                     // A new node already exists for this position and state
+        //                     // Add an edge from the current node to the new node
+        //                     node_guard.insert(token.id, new_node.clone());
+        //                 } else {
+        //                     // A new node does not exist for this position and state
+        //                     // Create a new node and add an edge from the current node to the new node
+        //                     let new_node = Arc::new(Mutex::new(TrieNode::new((BTreeMap::new(), BTreeMap::new(), None))));
+        //                     new_nodes_for_positions.insert((new_position, new_state), new_node.clone());
+        //                     node_guard.insert(token.id, new_node.clone());
+        //                     queue_positions.insert(Arc::as_ptr(&new_node), (new_position, new_state));
+        //                     queue.entry((new_position, new_state)).or_default().insert(Arc::as_ptr(&new_node), new_node.clone());
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
     }
 }
 

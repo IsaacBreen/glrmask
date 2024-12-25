@@ -117,6 +117,25 @@ impl<T, E: Ord> TrieNode<E, T> {
     pub fn max_depth(&self) -> usize {
         self.max_depth
     }
+
+    pub fn all_nodes(root: Arc<Mutex<TrieNode<E, T>>>) -> Vec<Arc<Mutex<TrieNode<E, T>>>> {
+        let mut node_ptrs_in_order: Vec<*const TrieNode<E, T>> = Vec::new();
+        let mut nodes: BTreeMap<*const TrieNode<E, T>, Arc<Mutex<TrieNode<E, T>>>> = BTreeMap::new();
+        let mut queue: Vec<Arc<Mutex<TrieNode<E, T>>>> = Vec::new();
+        queue.push(root);
+        while let Some(node) = queue.pop() {
+            if node_ptrs_in_order.contains(&(&*node.try_lock().unwrap() as *const TrieNode<E, T>)) {
+                continue;
+            }
+            node_ptrs_in_order.push(&*node.try_lock().unwrap() as *const TrieNode<E, T>);
+            nodes.insert(&*node.try_lock().unwrap() as *const TrieNode<E, T>, node.clone());
+            let node = node.try_lock().unwrap();
+            for (_, child) in &node.children {
+                queue.push(child.clone());
+            }
+        }
+        node_ptrs_in_order.into_iter().map(|ptr| nodes.get(&ptr).unwrap().clone()).collect()
+    }
 }
 
 impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
@@ -337,5 +356,28 @@ mod tests {
 
         // Verify nodes are processed in order of increasing depth
         assert_eq!(processed_order, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn test_all_nodes() {
+        let root = Arc::new(Mutex::new(TrieNode::new("root")));
+        let child1 = Arc::new(Mutex::new(TrieNode::new("child1")));
+        let child2 = Arc::new(Mutex::new(TrieNode::new("child2")));
+        let grandchild = Arc::new(Mutex::new(TrieNode::new("grandchild")));
+
+        root.try_lock().unwrap().insert("r->c1", child1.clone()).unwrap();
+        root.try_lock().unwrap().insert("r->c2", child2.clone()).unwrap();
+        child1.try_lock().unwrap().insert("c1->gc", grandchild.clone()).unwrap();
+
+        let all_nodes = TrieNode::all_nodes(root.clone());
+        
+        // Check that all nodes are present
+        assert_eq!(all_nodes.len(), 4);
+
+        // Check that the root is present
+        assert!(all_nodes.iter().any(|node| Arc::ptr_eq(node, &root)));
+        assert!(all_nodes.iter().any(|node| Arc::ptr_eq(node, &child1)));
+        assert!(all_nodes.iter().any(|node| Arc::ptr_eq(node, &child2)));
+        assert!(all_nodes.iter().any(|node| Arc::ptr_eq(node, &grandchild)));
     }
 }
