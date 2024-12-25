@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, BinaryHeap};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
-use std::cmp::Reverse;
+use std::cmp::Ordering;
 
 #[derive(Debug, Clone)]
 pub struct TrieNode<E, T> {
@@ -138,6 +138,27 @@ impl<T, E: Ord> TrieNode<E, T> {
     }
 }
 
+#[derive(PartialEq, Eq)]
+struct QueueItem<E, T, V> {
+    max_depth: usize,
+    node: Arc<Mutex<TrieNode<E, T>>>,
+    value: V,
+}
+
+impl<E, T, V: Ord> Ord for QueueItem<E, T, V> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Reverse order for min-heap
+        other.max_depth.cmp(&self.max_depth)
+    }
+}
+
+impl<E, T, V: Ord> PartialOrd for QueueItem<E, T, V> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+
 impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
     pub fn special_map<V>(
         initial_node: Arc<Mutex<TrieNode<E, T>>>,
@@ -146,7 +167,7 @@ impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
         mut merge: impl FnMut(Vec<V>) -> V,
         mut process: impl FnMut(&T, &V),
     ) where
-        V: Clone,
+        V: Clone + Ord,
         E: Ord,
     {
         // Priority queue ordered by max_depth (min heap)
@@ -154,13 +175,13 @@ impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
         let mut processed = HashSet::new();
         
         // Initialize with root node
-        queue.push(Reverse((
-            initial_node.try_lock().unwrap().max_depth,
-            initial_node.clone(),
-            initial_value
-        )));
+        queue.push(QueueItem {
+            max_depth: initial_node.try_lock().unwrap().max_depth,
+            node: initial_node.clone(),
+            value: initial_value
+        });
 
-        while let Some(Reverse((_, node_arc, value))) = queue.pop() {
+        while let Some(QueueItem { max_depth: _, node: node_arc, value }) = queue.pop() {
             let node = node_arc.try_lock().unwrap();
             let node_ptr = &*node as *const TrieNode<E, T>;
 
@@ -176,11 +197,11 @@ impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
                 let child = child_arc.try_lock().unwrap();
                 let new_value = step(&value, edge, &child);
                 
-                queue.push(Reverse((
-                    child.max_depth,
-                    child_arc.clone(),
-                    new_value
-                )));
+                queue.push(QueueItem {
+                    max_depth: child.max_depth,
+                    node: child_arc.clone(),
+                    value: new_value
+                });
             }
         }
     }
@@ -253,7 +274,6 @@ impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
                         }
                     }
                 }
-
                 merged_nodes
             },
             // Process function
