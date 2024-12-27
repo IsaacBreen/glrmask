@@ -170,7 +170,7 @@ impl<EV: Clone, E, T, V> Ord for QueueItem<EV, E, T, V> {
 impl<EV: Clone, T: Clone, E: Ord + Clone> TrieNode<EV, E, T> {
     pub fn special_map<V>(
         initial_nodes_and_values: Vec<(Arc<Mutex<TrieNode<EV, E, T>>>, V)>,
-        mut step: impl FnMut(&V, &E, &TrieNode<EV, E, T>) -> V,
+        mut step: impl FnMut(&V, &E, &EV, &TrieNode<EV, E, T>) -> V,
         mut merge: impl FnMut(Vec<V>) -> V,
         mut process: impl FnMut(&T, &V),
     ) where
@@ -201,9 +201,9 @@ impl<EV: Clone, T: Clone, E: Ord + Clone> TrieNode<EV, E, T> {
             process(&node.value, &value);
 
             // Process children
-            for (edge, (_, child_arc)) in &node.children {
+            for (edge, (ev, child_arc)) in &node.children {
                 let child = child_arc.try_lock().unwrap();
-                let new_value = step(&value, edge, &child);
+                let new_value = step(&value, edge, ev, &child);
                 
                 queue.push(QueueItem {
                     max_depth: child.max_depth,
@@ -301,7 +301,7 @@ mod tests {
         let mut processed_order = Vec::new();
         TrieNode::special_map(
             vec![(root.clone(), ())],
-            |_, _, _| (),
+            |_, _, _, _| (),
             |_| (),
             |value, _| processed_order.push(*value)
         );
