@@ -168,9 +168,8 @@ impl<E, T, V> Ord for QueueItem<E, T, V> {
 
 
 impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
-    pub fn special_map<V>(
-        initial_node: Arc<Mutex<TrieNode<E, T>>>,
-        initial_value: V,
+    pub fn special_map2<V>(
+        initial_nodes_and_values: Vec<(Arc<Mutex<TrieNode<E, T>>>, V)>,
         mut step: impl FnMut(&V, &E, &TrieNode<E, T>) -> V,
         mut merge: impl FnMut(Vec<V>) -> V,
         mut process: impl FnMut(&T, &V),
@@ -181,13 +180,14 @@ impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
         // Priority queue ordered by max_depth (min heap)
         let mut queue = BinaryHeap::new();
         let mut processed = HashSet::new();
-        
-        // Initialize with root node
-        queue.push(QueueItem {
-            max_depth: initial_node.try_lock().unwrap().max_depth,
-            node: initial_node.clone(),
-            value: initial_value
-        });
+
+        for (node, value) in initial_nodes_and_values {
+            queue.push(QueueItem {
+                max_depth: node.try_lock().unwrap().max_depth,
+                node: node.clone(),
+                value: value.clone()
+            });
+        }
 
         while let Some(QueueItem { max_depth: _, node: node_arc, value }) = queue.pop() {
             let node = node_arc.try_lock().unwrap();
@@ -212,6 +212,19 @@ impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
                 });
             }
         }
+    }
+
+    pub fn special_map<V>(
+        initial_node: Arc<Mutex<TrieNode<E, T>>>,
+        initial_value: V,
+        mut step: impl FnMut(&V, &E, &TrieNode<E, T>) -> V,
+        mut merge: impl FnMut(Vec<V>) -> V,
+        mut process: impl FnMut(&T, &V),
+    ) where
+        V: Clone,
+        E: Ord,
+    {
+        Self::special_map2(vec![(initial_node, initial_value)], step, merge, process)
     }
 
     pub fn merge<T2>(

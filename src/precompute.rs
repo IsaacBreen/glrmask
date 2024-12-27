@@ -154,40 +154,12 @@ pub fn precompute<'a>(
     let mut max_depths: BTreeMap<LLMTokenID, usize> = BTreeMap::new();
 
     debug!(2, "Precomputing in precompute");
-    for state_id in tqdm!(0..tokenizer.max_state()) {
-        let mut state_map_root_arc: Arc<Mutex<TrieNode<GroupID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>> = Arc::new(Mutex::new(TrieNode::new((BTreeMap::new(), BTreeMap::new(), None))));
 
-        for (i, (llm_token, llm_token_id)) in llm_token_map.iter().enumerate() {
-            debug!(1, "Precomputing for token {:?} ({:?}) ({})", llm_token_id, llm_token, i);
-            tokenizer.execute_all_from_state(
-                llm_token,
-                state_id,
-                state_map_root_arc.clone(),
-                *llm_token_id,
-                max_llm_token_id,
-            );
 
-            // TOOD: remove this
-            // Compute maximum depth for this state and LLM token
-            // let mut temp_root_arc = Arc::new(Mutex::new(TrieNode::new((BTreeMap::new(), BTreeMap::new(), None))));
-            // tokenizer.execute_all_from_state(
-            //     llm_token,
-            //     state_id,
-            //     temp_root_arc.clone(),
-            //     *llm_token_id,
-            //     max_llm_token_id,
-            // );
-            // let max_depth = temp_root_arc.try_lock().unwrap().max_depth();
-            // if let Some(existing_depth) = max_depths.get_mut(llm_token_id) {
-            //     *existing_depth = std::cmp::max(*existing_depth, max_depth);
-            // } else {
-            //     max_depths.insert(*llm_token_id, max_depth);
-            // }
-        }
 
-        let state_map_root = state_map_root_arc.try_lock().unwrap().clone();
-        result.insert(glr::table::StateID(state_id), state_map_root);
-    }
+
+
+
 
     let mut max_depth_frequency: BTreeMap<usize, usize> = BTreeMap::new();
     for (llm_token_id, max_depth) in max_depths {
