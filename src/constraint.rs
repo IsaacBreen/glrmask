@@ -74,7 +74,7 @@ impl<'a, T: Tokenizer> GrammarConstraintState<T> {
             |(current_parse_states, active_tokens), token_id, token_gate, _dst_node| {
                 let mut glr_parse_state = self.parent.parser.init_glr_parser_from_parse_states(current_parse_states.clone());
                 glr_parse_state.step(TerminalID(*token_id));
-                (glr_parse_state.active_states, active_tokens.clone())
+                (glr_parse_state.active_states, active_tokens.clone() & token_gate)
             },
             |values| {
                 let mut all_parse_states = Vec::new();
@@ -103,7 +103,7 @@ impl<'a, T: Tokenizer> GrammarConstraintState<T> {
                         result |= bitset;
                     }
                 };
-                true
+                !active_tokens.is_empty()
             },
         );
         result
