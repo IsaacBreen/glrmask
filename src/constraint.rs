@@ -15,7 +15,7 @@ type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
 pub struct GrammarConstraint<T: Tokenizer> {
     pub(crate) tokenizer: T,
     pub(crate) parser: GLRParser,
-    pub precomputed: BTreeMap<StateID, TrieNode<(), TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>,
+    pub precomputed: BTreeMap<StateID, TrieNode<BitVec, TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>,
     pub(crate) max_llm_token_id: usize,
 }
 
@@ -152,7 +152,7 @@ impl<'a, T: Tokenizer> GrammarConstraintState<T> {
         }
     }
 
-    pub fn get_precomputed(&self) -> &BTreeMap<StateID, TrieNode<(), TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>> {
+    pub fn get_precomputed(&self) -> &BTreeMap<StateID, TrieNode<BitVec, TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>> {
         &self.parent.precomputed
     }
 }
