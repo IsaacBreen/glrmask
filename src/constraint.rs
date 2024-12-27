@@ -111,44 +111,55 @@ impl<'a, T: Tokenizer> GrammarConstraintState<T> {
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) {
         let mut new_states: BTreeMap<(ParseStateKey, BTreeSet<StateID>), ParseState> = BTreeMap::new();
-        
+        let mut initial_nodes_and_values = Vec::new();
         for (parse_state, tokenizer_state_ids) in &self.states {
             for tokenizer_state_id in tokenizer_state_ids {
-                // todo: should be able to do the below loop more efficiently by optimising the precomputed
-                //  stuff for earlier llm token lookup
-                TrieNode::special_map(
-                    vec![(Arc::new(Mutex::new(self.parent.precomputed[tokenizer_state_id].clone())), vec![parse_state.clone()])],
-                    // todo: it's messy that we need to access the value in dst_node here.
-                    |current_parse_states, token_id, token_gate, _dst_node| {
-                        // todo: this is introducing redundancy... ?
-                        let mut glr_parse_state = self.parent.parser.init_glr_parser_from_parse_states(current_parse_states.clone());
-                        glr_parse_state.step(TerminalID(*token_id));
-                        glr_parse_state.active_states
-                    },
-                    |parse_states: Vec<Vec<ParseState>>| {
-                        let all_parse_states: Vec<ParseState> = parse_states.into_iter().flatten().collect();
-                        let mut new_glr_parse_state = self.parent.parser.init_glr_parser_from_parse_states(all_parse_states);
-                        new_glr_parse_state.merge_active_states();
-                        new_glr_parse_state.active_states
-                    },
-                    |(llm_token_id_to_state_id, _, _), current_parse_states| {
-                        let mut new_glr_parse_state = self.parent.parser.init_glr_parser_from_parse_states(current_parse_states.clone());
-                        if let Some(info) = llm_token_id_to_state_id.get(&llm_token_id) {
-                            for active_parse_state in new_glr_parse_state.active_states {
-                                new_states.insert_with(
-                                    (active_parse_state.key(), BTreeSet::from([info.unwrap_or(StateID(0))])),
-                                    active_parse_state,
-                                    |old, new| {
-                                        old.merge(new);
-                                    },
-                                );
-                            }
-                        };
-                        true
-                    },
-                )
+                let token_sequence_map = &self.parent.precomputed[tokenizer_state_id];
+                let active_tokens = bitvec![1; self.parent.max_llm_token_id + 1];
+                initial_nodes_and_values.push((Arc::new(Mutex::new(token_sequence_map.clone())), (vec![parse_state.clone()], active_tokens)));
             }
         }
+
+        // todo: should be able to remove active tokens from this, not relevant.
+
+        // todo: should be able to do the below loop more efficiently by optimising the precomputed
+        //  stuff for earlier llm token lookup
+        TrieNode::special_map(
+            // todo: it's messy that we need to access the value in dst_node here.
+            initial_nodes_and_values,
+            |(current_parse_states, active_tokens), token_id, token_gate, _dst_node| {
+                // todo: this is introducing redundancy... ?
+                let mut glr_parse_state = self.parent.parser.init_glr_parser_from_parse_states(current_parse_states.clone());
+                glr_parse_state.step(TerminalID(*token_id));
+                (glr_parse_state.active_states, active_tokens.clone() & token_gate)
+            },
+            |values| {
+                let mut all_parse_states = Vec::new();
+                let mut all_active_tokens = bitvec![0; self.parent.max_llm_token_id + 1];
+                for (parse_states, active_tokens) in values {
+                    all_parse_states.extend(parse_states);
+                    all_active_tokens |= active_tokens;
+                }
+                let mut new_glr_parse_state = self.parent.parser.init_glr_parser_from_parse_states(all_parse_states);
+                new_glr_parse_state.merge_active_states();
+                (new_glr_parse_state.active_states, all_active_tokens)
+            },
+            |(llm_token_id_to_state_id, _, _), (current_parse_states, active_tokens)| {
+                let mut new_glr_parse_state = self.parent.parser.init_glr_parser_from_parse_states(current_parse_states.clone());
+                if let Some(info) = llm_token_id_to_state_id.get(&llm_token_id) {
+                    for active_parse_state in new_glr_parse_state.active_states {
+                        new_states.insert_with(
+                            (active_parse_state.key(), BTreeSet::from([info.unwrap_or(StateID(0))])),
+                            active_parse_state,
+                            |old, new| {
+                                old.merge(new);
+                            },
+                        );
+                    }
+                };
+                true
+            },
+        );
         
         self.states = new_states.into_iter().map(|((_key, tokenizer_state_ids), parse_state)| {
             (parse_state, tokenizer_state_ids)
