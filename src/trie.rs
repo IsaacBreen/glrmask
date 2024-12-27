@@ -172,7 +172,7 @@ impl<EV: Clone, T: Clone, E: Ord + Clone> TrieNode<EV, E, T> {
         initial_nodes_and_values: Vec<(Arc<Mutex<TrieNode<EV, E, T>>>, V)>,
         mut step: impl FnMut(&V, &E, &EV, &TrieNode<EV, E, T>) -> V,
         mut merge: impl FnMut(Vec<V>) -> V,
-        mut process: impl FnMut(&T, &V),
+        mut process: impl FnMut(&T, &V) -> bool,
     ) where
         V: Clone,
         E: Ord,
@@ -303,7 +303,10 @@ mod tests {
             vec![(root.clone(), ())],
             |_, _, _, _| (),
             |_| (),
-            |value, _| processed_order.push(*value)
+            |value, _| {
+                processed_order.push(*value);
+                true
+            }
         );
 
         // Verify nodes are processed in order of increasing depth

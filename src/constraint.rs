@@ -64,24 +64,31 @@ impl<'a, T: Tokenizer> GrammarConstraintState<T> {
         for (parse_state, tokenizer_state_ids) in &self.states {
             for tokenizer_state in tokenizer_state_ids {
                 let token_sequence_map = &self.parent.precomputed[tokenizer_state];
-                initial_nodes_and_values.push((Arc::new(Mutex::new(token_sequence_map.clone())), vec![parse_state.clone()]));
+                let active_tokens = bitvec![1; self.parent.max_llm_token_id + 1];
+                initial_nodes_and_values.push((Arc::new(Mutex::new(token_sequence_map.clone())), (vec![parse_state.clone()], active_tokens)));
             }
         }
 
         TrieNode::special_map(
             initial_nodes_and_values,
-            |current_parse_states, token_id, token_gate, _dst_node| {
+            |(current_parse_states, active_tokens), token_id, token_gate, _dst_node| {
                 let mut glr_parse_state = self.parent.parser.init_glr_parser_from_parse_states(current_parse_states.clone());
                 glr_parse_state.step(TerminalID(*token_id));
-                glr_parse_state.active_states
+                (glr_parse_state.active_states, active_tokens.clone())
             },
-            |parse_states: Vec<Vec<ParseState>>| {
-                let all_parse_states: Vec<ParseState> = parse_states.into_iter().flatten().collect();
+            |values| {
+                let mut all_parse_states = Vec::new();
+                let mut all_active_tokens = bitvec![0; self.parent.max_llm_token_id + 1];
+                for (parse_states, active_tokens) in values {
+                    all_parse_states.extend(parse_states);
+                    all_active_tokens |= active_tokens;
+                }
                 let mut new_glr_parse_state = self.parent.parser.init_glr_parser_from_parse_states(all_parse_states);
                 new_glr_parse_state.merge_active_states();
-                new_glr_parse_state.active_states
+                (new_glr_parse_state.active_states, all_active_tokens)
+
             },
-            |(_, bitsets, maybe_clean_end_bitset), current_parse_states| {
+            |(_, bitsets, maybe_clean_end_bitset), (current_parse_states, active_tokens)| {
                 let mut glr_parse_state = self.parent.parser.init_glr_parser_from_parse_states(current_parse_states.clone());
                 if glr_parse_state.is_ok() {
                     for (possible_next_grammar_token, bitset) in bitsets {
@@ -95,7 +102,8 @@ impl<'a, T: Tokenizer> GrammarConstraintState<T> {
                     if let Some(bitset) = maybe_clean_end_bitset {
                         result |= bitset;
                     }
-                }
+                };
+                true
             },
         );
         result
@@ -135,7 +143,8 @@ impl<'a, T: Tokenizer> GrammarConstraintState<T> {
                                     },
                                 );
                             }
-                        }
+                        };
+                        true
                     },
                 )
             }
