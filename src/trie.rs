@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 #[derive(Debug, Clone)]
 pub struct TrieNode<EV, E, T> {
     pub value: T,
-    children: BTreeMap<E, Arc<Mutex<TrieNode<EV, E, T>>>>,
+    children: BTreeMap<E, (EV, Arc<Mutex<TrieNode<EV, E, T>>>)>,
     max_depth: usize,
 }
 
@@ -16,7 +16,7 @@ pub enum InsertError {
     CycleDetected,
 }
 
-impl<EV, T, E: Ord> TrieNode<EV, E, T> {
+impl<EV: Clone, T, E: Ord> TrieNode<EV, E, T> {
     pub fn new(value: T) -> TrieNode<EV, E, T> {
         TrieNode {
             value,
@@ -39,7 +39,7 @@ impl<EV, T, E: Ord> TrieNode<EV, E, T> {
         while let Some(current) = stack.pop() {
             let current_node = current.try_lock().unwrap();
             
-            for child in current_node.children.values() {
+            for (_, child) in current_node.children.values() {
                 let child_ptr = Arc::as_ptr(child);
                 
                 // If we find the current node in the child's descendants, we have a cycle
@@ -71,7 +71,7 @@ impl<EV, T, E: Ord> TrieNode<EV, E, T> {
             let current_max = new_depths.entry(node_ptr).or_insert(depth);
             *current_max = (*current_max).max(depth);
 
-            for child in node.children.values() {
+            for (_, child) in node.children.values() {
                 let child_ptr = &*child.try_lock().unwrap() as *const TrieNode<EV, E, T>;
                 stack.push((child_ptr, depth + 1));
             }
@@ -87,14 +87,14 @@ impl<EV, T, E: Ord> TrieNode<EV, E, T> {
         }
     }
 
-    pub fn insert(&mut self, edge: E, child: Arc<Mutex<TrieNode<EV, E, T>>>) -> Result<(), InsertError> {
+    pub fn insert(&mut self, edge: E, child: Arc<Mutex<TrieNode<EV, E, T>>>, ev: EV) -> Result<(), InsertError> {
         // Check for cycles before making any modifications
         if self.would_create_cycle(&child) {
             return Err(InsertError::CycleDetected);
         }
 
         // Insert the new child
-        self.children.insert(edge, child);
+        self.children.insert(edge, (ev, child));
         
         // Update max_depths for all affected nodes
         self.update_max_depths();
@@ -102,11 +102,11 @@ impl<EV, T, E: Ord> TrieNode<EV, E, T> {
         Ok(())
     }
 
-    pub fn get(&self, edge: &E) -> Option<Arc<Mutex<TrieNode<EV, E, T>>>> {
+    pub fn get(&self, edge: &E) -> Option<(EV, Arc<Mutex<TrieNode<EV, E, T>>>)> {
         self.children.get(edge).cloned()
     }
 
-    pub fn children(&self) -> &BTreeMap<E, Arc<Mutex<TrieNode<EV, E, T>>>> {
+    pub fn children(&self) -> &BTreeMap<E, (EV, Arc<Mutex<TrieNode<EV, E, T>>>)> {
         &self.children
     }
 
@@ -130,7 +130,7 @@ impl<EV, T, E: Ord> TrieNode<EV, E, T> {
             node_ptrs_in_order.push(&*node.try_lock().unwrap() as *const TrieNode<EV, E, T>);
             nodes.insert(&*node.try_lock().unwrap() as *const TrieNode<EV, E, T>, node.clone());
             let node = node.try_lock().unwrap();
-            for (_, child) in &node.children {
+            for (_, (_, child)) in &node.children {
                 queue.push(child.clone());
             }
         }
@@ -145,21 +145,21 @@ struct QueueItem<EV, E, T, V> {
     value: V,
 }
 
-impl<EV, E, T, V> PartialEq for QueueItem<EV, E, T, V> {
+impl<EV: Clone, E, T, V> PartialEq for QueueItem<EV, E, T, V> {
     fn eq(&self, other: &Self) -> bool {
         self.max_depth == other.max_depth
     }
 }
 
-impl<EV, E, T, V> Eq for QueueItem<EV, E, T, V> {}
+impl<EV: Clone, E, T, V> Eq for QueueItem<EV, E, T, V> {}
 
-impl<EV, E, T, V> PartialOrd for QueueItem<EV, E, T, V> {
+impl<EV: Clone, E, T, V> PartialOrd for QueueItem<EV, E, T, V> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<EV, E, T, V> Ord for QueueItem<EV, E, T, V> {
+impl<EV: Clone, E, T, V> Ord for QueueItem<EV, E, T, V> {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse order for min-heap
         other.max_depth.cmp(&self.max_depth)
@@ -167,7 +167,7 @@ impl<EV, E, T, V> Ord for QueueItem<EV, E, T, V> {
 }
 
 
-impl<EV, T: Clone, E: Ord + Clone> TrieNode<EV, E, T> {
+impl<EV: Clone, T: Clone, E: Ord + Clone> TrieNode<EV, E, T> {
     pub fn special_map<V>(
         initial_nodes_and_values: Vec<(Arc<Mutex<TrieNode<EV, E, T>>>, V)>,
         mut step: impl FnMut(&V, &E, &TrieNode<EV, E, T>) -> V,
@@ -201,7 +201,7 @@ impl<EV, T: Clone, E: Ord + Clone> TrieNode<EV, E, T> {
             process(&node.value, &value);
 
             // Process children
-            for (edge, child_arc) in &node.children {
+            for (edge, (_, child_arc)) in &node.children {
                 let child = child_arc.try_lock().unwrap();
                 let new_value = step(&value, edge, &child);
                 
@@ -212,69 +212,6 @@ impl<EV, T: Clone, E: Ord + Clone> TrieNode<EV, E, T> {
                 });
             }
         }
-    }
-
-    pub fn merge<T2>(
-        node: Arc<Mutex<TrieNode<EV, E, T>>>,
-        other: Arc<Mutex<TrieNode<EV, E, T2>>>,
-        t_merge: impl Fn(T, T2) -> T,
-        t_init: impl Fn() -> T,
-    )
-    where
-        T2: Clone,
-    {
-        // A map to track the mapping of nodes from `other` to `self`
-        let mut node_map: HashMap<*const TrieNode<EV, E, T2>, Arc<Mutex<TrieNode<EV, E, T>>>> = HashMap::new();
-        let mut already_merged_values: HashSet<*const TrieNode<EV, E, T>> = HashSet::new();
-
-        // Special case: merge T for the root node
-        let existing_value = node.try_lock().unwrap().value.clone();
-        let new_value = t_merge(existing_value, other.try_lock().unwrap().value.clone());
-        node.try_lock().unwrap().value = new_value;
-
-        TrieNode::special_map(
-            vec![(other.clone(), ())],
-            // Step function
-            |current_nodes: &(), edge: &E, dest_other_node: &TrieNode<EV, E, T2>| {
-                let mut new_nodes = Vec::new();
-                let current_nodes = vec![node.clone()];
-
-                for current_self_node in current_nodes {
-                    let mut current_self_node_guard = current_self_node.try_lock().unwrap();
-
-                    // Check if the current node has an equivalent edge
-                    if let Some(child) = current_self_node_guard.get(edge) {
-                        if !already_merged_values.contains(&(&*child.try_lock().unwrap() as *const TrieNode<EV, E, T>)) {
-                            // Merge the values
-                            let child_value = child.try_lock().unwrap().value.clone();
-                            let merged_value = t_merge(child_value, dest_other_node.value.clone());
-                            child.try_lock().unwrap().value = merged_value;
-                        }
-                        new_nodes.push(child);
-                    } else {
-                        // Check if the `other` node is already mapped
-                        let other_node_ptr = dest_other_node as *const TrieNode<EV, E, T2>;
-                        if let Some(mapped_node) = node_map.get(&other_node_ptr) {
-                            // Add the mapped node as a child
-                            current_self_node_guard.insert(edge.clone(), mapped_node.clone());
-                            new_nodes.push(mapped_node.clone());
-                        } else {
-                            // Create a new node and map it
-                            let new_node = Arc::new(Mutex::new(TrieNode::new(t_merge(t_init(), dest_other_node.value.clone()))));
-                            current_self_node_guard.insert(edge.clone(), new_node.clone());
-                            node_map.insert(other_node_ptr, new_node.clone());
-                            new_nodes.push(new_node);
-                        }
-                    }
-                }
-                ()
-            },
-            |_: Vec<()>| {
-                ()
-            },
-            // Process function
-            |_, _| {}
-        );
     }
 }
 
@@ -288,7 +225,7 @@ pub(crate) fn dump_structure<EV, E, T>(root: Arc<Mutex<TrieNode<EV, E, T>>>) whe
         let node = node.try_lock().unwrap();
         let node_ptr = &*node as *const TrieNode<EV, E, T>;
         println!("{:?}: max_depth: {}", node_ptr, node.max_depth);
-        for (edge, child) in &node.children {
+        for (edge, (_, child)) in &node.children {
             let child_ptr = &*child.try_lock().unwrap() as *const TrieNode<EV, E, T>;
             println!("  - {:?} -> {:?}", edge, child_ptr);
             if !seen.contains(&child_ptr) {
@@ -310,13 +247,13 @@ mod tests {
         let c = Arc::new(Mutex::new(TrieNode::new("c")));
 
         // Create a->b->c
-        b.try_lock().unwrap().insert("b->c", c.clone()).unwrap();
-        a.insert("a->b", b.clone()).unwrap();
+        b.try_lock().unwrap().insert("b->c", c.clone(), ()).unwrap();
+        a.insert("a->b", b.clone(), ()).unwrap();
 
         // Try to create a cycle by making c->a
         let a_arc = Arc::new(Mutex::new(a));
         assert!(matches!(
-            c.try_lock().unwrap().insert("c->a", a_arc.clone()),
+            c.try_lock().unwrap().insert("c->a", a_arc.clone(), ()),
             Err(InsertError::CycleDetected)
         ));
 
@@ -334,17 +271,17 @@ mod tests {
         let grandchild = Arc::new(Mutex::new(TrieNode::new("grandchild")));
 
         // Add child1 and verify depths
-        root.insert("root->child1", child1.clone()).unwrap();
+        root.insert("root->child1", child1.clone(), ()).unwrap();
         assert_eq!(root.max_depth(), 2);
         assert_eq!(child1.try_lock().unwrap().max_depth(), 1);
 
         // Add child2 and verify depths
-        root.insert("root->child2", child2.clone()).unwrap();
+        root.insert("root->child2", child2.clone(), ()).unwrap();
         assert_eq!(root.max_depth(), 2);
         assert_eq!(child2.try_lock().unwrap().max_depth(), 1);
 
         // Add grandchild to child1 and verify depths update
-        child1.try_lock().unwrap().insert("child1->grandchild", grandchild.clone()).unwrap();
+        child1.try_lock().unwrap().insert("child1->grandchild", grandchild.clone(), ()).unwrap();
         assert_eq!(root.max_depth(), 3);
         assert_eq!(child1.try_lock().unwrap().max_depth(), 2);
         assert_eq!(grandchild.try_lock().unwrap().max_depth(), 1);
@@ -357,9 +294,9 @@ mod tests {
         let child2 = Arc::new(Mutex::new(TrieNode::new(2)));
         let grandchild = Arc::new(Mutex::new(TrieNode::new(3)));
 
-        root.try_lock().unwrap().insert("0->1", child1.clone()).unwrap();
-        root.try_lock().unwrap().insert("0->2", child2.clone()).unwrap();
-        child1.try_lock().unwrap().insert("1->3", grandchild.clone()).unwrap();
+        root.try_lock().unwrap().insert("0->1", child1.clone(), ()).unwrap();
+        root.try_lock().unwrap().insert("0->2", child2.clone(), ()).unwrap();
+        child1.try_lock().unwrap().insert("1->3", grandchild.clone(), ()).unwrap();
 
         let mut processed_order = Vec::new();
         TrieNode::special_map(
@@ -380,9 +317,9 @@ mod tests {
         let child2 = Arc::new(Mutex::new(TrieNode::new("child2")));
         let grandchild = Arc::new(Mutex::new(TrieNode::new("grandchild")));
 
-        root.try_lock().unwrap().insert("r->c1", child1.clone()).unwrap();
-        root.try_lock().unwrap().insert("r->c2", child2.clone()).unwrap();
-        child1.try_lock().unwrap().insert("c1->gc", grandchild.clone()).unwrap();
+        root.try_lock().unwrap().insert("r->c1", child1.clone(), ()).unwrap();
+        root.try_lock().unwrap().insert("r->c2", child2.clone(), ()).unwrap();
+        child1.try_lock().unwrap().insert("c1->gc", grandchild.clone(), ()).unwrap();
 
         let all_nodes = TrieNode::all_nodes(root.clone());
         

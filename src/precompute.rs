@@ -219,7 +219,7 @@ pub fn print_precomputed(precomputed: &BTreeMap<StateID, TrieNode<(), TokenID, (
         for node in TrieNode::all_nodes(Arc::new(Mutex::new(root.clone()))) {
             println!("    Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
             // print edge values and destination addresses
-            for (edge, dest) in node.try_lock().unwrap().children() {
+            for (edge, (_, dest)) in node.try_lock().unwrap().children() {
                 println!("      Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
             }
         }
