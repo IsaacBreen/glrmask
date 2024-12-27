@@ -70,7 +70,7 @@ impl<'a, T: Tokenizer> GrammarConstraintState<T> {
 
         TrieNode::special_map(
             initial_nodes_and_values,
-            |current_parse_states, token_id, ev, _dst_node| {
+            |current_parse_states, token_id, token_gate, _dst_node| {
                 let mut glr_parse_state = self.parent.parser.init_glr_parser_from_parse_states(current_parse_states.clone());
                 glr_parse_state.step(TerminalID(*token_id));
                 glr_parse_state.active_states
@@ -111,7 +111,7 @@ impl<'a, T: Tokenizer> GrammarConstraintState<T> {
                 TrieNode::special_map(
                     vec![(Arc::new(Mutex::new(self.parent.precomputed[tokenizer_state_id].clone())), vec![parse_state.clone()])],
                     // todo: it's messy that we need to access the value in dst_node here.
-                    |current_parse_states, token_id, ev, _dst_node| {
+                    |current_parse_states, token_id, token_gate, _dst_node| {
                         // todo: this is introducing redundancy... ?
                         let mut glr_parse_state = self.parent.parser.init_glr_parser_from_parse_states(current_parse_states.clone());
                         glr_parse_state.step(TerminalID(*token_id));
