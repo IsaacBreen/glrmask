@@ -47,7 +47,7 @@ pub trait Tokenizer: Sized {
         &self,
         text: &[u8],
         state: usize,
-        state_map_root_arc: Arc<Mutex<TrieNode<GroupID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>>,
+        state_map_root_arc: Arc<Mutex<TrieNode<(), GroupID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>>,
         llm_token_id: LLMTokenID,
         max_llm_token_id: usize,
     ) {
@@ -140,8 +140,8 @@ pub fn precompute<'a>(
     llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
     eof_llm_token_id: LLMTokenID,
     max_llm_token_id: usize,
-) -> BTreeMap<StateID, TrieNode<TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>> {
-    let mut result: BTreeMap<StateID, TrieNode<GroupID, _>> = BTreeMap::new();
+) -> BTreeMap<StateID, TrieNode<(), TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>> {
+    let mut result: BTreeMap<StateID, TrieNode<(), GroupID, _>> = BTreeMap::new();
 
     // Ensure the tokenizer doesn't match on empty strings
     debug!(2, "Ensuring tokenizer doesn't match on empty strings");
@@ -172,7 +172,7 @@ pub fn precompute<'a>(
 }
 
 pub(crate) fn precompute_add_eof(
-    precomputed: &mut BTreeMap<StateID, TrieNode<TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>,
+    precomputed: &mut BTreeMap<StateID, TrieNode<(), TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>,
     eof_llm_token_id: LLMTokenID,
     eof_grammar_token_id: TokenID,
     max_llm_token_id: usize,
@@ -212,7 +212,7 @@ impl Tokenizer for Regex {
     }
 }
 
-pub fn print_precomputed(precomputed: &BTreeMap<StateID, TrieNode<TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>) {
+pub fn print_precomputed(precomputed: &BTreeMap<StateID, TrieNode<(), TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>) {
     println!("Precomputed:");
     for (tokenizer_state, root) in precomputed {
         println!("  Tokenizer state: {}", tokenizer_state.0);
