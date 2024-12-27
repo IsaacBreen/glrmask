@@ -168,7 +168,7 @@ impl<E, T, V> Ord for QueueItem<E, T, V> {
 
 
 impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
-    pub fn special_map2<V>(
+    pub fn special_map<V>(
         initial_nodes_and_values: Vec<(Arc<Mutex<TrieNode<E, T>>>, V)>,
         mut step: impl FnMut(&V, &E, &TrieNode<E, T>) -> V,
         mut merge: impl FnMut(Vec<V>) -> V,
@@ -214,19 +214,6 @@ impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
         }
     }
 
-    pub fn special_map<V>(
-        initial_node: Arc<Mutex<TrieNode<E, T>>>,
-        initial_value: V,
-        mut step: impl FnMut(&V, &E, &TrieNode<E, T>) -> V,
-        mut merge: impl FnMut(Vec<V>) -> V,
-        mut process: impl FnMut(&T, &V),
-    ) where
-        V: Clone,
-        E: Ord,
-    {
-        Self::special_map2(vec![(initial_node, initial_value)], step, merge, process)
-    }
-
     pub fn merge<T2>(
         node: Arc<Mutex<TrieNode<E, T>>>,
         other: Arc<Mutex<TrieNode<E, T2>>>,
@@ -246,8 +233,7 @@ impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
         node.try_lock().unwrap().value = new_value;
 
         TrieNode::special_map(
-            other.clone(),
-            (),
+            vec![(other.clone(), ())],
             // Step function
             |current_nodes: &(), edge: &E, dest_other_node: &TrieNode<E, T2>| {
                 let mut new_nodes = Vec::new();
@@ -377,8 +363,7 @@ mod tests {
 
         let mut processed_order = Vec::new();
         TrieNode::special_map(
-            root.clone(),
-            (),
+            vec![(root.clone(), ())],
             |_, _, _| (),
             |_| (),
             |value, _| processed_order.push(*value)
