@@ -74,7 +74,6 @@ impl<T: Tokenizer> GrammarConstraint<T> {
         max_llm_token_id: usize
     ) -> Self {
         let mut precomputed = precompute::precompute(&tokenizer, &llm_tokens, LLMTokenID(eof_llm_token_id), max_llm_token_id);
-        precompute::precompute_add_eof(&mut precomputed, LLMTokenID(eof_llm_token_id), parser.eof_terminal_id.0, max_llm_token_id);
 
         Self {
             tokenizer,

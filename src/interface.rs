@@ -310,8 +310,6 @@ impl<T: Tokenizer> GrammarConstraint<T> {
         debug!(2, "Precomputing");
         let mut precomputed = precompute(&grammar.tokenizer, &llm_tokens, LLMTokenID(eof_llm_token_id), max_llm_token_id);
         debug!(2, "precomputed.len(): {}", precomputed.len());
-        crate::precompute::precompute_add_eof(&mut precomputed, LLMTokenID(eof_llm_token_id), parser.eof_terminal_id.0, max_llm_token_id);
-        debug!(2, "precomputed.len(): {}", precomputed.len());
         debug!(2, "Done precomputing");
 
         Self {
