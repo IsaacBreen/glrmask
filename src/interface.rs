@@ -514,7 +514,6 @@ mod tests {
         assert_eq!(mask, expected_mask);
     }
 
-    #[ignore]
     #[test]
     fn test_grammar_from_exprs_very_simple() {
         let exprs = vec![
