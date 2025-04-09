@@ -1,43 +1,3 @@
-//! Each node has
-//!
-//! 1. a map from LLM token ID to final tokeniser state ID
-//! 2. a map from possible final grammar token ID to LLM token ID set
-//! 3. a map from edge key to edge value and child node
-//!
-//! ### Get LLM token mask
-//!
-//! Define a mutable bitset of valid next LLM tokens.
-//!
-//! Start with a queue of (node, ([active parse state], active LLM token bitset)) pairs.
-//!
-//! Traverse all edges. Do a bitwise AND between the active LLM token bitset and the edge's LLM token gate bitset. If the result is non-empty, run the parser from active parse states. Otherwise, use an empty list of parse states. Use these two results (the AND operation result and the new parse states or empty list) as the new value for the destination node.
-//!
-//! At each node (in the process function), loop over each (possible final grammar token ID, LLM token ID set) pair in map 2. Run the parser on the possible final grammar token ID from the current GLR parser states. If there are any active states, or any dormant states that indicate a complete parse (successful termination), take the bitwise AND of the corresponiding LLM token ID set and the active LLM token bitset, and use this on the RHS of an in-place bitwise OR with the mutable bitset of valid next LLM tokens.
-//!
-//! ### Committing a token
-//!
-//! Start with a queue of (node, [parse state]) pairs.
-//!
-//! Traverse all edges for which the edge value (the LLM token gate bitset) contains the LLM token we're committing.
-//!
-//! At each node (in the process function) look at map 1 to get the final tokeniser state ID. If it exists, add the current GLR states to the new list of GLR states. Associate them with the tokeniser state somehow.
-//!
-//! If the list of currrent GLR states is empty, return false to halt at this node.
-//!
-//! #### Redundant grammar token parsing
-//!
-//! Actually this might not be a huge concern.
-//!
-//! I was thinking that, if we end a commit (when a node has an entry in map 1 for the LLM token we're committing) and push the same parse state (cloned) with many different tokeniser states, and if on the next call to commit or get mask those tokeniser states yield the same grammar token, then we've essentially split one GLR state into many and then run the same grammar token through it. And it could then immediately merge again. So that'd be inefficient.
-//!
-//! But it's unlikely to be an issue. At the end of a commit, there's no more than one final tokeniser state that we can go to.
-//!
-//! ### More efficient representations for maps keyed by LLM tokens
-//!
-//! More generally, how can we efficiently map from a large set of u32 to a small set of u32?
-//!
-//! We want to reduce memory usage but keep operations fast.
-//!
 use crate::glr::parser::{GLRParser, GLRParserState, InsertWith, ParseState, ParseStateKey};
 use crate::glr::table::{StateID, TerminalID};
 use crate::{precompute, debug};
@@ -55,7 +15,7 @@ type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
 pub struct GrammarConstraint<T: Tokenizer> {
     pub(crate) tokenizer: T,
     pub(crate) parser: GLRParser,
-    pub precomputed: BTreeMap<StateID, TrieNode<BitVec, TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>,
+    pub precomputed: BTreeMap<StateID, TrieNode<(), TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>,
     pub(crate) max_llm_token_id: usize,
 }
 
