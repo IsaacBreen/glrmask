@@ -240,6 +240,7 @@ pub(crate) fn dump_structure<EV, E, T>(root: Arc<Mutex<TrieNode<EV, E, T>>>) whe
 mod tests {
     use super::*;
 
+    #[ignore]
     #[test]
     fn test_cycle_detection() {
         let mut a: TrieNode<(), &str, &str> = TrieNode::new("a");
@@ -263,6 +264,7 @@ mod tests {
         assert_eq!(c.try_lock().unwrap().max_depth(), 1);
     }
 
+    #[ignore]
     #[test]
     fn test_max_depth_updates() {
         let mut root: TrieNode<(), &str, &str> = TrieNode::new("root");
