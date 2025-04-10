@@ -1,39 +1,36 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
-// Removed: Ordering, BinaryHeap, HashMap, InsertError
 
+/// Represents a node in a Trie-like structure (allowing shared subtrees and DAGs).
+///
+/// `EV`: Type of the value associated with an edge.
+/// `E`: Type of the edge label (must be comparable).
+/// `T`: Type of the value stored within the node.
 #[derive(Debug, Clone)]
 pub struct TrieNode<EV, E, T> {
     pub value: T,
-    // Using BTreeMap for ordered iteration over children, if needed.
     children: BTreeMap<E, (EV, Arc<Mutex<TrieNode<EV, E, T>>>)>,
-    // Removed: max_depth
 }
 
-// Removed: InsertError enum
-
 impl<EV: Clone, T, E: Ord> TrieNode<EV, E, T> {
+    /// Creates a new TrieNode with the given value and no children.
     pub fn new(value: T) -> TrieNode<EV, E, T> {
         TrieNode {
             value,
             children: BTreeMap::new(),
-            // Removed: max_depth initialization
         }
     }
 
-    // Removed: would_create_cycle method
-    // Removed: update_max_depths method
-
-    /// Inserts a child node associated with the given edge.
-    /// Assumes that the insertion does not create a cycle.
+    /// Inserts a child node associated with the given edge and edge value.
+    ///
+    /// Note: This implementation does *not* perform cycle detection. Adding an edge
+    /// that creates a cycle may lead to infinite loops in traversal algorithms.
     pub fn insert(&mut self, edge: E, child: Arc<Mutex<TrieNode<EV, E, T>>>, ev: EV) {
-        // Simplified insertion: directly insert into the children map.
         self.children.insert(edge, (ev, child));
-        // Removed: Cycle check and max_depth update.
     }
 
-    /// Gets the edge value and child node associated with the given edge.
+    /// Gets the edge value and child node associated with the given edge, if it exists.
     pub fn get(&self, edge: &E) -> Option<(EV, Arc<Mutex<TrieNode<EV, E, T>>>)> {
         self.children.get(edge).cloned()
     }
@@ -48,177 +45,174 @@ impl<EV: Clone, T, E: Ord> TrieNode<EV, E, T> {
         self.children.is_empty()
     }
 
-    // Removed: max_depth() method
-
-    /// Collects all unique nodes reachable from the given root using BFS.
-    /// Nodes are identified by their memory address.
+    /// Collects all unique nodes reachable from the given root using Breadth-First Search (BFS).
+    /// Node uniqueness is determined by the memory address of the `TrieNode` data.
     pub fn all_nodes(root: Arc<Mutex<TrieNode<EV, E, T>>>) -> Vec<Arc<Mutex<TrieNode<EV, E, T>>>> {
-        // Use a set for tracking visited nodes by the raw pointer to the TrieNode data.
         let mut visited_ptrs: HashSet<*const TrieNode<EV, E, T>> = HashSet::new();
         let mut result: Vec<Arc<Mutex<TrieNode<EV, E, T>>>> = Vec::new();
         let mut queue: VecDeque<Arc<Mutex<TrieNode<EV, E, T>>>> = VecDeque::new();
 
-        // Lock the root node to get its pointer and mark as visited
-        {
-            let root_node = root.try_lock().expect("Failed to lock root node in all_nodes");
-            let root_ptr = &*root_node as *const TrieNode<EV, E, T>;
-            // Insert returns true if the value was not already present.
-            if visited_ptrs.insert(root_ptr) {
-                 queue.push_back(root.clone()); // Use the original Arc here
-            }
-            // root_node lock is released here
-        }
+        // Helper to check if a node (via its Arc) has been visited and add it to queue if not.
+        // Returns true if the node was added to the queue, false otherwise.
+        let mut visit_and_enqueue =
+            |node_arc: Arc<Mutex<TrieNode<EV, E, T>>>,
+             q: &mut VecDeque<Arc<Mutex<TrieNode<EV, E, T>>>>,
+             visited: &mut HashSet<*const TrieNode<EV, E, T>>|
+             -> bool {
+                let ptr = {
+                    // Lock briefly to get the pointer
+                    let node_guard = node_arc.try_lock().expect("Failed to lock node");
+                    &*node_guard as *const TrieNode<EV, E, T>
+                };
+                if visited.insert(ptr) {
+                    q.push_back(node_arc);
+                    true
+                } else {
+                    false
+                }
+            };
 
+        // Initialize queue with the root node
+        visit_and_enqueue(root, &mut queue, &mut visited_ptrs);
 
         while let Some(node_arc) = queue.pop_front() {
-            result.push(node_arc.clone()); // Add the Arc to the result list
+            result.push(node_arc.clone()); // Add the visited node Arc to the result
+
             // Lock the current node to access its children
-            let node = node_arc.try_lock().expect("Failed to lock node in all_nodes");
+            let node_guard = node_arc.try_lock().expect("Failed to lock node");
 
-            for (_, child_arc) in node.children.values() {
-                // Lock the child node *only* to get its pointer for the visited check
-                let child_node = child_arc.try_lock().expect("Failed to lock child node in all_nodes");
-                let child_ptr = &*child_node as *const TrieNode<EV, E, T>;
-                // Release lock immediately after getting pointer
-                drop(child_node);
-
-                // Insert the *pointer* into visited_ptrs. If it wasn't there before...
-                if visited_ptrs.insert(child_ptr) {
-                    // ...enqueue the Arc for processing.
-                    queue.push_back(child_arc.clone());
-                }
+            for child_arc in node_guard.children.values().map(|(_, arc)| arc) {
+                visit_and_enqueue(child_arc.clone(), &mut queue, &mut visited_ptrs);
             }
-            // node lock is released here
+            // node_guard lock is released here
         }
         result
     }
 }
 
-// Removed: QueueItem struct and its impls (PartialEq, Eq, PartialOrd, Ord)
-
 impl<EV: Clone, T: Clone, E: Ord + Clone> TrieNode<EV, E, T> {
-    /// Performs a breadth-first traversal and applies functions.
+    /// Performs a Breadth-First Search (BFS) traversal applying functions at each step.
     ///
-    /// Traverses the trie starting from `initial_nodes_and_values` using BFS.
-    /// For each node visited:
-    /// 1. Calls `process` with the node's value and the computed value `V`.
-    /// 2. For each child, computes a new value using `step` and enqueues the child if not visited.
+    /// Starts from `initial_nodes_and_values`. For each visited node:
+    /// 1. Calls `process` with the node's internal value (`T`) and the computed value (`V`).
+    /// 2. For each child, computes a new value `V` using `step` and enqueues the child if not already visited.
     ///
-    /// Note: The `merge` function parameter is kept for signature compatibility
-    /// but is not used in this simplified BFS implementation.
+    /// Node uniqueness for visitation is determined by the memory address of the `TrieNode` data.
+    ///
+    /// The `merge` function parameter is unused in this BFS implementation but kept for potential
+    /// compatibility with algorithms that might need to merge values arriving at a node via different paths.
     pub fn special_map<V>(
         initial_nodes_and_values: Vec<(Arc<Mutex<TrieNode<EV, E, T>>>, V)>,
-        mut step: impl FnMut(&V, &E, &EV, &TrieNode<EV, E, T>) -> V,
-        _merge: impl FnMut(Vec<V>) -> V, // Kept in signature, but unused
-        mut process: impl FnMut(&T, &V), // Simplified: process doesn't return bool
+        mut step: impl FnMut(
+            &V,                           /* parent computed value */
+            &E,                           /* edge label */
+            &EV,                          /* edge value */
+            &TrieNode<EV, E, T>, /* child node (locked) */
+        ) -> V,
+        _merge: impl FnMut(Vec<V>) -> V, // Unused in this BFS implementation
+        mut process: impl FnMut(
+            &T, /* node's internal value */
+            &V, /* node's computed value */
+        ),
     ) where
         V: Clone,
-        E: Ord, // E needs Ord because children are in BTreeMap
     {
-        // Use VecDeque for BFS queue
         let mut queue: VecDeque<(Arc<Mutex<TrieNode<EV, E, T>>>, V)> = VecDeque::new();
-        // Use HashSet to track visited nodes by pointer to the TrieNode data
         let mut visited: HashSet<*const TrieNode<EV, E, T>> = HashSet::new();
 
         // Initialize queue and visited set
         for (node_arc, value) in initial_nodes_and_values {
-            // Lock the node to get its pointer
-            let node = node_arc.try_lock().expect("Failed to lock initial node in special_map");
-            let node_ptr = &*node as *const TrieNode<EV, E, T>;
-            // Release lock
-            drop(node);
-
-            // If the node hasn't been visited yet, add it to the queue
-            if visited.insert(node_ptr) {
-                queue.push_back((node_arc.clone(), value.clone()));
+            let ptr = {
+                let node_guard = node_arc.try_lock().expect("Failed to lock initial node");
+                &*node_guard as *const TrieNode<EV, E, T>
+            };
+            if visited.insert(ptr) {
+                queue.push_back((node_arc, value));
             }
-            // Note: If multiple initial nodes point to the same actual node,
-            // only the first one encountered here will be added to the queue.
         }
 
-        while let Some((node_arc, value)) = queue.pop_front() {
+        while let Some((node_arc, current_value)) = queue.pop_front() {
             // Lock the node to access its data and children
-            let node = node_arc.try_lock().expect("Failed to lock node in special_map");
-            // Note: We don't need the pointer here again because it was checked before adding to queue
+            let node_guard = node_arc.try_lock().expect("Failed to lock node");
 
             // Process the current node
-            process(&node.value, &value);
+            process(&node_guard.value, ¤t_value);
 
             // Prepare children for the next level of BFS
-            for (edge, (ev, child_arc)) in &node.children {
-                 // Lock the child to pass to `step` and to get its pointer
-                let child_node = child_arc.try_lock().expect("Failed to lock child node in special_map");
-                let child_ptr = &*child_node as *const TrieNode<EV, E, T>;
+            for (edge, (ev, child_arc)) in &node_guard.children {
+                let child_ptr = {
+                    // Lock child briefly to get pointer and pass to step function
+                    let child_guard = child_arc.try_lock().expect("Failed to lock child node");
+                    let ptr = &*child_guard as *const TrieNode<EV, E, T>;
 
-                // Calculate the value for the child node *before* releasing lock
-                let new_child_value = step(&value, edge, ev, &child_node);
-                // Release lock
-                drop(child_node);
-
-                // Enqueue child only if it hasn't been visited yet
-                // Insert the *pointer* into visited set. If it wasn't there before...
-                if visited.insert(child_ptr) {
-                     // ...enqueue the Arc and its computed value.
-                    queue.push_back((child_arc.clone(), new_child_value));
-                }
-                // If the child was already visited, we don't re-enqueue or merge.
+                    // Enqueue child only if it hasn't been visited yet
+                    if visited.insert(ptr) {
+                        // Calculate the value for the child node *before* releasing lock
+                        let next_value = step(¤t_value, edge, ev, &child_guard);
+                        queue.push_back((child_arc.clone(), next_value));
+                    }
+                    // child_guard lock is released here
+                    ptr // Return ptr for potential use (though not strictly needed now)
+                };
+                 // child_ptr is available here if needed, but visited check already done
             }
-            // node lock is released here
+            // node_guard lock is released here
         }
     }
 }
 
-/// Helper function to dump the structure for debugging.
-pub(crate) fn dump_structure<EV, E, T>(root: Arc<Mutex<TrieNode<EV, E, T>>>) where E: Debug, T: Debug {
-    let mut queue = VecDeque::new(); // Use VecDeque for BFS dump
-    // Use HashSet to track visited nodes by pointer to the TrieNode data
+/// Helper function to print the structure of the Trie/DAG starting from root (BFS).
+pub(crate) fn dump_structure<EV, E, T>(root: Arc<Mutex<TrieNode<EV, E, T>>>)
+where
+    E: Debug,
+    T: Debug,
+{
+    let mut queue = VecDeque::new();
     let mut seen: HashSet<*const TrieNode<EV, E, T>> = HashSet::new();
 
-    // Lock root to get pointer and add to queue if not seen
-    {
-        let root_node = root.try_lock().unwrap();
-        let root_ptr = &*root_node as *const TrieNode<EV, E, T>;
-        if seen.insert(root_ptr) {
-            queue.push_back(root.clone());
-        }
-        // root_node lock released here
-    }
-
-
     println!("Dumping Trie Structure (BFS):");
+
+    // Helper to visit and enqueue
+     let mut visit_and_enqueue =
+            |node_arc: Arc<Mutex<TrieNode<EV, E, T>>>,
+             q: &mut VecDeque<Arc<Mutex<TrieNode<EV, E, T>>>>,
+             visited: &mut HashSet<*const TrieNode<EV, E, T>>| {
+                let ptr = {
+                    let node_guard = node_arc.try_lock().expect("Failed to lock node for dump");
+                    &*node_guard as *const TrieNode<EV, E, T>
+                };
+                if visited.insert(ptr) {
+                    q.push_back(node_arc);
+                }
+            };
+
+    visit_and_enqueue(root, &mut queue, &mut seen);
+
+
     while let Some(node_arc) = queue.pop_front() {
         // Lock node to print its info and access children
-        let node = node_arc.try_lock().unwrap();
-        let node_ptr = &*node as *const TrieNode<EV, E, T>;
-        // Removed max_depth printout
-        println!("{:?}: Value: {:?}", node_ptr, node.value);
+        let node_guard = node_arc.try_lock().expect("Failed to lock node for dump");
+        let node_ptr = &*node_guard as *const TrieNode<EV, E, T>;
 
-        for (edge, (_, child_arc)) in &node.children {
-            // Lock child to get its pointer for printing and visited check
-            let child_node = child_arc.try_lock().unwrap();
-            let child_ptr = &*child_node as *const TrieNode<EV, E, T>;
+        println!("{:?}: Value: {:?}", node_ptr, node_guard.value);
+
+        for (edge, (_, child_arc)) in &node_guard.children {
+            let child_ptr = {
+                 let child_guard = child_arc.try_lock().expect("Failed to lock child for dump");
+                 &*child_guard as *const TrieNode<EV, E, T>
+            };
             println!("  - Edge: {:?} -> Child: {:?}", edge, child_ptr);
-            // Release lock immediately after getting pointer and printing
-            drop(child_node);
-
-            // Insert the *pointer* into seen set. If it wasn't there before...
-            if seen.insert(child_ptr) {
-                // ...enqueue the Arc for processing.
-                queue.push_back(child_arc.clone());
-            }
+            // Enqueue child if not seen
+            visit_and_enqueue(child_arc.clone(), &mut queue, &mut seen);
         }
-        // node lock released here
+        // node_guard lock released here
     }
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet; // Import HashSet for test_all_nodes
-
-    // Removed: test_cycle_detection
-    // Removed: test_max_depth_updates
+    use std::collections::HashSet; // Required for pointer sets in tests
 
     #[test]
     fn test_insertion_and_retrieval() {
@@ -230,105 +224,84 @@ mod tests {
         root.insert("b", child2.clone(), ());
 
         // Test get
-        let (ev1, retrieved_child1) = root.get(&"a").unwrap();
+        let (ev1, retrieved_child1) = root.get(&"a").expect("Failed to get child 'a'");
         assert!(Arc::ptr_eq(&retrieved_child1, &child1));
         assert_eq!(ev1, ());
 
-        let (ev2, retrieved_child2) = root.get(&"b").unwrap();
+        let (ev2, retrieved_child2) = root.get(&"b").expect("Failed to get child 'b'");
         assert!(Arc::ptr_eq(&retrieved_child2, &child2));
         assert_eq!(ev2, ());
 
         assert!(root.get(&"c").is_none());
 
-        // Test children iterator
-        let children: Vec<_> = root.children().keys().cloned().collect();
-        assert_eq!(children, vec!["a", "b"]); // BTreeMap ensures order
+        // Test children iterator order (BTreeMap)
+        let children_keys: Vec<_> = root.children().keys().cloned().collect();
+        assert_eq!(children_keys, vec!["a", "b"]);
 
         // Test is_empty
         assert!(!root.is_empty());
         assert!(child1.try_lock().unwrap().is_empty());
     }
 
-
     #[test]
     fn test_special_map_bfs_order() {
-        // Structure:
-        //    root(0)
-        //   /     \
-        // c1(1)   c2(2)
-        //  |
-        // gc(3)
+        // Structure: root(0) -> c1(1) -> gc(3), root(0) -> c2(2)
         let root = Arc::new(Mutex::new(TrieNode::<(), &str, i32>::new(0)));
         let child1 = Arc::new(Mutex::new(TrieNode::new(1)));
         let child2 = Arc::new(Mutex::new(TrieNode::new(2)));
         let grandchild = Arc::new(Mutex::new(TrieNode::new(3)));
 
-        // Build the trie (manually locking)
         root.try_lock().unwrap().insert("r->c1", child1.clone(), ());
         root.try_lock().unwrap().insert("r->c2", child2.clone(), ());
         child1.try_lock().unwrap().insert("c1->gc", grandchild.clone(), ());
 
-        let mut processed_order = Vec::new();
-        let mut processed_values = Vec::new();
+        let mut processed_node_values = Vec::new();
+        let mut computed_values = Vec::new();
 
         TrieNode::special_map(
             vec![(root.clone(), 100)], // Start BFS from root with initial value 100
-            |parent_v, _edge, _ev, _child_node| {
-                // Simple step: child value is parent value + 1
-                parent_v + 1
-            },
-            |_| panic!("Merge should not be called in this BFS implementation"), // Merge not used
+            |parent_v, _edge, _ev, _child_node| parent_v + 1, // Step: increment value
+            |_| panic!("Merge should not be called"),
             |node_t_val, computed_v| {
-                // Process: record the node's T value and the computed V value
-                processed_order.push(*node_t_val);
-                processed_values.push(*computed_v);
-            }
+                processed_node_values.push(*node_t_val);
+                computed_values.push(*computed_v);
+            },
         );
 
-        // Verify nodes are processed in BFS order
-        // Expected order: root, child1, child2, grandchild
-        assert_eq!(processed_order, vec![0, 1, 2, 3]);
-
-        // Verify computed values (V) based on BFS traversal
-        // root: initial value 100
-        // c1: step(100) = 101
-        // c2: step(100) = 101
-        // gc: step(value_of_c1) = step(101) = 102
-        assert_eq!(processed_values, vec![100, 101, 101, 102]);
+        // Expected BFS processing order: 0, 1, 2, 3
+        assert_eq!(processed_node_values, vec![0, 1, 2, 3]);
+        // Expected computed values: root=100, c1=101, c2=101, gc=102 (from c1)
+        assert_eq!(computed_values, vec![100, 101, 101, 102]);
     }
 
     #[test]
-    fn test_all_nodes() {
+    fn test_all_nodes_diamond() {
+        // Structure: root -> c1 -> gc, root -> c2 -> gc (diamond)
         let root = Arc::new(Mutex::new(TrieNode::<(), &str, &str>::new("root")));
         let child1 = Arc::new(Mutex::new(TrieNode::new("child1")));
         let child2 = Arc::new(Mutex::new(TrieNode::new("child2")));
         let grandchild = Arc::new(Mutex::new(TrieNode::new("grandchild")));
 
-        // Build the trie
         root.try_lock().unwrap().insert("r->c1", child1.clone(), ());
         root.try_lock().unwrap().insert("r->c2", child2.clone(), ());
         child1.try_lock().unwrap().insert("c1->gc", grandchild.clone(), ());
-        // Add a shared child (diamond shape) - c2 also points to grandchild
-        child2.try_lock().unwrap().insert("c2->gc", grandchild.clone(), ());
-
+        child2.try_lock().unwrap().insert("c2->gc", grandchild.clone(), ()); // Diamond
 
         let all_nodes = TrieNode::all_nodes(root.clone());
 
-        // Check that all unique nodes are present (count should be 4)
+        // Should find 4 unique nodes
         assert_eq!(all_nodes.len(), 4);
 
-        // Use HashSet of pointers to verify uniqueness and presence
-        // Get pointers *after* locking each node in the result
+        // Verify uniqueness using pointers
         let mut node_ptrs = HashSet::new();
         for node_arc in &all_nodes {
-             let node = node_arc.try_lock().unwrap();
-             let node_ptr = &*node as *const TrieNode<_, _, _>;
-             node_ptrs.insert(node_ptr);
+            let node_guard = node_arc.try_lock().unwrap();
+            let ptr = &*node_guard as *const TrieNode<_, _, _>;
+            node_ptrs.insert(ptr);
         }
+        assert_eq!(node_ptrs.len(), 4); // Confirm unique pointers collected
 
-        assert_eq!(node_ptrs.len(), 4); // Ensure collected nodes are unique
-
-        // Verify presence by checking pointers obtained after locking
+        // Verify presence of all nodes (by comparing pointers)
         let root_ptr = &*root.try_lock().unwrap() as *const _;
         let c1_ptr = &*child1.try_lock().unwrap() as *const _;
         let c2_ptr = &*child2.try_lock().unwrap() as *const _;
@@ -340,65 +313,48 @@ mod tests {
         assert!(node_ptrs.contains(&gc_ptr));
     }
 
-     #[test]
+    #[test]
     fn test_special_map_diamond() {
-        // Structure:
-        //      root(0)
-        //     /     \
-        //   c1(1)   c2(2)
-        //     \     /
-        //      gc(3)
+        // Structure: root(0) -> c1(1) -> gc(3), root(0) -> c2(2) -> gc(3)
         let root = Arc::new(Mutex::new(TrieNode::<(), &str, i32>::new(0)));
         let child1 = Arc::new(Mutex::new(TrieNode::new(1)));
         let child2 = Arc::new(Mutex::new(TrieNode::new(2)));
         let grandchild = Arc::new(Mutex::new(TrieNode::new(3)));
 
-        // Build the trie
         root.try_lock().unwrap().insert("r->c1", child1.clone(), ());
         root.try_lock().unwrap().insert("r->c2", child2.clone(), ());
         child1.try_lock().unwrap().insert("c1->gc", grandchild.clone(), ());
         child2.try_lock().unwrap().insert("c2->gc", grandchild.clone(), ()); // Diamond
 
-        let mut processed_order = Vec::new();
-        let mut processed_values = Vec::new();
+        let mut processed_node_values = Vec::new();
+        let mut computed_values = Vec::new();
 
         TrieNode::special_map(
             vec![(root.clone(), 100)],
             |parent_v, _edge, _ev, _child_node| parent_v + 1,
             |_| panic!("Merge should not be called"),
             |node_t_val, computed_v| {
-                processed_order.push(*node_t_val);
-                processed_values.push(*computed_v);
-            }
+                processed_node_values.push(*node_t_val);
+                computed_values.push(*computed_v);
+            },
         );
 
-        // BFS order: root, c1, c2, gc (gc is visited only once)
-        // The exact order between c1 and c2 might vary in a simple VecDeque BFS,
-        // but gc should appear after both. Let's check the content regardless of
-        // the c1/c2 order.
-        assert_eq!(processed_order.len(), 4);
-        assert!(processed_order.contains(&0));
-        assert!(processed_order.contains(&1));
-        assert!(processed_order.contains(&2));
-        assert!(processed_order.contains(&3));
-        assert_eq!(processed_order[0], 0); // Root is always first
-        assert_eq!(processed_order[3], 3); // Grandchild is last in this structure
+        // BFS ensures each node is processed exactly once.
+        // Expected order: 0, then {1, 2} in some order, then 3.
+        assert_eq!(processed_node_values.len(), 4);
+        assert!(processed_node_values.contains(&0));
+        assert!(processed_node_values.contains(&1));
+        assert!(processed_node_values.contains(&2));
+        assert!(processed_node_values.contains(&3));
+        assert_eq!(processed_node_values[0], 0); // Root first
+        assert_eq!(processed_node_values[3], 3); // Grandchild last
 
-
-        // Values: root=100, c1=101, c2=101
-        // gc is processed when visited first (e.g., from c1), value = step(value_c1) = 102
-        // When reached from c2 later, it's already 'visited', so not enqueued again.
-        // Check values corresponding to the processed order.
-        let mut expected_values = vec![100]; // Root value
-        if processed_order[1] == 1 { // If c1 was processed second
-            expected_values.push(101); // c1 value
-            expected_values.push(101); // c2 value
-        } else { // If c2 was processed second
-            expected_values.push(101); // c2 value
-            expected_values.push(101); // c1 value
-        }
-        expected_values.push(102); // gc value (derived from the first parent processed)
-
-        assert_eq!(processed_values, expected_values);
+        // Values: root=100, c1=101, c2=101.
+        // gc=102 (processed once, value derived from the first parent path reaching it in BFS).
+        assert_eq!(computed_values.len(), 4);
+        assert_eq!(computed_values[0], 100); // Root value
+        assert!(computed_values[1..3].contains(&101)); // c1 and c2 values
+        assert_eq!(computed_values[1..3].iter().filter(|&&v| v == 101).count(), 2);
+        assert_eq!(computed_values[3], 102); // Grandchild value
     }
 }
