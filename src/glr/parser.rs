@@ -1,8 +1,8 @@
-use crate::gss::BulkMerge;
+use crate::datastructures::gss::BulkMerge;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
 use crate::glr::table::{NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID};
-use crate::gss::{GSSNode, GSSTrait};
+use crate::datastructures::gss::{GSSNode, GSSTrait};
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};

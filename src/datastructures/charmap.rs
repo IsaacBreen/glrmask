@@ -1,4 +1,4 @@
-use crate::u8set::U8Set;
+use crate::datastructures::u8set::U8Set;
 use std::ops::{Index, IndexMut};
 
 const CHARMAP_SIZE: usize = 256;

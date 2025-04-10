@@ -1,7 +1,7 @@
 use crate::finite_automata::{GroupID, Regex};
 use crate::glr::parser::{GLRParser, InsertWith, ParseState};
 use crate::glr::table::StateID;
-use crate::trie::TrieNode;
+use crate::datastructures::trie::TrieNode;
 use bimap::BiBTreeMap;
 use bitvec::prelude::BitVec;
 use bitvec::prelude::*;
@@ -122,9 +122,9 @@ impl<'a> GrammarConstraintState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::charmap::TrieMap;
+    use crate::datastructures::charmap::TrieMap;
     use crate::finite_automata::{eat_u8, DFAState, Regex, DFA};
-    use crate::u8set::U8Set;
+    use crate::datastructures::u8set::U8Set;
     use crate::{groups, seq};
     use bimap::BiBTreeMap;
     use std::collections::{BTreeMap, BTreeSet};

@@ -1,11 +1,7 @@
-pub mod frozenset;
-pub mod charmap;
 pub mod tokenizer_combinators;
-pub mod u8set;
 pub mod finite_automata;
-mod gss;
 pub mod glr;
-mod trie;
 mod utils;
 mod analyze_grammar;
 mod constraint;
+mod datastructures;

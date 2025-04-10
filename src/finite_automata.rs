@@ -1,6 +1,6 @@
-use crate::charmap::TrieMap;
-use crate::frozenset::FrozenSet;
-use crate::u8set::U8Set;
+use crate::datastructures::charmap::TrieMap;
+use crate::datastructures::frozenset::FrozenSet;
+use crate::datastructures::u8set::U8Set;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Formatter};
 
