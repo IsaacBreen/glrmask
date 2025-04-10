@@ -7,8 +7,8 @@ use bitvec::prelude::BitVec;
 use bitvec::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
-
-pub type TokenID = usize;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TokenID(pub usize);
 
 type LLMToken = Vec<u8>;
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
@@ -56,7 +56,7 @@ impl Regex {
 
     fn tokens_accessible_from_state(&self, state: usize) -> Vec<TokenID> {
         let regex_state = self.init_to_state(state);
-        regex_state.possible_group_ids().iter().cloned().collect()
+        regex_state.possible_group_ids().iter().cloned().map(|id| TokenID(id)).collect()
     }
 
     fn max_state(&self) -> usize {
@@ -192,6 +192,6 @@ mod tests {
 
         // Run precompute
         let max_llm_token_id = llm_tokens.len() + 1;
-        let result = precompute(tokenizer, &llm_token_map, LLMTokenID(max_llm_token_id), max_llm_token_id);
+        let result = precompute(tokenizer, &llm_token_map, max_llm_token_id);
     }
 }
