@@ -29,7 +29,14 @@ pub struct ExecuteResult {
 
 type Precomputed = BTreeMap<
     StateID,
-    Trie<GrammarTokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<GrammarTokenID, BitVec>, Option<BitVec>)>,
+    Trie<
+        GrammarTokenID, 
+        (
+            BTreeMap<LLMTokenID, Option<StateID>>, 
+            BTreeMap<GrammarTokenID, BitVec>,
+            Option<BitVec>
+        )
+    >,
 >;
 
 #[derive(Debug, Clone)]
