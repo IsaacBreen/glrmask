@@ -49,7 +49,7 @@ pub fn precompute<'a>(
     llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
     eof_llm_token_id: LLMTokenID,
     max_llm_token_id: usize,
-) -> BTreeMap<StateID, TrieNode<BitVec, TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>> {
+) -> BTreeMap<StateID, TrieNode<(), TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>> {
     todo!()
 }
 
@@ -82,7 +82,7 @@ impl Tokenizer for Regex {
     }
 }
 
-pub fn print_precomputed(precomputed: &BTreeMap<StateID, TrieNode<BitVec, TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>) {
+pub fn print_precomputed(precomputed: &BTreeMap<StateID, TrieNode<(), TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>) {
     todo!()
 }
 
