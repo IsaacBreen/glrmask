@@ -402,7 +402,7 @@ mod tests {
             }
         }
 
-        for (tokenizer_state, root) in grammar_constraint_state.get_precomputed() {
+        for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
             debug!(3, "Tokenizer state: {}", tokenizer_state.0);
             for node in TrieNode::all_nodes(Arc::new(Mutex::new(root.clone()))) {
                 debug!(3, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
@@ -473,7 +473,7 @@ mod tests {
         let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
         let mut grammar_constraint_state = grammar_constraint.init();
 
-        for (tokenizer_state, root) in grammar_constraint_state.get_precomputed() {
+        for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
             debug!(1, "Tokenizer state: {}", tokenizer_state.0);
             for node in TrieNode::all_nodes(Arc::new(Mutex::new(root.clone()))) {
                 debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
@@ -533,7 +533,7 @@ mod tests {
 
         // print_precomputed(&grammar_constraint_state.get_precomputed());
 
-        for (tokenizer_state, root) in grammar_constraint_state.get_precomputed() {
+        for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
             debug!(1, "Tokenizer state: {}", tokenizer_state.0);
             for node in TrieNode::all_nodes(Arc::new(Mutex::new(root.clone()))) {
                 debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);

@@ -74,7 +74,7 @@ pub struct GrammarConstraint {
 
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintState {
-    parent: GrammarConstraint,
+    pub(crate) parent: GrammarConstraint,
     states: Vec<(ParseState, BTreeSet<StateID>)>,
 }
 
@@ -112,9 +112,5 @@ impl<'a> GrammarConstraintState {
         for &llm_token_id in llm_token_ids {
             self.commit(llm_token_id);
         }
-    }
-
-    pub fn get_precomputed(&self) -> &BTreeMap<StateID, TrieNode<(), TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>> {
-        &self.parent.precomputed
     }
 }
