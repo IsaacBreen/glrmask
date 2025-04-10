@@ -12,7 +12,7 @@ type LLMToken = Vec<u8>;
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TokenID(pub usize);
+pub struct GrammarTokenID(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LLMTokenID(pub usize);
 
@@ -32,7 +32,7 @@ pub fn precompute<'a>(
     tokenizer: &Regex,
     llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
     max_llm_token_id: usize,
-) -> BTreeMap<StateID, Trie<TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>> {
+) -> BTreeMap<StateID, Trie<GrammarTokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<GrammarTokenID, BitVec>, Option<BitVec>)>> {
     todo!()
 }
 
@@ -54,9 +54,9 @@ impl Regex {
         ExecuteResult { matches, new_state }
     }
 
-    fn tokens_accessible_from_state(&self, state: usize) -> Vec<TokenID> {
+    fn tokens_accessible_from_state(&self, state: usize) -> Vec<GrammarTokenID> {
         let regex_state = self.init_to_state(state);
-        regex_state.possible_group_ids().iter().cloned().map(|id| TokenID(id)).collect()
+        regex_state.possible_group_ids().iter().cloned().map(|id| GrammarTokenID(id)).collect()
     }
 
     fn max_state(&self) -> usize {
@@ -68,7 +68,7 @@ impl Regex {
 pub struct GrammarConstraint {
     pub(crate) tokenizer: Regex,
     pub(crate) parser: GLRParser,
-    pub precomputed: BTreeMap<StateID, Trie<TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>,
+    pub precomputed: BTreeMap<StateID, Trie<GrammarTokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<GrammarTokenID, BitVec>, Option<BitVec>)>>,
     pub(crate) max_llm_token_id: usize,
 }
 
