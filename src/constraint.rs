@@ -31,7 +31,6 @@ pub struct ExecuteResult {
 pub fn precompute<'a>(
     tokenizer: Regex,
     llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-    eof_llm_token_id: LLMTokenID,
     max_llm_token_id: usize,
 ) -> BTreeMap<StateID, TrieNode<(), TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>> {
     todo!()
@@ -84,7 +83,6 @@ impl GrammarConstraint {
         tokenizer: Regex,
         parser: GLRParser,
         llm_tokens: LLMTokenMap,
-        eof_llm_token_id: usize,
         max_llm_token_id: usize
     ) -> Self {
         todo!()
