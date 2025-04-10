@@ -136,7 +136,7 @@ impl<EV: Clone, T: Clone, E: Ord + Clone> TrieNode<EV, E, T> {
             let node_guard = node_arc.try_lock().expect("Failed to lock node");
 
             // Process the current node
-            process(&node_guard.value, ¤t_value);
+            process(&node_guard.value, &current_value);
 
             // Prepare children for the next level of BFS
             for (edge, (ev, child_arc)) in &node_guard.children {
@@ -148,7 +148,7 @@ impl<EV: Clone, T: Clone, E: Ord + Clone> TrieNode<EV, E, T> {
                     // Enqueue child only if it hasn't been visited yet
                     if visited.insert(ptr) {
                         // Calculate the value for the child node *before* releasing lock
-                        let next_value = step(¤t_value, edge, ev, &child_guard);
+                        let next_value = step(&current_value, edge, ev, &child_guard);
                         queue.push_back((child_arc.clone(), next_value));
                     }
                     // child_guard lock is released here
