@@ -27,11 +27,13 @@ pub struct ExecuteResult {
     pub new_state: Option<usize>,
 }
 
+type Precomputed = BTreeMap<StateID, Trie<GrammarTokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<GrammarTokenID, BitVec>, Option<BitVec>)>>;
+
 #[derive(Debug, Clone)]
 pub struct GrammarConstraint {
     pub(crate) tokenizer: Regex,
     pub(crate) parser: GLRParser,
-    pub(crate) precomputed: BTreeMap<StateID, Trie<GrammarTokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<GrammarTokenID, BitVec>, Option<BitVec>)>>,
+    pub(crate) precomputed: Precomputed,
     pub(crate) max_llm_token_id: usize,
 }
 
@@ -74,7 +76,7 @@ pub fn precompute<'a>(
     tokenizer: &Regex,
     llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
     max_llm_token_id: usize,
-) -> BTreeMap<StateID, Trie<GrammarTokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<GrammarTokenID, BitVec>, Option<BitVec>)>> {
+) -> Precomputed {
     todo!()
 }
 
