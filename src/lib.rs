@@ -7,7 +7,7 @@ pub mod finite_automata;
 mod gss;
 pub mod glr;
 pub mod constraint_runtime;
-pub mod interface;
+pub mod constraint_simple_interface;
 mod trie;
 mod utils;
 mod analyze_grammar;
