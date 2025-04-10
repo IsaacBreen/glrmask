@@ -76,7 +76,7 @@ impl<T> TrieMap<T> {
         F: FnMut(u8, &mut T) -> bool,
     {
         for (i, value) in self.data.iter_mut().enumerate() {
-            if let Some(ref mut v) = value {
+            if let Some(v) = value {
                 let key = i as u8;
                 if !f(key, v.as_mut()) {
                     *value = None;
