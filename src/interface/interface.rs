@@ -1,14 +1,15 @@
-use crate::finite_automata::{greedy_group, groups, non_greedy_group, ExprGroup, ExprGroups};
+use crate::constraint::{precompute, GrammarConstraint};
+use crate::debug;
+use crate::finite_automata::{greedy_group, groups, ExprGroup};
 use crate::finite_automata::{Expr, Regex};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::parser::{GLRParser, ParseState};
-use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, NonTerminalID, StateID, TerminalID};
+use crate::glr::parser::GLRParser;
+use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, NonTerminalID, TerminalID};
+use crate::tokenizer::LLMTokenID;
 use bimap::BiBTreeMap;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fmt::{Debug, Formatter};
 use kdam::tqdm;
-use crate::constraint::{precompute, GrammarConstraint, LLMTokenID};
-use crate::debug;
+use std::collections::{BTreeMap, HashSet};
+use std::fmt::{Debug, Formatter};
 
 type LLMToken<'a> = &'a [u8];
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
@@ -321,14 +322,13 @@ impl GrammarConstraint {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-    use bitvec::prelude::*;
     use super::*;
-    use crate::finite_automata::eat_u8;
-    use crate::glr::table::generate_glr_parser;
-    use crate::{choice_fast, groups, seq_fast};
-    use crate::interface::tokenizer_combinators::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast};
     use crate::datastructures::trie::Trie;
+    use crate::finite_automata::eat_u8;
+    use crate::interface::tokenizer_combinators::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast};
+    use crate::{choice_fast, groups, seq_fast};
+    use bitvec::prelude::*;
+    use std::sync::{Arc, Mutex};
 
 
     fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> BitVec {
