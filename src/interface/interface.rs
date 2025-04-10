@@ -328,7 +328,7 @@ mod tests {
     use crate::glr::table::generate_glr_parser;
     use crate::{choice_fast, groups, seq_fast};
     use crate::interface::tokenizer_combinators::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast};
-    use crate::datastructures::trie::TrieNode;
+    use crate::datastructures::trie::Trie;
 
 
     fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> BitVec {
@@ -404,7 +404,7 @@ mod tests {
 
         for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
             debug!(3, "Tokenizer state: {}", tokenizer_state.0);
-            for node in TrieNode::all_nodes(Arc::new(Mutex::new(root.clone()))) {
+            for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
                 debug!(3, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
                 // print edge values and destination addresses
                 for (edge, dest) in node.try_lock().unwrap().children() {
@@ -475,7 +475,7 @@ mod tests {
 
         for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
             debug!(1, "Tokenizer state: {}", tokenizer_state.0);
-            for node in TrieNode::all_nodes(Arc::new(Mutex::new(root.clone()))) {
+            for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
                 debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
                 // print edge values and destination addresses
                 for (edge, dest) in node.try_lock().unwrap().children() {
@@ -535,7 +535,7 @@ mod tests {
 
         for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
             debug!(1, "Tokenizer state: {}", tokenizer_state.0);
-            for node in TrieNode::all_nodes(Arc::new(Mutex::new(root.clone()))) {
+            for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
                 debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
                 // print edge values and destination addresses
                 for (edge, dest) in node.try_lock().unwrap().children() {

@@ -1,7 +1,7 @@
 use crate::finite_automata::{GroupID, Regex};
 use crate::glr::parser::{GLRParser, InsertWith, ParseState};
 use crate::glr::table::StateID;
-use crate::datastructures::trie::TrieNode;
+use crate::datastructures::trie::Trie;
 use bimap::BiBTreeMap;
 use bitvec::prelude::BitVec;
 use bitvec::prelude::*;
@@ -32,7 +32,7 @@ pub fn precompute<'a>(
     tokenizer: &Regex,
     llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
     max_llm_token_id: usize,
-) -> BTreeMap<StateID, TrieNode<TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>> {
+) -> BTreeMap<StateID, Trie<TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>> {
     todo!()
 }
 
@@ -68,7 +68,7 @@ impl Regex {
 pub struct GrammarConstraint {
     pub(crate) tokenizer: Regex,
     pub(crate) parser: GLRParser,
-    pub precomputed: BTreeMap<StateID, TrieNode<TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>,
+    pub precomputed: BTreeMap<StateID, Trie<TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>,
     pub(crate) max_llm_token_id: usize,
 }
 

@@ -7,22 +7,22 @@ use std::sync::{Arc, Mutex};
 /// `E`: Type of the edge label (must be comparable).
 /// `T`: Type of the value stored within the node.
 #[derive(Debug, Clone)]
-pub struct TrieNode<E, T> {
+pub struct Trie<E, T> {
     pub value: T,
-    children: BTreeMap<E, Arc<Mutex<TrieNode<E, T>>>>,
+    children: BTreeMap<E, Arc<Mutex<Trie<E, T>>>>,
 }
 
 // Helper to get the raw pointer of the node inside an Arc<Mutex<TrieNode>>.
 // Panics if the mutex is poisoned.
-fn node_ptr<E, T>(node_arc: &Arc<Mutex<TrieNode<E, T>>>) -> *const TrieNode<E, T> {
+fn node_ptr<E, T>(node_arc: &Arc<Mutex<Trie<E, T>>>) -> *const Trie<E, T> {
     let guard = node_arc.try_lock().expect("Mutex poisoned");
     &*guard as *const _
 }
 
-impl<T, E: Ord> TrieNode<E, T> {
+impl<T, E: Ord> Trie<E, T> {
     /// Creates a new TrieNode with the given value and no children.
     pub fn new(value: T) -> Self {
-        TrieNode {
+        Trie {
             value,
             children: BTreeMap::new(),
         }
@@ -32,17 +32,17 @@ impl<T, E: Ord> TrieNode<E, T> {
     ///
     /// Note: This implementation does *not* perform cycle detection. Adding an edge
     /// that creates a cycle may lead to infinite loops in traversal algorithms.
-    pub fn insert(&mut self, edge: E, child: Arc<Mutex<TrieNode<E, T>>>) {
+    pub fn insert(&mut self, edge: E, child: Arc<Mutex<Trie<E, T>>>) {
         self.children.insert(edge, child);
     }
 
     /// Gets the child node associated with the given edge, if it exists.
-    pub fn get(&self, edge: &E) -> Option<Arc<Mutex<TrieNode<E, T>>>> {
+    pub fn get(&self, edge: &E) -> Option<Arc<Mutex<Trie<E, T>>>> {
         self.children.get(edge).cloned()
     }
 
     /// Returns a reference to the map of children nodes.
-    pub fn children(&self) -> &BTreeMap<E, Arc<Mutex<TrieNode<E, T>>>> {
+    pub fn children(&self) -> &BTreeMap<E, Arc<Mutex<Trie<E, T>>>> {
         &self.children
     }
 
@@ -53,8 +53,8 @@ impl<T, E: Ord> TrieNode<E, T> {
 
     /// Collects all unique nodes reachable from the given root using Breadth-First Search (BFS).
     /// Node uniqueness is determined by the memory address of the `TrieNode` data.
-    pub fn all_nodes(root: Arc<Mutex<TrieNode<E, T>>>) -> Vec<Arc<Mutex<TrieNode<E, T>>>> {
-        let mut visited_ptrs: HashSet<*const TrieNode<E, T>> = HashSet::new();
+    pub fn all_nodes(root: Arc<Mutex<Trie<E, T>>>) -> Vec<Arc<Mutex<Trie<E, T>>>> {
+        let mut visited_ptrs: HashSet<*const Trie<E, T>> = HashSet::new();
         let mut result = Vec::new();
         let mut queue = VecDeque::new();
 
@@ -78,7 +78,7 @@ impl<T, E: Ord> TrieNode<E, T> {
     }
 }
 
-impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
+impl<T: Clone, E: Ord + Clone> Trie<E, T> {
     /// Performs a Breadth-First Search (BFS) traversal applying functions at each step.
     ///
     /// Starts from `initial_nodes_and_values`. For each visited node:
@@ -87,12 +87,12 @@ impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
     ///
     /// Node uniqueness for visitation is determined by the memory address of the `TrieNode` data.
     pub fn special_map<V: Clone>(
-        initial_nodes_and_values: Vec<(Arc<Mutex<TrieNode<E, T>>>, V)>,
-        mut step: impl FnMut(&V, &E, &TrieNode<E, T>) -> V,
+        initial_nodes_and_values: Vec<(Arc<Mutex<Trie<E, T>>>, V)>,
+        mut step: impl FnMut(&V, &E, &Trie<E, T>) -> V,
         mut process: impl FnMut(&T, &V),
     ) {
-        let mut queue: VecDeque<(Arc<Mutex<TrieNode<E, T>>>, V)> = VecDeque::new();
-        let mut visited: HashSet<*const TrieNode<E, T>> = HashSet::new();
+        let mut queue: VecDeque<(Arc<Mutex<Trie<E, T>>>, V)> = VecDeque::new();
+        let mut visited: HashSet<*const Trie<E, T>> = HashSet::new();
 
         // Initialize queue and visited set
         for (node_arc, value) in initial_nodes_and_values {
@@ -126,9 +126,9 @@ impl<T: Clone, E: Ord + Clone> TrieNode<E, T> {
 }
 
 /// Helper function to print the structure of the Trie/DAG starting from root (BFS).
-pub(crate) fn dump_structure<E: Debug, T: Debug>(root: Arc<Mutex<TrieNode<E, T>>>) {
+pub(crate) fn dump_structure<E: Debug, T: Debug>(root: Arc<Mutex<Trie<E, T>>>) {
     let mut queue = VecDeque::new();
-    let mut seen: HashSet<*const TrieNode<E, T>> = HashSet::new();
+    let mut seen: HashSet<*const Trie<E, T>> = HashSet::new();
 
     println!("Dumping Trie Structure (BFS):");
 
@@ -159,9 +159,9 @@ mod tests {
 
     #[test]
     fn test_insertion_and_retrieval() {
-        let mut root = TrieNode::<&str, i32>::new(0);
-        let child1 = Arc::new(Mutex::new(TrieNode::new(1)));
-        let child2 = Arc::new(Mutex::new(TrieNode::new(2)));
+        let mut root = Trie::<&str, i32>::new(0);
+        let child1 = Arc::new(Mutex::new(Trie::new(1)));
+        let child2 = Arc::new(Mutex::new(Trie::new(2)));
 
         root.insert("a", child1.clone());
         root.insert("b", child2.clone());
@@ -187,10 +187,10 @@ mod tests {
     #[test]
     fn test_special_map_bfs_order() {
         // Structure: root(0) -> c1(1) -> gc(3), root(0) -> c2(2)
-        let root = Arc::new(Mutex::new(TrieNode::<&str, i32>::new(0)));
-        let child1 = Arc::new(Mutex::new(TrieNode::new(1)));
-        let child2 = Arc::new(Mutex::new(TrieNode::new(2)));
-        let grandchild = Arc::new(Mutex::new(TrieNode::new(3)));
+        let root = Arc::new(Mutex::new(Trie::<&str, i32>::new(0)));
+        let child1 = Arc::new(Mutex::new(Trie::new(1)));
+        let child2 = Arc::new(Mutex::new(Trie::new(2)));
+        let grandchild = Arc::new(Mutex::new(Trie::new(3)));
 
         root.try_lock().unwrap().insert("r->c1", child1.clone());
         root.try_lock().unwrap().insert("r->c2", child2.clone());
@@ -199,7 +199,7 @@ mod tests {
         let mut processed_node_values = Vec::new();
         let mut computed_values = Vec::new();
 
-        TrieNode::special_map(
+        Trie::special_map(
             vec![(root.clone(), 100)], // Start BFS from root with initial value 100
             |parent_v, _edge, _child_node| parent_v + 1, // Step: increment value
             |node_t_val, computed_v| {
@@ -217,17 +217,17 @@ mod tests {
     #[test]
     fn test_all_nodes_diamond() {
         // Structure: root -> c1 -> gc, root -> c2 -> gc (diamond)
-        let root = Arc::new(Mutex::new(TrieNode::<&str, &str>::new("root")));
-        let child1 = Arc::new(Mutex::new(TrieNode::new("child1")));
-        let child2 = Arc::new(Mutex::new(TrieNode::new("child2")));
-        let grandchild = Arc::new(Mutex::new(TrieNode::new("grandchild")));
+        let root = Arc::new(Mutex::new(Trie::<&str, &str>::new("root")));
+        let child1 = Arc::new(Mutex::new(Trie::new("child1")));
+        let child2 = Arc::new(Mutex::new(Trie::new("child2")));
+        let grandchild = Arc::new(Mutex::new(Trie::new("grandchild")));
 
         root.try_lock().unwrap().insert("r->c1", child1.clone());
         root.try_lock().unwrap().insert("r->c2", child2.clone());
         child1.try_lock().unwrap().insert("c1->gc", grandchild.clone());
         child2.try_lock().unwrap().insert("c2->gc", grandchild.clone()); // Diamond
 
-        let all_nodes = TrieNode::all_nodes(root.clone());
+        let all_nodes = Trie::all_nodes(root.clone());
 
         // Should find 4 unique nodes
         assert_eq!(all_nodes.len(), 4);
@@ -246,10 +246,10 @@ mod tests {
     #[test]
     fn test_special_map_diamond() {
         // Structure: root(0) -> c1(1) -> gc(3), root(0) -> c2(2) -> gc(3)
-        let root = Arc::new(Mutex::new(TrieNode::<&str, i32>::new(0)));
-        let child1 = Arc::new(Mutex::new(TrieNode::new(1)));
-        let child2 = Arc::new(Mutex::new(TrieNode::new(2)));
-        let grandchild = Arc::new(Mutex::new(TrieNode::new(3)));
+        let root = Arc::new(Mutex::new(Trie::<&str, i32>::new(0)));
+        let child1 = Arc::new(Mutex::new(Trie::new(1)));
+        let child2 = Arc::new(Mutex::new(Trie::new(2)));
+        let grandchild = Arc::new(Mutex::new(Trie::new(3)));
 
         root.try_lock().unwrap().insert("r->c1", child1.clone());
         root.try_lock().unwrap().insert("r->c2", child2.clone());
@@ -259,7 +259,7 @@ mod tests {
         let mut processed_node_values = Vec::new();
         let mut computed_values = Vec::new();
 
-        TrieNode::special_map(
+        Trie::special_map(
             vec![(root.clone(), 100)],
             |parent_v, _edge, _child_node| parent_v + 1,
             |node_t_val, computed_v| {
@@ -289,14 +289,14 @@ mod tests {
 
      #[test]
     fn test_empty_trie() {
-        let root = Arc::new(Mutex::new(TrieNode::<&str, i32>::new(42)));
-        let nodes = TrieNode::all_nodes(root.clone());
+        let root = Arc::new(Mutex::new(Trie::<&str, i32>::new(42)));
+        let nodes = Trie::all_nodes(root.clone());
         assert_eq!(nodes.len(), 1);
         assert!(Arc::ptr_eq(&nodes[0], &root));
         assert!(root.try_lock().unwrap().is_leaf());
 
         let mut processed = false;
-        TrieNode::special_map(
+        Trie::special_map(
             vec![(root.clone(), 100)],
             |_v, _e, _n| panic!("Step should not be called for leaf"),
             |t, v| {
@@ -311,13 +311,13 @@ mod tests {
     #[test]
     fn test_cycle_all_nodes() {
         // root -> child -> root (cycle)
-        let root = Arc::new(Mutex::new(TrieNode::<&str, i32>::new(0)));
-        let child = Arc::new(Mutex::new(TrieNode::new(1)));
+        let root = Arc::new(Mutex::new(Trie::<&str, i32>::new(0)));
+        let child = Arc::new(Mutex::new(Trie::new(1)));
 
         root.try_lock().unwrap().insert("r->c", child.clone());
         child.try_lock().unwrap().insert("c->r", root.clone());
 
-        let nodes = TrieNode::all_nodes(root.clone());
+        let nodes = Trie::all_nodes(root.clone());
         // Should detect both nodes despite the cycle
         assert_eq!(nodes.len(), 2);
         let node_ptrs: HashSet<_> = nodes.iter().map(|arc| node_ptr(arc)).collect();
@@ -329,8 +329,8 @@ mod tests {
      #[test]
     fn test_cycle_special_map() {
         // root -> child -> root (cycle)
-        let root = Arc::new(Mutex::new(TrieNode::<&str, i32>::new(0)));
-        let child = Arc::new(Mutex::new(TrieNode::new(1)));
+        let root = Arc::new(Mutex::new(Trie::<&str, i32>::new(0)));
+        let child = Arc::new(Mutex::new(Trie::new(1)));
 
         root.try_lock().unwrap().insert("r->c", child.clone());
         child.try_lock().unwrap().insert("c->r", root.clone());
@@ -338,7 +338,7 @@ mod tests {
         let mut processed_values = Vec::new();
         let mut computed_vals = Vec::new();
 
-        TrieNode::special_map(
+        Trie::special_map(
             vec![(root.clone(), 100)],
             |v, _e, _n| v + 1,
             |t, v| {
