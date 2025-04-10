@@ -6,7 +6,6 @@ pub mod u8set;
 pub mod finite_automata;
 mod gss;
 pub mod glr;
-pub mod constraint_simple_interface;
 mod trie;
 mod utils;
 mod analyze_grammar;
