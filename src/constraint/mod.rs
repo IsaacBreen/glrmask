@@ -1,2 +1,2 @@
-pub mod constraint_creation;
-pub mod constraint_runtime;
+pub mod create;
+pub mod infer;
