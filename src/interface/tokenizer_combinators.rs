@@ -118,19 +118,3 @@ pub fn repeatn_fast(n: usize, parser: Expr) -> Expr {
     let parsers = std::iter::repeat(parser).take(n).collect();
     seq_fast(parsers)
 }
-
-/// Macro for creating a sequence of parsers
-#[macro_export]
-macro_rules! seq_fast {
-    ($($x:expr),* $(,)?) => {
-        $crate::tokenizer_combinators::seq_fast(vec![$($x),*])
-    };
-}
-
-/// Macro for creating a choice of parsers
-#[macro_export]
-macro_rules! choice_fast {
-    ($($x:expr),* $(,)?) => {
-        $crate::tokenizer_combinators::choice_fast(vec![$($x),*])
-    };
-}

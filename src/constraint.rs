@@ -29,7 +29,7 @@ pub struct ExecuteResult {
 
 /// Precomputes a map from state -> token sequence -> LLM token -> state.
 pub fn precompute<'a>(
-    tokenizer: Regex,
+    tokenizer: &Regex,
     llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
     max_llm_token_id: usize,
 ) -> BTreeMap<StateID, TrieNode<(), TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>> {
@@ -192,6 +192,6 @@ mod tests {
 
         // Run precompute
         let max_llm_token_id = llm_tokens.len() + 1;
-        let result = precompute(tokenizer, &llm_token_map, max_llm_token_id);
+        let result = precompute(&tokenizer, &llm_token_map, max_llm_token_id);
     }
 }

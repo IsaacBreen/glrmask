@@ -14,16 +14,16 @@ type LLMToken<'a> = &'a [u8];
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
 
 #[derive(Clone)]
-pub struct Grammar<T> {
+pub struct Grammar {
     pub productions: Vec<Production>,
     pub start_production_id: usize,
     pub literal_map: BTreeMap<String, String>,
     pub terminal_name_to_group_id: BiBTreeMap<String, usize>,
     pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,
-    pub tokenizer: T,
+    pub tokenizer: Regex,
 }
 
-impl<T> Debug for Grammar<T> where T: Debug {
+impl Debug for Grammar {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Grammar:")?;
         writeln!(f, "  Start Production ID: {}", self.start_production_id)?;
@@ -60,7 +60,7 @@ impl<T> Debug for Grammar<T> where T: Debug {
     }
 }
 
-impl<T> Grammar<T> {
+impl Grammar {
     fn mangle_literal(literal: &str, tokens: &BTreeMap<String, Expr>) -> String {
         let mut mangled_name = literal.to_string();
         let mut i = 0;
@@ -106,13 +106,13 @@ pub fn repeat(expr: GrammarExpr) -> GrammarExpr {
     GrammarExpr::Repeat(Box::new(expr))
 }
 
-impl<T> Grammar<T> {
+impl Grammar {
     pub fn glr_parser(&self) -> GLRParser {
         generate_glr_parser(&self.productions, self.start_production_id)
     }
 }
 
-impl Grammar<Regex> {
+impl Grammar {
     /// Constructs a `Grammar` and `Regex` tokenizer from a list of grammar expressions.
     /// The first non-terminal in the list is treated as the start symbol.
     pub fn from_exprs(exprs: Vec<(String, GrammarExpr)>) -> Self {
@@ -306,7 +306,7 @@ impl GrammarConstraint {
         let parser = generate_glr_parser_with_maps(&grammar.productions, grammar.start_production_id, terminal_map, non_terminal_map);
 
         debug!(2, "Precomputing");
-        let mut precomputed = precompute(&grammar.tokenizer, &llm_tokens, LLMTokenID(eof_llm_token_id), max_llm_token_id);
+        let mut precomputed = precompute(&grammar.tokenizer, &llm_tokens, max_llm_token_id);
         debug!(2, "precomputed.len(): {}", precomputed.len());
         debug!(2, "Done precomputing");
 
@@ -608,7 +608,7 @@ mod tests {
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let eof_llm_token_id = llm_tokens.len();
         let max_llm_token_id = llm_tokens.len();
-        let precomputed = precompute(&tokenizer, &llm_token_map, LLMTokenID(eof_llm_token_id), max_llm_token_id);
+        let precomputed = precompute(&tokenizer, &llm_token_map, max_llm_token_id);
         // print_precomputed(&precomputed);
         println!("Done precomputing");
     }
@@ -624,7 +624,7 @@ mod tests {
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let eof_llm_token_id = llm_tokens.len();
         let max_llm_token_id = llm_tokens.len();
-        let precomputed = precompute(&tokenizer, &llm_token_map, LLMTokenID(eof_llm_token_id), max_llm_token_id);
+        let precomputed = precompute(&tokenizer, &llm_token_map, max_llm_token_id);
         // print_precomputed(&precomputed);
         println!("Done precomputing");
     }
