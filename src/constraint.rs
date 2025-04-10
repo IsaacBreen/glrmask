@@ -68,14 +68,14 @@ impl Regex {
 pub struct GrammarConstraint {
     pub(crate) tokenizer: Regex,
     pub(crate) parser: GLRParser,
-    pub precomputed: BTreeMap<StateID, Trie<GrammarTokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<GrammarTokenID, BitVec>, Option<BitVec>)>>,
+    pub(crate) precomputed: BTreeMap<StateID, Trie<GrammarTokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<GrammarTokenID, BitVec>, Option<BitVec>)>>,
     pub(crate) max_llm_token_id: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintState {
     pub(crate) parent: GrammarConstraint,
-    states: Vec<(ParseState, BTreeSet<StateID>)>,
+    pub(crate) states: Vec<(ParseState, BTreeSet<StateID>)>,
 }
 
 impl GrammarConstraint {
