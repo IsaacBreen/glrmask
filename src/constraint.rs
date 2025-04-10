@@ -41,15 +41,6 @@ pub struct GrammarConstraintState {
     pub(crate) states: Vec<(ParseState, BTreeSet<StateID>)>,
 }
 
-/// Precomputes a map from state -> token sequence -> LLM token -> state.
-pub fn precompute<'a>(
-    tokenizer: &Regex,
-    llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-    max_llm_token_id: usize,
-) -> BTreeMap<StateID, Trie<GrammarTokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<GrammarTokenID, BitVec>, Option<BitVec>)>> {
-    todo!()
-}
-
 impl Regex {
     fn initial_state_id(&self) -> usize {
         0
@@ -76,6 +67,15 @@ impl Regex {
     fn max_state(&self) -> usize {
         self.dfa.states.len()
     }
+}
+
+/// Precomputes a map from state -> token sequence -> LLM token -> state.
+pub fn precompute<'a>(
+    tokenizer: &Regex,
+    llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+    max_llm_token_id: usize,
+) -> BTreeMap<StateID, Trie<GrammarTokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<GrammarTokenID, BitVec>, Option<BitVec>)>> {
+    todo!()
 }
 
 impl GrammarConstraint {
