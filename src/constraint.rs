@@ -27,6 +27,20 @@ pub struct ExecuteResult {
     pub new_state: Option<usize>,
 }
 
+#[derive(Debug, Clone)]
+pub struct GrammarConstraint {
+    pub(crate) tokenizer: Regex,
+    pub(crate) parser: GLRParser,
+    pub(crate) precomputed: BTreeMap<StateID, Trie<GrammarTokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<GrammarTokenID, BitVec>, Option<BitVec>)>>,
+    pub(crate) max_llm_token_id: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct GrammarConstraintState {
+    pub(crate) parent: GrammarConstraint,
+    pub(crate) states: Vec<(ParseState, BTreeSet<StateID>)>,
+}
+
 /// Precomputes a map from state -> token sequence -> LLM token -> state.
 pub fn precompute<'a>(
     tokenizer: &Regex,
@@ -62,20 +76,6 @@ impl Regex {
     fn max_state(&self) -> usize {
         self.dfa.states.len()
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct GrammarConstraint {
-    pub(crate) tokenizer: Regex,
-    pub(crate) parser: GLRParser,
-    pub(crate) precomputed: BTreeMap<StateID, Trie<GrammarTokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<GrammarTokenID, BitVec>, Option<BitVec>)>>,
-    pub(crate) max_llm_token_id: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct GrammarConstraintState {
-    pub(crate) parent: GrammarConstraint,
-    pub(crate) states: Vec<(ParseState, BTreeSet<StateID>)>,
 }
 
 impl GrammarConstraint {
