@@ -1,7 +1,5 @@
-use crate::debug;
 use crate::finite_automata::{GroupID, Regex};
-use crate::glr;
-use crate::glr::parser::{GLRParser, GLRParserState, InsertWith, ParseState, ParseStateKey};
+use crate::glr::parser::{GLRParser, InsertWith, ParseState, ParseStateKey};
 use crate::glr::table::StateID;
 use crate::glr::table::TerminalID;
 use crate::trie::TrieNode;
@@ -9,7 +7,6 @@ use bimap::BiBTreeMap;
 use bitvec::bitvec;
 use bitvec::prelude::BitVec;
 use bitvec::prelude::*;
-use kdam::tqdm;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
@@ -89,84 +86,6 @@ impl Tokenizer for Regex {
 pub fn print_precomputed(precomputed: &BTreeMap<StateID, TrieNode<(), TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>>) {
     todo!()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::charmap::TrieMap;
-    use crate::finite_automata::{eat_u8, DFAState, Regex, DFA};
-    use crate::u8set::U8Set;
-    use crate::{groups, seq};
-    use bimap::BiBTreeMap;
-    use std::collections::{BTreeMap, BTreeSet};
-
-    #[test]
-    fn test_precompute() {
-        let _tokenizer = groups![
-            eat_u8(b'a'), // Token 0: 'a'
-            eat_u8(b'b'), // Token 1: 'b'
-            seq![eat_u8(b'a'), eat_u8(b'b')], // Token 2: 'ab'
-            seq![eat_u8(b'a'), eat_u8(b'b'), eat_u8(b'c')], // Token 3: 'abc'
-        ].build();
-
-        let tokenizer = Regex {
-            dfa: DFA {
-                states: vec![
-                    DFAState {
-                        transitions: TrieMap::from_iter(vec![(b'a', 1), (b'b', 2)]),
-                        finalizers: BTreeSet::new(),
-                        possible_group_ids: BTreeSet::from([0, 1, 2, 3]),
-                        group_id_to_u8set: BTreeMap::from([
-                            (0, U8Set::from_bytes(b"a")),
-                            (1, U8Set::from_bytes(b"b")),
-                            (2, U8Set::from_bytes(b"a")),
-                            (3, U8Set::from_bytes(b"a")),
-                        ]),
-                    },
-                    DFAState {
-                        transitions: TrieMap::from_iter(vec![(b'b', 3)]),
-                        finalizers: BTreeSet::from([0]),
-                        possible_group_ids: BTreeSet::from([0, 2, 3]),
-                        group_id_to_u8set: BTreeMap::from([
-                            (2, U8Set::from_bytes(b"b")),
-                            (3, U8Set::from_bytes(b"b")),
-                        ]),
-                    },
-                    DFAState {
-                        transitions: TrieMap::new(),
-                        finalizers: BTreeSet::from([1]),
-                        possible_group_ids: BTreeSet::from([1]),
-                        group_id_to_u8set: BTreeMap::new(),
-                    },
-                    DFAState {
-                        transitions: TrieMap::from_iter(vec![(b'c', 4)]),
-                        finalizers: BTreeSet::from([2]),
-                        possible_group_ids: BTreeSet::from([2, 3]),
-                        group_id_to_u8set: BTreeMap::from([(3, U8Set::from_bytes(b"c"))]),
-                    },
-                    DFAState {
-                        transitions: TrieMap::new(),
-                        finalizers: BTreeSet::from([3]),
-                        possible_group_ids: BTreeSet::from([3]),
-                        group_id_to_u8set: BTreeMap::new(),
-                    },
-                ],
-                start_state: 0,
-                non_greedy_finalizers: BTreeSet::new(),
-            },
-        };
-        assert_eq!(_tokenizer, tokenizer);
-
-        // Define the LLM tokens
-        let llm_tokens: &[&[u8]] = &[b"a", b"b", b"c", b"ab", b"bc", b"abc"];
-        let llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = llm_tokens.iter().enumerate().map(|(i, token)| (token.to_vec(), LLMTokenID(i))).collect();
-
-        // Run precompute
-        let max_llm_token_id = llm_tokens.len() + 1;
-        let result = precompute(&tokenizer, &llm_token_map, LLMTokenID(max_llm_token_id), max_llm_token_id);
-    }
-}
-
 
 type LLMToken = Vec<u8>;
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
@@ -333,5 +252,82 @@ impl<'a, T: Tokenizer> GrammarConstraintState<T> {
 
     pub fn get_precomputed(&self) -> &BTreeMap<StateID, TrieNode<(), TokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<TokenID, BitVec>, Option<BitVec>)>> {
         &self.parent.precomputed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::charmap::TrieMap;
+    use crate::finite_automata::{eat_u8, DFAState, Regex, DFA};
+    use crate::u8set::U8Set;
+    use crate::{groups, seq};
+    use bimap::BiBTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn test_precompute() {
+        let _tokenizer = groups![
+            eat_u8(b'a'), // Token 0: 'a'
+            eat_u8(b'b'), // Token 1: 'b'
+            seq![eat_u8(b'a'), eat_u8(b'b')], // Token 2: 'ab'
+            seq![eat_u8(b'a'), eat_u8(b'b'), eat_u8(b'c')], // Token 3: 'abc'
+        ].build();
+
+        let tokenizer = Regex {
+            dfa: DFA {
+                states: vec![
+                    DFAState {
+                        transitions: TrieMap::from_iter(vec![(b'a', 1), (b'b', 2)]),
+                        finalizers: BTreeSet::new(),
+                        possible_group_ids: BTreeSet::from([0, 1, 2, 3]),
+                        group_id_to_u8set: BTreeMap::from([
+                            (0, U8Set::from_bytes(b"a")),
+                            (1, U8Set::from_bytes(b"b")),
+                            (2, U8Set::from_bytes(b"a")),
+                            (3, U8Set::from_bytes(b"a")),
+                        ]),
+                    },
+                    DFAState {
+                        transitions: TrieMap::from_iter(vec![(b'b', 3)]),
+                        finalizers: BTreeSet::from([0]),
+                        possible_group_ids: BTreeSet::from([0, 2, 3]),
+                        group_id_to_u8set: BTreeMap::from([
+                            (2, U8Set::from_bytes(b"b")),
+                            (3, U8Set::from_bytes(b"b")),
+                        ]),
+                    },
+                    DFAState {
+                        transitions: TrieMap::new(),
+                        finalizers: BTreeSet::from([1]),
+                        possible_group_ids: BTreeSet::from([1]),
+                        group_id_to_u8set: BTreeMap::new(),
+                    },
+                    DFAState {
+                        transitions: TrieMap::from_iter(vec![(b'c', 4)]),
+                        finalizers: BTreeSet::from([2]),
+                        possible_group_ids: BTreeSet::from([2, 3]),
+                        group_id_to_u8set: BTreeMap::from([(3, U8Set::from_bytes(b"c"))]),
+                    },
+                    DFAState {
+                        transitions: TrieMap::new(),
+                        finalizers: BTreeSet::from([3]),
+                        possible_group_ids: BTreeSet::from([3]),
+                        group_id_to_u8set: BTreeMap::new(),
+                    },
+                ],
+                start_state: 0,
+                non_greedy_finalizers: BTreeSet::new(),
+            },
+        };
+        assert_eq!(_tokenizer, tokenizer);
+
+        // Define the LLM tokens
+        let llm_tokens: &[&[u8]] = &[b"a", b"b", b"c", b"ab", b"bc", b"abc"];
+        let llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = llm_tokens.iter().enumerate().map(|(i, token)| (token.to_vec(), LLMTokenID(i))).collect();
+
+        // Run precompute
+        let max_llm_token_id = llm_tokens.len() + 1;
+        let result = precompute(&tokenizer, &llm_token_map, LLMTokenID(max_llm_token_id), max_llm_token_id);
     }
 }
