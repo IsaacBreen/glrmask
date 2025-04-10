@@ -3,13 +3,11 @@ use crate::finite_automata::{Expr, Regex};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, ParseState};
 use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, NonTerminalID, StateID, TerminalID};
-use crate::constraint::create::{precompute, LLMTokenID, Token, Tokenizer};
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::{Debug, Formatter};
 use kdam::tqdm;
-use crate::analyze_grammar::drop_dead;
-use crate::constraint::infer::{GrammarConstraint};
+use crate::constraint::{precompute, GrammarConstraint, LLMTokenID};
 use crate::debug;
 
 type LLMToken<'a> = &'a [u8];
@@ -299,8 +297,8 @@ impl Grammar<Regex> {
     }
 }
 
-impl<T: Tokenizer> GrammarConstraint<T> {
-    pub fn from_grammar(grammar: Grammar<T>, llm_tokens: LLMTokenMap, eof_llm_token_id: usize, max_llm_token_id: usize) -> Self {
+impl GrammarConstraint {
+    pub fn from_grammar(grammar: Grammar, llm_tokens: LLMTokenMap, eof_llm_token_id: usize, max_llm_token_id: usize) -> Self {
         debug!(2, "GrammarConstraint::from_grammar");
         let terminal_map = grammar.terminal_name_to_group_id.iter().map(|(name, group_id)| { (Terminal(name.clone()), TerminalID(*group_id)) }).collect();
         let non_terminal_map = assign_non_terminal_ids(&grammar.productions);
@@ -328,10 +326,9 @@ mod tests {
     use super::*;
     use crate::finite_automata::eat_u8;
     use crate::glr::table::generate_glr_parser;
-    use crate::constraint::create::{print_precomputed, LLMTokenID};
     use crate::{choice_fast, groups, seq_fast};
-    use crate::tokenizer_combinators::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast};
-    use crate::trie::TrieNode;
+    use crate::interface::tokenizer_combinators::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast};
+    use crate::datastructures::trie::TrieNode;
 
 
     fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> BitVec {
@@ -534,7 +531,7 @@ mod tests {
         let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
         let mut grammar_constraint_state = grammar_constraint.init();
 
-        print_precomputed(&grammar_constraint_state.get_precomputed());
+        // print_precomputed(&grammar_constraint_state.get_precomputed());
 
         for (tokenizer_state, root) in grammar_constraint_state.get_precomputed() {
             debug!(1, "Tokenizer state: {}", tokenizer_state.0);
@@ -612,7 +609,7 @@ mod tests {
         let eof_llm_token_id = llm_tokens.len();
         let max_llm_token_id = llm_tokens.len();
         let precomputed = precompute(&tokenizer, &llm_token_map, LLMTokenID(eof_llm_token_id), max_llm_token_id);
-        print_precomputed(&precomputed);
+        // print_precomputed(&precomputed);
         println!("Done precomputing");
     }
 
@@ -628,7 +625,7 @@ mod tests {
         let eof_llm_token_id = llm_tokens.len();
         let max_llm_token_id = llm_tokens.len();
         let precomputed = precompute(&tokenizer, &llm_token_map, LLMTokenID(eof_llm_token_id), max_llm_token_id);
-        print_precomputed(&precomputed);
+        // print_precomputed(&precomputed);
         println!("Done precomputing");
     }
 }
