@@ -30,9 +30,9 @@ pub struct ExecuteResult {
 type Precomputed = BTreeMap<
     StateID,
     Trie<
-        GrammarTokenID, 
+        GrammarTokenID,
         (
-            BTreeMap<LLMTokenID, Option<StateID>>, 
+            BTreeMap<LLMTokenID, Option<StateID>>,
             BTreeMap<GrammarTokenID, BitVec>,
             Option<BitVec>
         )
@@ -81,15 +81,6 @@ impl Regex {
     }
 }
 
-/// Precomputes a map from state -> token sequence -> LLM token -> state.
-pub fn precompute<'a>(
-    tokenizer: &Regex,
-    llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-    max_llm_token_id: usize,
-) -> Precomputed {
-    todo!()
-}
-
 impl GrammarConstraint {
     pub fn new(
         tokenizer: Regex,
@@ -109,6 +100,15 @@ impl GrammarConstraint {
             states: vec![(parser_initial_state, BTreeSet::from([tokenizer_initial_state_id]))],
         }
     }
+}
+
+/// Precomputes a map from state -> token sequence -> LLM token -> state.
+pub fn precompute<'a>(
+    tokenizer: &Regex,
+    llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+    max_llm_token_id: usize,
+) -> Precomputed {
+    todo!()
 }
 
 impl<'a> GrammarConstraintState {
