@@ -27,7 +27,10 @@ pub struct ExecuteResult {
     pub new_state: Option<usize>,
 }
 
-type Precomputed = BTreeMap<StateID, Trie<GrammarTokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<GrammarTokenID, BitVec>, Option<BitVec>)>>;
+type Precomputed = BTreeMap<
+    StateID,
+    Trie<GrammarTokenID, (BTreeMap<LLMTokenID, Option<StateID>>, BTreeMap<GrammarTokenID, BitVec>, Option<BitVec>)>,
+>;
 
 #[derive(Debug, Clone)]
 pub struct GrammarConstraint {
