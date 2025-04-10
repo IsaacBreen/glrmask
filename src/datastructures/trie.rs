@@ -12,7 +12,7 @@ pub struct Trie<E, T> {
     children: BTreeMap<E, Arc<Mutex<Trie<E, T>>>>,
 }
 
-// Helper to get the raw pointer of the node inside an Arc<Mutex<TrieNode>>.
+// Helper to get the raw pointer of the node inside an Arc<Mutex<Trie>>.
 // Panics if the mutex is poisoned.
 fn node_ptr<E, T>(node_arc: &Arc<Mutex<Trie<E, T>>>) -> *const Trie<E, T> {
     let guard = node_arc.try_lock().expect("Mutex poisoned");
@@ -20,7 +20,7 @@ fn node_ptr<E, T>(node_arc: &Arc<Mutex<Trie<E, T>>>) -> *const Trie<E, T> {
 }
 
 impl<T, E: Ord> Trie<E, T> {
-    /// Creates a new TrieNode with the given value and no children.
+    /// Creates a new Trie node with the given value and no children.
     pub fn new(value: T) -> Self {
         Trie {
             value,
@@ -46,13 +46,13 @@ impl<T, E: Ord> Trie<E, T> {
         &self.children
     }
 
-    /// Checks if the node has any children.
+    /// Checks if the node has any children (i.e., is a leaf).
     pub fn is_leaf(&self) -> bool {
         self.children.is_empty()
     }
 
     /// Collects all unique nodes reachable from the given root using Breadth-First Search (BFS).
-    /// Node uniqueness is determined by the memory address of the `TrieNode` data.
+    /// Node uniqueness is determined by the memory address of the `Trie` data.
     pub fn all_nodes(root: Arc<Mutex<Trie<E, T>>>) -> Vec<Arc<Mutex<Trie<E, T>>>> {
         let mut visited_ptrs: HashSet<*const Trie<E, T>> = HashSet::new();
         let mut result = Vec::new();
@@ -85,7 +85,7 @@ impl<T: Clone, E: Ord + Clone> Trie<E, T> {
     /// 1. Calls `process` with the node's internal value (`T`) and the computed value (`V`).
     /// 2. For each child, computes a new value `V` using `step` and enqueues the child if not already visited.
     ///
-    /// Node uniqueness for visitation is determined by the memory address of the `TrieNode` data.
+    /// Node uniqueness for visitation is determined by the memory address of the `Trie` data.
     pub fn special_map<V: Clone>(
         initial_nodes_and_values: Vec<(Arc<Mutex<Trie<E, T>>>, V)>,
         mut step: impl FnMut(&V, &E, &Trie<E, T>) -> V,
