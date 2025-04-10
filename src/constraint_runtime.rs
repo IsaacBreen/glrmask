@@ -1,7 +1,7 @@
 use crate::glr::parser::{GLRParser, GLRParserState, InsertWith, ParseState, ParseStateKey};
 use crate::glr::table::{StateID, TerminalID};
-use crate::{precompute, debug};
-use crate::precompute::{LLMTokenID, TokenID, Tokenizer};
+use crate::{constraint_creation, debug};
+use crate::constraint_creation::{LLMTokenID, TokenID, Tokenizer};
 use bitvec::prelude::*;
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,7 +33,7 @@ impl<T: Tokenizer> GrammarConstraint<T> {
         eof_llm_token_id: usize, 
         max_llm_token_id: usize
     ) -> Self {
-        let mut precomputed = precompute::precompute(&tokenizer, &llm_tokens, LLMTokenID(eof_llm_token_id), max_llm_token_id);
+        let mut precomputed = constraint_creation::precompute(&tokenizer, &llm_tokens, LLMTokenID(eof_llm_token_id), max_llm_token_id);
 
         Self {
             tokenizer,

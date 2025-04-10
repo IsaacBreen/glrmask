@@ -3,13 +3,13 @@ use crate::finite_automata::{Expr, Regex};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, ParseState};
 use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, NonTerminalID, StateID, TerminalID};
-use crate::precompute::{precompute, LLMTokenID, Token, Tokenizer};
+use crate::constraint_creation::{precompute, LLMTokenID, Token, Tokenizer};
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::{Debug, Formatter};
 use kdam::tqdm;
 use crate::analyze_grammar::drop_dead;
-use crate::constraint::{GrammarConstraint};
+use crate::constraint_runtime::{GrammarConstraint};
 use crate::debug;
 
 type LLMToken<'a> = &'a [u8];
@@ -328,7 +328,7 @@ mod tests {
     use super::*;
     use crate::finite_automata::eat_u8;
     use crate::glr::table::generate_glr_parser;
-    use crate::precompute::{print_precomputed, LLMTokenID};
+    use crate::constraint_creation::{print_precomputed, LLMTokenID};
     use crate::{choice_fast, groups, seq_fast};
     use crate::tokenizer_combinators::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast};
     use crate::trie::TrieNode;
