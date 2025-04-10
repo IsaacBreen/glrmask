@@ -50,10 +50,9 @@ impl Regex {
             // Filter out zero-width tokens
             .filter(|token| token.width != 0).collect();
 
-        ExecuteResult {
-            matches,
-            new_state: if regex_state.done { None } else { Some(regex_state.current_state) },
-        }
+        let new_state = if regex_state.done { None } else { Some(regex_state.current_state) };
+
+        ExecuteResult { matches, new_state }
     }
 
     fn tokens_accessible_from_state(&self, state: usize) -> Vec<TokenID> {
