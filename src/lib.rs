@@ -8,3 +8,4 @@ pub mod glr;
 mod trie;
 mod utils;
 mod analyze_grammar;
+mod constraint;

@@ -1,19 +1,17 @@
+use crate::debug;
 use crate::finite_automata::{GroupID, Regex};
 use crate::glr;
+use crate::glr::parser::{GLRParser, GLRParserState, InsertWith, ParseState, ParseStateKey};
 use crate::glr::table::StateID;
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
-use bitvec::prelude::BitVec;
-use kdam::tqdm;
-use crate::trie::{TrieNode};
+use crate::glr::table::TerminalID;
+use crate::trie::TrieNode;
 use bimap::BiBTreeMap;
 use bitvec::bitvec;
-use crate::debug;
-
-use crate::glr::parser::{GLRParser, GLRParserState, InsertWith, ParseState, ParseStateKey};
-use crate::glr::table::{TerminalID};
-use crate::constraint::create;
+use bitvec::prelude::BitVec;
 use bitvec::prelude::*;
+use kdam::tqdm;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 
 pub type TokenID = usize;
@@ -99,8 +97,8 @@ mod tests {
     use crate::finite_automata::{eat_u8, DFAState, Regex, DFA};
     use crate::u8set::U8Set;
     use crate::{groups, seq};
-    use std::collections::{BTreeMap, BTreeSet};
     use bimap::BiBTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn test_precompute() {
@@ -189,13 +187,13 @@ pub struct GrammarConstraintState<T: Tokenizer> {
 
 impl<T: Tokenizer> GrammarConstraint<T> {
     pub fn new(
-        tokenizer: T, 
-        parser: GLRParser, 
-        llm_tokens: LLMTokenMap, 
-        eof_llm_token_id: usize, 
+        tokenizer: T,
+        parser: GLRParser,
+        llm_tokens: LLMTokenMap,
+        eof_llm_token_id: usize,
         max_llm_token_id: usize
     ) -> Self {
-        let mut precomputed = create::precompute(&tokenizer, &llm_tokens, LLMTokenID(eof_llm_token_id), max_llm_token_id);
+        let mut precomputed = precompute(&tokenizer, &llm_tokens, LLMTokenID(eof_llm_token_id), max_llm_token_id);
 
         Self {
             tokenizer,
@@ -321,7 +319,7 @@ impl<'a, T: Tokenizer> GrammarConstraintState<T> {
                 true
             },
         );
-        
+
         self.states = new_states.into_iter().map(|((_key, tokenizer_state_ids), parse_state)| {
             (parse_state, tokenizer_state_ids)
         }).collect();
