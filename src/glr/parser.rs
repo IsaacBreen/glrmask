@@ -10,26 +10,26 @@ use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 use crate::debug;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseState {
     pub stack: Arc<GSSNode<StateID>>,
     pub action_stack: Option<Arc<GSSNode<Action>>>,
     pub status: ParseStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Action {
     Shift(TerminalID),
     Reduce { production_id: ProductionID, len: usize, nonterminal_id: NonTerminalID },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ParseStatus {
     Active,
     Inactive(StopReason),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StopReason {
     ActionNotFound,
     GotoNotFound,
@@ -366,7 +366,7 @@ impl<'a> GLRParserState<'a> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseStateKey {
     stack: StateID,
     action_stack: Option<Action>,

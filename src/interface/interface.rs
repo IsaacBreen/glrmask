@@ -315,6 +315,7 @@ impl GrammarConstraint {
             tokenizer: grammar.tokenizer,
             parser,
             precomputed,
+            llm_token_map: todo!(),
             max_llm_token_id,
         }
     }
