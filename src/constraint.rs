@@ -44,6 +44,16 @@ impl GrammarConstraint {
     ) -> Self {
         todo!()
     }
+    
+    /// Precomputes a map from state -> token sequence -> LLM token -> state.
+    pub fn precompute<'a>(
+        tokenizer: &Regex,
+        llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+        max_llm_token_id: usize,
+    ) -> Precomputed {
+        todo!()
+    }
+
 
     pub fn init(self) -> GrammarConstraintState {
         let parser_initial_state = self.parser.init_parse_state();
@@ -54,15 +64,6 @@ impl GrammarConstraint {
             states: vec![(parser_initial_state, BTreeSet::from([tokenizer_initial_state_id]))],
         }
     }
-}
-
-/// Precomputes a map from state -> token sequence -> LLM token -> state.
-pub fn precompute<'a>(
-    tokenizer: &Regex,
-    llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-    max_llm_token_id: usize,
-) -> Precomputed {
-    todo!()
 }
 
 impl<'a> GrammarConstraintState {
