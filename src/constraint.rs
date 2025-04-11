@@ -39,10 +39,17 @@ impl GrammarConstraint {
     pub fn new(
         tokenizer: Regex,
         parser: GLRParser,
-        llm_tokens: LLMTokenMap,
+        llm_token_map: LLMTokenMap,
         max_llm_token_id: usize
     ) -> Self {
-        todo!()
+        let precomputed = GrammarConstraint::precompute(&tokenizer, &llm_token_map, max_llm_token_id);
+        Self {
+            tokenizer,
+            parser,
+            precomputed,
+            llm_token_map,
+            max_llm_token_id,
+        }
     }
     
     /// Precomputes a map from state -> token sequence -> LLM token -> state.

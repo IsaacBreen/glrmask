@@ -1,4 +1,4 @@
-use crate::constraint::{precompute, GrammarConstraint};
+use crate::constraint::{GrammarConstraint};
 use crate::debug;
 use crate::finite_automata::{greedy_group, groups, ExprGroup};
 use crate::finite_automata::{Expr, Regex};
@@ -307,7 +307,7 @@ impl GrammarConstraint {
         let parser = generate_glr_parser_with_maps(&grammar.productions, grammar.start_production_id, terminal_map, non_terminal_map);
 
         debug!(2, "Precomputing");
-        let mut precomputed = precompute(&grammar.tokenizer, &llm_tokens, max_llm_token_id);
+        let mut precomputed = GrammarConstraint::precompute(&grammar.tokenizer, &llm_tokens, max_llm_token_id);
         debug!(2, "precomputed.len(): {}", precomputed.len());
         debug!(2, "Done precomputing");
 
@@ -609,7 +609,7 @@ mod tests {
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let eof_llm_token_id = llm_tokens.len();
         let max_llm_token_id = llm_tokens.len();
-        let precomputed = precompute(&tokenizer, &llm_token_map, max_llm_token_id);
+        let precomputed = GrammarConstraint::precompute(&tokenizer, &llm_token_map, max_llm_token_id);
         // print_precomputed(&precomputed);
         println!("Done precomputing");
     }
@@ -625,7 +625,7 @@ mod tests {
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let eof_llm_token_id = llm_tokens.len();
         let max_llm_token_id = llm_tokens.len();
-        let precomputed = precompute(&tokenizer, &llm_token_map, max_llm_token_id);
+        let precomputed = GrammarConstraint::precompute(&tokenizer, &llm_token_map, max_llm_token_id);
         // print_precomputed(&precomputed);
         println!("Done precomputing");
     }
