@@ -8,15 +8,14 @@ use bitvec::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use keyed_priority_queue::KeyedPriorityQueue;
 
+pub type LLMTokenBV = BitVec;
+pub type GrammarTokenBV = BitVec;
+
 type Precomputed = BTreeMap<
     TokenizerStateID,
     Trie<
         GrammarTokenID,
-        (
-            BTreeMap<LLMTokenID, Option<TokenizerStateID>>,
-            BTreeMap<GrammarTokenID, BitVec>,
-            Option<BitVec>
-        )
+        Vec<(GrammarTokenBV, LLMTokenBV, TokenizerStateID)>,
     >,
 >;
 
@@ -51,7 +50,7 @@ impl GrammarConstraint {
             max_llm_token_id,
         }
     }
-    
+
     /// Precomputes a map from state -> token sequence -> LLM token -> state.
     pub fn precompute<'a>(
         tokenizer: &Regex,
@@ -74,7 +73,7 @@ impl GrammarConstraint {
 }
 
 impl<'a> GrammarConstraintState {
-    pub fn get_mask(&self) -> BitVec {
+    pub fn get_mask(&self) -> LLMTokenBV {
         todo!()
     }
 
