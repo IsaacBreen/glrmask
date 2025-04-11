@@ -8,6 +8,8 @@ pub type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
 pub struct GrammarTokenID(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LLMTokenID(pub usize);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TokenizerStateID(pub usize);
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Token {
@@ -21,12 +23,12 @@ pub struct ExecuteResult {
 }
 
 impl Regex {
-    pub(crate) fn initial_state_id(&self) -> usize {
-        0
+    pub(crate) fn initial_state_id(&self) -> TokenizerStateID {
+        TokenizerStateID(0)
     }
 
-    fn execute_from_state(&self, text: &[u8], state: usize) -> ExecuteResult {
-        let mut regex_state = self.init_to_state(state);
+    fn execute_from_state(&self, text: &[u8], state: TokenizerStateID) -> ExecuteResult {
+        let mut regex_state = self.init_to_state(state.0);
         regex_state.execute(text);
 
         let matches: Vec<_> = regex_state.matches.iter().map(|(&id, &width)| Token { id, width })
@@ -38,8 +40,8 @@ impl Regex {
         ExecuteResult { matches, new_state }
     }
 
-    fn tokens_accessible_from_state(&self, state: usize) -> Vec<GrammarTokenID> {
-        let regex_state = self.init_to_state(state);
+    fn tokens_accessible_from_state(&self, state: TokenizerStateID) -> Vec<GrammarTokenID> {
+        let regex_state = self.init_to_state(state.0);
         regex_state.possible_group_ids().iter().cloned().map(|id| GrammarTokenID(id)).collect()
     }
 
