@@ -1,7 +1,7 @@
 use crate::datastructures::trie::Trie;
 use crate::finite_automata::Regex;
 use crate::glr::parser::{GLRParser, ParseState};
-use crate::glr::table::StateID;
+use crate::glr::table::StateID as ParseStateID;
 use crate::tokenizer::{GrammarTokenID, LLMTokenID, LLMTokenMap};
 use bimap::BiBTreeMap;
 use bitvec::prelude::BitVec;
@@ -9,11 +9,11 @@ use bitvec::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
 type Precomputed = BTreeMap<
-    StateID,
+    ParseStateID,
     Trie<
         GrammarTokenID,
         (
-            BTreeMap<LLMTokenID, Option<StateID>>,
+            BTreeMap<LLMTokenID, Option<ParseStateID>>,
             BTreeMap<GrammarTokenID, BitVec>,
             Option<BitVec>
         )
@@ -31,7 +31,7 @@ pub struct GrammarConstraint {
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintState {
     pub(crate) parent: GrammarConstraint,
-    pub(crate) states: Vec<(ParseState, BTreeSet<StateID>)>,
+    pub(crate) states: Vec<(ParseState, BTreeSet<ParseStateID>)>,
 }
 
 impl GrammarConstraint {
@@ -46,7 +46,7 @@ impl GrammarConstraint {
 
     pub fn init(self) -> GrammarConstraintState {
         let parser_initial_state = self.parser.init_parse_state();
-        let tokenizer_initial_state_id = StateID(self.tokenizer.initial_state_id());
+        let tokenizer_initial_state_id = ParseStateID(self.tokenizer.initial_state_id());
 
         GrammarConstraintState {
             parent: self,
