@@ -73,8 +73,7 @@ impl GLRParser {
         GLRParserState {
             parser: self,
             active_states: vec![self.init_parse_state()],
-            inactive_states: BTreeMap::new(),
-            input_pos: 0,
+            inactive_states: Vec::new(),
         }
     }
     
@@ -82,8 +81,7 @@ impl GLRParser {
         GLRParserState {
             parser: self,
             active_states: vec![parse_state],
-            inactive_states: BTreeMap::new(),
-            input_pos: 0,
+            inactive_states: Vec::new(),
         }
     }
 
@@ -91,8 +89,7 @@ impl GLRParser {
         GLRParserState {
             parser: self,
             active_states: parse_states,
-            inactive_states: BTreeMap::new(),
-            input_pos: 0,
+            inactive_states: Vec::new(),
         }
     }
 
@@ -204,8 +201,7 @@ impl Display for GLRParser {
 pub struct GLRParserState<'a> {
     pub parser: &'a GLRParser,
     pub active_states: Vec<ParseState>,
-    pub inactive_states: BTreeMap<usize, Vec<ParseState>>,
-    pub input_pos: usize,
+    pub inactive_states: Vec<ParseState>,
 }
 
 impl<'a> GLRParserState<'a> {
@@ -324,11 +320,7 @@ impl<'a> GLRParserState<'a> {
             }
         }
         self.active_states = next_active_states;
-        self.inactive_states.insert(self.input_pos, inactive_states);
-
-        if token_id != self.parser.eof_terminal_id {
-            self.input_pos += 1;
-        }
+        self.inactive_states.extend(inactive_states);
     }
 
     pub fn merge_active_states(&mut self) {
@@ -356,9 +348,7 @@ impl<'a> GLRParserState<'a> {
     }
 
     pub fn fully_matching_states(&self) -> Vec<&ParseState> {
-        self.inactive_states.get(&self.input_pos).map_or(vec![], |states| {
-            states.iter().filter(|state| state.status == ParseStatus::Inactive(StopReason::GotoNotFound)).collect()
-        })
+        self.inactive_states.iter().filter(|state| state.status == ParseStatus::Inactive(StopReason::GotoNotFound)).collect()
     }
 
     pub fn is_ok(&self) -> bool {
