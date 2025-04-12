@@ -23,6 +23,28 @@ pub struct ManagedParseState {
     pub status: ParseStatus,
 }
 
+impl From<ManagedParseState> for ParseState {
+    fn from(managed_parse_state: ManagedParseState) -> Self {
+        ParseState {
+            stack: managed_parse_state.stack,
+            action_stack: managed_parse_state.action_stack,
+            status: managed_parse_state.status,
+        }
+    }
+}
+
+impl From<(ParseState, BTreeSet<TokenizerStateID>)> for ManagedParseState {
+    fn from(parse_state: (ParseState, BTreeSet<TokenizerStateID>)) -> Self {
+        let (parse_state, tokenizer_state_ids) = parse_state;
+        ManagedParseState {
+            tokenizer_state_ids,
+            stack: parse_state.stack,
+            action_stack: parse_state.action_stack,
+            status: parse_state.status,
+        }
+    }
+}
+
 impl GLRParser {
     pub fn init_managed_glr_parser(&self) -> ManagedGLRParserState {
         ManagedGLRParserState {
@@ -60,11 +82,7 @@ impl<'a> ManagedGLRParserState<'a> {
         let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, BTreeSet<ParseState>> = BTreeMap::new();
         for managed_parse_state in self.active_states.iter() {
             for tokenizer_state_id in managed_parse_state.tokenizer_state_ids.iter() {
-                let parse_state = ParseState {
-                    stack: managed_parse_state.stack.clone(),
-                    action_stack: managed_parse_state.action_stack.clone(),
-                    status: managed_parse_state.status,
-                };
+                let parse_state = ParseState::from(managed_parse_state.clone());
                 tokenizer_state_id_to_parse_states.entry(*tokenizer_state_id).or_default().insert(parse_state);
             }
         }
@@ -97,12 +115,7 @@ impl<'a> ManagedGLRParserState<'a> {
             // process
             |tokenizer_state_ids, parse_state| {
                 for active_state in &parse_state.active_states {
-                    final_active_parse_states.push(ManagedParseState {
-                        tokenizer_state_ids: tokenizer_state_ids.clone(),
-                        stack: active_state.stack.clone(),
-                        action_stack: active_state.action_stack.clone(),
-                        status: active_state.status,
-                    });
+                    final_active_parse_states.push(ManagedParseState::from((active_state.clone(), tokenizer_state_ids.clone())));
                 }
             },
         );
