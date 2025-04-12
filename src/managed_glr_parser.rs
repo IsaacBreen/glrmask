@@ -7,10 +7,12 @@ use crate::datastructures::gss::{GSSNode, GSSTrait};
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display, Formatter};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use crate::datastructures::trie::Trie;
 use crate::debug;
-use crate::glr::parser::{Action, GLRParser, ParseStatus, StopReason};
-use crate::tokenizer::TokenizerStateID;
+use crate::finite_automata::Regex;
+use crate::glr::parser::{Action, GLRParser, ParseState, ParseStatus, StopReason};
+use crate::tokenizer::{GrammarTokenID, TokenizerStateID};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ManagedParseState {
@@ -47,7 +49,49 @@ pub struct ManagedGLRParserState<'a> {
     pub inactive_states: Vec<ManagedParseState>,
 }
 
+impl Regex {
+    pub(crate) fn make_grammar_token_trie(&self, text: &[u8], states: BTreeSet<TokenizerStateID>) -> BTreeMap<TokenizerStateID, Trie<GrammarTokenID, BTreeSet<TokenizerStateID>>> {
+        todo!()
+    }
+
+}
+
 impl<'a> ManagedGLRParserState<'a> {
+    pub fn parse_grammar_token_trie(&mut self, grammar_token_trie_roots: BTreeMap<TokenizerStateID, Trie<GrammarTokenID, BTreeSet<TokenizerStateID>>>) {
+        let mut initial_nodes_and_values: Vec<(Arc<Mutex<Trie<GrammarTokenID, BTreeSet<TokenizerStateID>>>>, ParseState)> = Vec::new();
+        let mut final_active_parse_states: Vec<ManagedParseState> = Vec::new();
+        let mut final_inactive_parse_states: Vec<ManagedParseState> = Vec::new();
+
+        for managed_parse_state in self.active_states.iter() {
+            for tokenizer_state_id in managed_parse_state.tokenizer_state_ids.iter() {
+                let grammar_token_trie = grammar_token_trie_roots[tokenizer_state_id].clone();
+                let grammar_token_trie = Arc::new(Mutex::new(grammar_token_trie));
+                let parse_state = ParseState {
+                    stack: managed_parse_state.stack.clone(),
+                    action_stack: managed_parse_state.action_stack.clone(),
+                    status: managed_parse_state.status,
+                };
+                initial_nodes_and_values.push((grammar_token_trie, parse_state));
+            }
+        }
+
+        Trie::special_map(
+            initial_nodes_and_values,
+            |parse_state, grammar_token_id, grammar_token_trie| {
+                todo!()
+            },
+            |parse_state, new_parse_state| {
+                todo!()
+            },
+            |tokenizer_state_ids, parse_state| {
+                todo!()
+            },
+        );
+
+        self.active_states = final_active_parse_states;
+        self.inactive_states.extend(final_inactive_parse_states);
+    }
+
     pub fn merge_with(&mut self, other: &ManagedGLRParserState) {
         assert!(std::ptr::eq(&self.parser, &other.parser));
         self.active_states.extend(other.active_states.iter().cloned());
