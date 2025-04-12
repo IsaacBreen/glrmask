@@ -3,6 +3,7 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
 use crate::glr::table::{NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID};
 use crate::datastructures::gss::{GSSNode, GSSTrait};
+use crate::types::{TerminalID as GrammarTokenID};
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,7 +13,7 @@ use crate::datastructures::trie::Trie;
 use crate::debug;
 use crate::finite_automata::Regex;
 use crate::glr::parser::{Action, GLRParser, GLRParserState, ParseState, ParseStatus, StopReason};
-use crate::tokenizer::{GrammarTokenID, TokenizerStateID};
+use crate::tokenizer::{TokenizerStateID};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ManagedParseState {
@@ -85,7 +86,7 @@ impl<'a> ManagedGLRParserState<'a> {
             initial_nodes_and_values,
             |parse_state, grammar_token_id, grammar_token_trie| {
                 let mut parse_state = parse_state.clone();
-                parse_state.step(TerminalID(grammar_token_id.0));
+                parse_state.step(*grammar_token_id);
                 parse_state
             },
             |parse_state, new_parse_state| {

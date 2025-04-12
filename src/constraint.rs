@@ -1,12 +1,13 @@
 use crate::datastructures::trie::Trie;
 use crate::finite_automata::Regex;
 use crate::glr::parser::{GLRParser, GLRParserState, ParseState, ParseStateKey};
-use crate::tokenizer::{GrammarTokenID, LLMTokenID, LLMTokenMap, TokenizerStateID};
+use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use bimap::BiBTreeMap;
 use bitvec::prelude::BitVec;
 use bitvec::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use keyed_priority_queue::KeyedPriorityQueue;
+use crate::types::{TerminalID as GrammarTokenID};
 
 pub type LLMTokenBV = BitVec;
 pub type GrammarTokenBV = BitVec;

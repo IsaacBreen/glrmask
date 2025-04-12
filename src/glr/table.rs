@@ -6,6 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use crate::glr::analyze::{drop_dead, validate};
+pub use crate::types::{TerminalID};
 
 type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
 type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
@@ -74,8 +75,6 @@ pub struct StateID(pub usize);
 pub struct ProductionID(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NonTerminalID(pub usize);
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TerminalID(pub usize);
 
 type Stage1Result = Stage1Table;
 type Stage2Result = Stage2Table;

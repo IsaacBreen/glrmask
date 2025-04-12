@@ -1,11 +1,10 @@
 use crate::finite_automata::{GroupID, Regex};
+use crate::types::{TerminalID as GrammarTokenID};
 use bimap::BiBTreeMap;
 
 pub type LLMToken = Vec<u8>;
 pub type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct GrammarTokenID(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LLMTokenID(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
