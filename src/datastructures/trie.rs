@@ -25,7 +25,7 @@ impl<E: Ord, T> Trie<E, T> {
             max_depth: 0,
         }
     }
-    
+
     /// Inserts a child node with the given edge.
     ///
     /// WARNING: This method does not detect cycles. (Also, since edges never change after insertion,
@@ -103,37 +103,37 @@ impl<E: Ord, T> Trie<E, T> {
         // Finished processing this node; remove from recursion stack.
         rec_stack.remove(&node_ptr_val);
     }
-    
+
     /// Gets the child node associated with the given edge, if it exists.
     pub fn get(&self, edge: &E) -> Option<Arc<Mutex<Trie<E, T>>>> {
         self.children.get(edge).cloned()
     }
-    
+
     /// Returns a reference to the map of children nodes.
     pub fn children(&self) -> &BTreeMap<E, Arc<Mutex<Trie<E, T>>>> {
         &self.children
     }
-    
+
     /// Checks if the node is a leaf (has no children).
     pub fn is_leaf(&self) -> bool {
         self.children.is_empty()
     }
-    
+
     /// Collects all *unique* nodes (by pointer) reachable from the given root (BFS).
     pub fn all_nodes(root: Arc<Mutex<Trie<E, T>>>) -> Vec<Arc<Mutex<Trie<E, T>>>> {
         // Use a visited pointer set.
         let mut visited_ptrs: HashSet<*const Trie<E, T>> = HashSet::new();
         let mut result = Vec::new();
         let mut queue = VecDeque::new();
- 
+
         let root_ptr = node_ptr(&root);
         if visited_ptrs.insert(root_ptr) {
             queue.push_back(root);
         }
- 
+
         while let Some(node_arc) = queue.pop_front() {
             result.push(node_arc.clone());
- 
+
             let node = node_arc.lock().expect("Mutex poisoned during BFS");
             for child_arc in node.children.values() {
                 let child_ptr = node_ptr(child_arc);
@@ -145,13 +145,13 @@ impl<E: Ord, T> Trie<E, T> {
         result
     }
 }
- 
+
 // A helper that “gets” the raw pointer from an Arc<Mutex<Trie>>; panic if poisoned.
 fn node_ptr<E, T>(node_arc: &Arc<Mutex<Trie<E, T>>>) -> *const Trie<E, T> {
     let guard = node_arc.try_lock().expect("Mutex poisoned");
     &*guard as *const _
 }
- 
+
 ///
 /// new special_map
 ///
@@ -177,7 +177,7 @@ fn node_ptr<E, T>(node_arc: &Arc<Mutex<Trie<E, T>>>) -> *const Trie<E, T> {
 /// depth among all incoming reachable edges). (Because we “relax” max_depth at insertion time,
 /// if a node is reached from several directions its max_depth reflects the longest path. Thus, waiting
 /// until (arrival depth == max_depth) means that all incoming edges that we can reach have contributed.)
- 
+
 impl<T: Clone, E: Ord + Clone> Trie<E, T> {
     pub fn special_map<V: Clone>(
         initial_nodes_and_values: Vec<(Arc<Mutex<Trie<E, T>>>, V)>,
@@ -193,7 +193,7 @@ impl<T: Clone, E: Ord + Clone> Trie<E, T> {
         let mut processed: HashSet<*const Trie<E, T>> = HashSet::new();
         // record which nodes came in as initial nodes – for these we process right away.
         let mut initial_set: HashSet<*const Trie<E, T>> = HashSet::new();
- 
+
         // Initialize state for starting nodes.
         for (node_arc, v) in initial_nodes_and_values {
             let ptr = node_ptr(&node_arc);
@@ -207,7 +207,7 @@ impl<T: Clone, E: Ord + Clone> Trie<E, T> {
             // push starting nodes into ready queue unconditionally.
             ready.push_back(node_arc.clone());
         }
- 
+
         // Main loop.
         while let Some(node_arc) = ready.pop_front() {
             let ptr = node_ptr(&node_arc);
@@ -224,24 +224,24 @@ impl<T: Clone, E: Ord + Clone> Trie<E, T> {
                 let node = node_arc.lock().expect("Mutex poisoned in special_map");
                 node.max_depth
             };
- 
+
             // A non–initial node is considered ready once its arrival depth equals node.max.
             // For initial nodes we process them as soon as they are encountered.
             if !initial_set.contains(&ptr) && arr_depth != node_max {
                 // Not yet fully updated; skip processing now.
                 continue;
             }
- 
+
             // Mark node as processed (and remove it from initial_set if it was there).
             processed.insert(ptr);
             initial_set.remove(&ptr);
- 
+
             // Call process on this node (using the node’s stored T value) along with its merged V.
             {
                 let node = node_arc.lock().expect("Mutex poisoned during process call");
                 process(&node.value, &node_val_merged);
             }
- 
+
             // Now propagate to children.
             let children: Vec<(E, Arc<Mutex<Trie<E, T>>>)> = {
                 let node = node_arc.lock().expect("Mutex poisoned while reading children");
@@ -250,7 +250,7 @@ impl<T: Clone, E: Ord + Clone> Trie<E, T> {
                     .map(|(edge, child_arc)| (edge.clone(), child_arc.clone()))
                     .collect()
             };
- 
+
             for (edge, child_arc) in children {
                 let child_ptr = node_ptr(&child_arc);
                 if processed.contains(&child_ptr) {
@@ -270,7 +270,7 @@ impl<T: Clone, E: Ord + Clone> Trie<E, T> {
                     *depth = new_depth;
                     merge(existing, candidate_v.clone());
                 }).or_insert((candidate_v, candidate_depth));
- 
+
                 // Also, update the child’s inherent max_depth if needed.
                 {
                     let mut child = child_arc.lock().expect("Mutex poisoned while updating child max_depth");
@@ -283,7 +283,7 @@ impl<T: Clone, E: Ord + Clone> Trie<E, T> {
                 // (After our update, if the stored arrival depth now equals the child’s max_depth,
                 // then the child is “ready” – push it into the ready queue.)
                 {
-                    let child_max = { 
+                    let child_max = {
                         let child = child_arc.lock().expect("Mutex poisoned while checking child max_depth");
                         child.max_depth
                     };
@@ -296,24 +296,24 @@ impl<T: Clone, E: Ord + Clone> Trie<E, T> {
         }
     }
 }
- 
+
 /// A helper function to print the structure of the Trie/DAG via BFS.
 pub(crate) fn dump_structure<E: Debug, T: Debug>(root: Arc<Mutex<Trie<E, T>>>) {
     let mut queue = VecDeque::new();
     let mut seen: HashSet<*const Trie<E, T>> = HashSet::new();
- 
+
     println!("Dumping Trie Structure (BFS):");
- 
+
     let root_ptr = node_ptr(&root);
     if seen.insert(root_ptr) {
         queue.push_back(root);
     }
- 
+
     while let Some(node_arc) = queue.pop_front() {
         let node = node_arc.lock().expect("Mutex poisoned during dump");
         let ptr = &*node as *const _;
         println!("{:?}: Value: {:?}", ptr, node.value);
- 
+
         for (edge, child_arc) in node.children.iter() {
             let child_ptr = node_ptr(child_arc);
             println!("  - Edge: {:?} -> Child: {:?}", edge, child_ptr);
@@ -323,43 +323,43 @@ pub(crate) fn dump_structure<E: Debug, T: Debug>(root: Arc<Mutex<Trie<E, T>>>) {
         }
     }
 }
- 
+
 // ─────────────────────────────────────────────────────────────────────────────
 // TESTS
 // (The tests have been updated to supply a merge function. In our tests we use a simple “replacement” merge,
 //  so that the second contribution simply replaces the first. You could imagine more sophisticated merges.)
- 
+
 #[cfg(test)]
 mod tests {
     use super::*;
- 
+
     #[test]
     fn test_insertion_and_retrieval() {
         let mut root = Trie::<&str, i32>::new(0);
         let child1 = Arc::new(Mutex::new(Trie::new(1)));
         let child2 = Arc::new(Mutex::new(Trie::new(2)));
- 
+
         root.insert("a", child1.clone());
         root.insert("b", child2.clone());
- 
+
         // Test get
         let retrieved_child1 = root.get(&"a").expect("Failed to get child 'a'");
         assert!(Arc::ptr_eq(&retrieved_child1, &child1));
- 
+
         let retrieved_child2 = root.get(&"b").expect("Failed to get child 'b'");
         assert!(Arc::ptr_eq(&retrieved_child2, &child2));
- 
+
         assert!(root.get(&"c").is_none());
- 
+
         // Test children iterator order (BTreeMap ensures sorted order)
         let children_keys: Vec<_> = root.children().keys().cloned().collect();
         assert_eq!(children_keys, vec!["a", "b"]);
- 
+
         // Test is_leaf
         assert!(!root.is_leaf());
         assert!(child1.try_lock().unwrap().is_leaf());
     }
- 
+
     #[test]
     fn test_special_map_bfs_order() {
         // Structure:
@@ -375,7 +375,7 @@ mod tests {
         let child1 = Arc::new(Mutex::new(Trie::new(1)));
         let child2 = Arc::new(Mutex::new(Trie::new(2)));
         let grandchild = Arc::new(Mutex::new(Trie::new(3)));
- 
+
         {
             let mut r = root.lock().unwrap();
             r.insert("r->c1", child1.clone());
@@ -385,10 +385,10 @@ mod tests {
             let mut c1 = child1.lock().unwrap();
             c1.insert("c1->gc", grandchild.clone());
         }
- 
+
         let mut processed_node_values = Vec::new();
         let mut computed_values = Vec::new();
- 
+
         Trie::special_map(
             vec![(root.clone(), 100)],
             // step: add one
@@ -400,13 +400,13 @@ mod tests {
                 computed_values.push(*computed_val);
             },
         );
- 
+
         // Expected processing order: 0, 1, 2, 3.
         assert_eq!(processed_node_values, vec![0, 1, 2, 3]);
         // Expected computed values: root = 100, c1 = 101, c2 = 101, gc = 102.
         assert_eq!(computed_values, vec![100, 101, 101, 102]);
     }
- 
+
     #[test]
     fn test_all_nodes_diamond() {
         // Diamond structure:
@@ -419,7 +419,7 @@ mod tests {
         let child1 = Arc::new(Mutex::new(Trie::new("child1")));
         let child2 = Arc::new(Mutex::new(Trie::new("child2")));
         let grandchild = Arc::new(Mutex::new(Trie::new("grandchild")));
- 
+
         {
             let mut r = root.lock().unwrap();
             r.insert("r->c1", child1.clone());
@@ -433,21 +433,21 @@ mod tests {
             let mut c2 = child2.lock().unwrap();
             c2.insert("c2->gc", grandchild.clone()); // Diamond
         }
- 
+
         let all_nodes = Trie::all_nodes(root.clone());
- 
+
         // Should find 4 unique nodes.
         assert_eq!(all_nodes.len(), 4);
- 
+
         let node_ptrs: HashSet<_> = all_nodes.iter().map(|arc| node_ptr(arc)).collect();
         assert_eq!(node_ptrs.len(), 4);
- 
+
         assert!(node_ptrs.contains(&node_ptr(&root)));
         assert!(node_ptrs.contains(&node_ptr(&child1)));
         assert!(node_ptrs.contains(&node_ptr(&child2)));
         assert!(node_ptrs.contains(&node_ptr(&grandchild)));
     }
- 
+
     #[test]
     fn test_special_map_diamond() {
         // Diamond structure:
@@ -462,7 +462,7 @@ mod tests {
         let child1 = Arc::new(Mutex::new(Trie::new(1)));
         let child2 = Arc::new(Mutex::new(Trie::new(2)));
         let grandchild = Arc::new(Mutex::new(Trie::new(3)));
- 
+
         {
             let mut r = root.lock().unwrap();
             r.insert("r->c1", child1.clone());
@@ -476,10 +476,10 @@ mod tests {
             let mut c2 = child2.lock().unwrap();
             c2.insert("c2->gc", grandchild.clone());
         }
- 
+
         let mut processed = Vec::new();
         let mut computed = Vec::new();
- 
+
         Trie::special_map(
             vec![(root.clone(), 100)],
             |p, _e, _n| p + 1,
@@ -489,7 +489,7 @@ mod tests {
                 computed.push(*v);
             },
         );
- 
+
         // In a diamond, we expect each node to be processed once, with root always first
         // and grandchild processed only after both child1 and child2 have contributed.
         assert_eq!(processed.len(), 4);
@@ -497,7 +497,7 @@ mod tests {
         assert!(processed.contains(&1));
         assert!(processed.contains(&2));
         assert!(processed.contains(&3));
- 
+
         // For computed values we expect: root=100, child1=101, child2=101, grandchild=102.
         assert_eq!(computed.len(), 4);
         assert_eq!(computed[0], 100);
@@ -506,7 +506,7 @@ mod tests {
         assert!(middle.contains(&101));
         assert_eq!(computed[3], 102);
     }
- 
+
     #[test]
     fn test_empty_trie() {
         let root = Arc::new(Mutex::new(Trie::<&str, i32>::new(42)));
@@ -514,7 +514,7 @@ mod tests {
         assert_eq!(nodes.len(), 1);
         assert!(Arc::ptr_eq(&nodes[0], &root));
         assert!(root.try_lock().unwrap().is_leaf());
- 
+
         let mut processed = false;
         Trie::special_map(
             vec![(root.clone(), 100)],
@@ -528,14 +528,14 @@ mod tests {
         );
         assert!(processed);
     }
- 
+
     #[test]
     #[should_panic(expected = "Cycle detected in propagate_max_depth")] // Add this attribute
     fn test_cycle_all_nodes() {
         // Cycle:  root -> child -> root
         let root = Arc::new(Mutex::new(Trie::<&str, i32>::new(0)));
         let child = Arc::new(Mutex::new(Trie::new(1)));
- 
+
         {
             let mut r = root.lock().unwrap();
             // This insert will eventually call propagate_max_depth
@@ -553,20 +553,20 @@ mod tests {
         let nodes = Trie::all_nodes(root.clone());
         // Should detect both nodes.
         assert_eq!(nodes.len(), 2);
- 
+
         let node_ptrs: HashSet<_> = nodes.iter().map(|arc| node_ptr(arc)).collect();
         assert_eq!(node_ptrs.len(), 2);
         assert!(node_ptrs.contains(&node_ptr(&root)));
         assert!(node_ptrs.contains(&node_ptr(&child)));
     }
- 
+
     #[test]
     #[should_panic(expected = "Cycle detected in propagate_max_depth")] // Add this attribute
     fn test_cycle_special_map() {
         // Cycle: root -> child -> root.
         let root = Arc::new(Mutex::new(Trie::<&str, i32>::new(0)));
         let child = Arc::new(Mutex::new(Trie::new(1)));
- 
+
         {
             let mut r = root.lock().unwrap();
             // This insert will eventually call propagate_max_depth
@@ -581,7 +581,7 @@ mod tests {
         // The code below will not be reached because the second insert panics.
         let mut processed_vals = Vec::new();
         let mut computed_vals = Vec::new();
- 
+
         Trie::special_map(
             vec![(root.clone(), 100)],
             |p, _e, _n| p + 1,
