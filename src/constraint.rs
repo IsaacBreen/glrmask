@@ -87,13 +87,7 @@ impl GrammarConstraintState<'_> {
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) {
-        let mut next_node: Trie<GrammarTokenID, BTreeSet<TokenizerStateID>> = Trie::new(BTreeSet::new());
         let mut grammar_token_trie_roots: BTreeMap<TokenizerStateID, Trie<GrammarTokenID, BTreeSet<TokenizerStateID>>> = BTreeMap::new();
-        let mut tokenizer_state_ids: BTreeSet<TokenizerStateID> = BTreeSet::new();
-        for parse_state in &self.state.active_states {
-            tokenizer_state_ids.extend(parse_state.tokenizer_state_ids.iter().cloned());
-        }
-        let token = self.parent.llm_token_map.get_by_right(&llm_token_id).unwrap();
 
     }
 

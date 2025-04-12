@@ -51,13 +51,11 @@ pub struct ManagedGLRParserState<'a> {
 }
 
 impl<'a> ManagedGLRParserState<'a> {
-    pub fn parse_grammar_token_trie(&mut self, grammar_token_trie_roots: BTreeMap<TokenizerStateID, Trie<GrammarTokenID, BTreeSet<TokenizerStateID>>>) {
+    fn prepare_initial_nodes_and_values_for_special_map(&mut self, grammar_token_trie_roots: BTreeMap<TokenizerStateID, Trie<TerminalID, BTreeSet<TokenizerStateID>>>) -> Vec<(Arc<Mutex<Trie<TerminalID, BTreeSet<TokenizerStateID>>>>, GLRParserState)> {
         // The BTreeSet<TokenizerStateID> in each Trie node here is the set of terminal states at this node.
         // Each terminal state indicates that the path through the trie can terminate here.
         // (todo: explain this better)
         let mut initial_nodes_and_values: Vec<(Arc<Mutex<Trie<GrammarTokenID, BTreeSet<TokenizerStateID>>>>, GLRParserState)> = Vec::new();
-        let mut final_active_parse_states: Vec<ManagedParseState> = Vec::new();
-        let mut final_inactive_parse_states: Vec<ManagedParseState> = Vec::new();
 
         let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, BTreeSet<ParseState>> = BTreeMap::new();
         for managed_parse_state in self.active_states.iter() {
@@ -77,6 +75,14 @@ impl<'a> ManagedGLRParserState<'a> {
             let glr_parser_state = GLRParser::init_glr_parser_from_parse_states(self.parser, parse_states.into_iter().collect());
             initial_nodes_and_values.push((token_trie, glr_parser_state));
         }
+        initial_nodes_and_values
+    }
+
+    pub fn parse_grammar_token_trie(&mut self, grammar_token_trie_roots: BTreeMap<TokenizerStateID, Trie<GrammarTokenID, BTreeSet<TokenizerStateID>>>) {
+        let initial_nodes_and_values = self.prepare_initial_nodes_and_values_for_special_map(grammar_token_trie_roots);
+
+        let mut final_active_parse_states: Vec<ManagedParseState> = Vec::new();
+        let mut final_inactive_parse_states: Vec<ManagedParseState> = Vec::new();
 
         Trie::special_map(
             initial_nodes_and_values,
