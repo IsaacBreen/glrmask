@@ -33,7 +33,8 @@ impl<T, E: Ord> Trie<E, T> {
     /// Note: This implementation does *not* perform cycle detection. Adding an edge
     /// that creates a cycle may lead to infinite loops in traversal algorithms.
     pub fn insert(&mut self, edge: E, child: Arc<Mutex<Trie<E, T>>>) {
-        self.children.insert(edge, child);
+        // Ensure we don't overwrite an existing edge.
+        assert!(self.children.insert(edge, child).is_none());
     }
 
     /// Gets the child node associated with the given edge, if it exists.
