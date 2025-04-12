@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use crate::datastructures::trie::Trie;
 use crate::debug;
 use crate::finite_automata::Regex;
-use crate::glr::parser::{Action, GLRParser, ParseState, ParseStatus, StopReason};
+use crate::glr::parser::{Action, GLRParser, GLRParserState, ParseState, ParseStatus, StopReason};
 use crate::tokenizer::{GrammarTokenID, TokenizerStateID};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -58,27 +58,35 @@ impl Regex {
 
 impl<'a> ManagedGLRParserState<'a> {
     pub fn parse_grammar_token_trie(&mut self, grammar_token_trie_roots: BTreeMap<TokenizerStateID, Trie<GrammarTokenID, BTreeSet<TokenizerStateID>>>) {
-        let mut initial_nodes_and_values: Vec<(Arc<Mutex<Trie<GrammarTokenID, BTreeSet<TokenizerStateID>>>>, ParseState)> = Vec::new();
+        let mut initial_nodes_and_values: Vec<(Arc<Mutex<Trie<GrammarTokenID, BTreeSet<TokenizerStateID>>>>, GLRParserState)> = Vec::new();
         let mut final_active_parse_states: Vec<ManagedParseState> = Vec::new();
         let mut final_inactive_parse_states: Vec<ManagedParseState> = Vec::new();
 
+        let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, BTreeSet<ParseState>> = BTreeMap::new();
         for managed_parse_state in self.active_states.iter() {
             for tokenizer_state_id in managed_parse_state.tokenizer_state_ids.iter() {
-                let grammar_token_trie = grammar_token_trie_roots[tokenizer_state_id].clone();
-                let grammar_token_trie = Arc::new(Mutex::new(grammar_token_trie));
                 let parse_state = ParseState {
                     stack: managed_parse_state.stack.clone(),
                     action_stack: managed_parse_state.action_stack.clone(),
                     status: managed_parse_state.status,
                 };
-                initial_nodes_and_values.push((grammar_token_trie, parse_state));
+                tokenizer_state_id_to_parse_states.entry(*tokenizer_state_id).or_default().insert(parse_state);
             }
+        }
+
+        for (tokenizer_state_id, parse_states) in tokenizer_state_id_to_parse_states {
+            let token_trie = grammar_token_trie_roots[&tokenizer_state_id].clone();
+            let token_trie = Arc::new(Mutex::new(token_trie));
+            let glr_parser_state = GLRParser::init_glr_parser_from_parse_states(self.parser, parse_states.into_iter().collect());
+            initial_nodes_and_values.push((token_trie, glr_parser_state));
         }
 
         Trie::special_map(
             initial_nodes_and_values,
             |parse_state, grammar_token_id, grammar_token_trie| {
-                todo!()
+                let mut parse_state = parse_state.clone();
+                parse_state.step(TerminalID(grammar_token_id.0));
+                parse_state
             },
             |parse_state, new_parse_state| {
                 todo!()
