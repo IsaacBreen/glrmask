@@ -40,29 +40,68 @@ impl<E: Ord, T> Trie<E, T> {
             }
         }
         self.children.insert(edge, child.clone());
-        // Because the child’s max_depth may now have increased, we “propagate” that update to its children.
+        // Because the child’s max_depth may now have increased, we “propagate” that update downward.
         Self::propagate_max_depth(child, candidate_depth);
     }
     
-    /// Helper function: starting at node_arc, do a “relaxation” BFS updating children’s max_depth.
+    /// Propagates a max_depth update to all descendant nodes.
+    ///
+    /// The new version uses a recursive helper that tracks the current propagation
+    /// chain in a HashSet. If a node is encountered twice along the same chain,
+    /// a cycle exists and we panic.
     fn propagate_max_depth(node_arc: Arc<Mutex<Trie<E, T>>>, current_depth: usize) {
-        let mut queue = VecDeque::new();
-        queue.push_back(node_arc);
-        while let Some(n_arc) = queue.pop_front() {
-            let children: Vec<Arc<Mutex<Trie<E, T>>>> = {
-                let node = n_arc.lock().expect("Mutex poisoned in propagate_max_depth");
-                node.children.values().cloned().collect()
-            };
-            for child_arc in children {
+        // rec_stack will contain the set of node pointers from the root of the propagation
+        // down to the current recursion level.
+        let mut rec_stack: HashSet<*const Trie<E, T>> = HashSet::new();
+        Self::_propagate_max_depth(node_arc, current_depth, &mut rec_stack);
+    }
+    
+    /// Recursive helper for propagate_max_depth.
+    fn _propagate_max_depth(
+        node_arc: Arc<Mutex<Trie<E, T>>>,
+        current_depth: usize,
+        rec_stack: &mut HashSet<*const Trie<E, T>>,
+    ) {
+        let node_ptr_val = node_ptr(&node_arc);
+        // If this node is already in the current recursion chain, we have a cycle.
+        if rec_stack.contains(&node_ptr_val) {
+            panic!("Cycle detected in propagate_max_depth at node pointer: {:?}", node_ptr_val);
+        }
+        
+        // Add the current node to the recursion stack.
+        rec_stack.insert(node_ptr_val);
+        
+        // Collect the children outside of the lock.
+        let children: Vec<Arc<Mutex<Trie<E, T>>>> = {
+            let node = node_arc.lock().expect("Mutex poisoned in propagate_max_depth");
+            node.children.values().cloned().collect()
+        };
+        
+        // For each child, compute the candidate depth.
+        let candidate_depth = current_depth.saturating_add(1);
+        for child_arc in children {
+            let child_ptr_val = node_ptr(&child_arc);
+            // Update the child if the candidate depth is higher.
+            let should_propagate = {
                 let mut child = child_arc.lock().expect("Mutex poisoned in propagate_max_depth");
-                let candidate_depth = current_depth.saturating_add(1);
                 if candidate_depth > child.max_depth {
                     child.max_depth = candidate_depth;
-                    // Push child into the queue so that its children can be updated too.
-                    queue.push_back(child_arc.clone());
+                    true
+                } else {
+                    false
                 }
+            };
+            if should_propagate {
+                // Before recursing, check again whether the child is already in rec_stack.
+                if rec_stack.contains(&child_ptr_val) {
+                    panic!("Cycle detected in propagate_max_depth at child node pointer: {:?}", child_ptr_val);
+                }
+                Self::_propagate_max_depth(child_arc, candidate_depth, rec_stack);
             }
         }
+        
+        // Finished processing this node; remove from recursion stack.
+        rec_stack.remove(&node_ptr_val);
     }
     
     /// Gets the child node associated with the given edge, if it exists.
