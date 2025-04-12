@@ -335,10 +335,10 @@ impl<'a> GLRParserState<'a> {
         self.active_states = new_active_states;
     }
 
-    pub fn merge_with(&mut self, other: &GLRParserState) {
+    pub fn merge_with(&mut self, other: GLRParserState) {
         assert!(std::ptr::eq(&self.parser, &other.parser));
-        self.active_states.extend(other.active_states.iter().cloned());
-        self.inactive_states.extend(other.inactive_states.iter().cloned());
+        self.active_states.extend(other.active_states);
+        self.inactive_states.extend(other.inactive_states);
     }
 
     pub fn fully_matches(&self) -> bool {

@@ -59,6 +59,9 @@ impl Regex {
 
 impl<'a> ManagedGLRParserState<'a> {
     pub fn parse_grammar_token_trie(&mut self, grammar_token_trie_roots: BTreeMap<TokenizerStateID, Trie<GrammarTokenID, BTreeSet<TokenizerStateID>>>) {
+        // The BTreeSet<TokenizerStateID> in each Trie node here is the set of terminal states at this node.
+        // Each terminal state indicates that the path through the trie can terminate here.
+        // (todo: explain this better)
         let mut initial_nodes_and_values: Vec<(Arc<Mutex<Trie<GrammarTokenID, BTreeSet<TokenizerStateID>>>>, GLRParserState)> = Vec::new();
         let mut final_active_parse_states: Vec<ManagedParseState> = Vec::new();
         let mut final_inactive_parse_states: Vec<ManagedParseState> = Vec::new();
@@ -84,21 +87,49 @@ impl<'a> ManagedGLRParserState<'a> {
 
         Trie::special_map(
             initial_nodes_and_values,
+            // step
             |parse_state, grammar_token_id, grammar_token_trie| {
                 let mut parse_state = parse_state.clone();
                 parse_state.step(*grammar_token_id);
                 parse_state
             },
-            |parse_state, new_parse_state| {
-                todo!()
-            },
+            // merge
+            |parse_state, new_parse_state| parse_state.merge_with(new_parse_state),
+            // process
             |tokenizer_state_ids, parse_state| {
-                todo!()
+                for active_state in &parse_state.active_states {
+                    final_active_parse_states.push(ManagedParseState {
+                        tokenizer_state_ids: tokenizer_state_ids.clone(),
+                        stack: active_state.stack.clone(),
+                        action_stack: active_state.action_stack.clone(),
+                        status: active_state.status,
+                    });
+                }
             },
         );
 
         self.active_states = final_active_parse_states;
         self.inactive_states.extend(final_inactive_parse_states);
+    }
+
+    pub fn merge_active_states(&mut self) {
+        let mut active_state_map: BTreeMap<ManagedParseStateKey, ManagedParseState> = BTreeMap::new();
+
+        let mut new_active_states = Vec::new();
+
+        for mut state in std::mem::take(&mut self.active_states) {
+            let key = state.key();
+            if let Some(existing) = active_state_map.get_mut(&key) {
+                Arc::make_mut(&mut existing.stack).merge(state.stack.as_ref().clone());
+                if let Some(existing_action_stack) = existing.action_stack.as_mut() {
+                    Arc::make_mut(existing_action_stack).merge(state.action_stack.unwrap().as_ref().clone());
+                }
+            } else {
+                active_state_map.insert(key, state.clone());
+                new_active_states.push(state);
+            }
+        }
+        self.active_states = new_active_states;
     }
 
     pub fn merge_with(&mut self, other: &ManagedGLRParserState) {
@@ -145,24 +176,6 @@ impl ManagedParseState {
             }
             (None, None) => {}
             _ => unreachable!(),
-        }
-    }
-}
-
-pub trait InsertWith<K, V> {
-    fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F);
-}
-
-impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
-    fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F) {
-        match self.entry(k) {
-            std::collections::btree_map::Entry::Occupied(mut occupied) => {
-                let value = occupied.get_mut();
-                combine(value, v);
-            }
-            std::collections::btree_map::Entry::Vacant(vacant) => {
-                vacant.insert(v);
-            }
         }
     }
 }
