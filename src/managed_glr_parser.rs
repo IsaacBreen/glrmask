@@ -50,13 +50,6 @@ pub struct ManagedGLRParserState<'a> {
     pub inactive_states: Vec<ManagedParseState>,
 }
 
-impl Regex {
-    pub(crate) fn make_grammar_token_trie(&self, text: &[u8], states: BTreeSet<TokenizerStateID>) -> BTreeMap<TokenizerStateID, Trie<GrammarTokenID, BTreeSet<TokenizerStateID>>> {
-        todo!()
-    }
-
-}
-
 impl<'a> ManagedGLRParserState<'a> {
     pub fn parse_grammar_token_trie(&mut self, grammar_token_trie_roots: BTreeMap<TokenizerStateID, Trie<GrammarTokenID, BTreeSet<TokenizerStateID>>>) {
         // The BTreeSet<TokenizerStateID> in each Trie node here is the set of terminal states at this node.

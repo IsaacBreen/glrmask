@@ -75,12 +75,6 @@ impl GrammarConstraint {
 
 impl GrammarConstraintState<'_> {
     pub fn get_mask(&self) -> LLMTokenBV {
-        // let initial_nodes_and_values = Vec::new();
-
-        // for state in self.state.active_states.iter() {
-        //     let node = &self.parent.precomputed[state.];
-        // }
-
         todo!()
     }
 
@@ -89,8 +83,6 @@ impl GrammarConstraintState<'_> {
     }
 
     pub fn commit_many(&mut self, llm_token_ids: &[LLMTokenID]) {
-        for &llm_token_id in llm_token_ids {
-            self.commit(llm_token_id);
-        }
+        todo!()
     }
 }
