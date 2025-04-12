@@ -45,7 +45,6 @@ pub struct GLRParser {
     pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
     pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
     pub start_state_id: StateID,
-    pub eof_terminal_id: TerminalID,
 }
 
 impl GLRParser {
@@ -56,7 +55,6 @@ impl GLRParser {
         non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
         item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
         start_state_id: StateID,
-        eof_terminal_id: TerminalID,
     ) -> Self {
         Self {
             stage_7_table,
@@ -65,7 +63,6 @@ impl GLRParser {
             non_terminal_map,
             item_set_map,
             start_state_id,
-            eof_terminal_id,
         }
     }
 
@@ -207,17 +204,12 @@ pub struct GLRParserState<'a> {
 impl<'a> GLRParserState<'a> {
     pub fn parse(&mut self, input: &[TerminalID]) {
         self.parse_part(input);
-        self.parse_eof();
     }
 
     pub fn parse_part(&mut self, input: &[TerminalID]) {
         for &token_id in input {
             self.step(token_id);
         }
-    }
-
-    pub fn parse_eof(&mut self) {
-        self.step(self.parser.eof_terminal_id);
     }
 
     pub fn step(&mut self, token_id: TerminalID) {
