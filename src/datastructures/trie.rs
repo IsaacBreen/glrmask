@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 
@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 pub struct Trie<E, T> {
     pub value: T,
     children: BTreeMap<E, Arc<Mutex<Trie<E, T>>>>,
+    max_depth: usize, // New field to track maximum depth
 }
 
 // Helper to get the raw pointer of the node inside an Arc<Mutex<Trie>>.
@@ -20,19 +21,24 @@ fn node_ptr<E, T>(node_arc: &Arc<Mutex<Trie<E, T>>>) -> *const Trie<E, T> {
 }
 
 impl<T, E: Ord> Trie<E, T> {
-    /// Creates a new Trie node with the given value and no children.
     pub fn new(value: T) -> Self {
         Trie {
             value,
             children: BTreeMap::new(),
+            max_depth: 0, // Initially 0 for source nodes
         }
     }
 
-    /// Inserts a child node associated with the given edge.
-    ///
-    /// Note: This implementation does *not* perform cycle detection. Adding an edge
-    /// that creates a cycle may lead to infinite loops in traversal algorithms.
     pub fn insert(&mut self, edge: E, child: Arc<Mutex<Trie<E, T>>>) {
+        // Update child's max_depth if this path increases it
+        let new_depth = self.max_depth + 1;
+        {
+            let mut child_guard = child.try_lock().expect("Mutex poisoned during insert");
+            if new_depth > child_guard.max_depth {
+                child_guard.max_depth = new_depth;
+            }
+        }
+
         // Ensure we don't overwrite an existing edge.
         assert!(self.children.insert(edge, child).is_none());
     }
@@ -79,49 +85,146 @@ impl<T, E: Ord> Trie<E, T> {
     }
 }
 
-impl<T: Clone, E: Ord + Clone> Trie<E, T> {
-    /// Performs a Breadth-First Search (BFS) traversal applying functions at each step.
+impl<T: Clone + std::cmp::Eq, E: Ord + Clone> Trie<E, T> {
+    /// Performs a modified Breadth-First Search (BFS) traversal with value merging and depth ordering.
     ///
-    /// Starts from `initial_nodes_and_values`. For each visited node:
-    /// 1. Calls `process` with the node's internal value (`T`) and the computed value (`V`).
-    /// 2. For each child, computes a new value `V` using `step` and enqueues the child if not already visited.
-    ///
-    /// Node uniqueness for visitation is determined by the memory address of the `Trie` data.
-    pub fn special_map<V: Clone>(
+    /// - Nodes are processed in order of their max_depth (highest first)
+    /// - A node is only processed after all its incoming edges (reachable from starting nodes) are traversed
+    /// - Values for nodes with multiple incoming paths are merged using the provided merge function
+    pub fn special_map<V: Clone + std::cmp::Eq>(
         initial_nodes_and_values: Vec<(Arc<Mutex<Trie<E, T>>>, V)>,
         mut step: impl FnMut(&V, &E, &Trie<E, T>) -> V,
         mut process: impl FnMut(&T, &V),
+        mut merge: impl FnMut(&mut V, V),
     ) {
-        let mut queue: VecDeque<(Arc<Mutex<Trie<E, T>>>, V)> = VecDeque::new();
-        let mut visited: HashSet<*const Trie<E, T>> = HashSet::new();
+        // Maps node pointers to their current value
+        let mut node_values: HashMap<*const Trie<E, T>, V> = HashMap::new();
 
-        // Initialize queue and visited set
-        for (node_arc, value) in initial_nodes_and_values {
-            let ptr = node_ptr(&node_arc);
-            if visited.insert(ptr) {
-                queue.push_back((node_arc, value));
+        // Maps node pointers to their remaining in-degree
+        let mut in_degree: HashMap<*const Trie<E, T>, usize> = HashMap::new();
+
+        // Maps node pointers to their Arc<Mutex<Trie>> for easy lookup
+        let mut node_arcs: HashMap<*const Trie<E, T>, Arc<Mutex<Trie<E, T>>>> = HashMap::new();
+
+        // First pass: discover all reachable nodes and count in-degrees
+        let mut discovery_queue = VecDeque::new();
+
+        // Initialize with starting nodes
+        for (node_arc, value) in &initial_nodes_and_values {
+            let ptr = node_ptr(node_arc);
+            node_values.insert(ptr, value.clone());
+            in_degree.insert(ptr, 0); // No incoming edges for start nodes
+            node_arcs.insert(ptr, node_arc.clone());
+            discovery_queue.push_back(node_arc.clone());
+        }
+
+        // BFS to count in-degrees for all reachable nodes
+        while let Some(node_arc) = discovery_queue.pop_front() {
+            let node_guard = node_arc.try_lock().expect("Mutex poisoned during discovery");
+
+            for (_, child_arc) in &node_guard.children {
+                let child_ptr = node_ptr(&child_arc);
+
+                // Increment in-degree for child
+                *in_degree.entry(child_ptr).or_insert(0) += 1;
+
+                // Add child to node_arcs and discovery_queue if not already discovered
+                if !node_arcs.contains_key(&child_ptr) {
+                    node_arcs.insert(child_ptr, child_arc.clone());
+                    discovery_queue.push_back(child_arc.clone());
+                }
             }
         }
 
-        while let Some((node_arc, current_value)) = queue.pop_front() {
-            // Lock the node to access its data and children
-            let node_guard = node_arc.try_lock().expect("Mutex poisoned during special_map");
+        // Second pass: process nodes in order of max_depth
+        // Custom struct for the priority queue
+        struct QueueEntry<E: Ord + Clone, T: Clone + Eq, V: Clone + Eq> {
+            max_depth: usize,
+            node_ptr: *const Trie<E, T>,
+            node_arc: Arc<Mutex<Trie<E, T>>>,
+            value: V,
+        }
 
-            // Process the current node
-            process(&node_guard.value, &current_value);
+        impl<E: Ord + Clone, T: Clone + Eq, V: Clone + Eq> PartialEq for QueueEntry<E, T, V> {
+            fn eq(&self, other: &Self) -> bool {
+                self.max_depth == other.max_depth && self.node_ptr == other.node_ptr
+            }
+        }
+        
+        impl<E: Ord + Clone, T: Clone + Eq, V: Clone + Eq> Eq for QueueEntry<E, T, V> {}
 
-            // Prepare children for the next level of BFS
+        // Implement ordering for the priority queue (max-heap by depth)
+        impl<E: Ord + Clone, T: Clone + Eq, V: Clone + Eq> Ord for QueueEntry<E, T, V> {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.max_depth.cmp(&other.max_depth).reverse() // Reverse for max-heap
+            }
+        }
+
+        impl<E: Ord + Clone, T: Clone + PartialEq + std::cmp::Eq, V: Clone + PartialEq + std::cmp::Eq> PartialOrd for QueueEntry<E, T, V> {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        // Priority queue to process nodes in order of max_depth
+        let mut processing_queue = std::collections::BinaryHeap::new();
+
+        // Add initial nodes with in-degree 0 to processing queue
+        for (node_arc, value) in initial_nodes_and_values {
+            let ptr = node_ptr(&node_arc);
+            if in_degree[&ptr] == 0 {
+                let depth = node_arc.try_lock().expect("Mutex poisoned").max_depth;
+                processing_queue.push(QueueEntry {
+                    max_depth: depth,
+                    node_ptr: ptr,
+                    node_arc,
+                    value: node_values[&ptr].clone(),
+                });
+            }
+        }
+
+        // Process nodes in order of max_depth
+        while let Some(entry) = processing_queue.pop() {
+            let node_arc = entry.node_arc;
+            let node_guard = node_arc.try_lock().expect("Mutex poisoned during processing");
+
+            // Process this node with its final merged value
+            process(&node_guard.value, &entry.value);
+
+            // Process children and update their in-degrees
             for (edge, child_arc) in &node_guard.children {
-                // Lock child briefly only if it hasn't been visited yet
                 let child_ptr = node_ptr(child_arc);
-                if visited.insert(child_ptr) {
-                    let child_guard = child_arc.try_lock().expect("Mutex poisoned for child");
-                    let next_value = step(&current_value, edge, &child_guard);
-                    // Release child lock implicitly here
-                    queue.push_back((child_arc.clone(), next_value));
+
+                // Compute new value for child
+                let child_guard = child_arc.try_lock().expect("Mutex poisoned");
+                let next_value = step(&entry.value, edge, &child_guard);
+                let child_depth = child_guard.max_depth;
+                drop(child_guard); // Release lock early
+
+                // Update child's value (merge if already exists)
+                if let Some(existing_value) = node_values.get_mut(&child_ptr) {
+                    // Merge the new value with existing value
+                    merge(existing_value, next_value);
+                } else {
+                    node_values.insert(child_ptr, next_value);
+                }
+
+                // Decrement child's in-degree
+                if let Some(degree) = in_degree.get_mut(&child_ptr) {
+                    *degree -= 1;
+
+                    // If all incoming edges processed, add to queue
+                    if *degree == 0 {
+                        let child_value = node_values[&child_ptr].clone();
+                        processing_queue.push(QueueEntry {
+                            max_depth: child_depth,
+                            node_ptr: child_ptr,
+                            node_arc: child_arc.clone(),
+                            value: child_value,
+                        });
+                    }
                 }
             }
-            // Release node lock implicitly here
         }
     }
 }
