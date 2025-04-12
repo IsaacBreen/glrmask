@@ -14,7 +14,7 @@ use crate::tokenizer::TokenizerStateID;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ManagedParseState {
-    pub tokenizer_state_ids: Vec<TokenizerStateID>,
+    pub tokenizer_state_ids: BTreeSet<TokenizerStateID>,
     pub stack: Arc<GSSNode<StateID>>,
     pub action_stack: Option<Arc<GSSNode<Action>>>,
     pub status: ParseStatus,
@@ -31,7 +31,7 @@ impl GLRParser {
 
     pub fn init_managed_parse_state(&self) -> ManagedParseState {
         ManagedParseState {
-            tokenizer_state_ids: vec![TokenizerStateID(0)],
+            tokenizer_state_ids: vec![TokenizerStateID(0)].into_iter().collect(),
             stack: Arc::new(GSSNode::new(self.start_state_id)),
             action_stack: None,
             status: ParseStatus::Active,
@@ -68,14 +68,16 @@ impl<'a> ManagedGLRParserState<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ParseStateKey {
+pub struct ManagedParseStateKey {
+    tokenizer_state_ids: BTreeSet<TokenizerStateID>,
     stack: StateID,
     action_stack: Option<Action>,
 }
 
 impl ManagedParseState {
-    pub fn key(&self) -> ParseStateKey {
-        ParseStateKey {
+    pub fn key(&self) -> ManagedParseStateKey {
+        ManagedParseStateKey {
+            tokenizer_state_ids: self.tokenizer_state_ids.clone(),
             stack: *self.stack.peek(),
             action_stack: self.action_stack.peek().cloned(),
         }
