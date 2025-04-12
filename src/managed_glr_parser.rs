@@ -31,7 +31,7 @@ impl GLRParser {
 
     pub fn init_managed_parse_state(&self) -> ManagedParseState {
         ManagedParseState {
-            tokenizer_state_ids: Vec::new(),
+            tokenizer_state_ids: vec![TokenizerStateID(0)],
             stack: Arc::new(GSSNode::new(self.start_state_id)),
             action_stack: None,
             status: ParseStatus::Active,
