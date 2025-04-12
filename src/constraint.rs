@@ -26,10 +26,7 @@ pub struct PrecomputedNodeContents {
     pub(crate) relevant_llm_token_ids: LLMTokenBV,
 }
 
-type Precomputed = BTreeMap<
-    TokenizerStateID,
-    Trie<GrammarTokenID, PrecomputedNodeContents>,
->;
+type Precomputed = BTreeMap<TokenizerStateID, Trie<GrammarTokenID, PrecomputedNodeContents>>;
 
 #[derive(Debug, Clone)]
 pub struct GrammarConstraint {
