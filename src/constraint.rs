@@ -31,7 +31,7 @@ pub struct GrammarConstraint {
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintState<'a> {
     pub(crate) parent: &'a GrammarConstraint,
-    pub(crate) states: Vec<(GLRParserState<'a>, BTreeSet<TokenizerStateID>)>,
+    pub(crate) state: GLRParserState<'a>,
 }
 
 impl GrammarConstraint {
@@ -67,7 +67,7 @@ impl GrammarConstraint {
 
         GrammarConstraintState {
             parent: self,
-            states: vec![(glr_parser_initial_state, BTreeSet::from([tokenizer_initial_state_id]))],
+            state: glr_parser_initial_state,
         }
     }
 }
@@ -75,6 +75,10 @@ impl GrammarConstraint {
 impl GrammarConstraintState<'_> {
     pub fn get_mask(&self) -> LLMTokenBV {
         // let initial_nodes_and_values = Vec::new();
+
+        // for state in self.state.active_states.iter() {
+        //     let node = &self.parent.precomputed[state.];
+        // }
 
         todo!()
     }
