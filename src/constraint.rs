@@ -1,6 +1,6 @@
 use crate::datastructures::trie::Trie;
 use crate::finite_automata::Regex;
-use crate::glr::parser::{GLRParser, ParseState, ParseStateKey};
+use crate::glr::parser::{GLRParser, GLRParserState, ParseState, ParseStateKey};
 use crate::tokenizer::{GrammarTokenID, LLMTokenID, LLMTokenMap, TokenizerStateID};
 use bimap::BiBTreeMap;
 use bitvec::prelude::BitVec;
@@ -29,9 +29,9 @@ pub struct GrammarConstraint {
 }
 
 #[derive(Debug, Clone)]
-pub struct GrammarConstraintState {
-    pub(crate) parent: GrammarConstraint,
-    pub(crate) states: Vec<(ParseState, BTreeSet<TokenizerStateID>)>,
+pub struct GrammarConstraintState<'a> {
+    pub(crate) parent: &'a GrammarConstraint,
+    pub(crate) states: Vec<(GLRParserState<'a>, BTreeSet<TokenizerStateID>)>,
 }
 
 impl GrammarConstraint {
@@ -61,19 +61,21 @@ impl GrammarConstraint {
     }
 
 
-    pub fn init(self) -> GrammarConstraintState {
-        let parser_initial_state = self.parser.init_parse_state();
+    pub fn init(&self) -> GrammarConstraintState<'_> {
+        let glr_parser_initial_state = self.parser.init_glr_parser();
         let tokenizer_initial_state_id = self.tokenizer.initial_state_id();
 
         GrammarConstraintState {
             parent: self,
-            states: vec![(parser_initial_state, BTreeSet::from([tokenizer_initial_state_id]))],
+            states: vec![(glr_parser_initial_state, BTreeSet::from([tokenizer_initial_state_id]))],
         }
     }
 }
 
-impl<'a> GrammarConstraintState {
+impl GrammarConstraintState<'_> {
     pub fn get_mask(&self) -> LLMTokenBV {
+        // let initial_nodes_and_values = Vec::new();
+
         todo!()
     }
 

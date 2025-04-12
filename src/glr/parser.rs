@@ -194,7 +194,7 @@ impl Display for GLRParser {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct GLRParserState<'a> {
     pub parser: &'a GLRParser,
     pub active_states: Vec<ParseState>,
