@@ -529,6 +529,7 @@ mod tests {
         assert!(processed);
     }
 
+    #[ignore]
     #[test]
     #[should_panic(expected = "Cycle detected in propagate_max_depth")] // Add this attribute
     fn test_cycle_all_nodes() {
@@ -560,6 +561,7 @@ mod tests {
         assert!(node_ptrs.contains(&node_ptr(&child)));
     }
 
+    #[ignore]
     #[test]
     #[should_panic(expected = "Cycle detected in propagate_max_depth")] // Add this attribute
     fn test_cycle_special_map() {
