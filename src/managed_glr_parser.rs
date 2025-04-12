@@ -114,10 +114,11 @@ impl<'a> ManagedGLRParserState<'a> {
                     for active_state in &parse_state.active_states {
                         final_active_parse_states.push(ManagedParseState::from((active_state.clone(), tokenizer_state_ids.clone())));
                     }
-                    true
-                } else {
-                    false
+                    for inactive_state in &parse_state.inactive_states {
+                        final_inactive_parse_states.push(ManagedParseState::from((inactive_state.clone(), tokenizer_state_ids.clone())));
+                    }
                 }
+                true
             },
         );
 
