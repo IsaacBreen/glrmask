@@ -105,18 +105,15 @@ impl<'a> ManagedGLRParserState<'a> {
         Trie::special_map(
             initial_nodes_and_values,
             // step
-            |parse_state, grammar_token_id, grammar_token_trie| {
-                let mut parse_state = parse_state.clone();
-                parse_state.step(*grammar_token_id);
-                parse_state
-            },
+            |parse_state, grammar_token_id, grammar_token_trie| parse_state.clone().with_step(*grammar_token_id),
             // merge
-            |parse_state, new_parse_state| parse_state.merge_with(new_parse_state),
+            GLRParserState::merge_with,
             // process
             |tokenizer_state_ids, parse_state| {
                 for active_state in &parse_state.active_states {
                     final_active_parse_states.push(ManagedParseState::from((active_state.clone(), tokenizer_state_ids.clone())));
                 }
+                true
             },
         );
 

@@ -212,6 +212,12 @@ impl<'a> GLRParserState<'a> {
         }
     }
 
+    pub fn with_step(self, token_id: TerminalID) -> Self {
+        let mut parser = self;
+        parser.step(token_id);
+        parser
+    }
+
     pub fn step(&mut self, token_id: TerminalID) {
         let mut next_active_states = Vec::new();
         let mut inactive_states = Vec::new();
