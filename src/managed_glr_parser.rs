@@ -9,6 +9,7 @@ use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::{Arc, Mutex};
+use crate::constraint::LLMTokenBV;
 use crate::datastructures::trie::Trie;
 use crate::debug;
 use crate::finite_automata::Regex;
@@ -18,6 +19,7 @@ use crate::tokenizer::{TokenizerStateID};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ManagedParseState {
     pub tokenizer_state_ids: BTreeSet<TokenizerStateID>,
+    pub llm_tokens: LLMTokenBV,
     pub stack: Arc<GSSNode<StateID>>,
     pub action_stack: Option<Arc<GSSNode<Action>>>,
     pub status: ParseStatus,
@@ -36,8 +38,10 @@ impl From<ManagedParseState> for ParseState {
 impl From<(ParseState, BTreeSet<TokenizerStateID>)> for ManagedParseState {
     fn from(parse_state: (ParseState, BTreeSet<TokenizerStateID>)) -> Self {
         let (parse_state, tokenizer_state_ids) = parse_state;
+        let llm_tokens = LLMTokenBV::repeat(true, tokenizer_state_ids.len());
         ManagedParseState {
             tokenizer_state_ids,
+            llm_tokens: llm_tokens.clone(),
             stack: parse_state.stack,
             action_stack: parse_state.action_stack,
             status: parse_state.status,
@@ -57,6 +61,7 @@ impl GLRParser {
     pub fn init_managed_parse_state(&self) -> ManagedParseState {
         ManagedParseState {
             tokenizer_state_ids: vec![TokenizerStateID(0)].into_iter().collect(),
+            llm_tokens: LLMTokenBV::repeat(true, self.terminal_map.len()),
             stack: Arc::new(GSSNode::new(self.start_state_id)),
             action_stack: None,
             status: ParseStatus::Active,
@@ -118,7 +123,7 @@ impl<'a> ManagedGLRParserState<'a> {
                         final_inactive_parse_states.push(ManagedParseState::from((inactive_state.clone(), tokenizer_state_ids.clone())));
                     }
                 }
-                true
+                !parse_state.active_states.is_empty()
             },
         );
 

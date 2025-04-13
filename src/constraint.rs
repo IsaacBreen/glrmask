@@ -69,7 +69,6 @@ impl GrammarConstraint {
         todo!()
     }
 
-
     pub fn init(&self) -> GrammarConstraintState<'_> {
         let glr_parser_initial_state = self.parser.init_managed_glr_parser();
         let tokenizer_initial_state_id = self.tokenizer.initial_state_id();
@@ -82,8 +81,18 @@ impl GrammarConstraint {
 }
 
 impl GrammarConstraintState<'_> {
-    pub fn get_mask(&self) -> LLMTokenBV {
+    pub fn parse(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(GLRParserState, LLMTokenBV)> {
         todo!()
+    }
+
+    pub fn get_mask(&mut self) -> LLMTokenBV {
+        let all_llm_tokens = LLMTokenBV::repeat(true, self.parent.max_llm_token_id);
+        let mut mask = LLMTokenBV::repeat(false, self.parent.max_llm_token_id);
+        let mut results = self.parse(&all_llm_tokens);
+        for (state, llm_tokens) in results {
+            mask |= llm_tokens;
+        }
+        mask
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) {
