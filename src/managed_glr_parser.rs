@@ -35,10 +35,9 @@ impl From<ManagedParseState> for ParseState {
     }
 }
 
-impl From<(ParseState, BTreeSet<TokenizerStateID>)> for ManagedParseState {
-    fn from(parse_state: (ParseState, BTreeSet<TokenizerStateID>)) -> Self {
-        let (parse_state, tokenizer_state_ids) = parse_state;
-        let llm_tokens = LLMTokenBV::repeat(true, tokenizer_state_ids.len());
+impl From<(ParseState, BTreeSet<TokenizerStateID>, LLMTokenBV)> for ManagedParseState {
+    fn from(x: (ParseState, BTreeSet<TokenizerStateID>, LLMTokenBV)) -> Self {
+        let (parse_state, tokenizer_state_ids, llm_tokens) = x;
         ManagedParseState {
             tokenizer_state_ids,
             llm_tokens: llm_tokens.clone(),
@@ -78,59 +77,6 @@ pub struct ManagedGLRParserState<'a> {
 }
 
 impl<'a> ManagedGLRParserState<'a> {
-    fn prepare_initial_nodes_and_values_for_special_map(&mut self, grammar_token_trie_roots: BTreeMap<TokenizerStateID, Trie<TerminalID, BTreeSet<TokenizerStateID>>>) -> Vec<(Arc<Mutex<Trie<TerminalID, BTreeSet<TokenizerStateID>>>>, GLRParserState)> {
-        // The BTreeSet<TokenizerStateID> in each Trie node here is the set of terminal states at this node.
-        // Each terminal state indicates that the path through the trie can terminate here.
-        // (todo: explain this better)
-        let mut initial_nodes_and_values: Vec<(Arc<Mutex<Trie<GrammarTokenID, BTreeSet<TokenizerStateID>>>>, GLRParserState)> = Vec::new();
-
-        let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, BTreeSet<ParseState>> = BTreeMap::new();
-        for managed_parse_state in self.active_states.iter() {
-            for tokenizer_state_id in managed_parse_state.tokenizer_state_ids.iter() {
-                let parse_state = ParseState::from(managed_parse_state.clone());
-                tokenizer_state_id_to_parse_states.entry(*tokenizer_state_id).or_default().insert(parse_state);
-            }
-        }
-
-        for (tokenizer_state_id, parse_states) in tokenizer_state_id_to_parse_states {
-            let token_trie = grammar_token_trie_roots[&tokenizer_state_id].clone();
-            let token_trie = Arc::new(Mutex::new(token_trie));
-            let glr_parser_state = GLRParser::init_glr_parser_from_parse_states(self.parser, parse_states.into_iter().collect());
-            initial_nodes_and_values.push((token_trie, glr_parser_state));
-        }
-        initial_nodes_and_values
-    }
-
-    pub fn parse_grammar_token_trie(&mut self, grammar_token_trie_roots: BTreeMap<TokenizerStateID, Trie<GrammarTokenID, BTreeSet<TokenizerStateID>>>) {
-        let initial_nodes_and_values = self.prepare_initial_nodes_and_values_for_special_map(grammar_token_trie_roots);
-
-        let mut final_active_parse_states: Vec<ManagedParseState> = Vec::new();
-        let mut final_inactive_parse_states: Vec<ManagedParseState> = Vec::new();
-
-        Trie::special_map(
-            initial_nodes_and_values,
-            // step
-            |parse_state, grammar_token_id, node| parse_state.clone().with_step(*grammar_token_id),
-            // merge
-            GLRParserState::merge_with,
-            // process
-            |tokenizer_state_ids, parse_state| {
-                if tokenizer_state_ids.is_empty() {
-                    for active_state in &parse_state.active_states {
-                        final_active_parse_states.push(ManagedParseState::from((active_state.clone(), tokenizer_state_ids.clone())));
-                    }
-                    for inactive_state in &parse_state.inactive_states {
-                        final_inactive_parse_states.push(ManagedParseState::from((inactive_state.clone(), tokenizer_state_ids.clone())));
-                    }
-                }
-                !parse_state.active_states.is_empty()
-            },
-        );
-
-        self.active_states = final_active_parse_states;
-        self.inactive_states.extend(final_inactive_parse_states);
-    }
-
     pub fn merge_active_states(&mut self) {
         let mut active_state_map: BTreeMap<ManagedParseStateKey, ManagedParseState> = BTreeMap::new();
 
