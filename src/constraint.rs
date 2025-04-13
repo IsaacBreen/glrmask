@@ -7,6 +7,7 @@ use bitvec::prelude::BitVec;
 use bitvec::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
+use bitvec::macros::internal::funty::Fundamental;
 use keyed_priority_queue::KeyedPriorityQueue;
 use crate::managed_glr_parser::{ManagedGLRParserState, ManagedParseState};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
@@ -16,7 +17,7 @@ pub type GrammarTokenBV = BitVec;
 
 #[derive(Debug, Clone)]
 pub struct PrecomputedFinalizer {
-    pub(crate) possible_final_grammar_tokens: GrammarTokenBV,
+    pub(crate) possible_final_grammar_tokens: BTreeSet<GrammarTokenID>,
     pub(crate) compatible_llm_tokens: LLMTokenBV,
     pub(crate) tokenizer_state_id: TokenizerStateID,
 }
@@ -148,16 +149,29 @@ impl GrammarConstraintState<'_> {
             },
             // process
             |precomputed_node_contents, (parse_state, llm_tokens)| {
-                let mut tokenizer_state_ids = BTreeSet::new();
                 for precomputed_finalizer in &precomputed_node_contents.finalizers {
-                    tokenizer_state_ids.insert(precomputed_finalizer.tokenizer_state_id);
-                }
-                if !tokenizer_state_ids.is_empty() {
+                    let tokenizer_state_ids: BTreeSet<_> = vec![precomputed_finalizer.tokenizer_state_id].into_iter().collect();
+                    let mut final_llm_tokens = llm_tokens.clone();
+                    final_llm_tokens |= precomputed_finalizer.compatible_llm_tokens.clone();
+                    if final_llm_tokens.is_empty() { continue; }
+                    if precomputed_finalizer.tokenizer_state_id == TokenizerStateID(0) { continue; }
+                    let mut any_final_grammar_token_parses = false;
+                    for possible_final_grammar_token in &precomputed_finalizer.possible_final_grammar_tokens {
+                        let mut parse_state = parse_state.clone();
+                        parse_state.step(*possible_final_grammar_token);
+                        if parse_state.matches_or_can_match() {
+                            any_final_grammar_token_parses = true;
+                            break;
+                        }
+                    }
+                    if !any_final_grammar_token_parses {
+                        continue;
+                    }
                     for active_state in &parse_state.active_states {
-                        final_active_parse_states.push(ManagedParseState::from((active_state.clone(), tokenizer_state_ids.clone(), llm_tokens.clone())));
+                        final_active_parse_states.push(ManagedParseState::from((active_state.clone(), tokenizer_state_ids.clone(), final_llm_tokens.clone())));
                     }
                     for inactive_state in &parse_state.inactive_states {
-                        final_inactive_parse_states.push(ManagedParseState::from((inactive_state.clone(), tokenizer_state_ids.clone(), llm_tokens.clone())));
+                        final_inactive_parse_states.push(ManagedParseState::from((inactive_state.clone(), tokenizer_state_ids.clone(), final_llm_tokens.clone())));
                     }
                 }
                 !parse_state.active_states.is_empty()

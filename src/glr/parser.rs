@@ -355,6 +355,14 @@ impl<'a> GLRParserState<'a> {
         self.inactive_states.iter().filter(|state| state.status == ParseStatus::Inactive(StopReason::GotoNotFound)).collect()
     }
 
+    pub fn can_match(&self) -> bool {
+        !self.active_states.is_empty()
+    }
+
+    pub fn matches_or_can_match(&self) -> bool {
+        self.can_match() || self.fully_matches()
+    }
+
     pub fn is_ok(&self) -> bool {
         !self.active_states.is_empty() || self.fully_matches()
     }
