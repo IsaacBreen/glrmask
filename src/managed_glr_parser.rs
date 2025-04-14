@@ -67,6 +67,13 @@ impl GLRParser {
         }
     }
 
+    pub fn init_managed_glr_parser_from_managed_parse_states(&self, parse_states: Vec<ManagedParseState>) -> ManagedGLRParserState {
+        ManagedGLRParserState {
+            parser: self,
+            active_states: parse_states,
+            inactive_states: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +84,15 @@ pub struct ManagedGLRParserState<'a> {
 }
 
 impl<'a> ManagedGLRParserState<'a> {
+    pub fn with_step(mut self, token_id: TerminalID) -> Self {
+        self.step(token_id);
+        self
+    }
+
+    pub fn step(&mut self, token_id: TerminalID) {
+        todo!()
+    }
+
     pub fn merge_active_states(&mut self) {
         let mut active_state_map: BTreeMap<ManagedParseStateKey, ManagedParseState> = BTreeMap::new();
 
@@ -97,10 +113,10 @@ impl<'a> ManagedGLRParserState<'a> {
         self.active_states = new_active_states;
     }
 
-    pub fn merge_with(&mut self, other: &ManagedGLRParserState) {
+    pub fn merge_with(&mut self, other: ManagedGLRParserState) {
         assert!(std::ptr::eq(&self.parser, &other.parser));
-        self.active_states.extend(other.active_states.iter().cloned());
-        self.inactive_states.extend(other.inactive_states.iter().cloned());
+        self.active_states.extend(other.active_states);
+        self.inactive_states.extend(other.inactive_states);
     }
 
     pub fn fully_matches(&self) -> bool {

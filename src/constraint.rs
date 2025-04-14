@@ -108,17 +108,16 @@ impl GrammarConstraintState<'_> {
         }
     }
 
-    fn prepare_initial_nodes_and_values_for_special_map(&mut self) -> Vec<(Arc<Mutex<Trie<TerminalID, PrecomputedNodeContents>>>, (GLRParserState, LLMTokenBV))> {
+    fn prepare_initial_nodes_and_values_for_special_map(&mut self) -> Vec<(Arc<Mutex<Trie<TerminalID, PrecomputedNodeContents>>>, ManagedGLRParserState)> {
         // The BTreeSet<TokenizerStateID> in each Trie node here is the set of terminal states at this node.
         // Each terminal state indicates that the path through the trie can terminate here.
         // (todo: explain this better)
-        let mut initial_nodes_and_values: Vec<(Arc<Mutex<Trie<GrammarTokenID, PrecomputedNodeContents>>>, (GLRParserState, LLMTokenBV))> = Vec::new();
+        let mut initial_nodes_and_values: Vec<(Arc<Mutex<Trie<GrammarTokenID, PrecomputedNodeContents>>>, ManagedGLRParserState)> = Vec::new();
 
-        let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, (BTreeSet<ParseState>, LLMTokenBV)> = BTreeMap::new();
+        let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, (BTreeSet<ManagedParseState>, LLMTokenBV)> = BTreeMap::new();
         for managed_parse_state in self.state.active_states.iter() {
             for tokenizer_state_id in managed_parse_state.tokenizer_state_ids.iter() {
-                let parse_state = ParseState::from(managed_parse_state.clone());
-                tokenizer_state_id_to_parse_states.entry(*tokenizer_state_id).or_default().0.insert(parse_state);
+                tokenizer_state_id_to_parse_states.entry(*tokenizer_state_id).or_default().0.insert(managed_parse_state.clone());
                 tokenizer_state_id_to_parse_states.entry(*tokenizer_state_id).or_default().1 |= managed_parse_state.llm_tokens.clone();
             }
         }
@@ -126,8 +125,9 @@ impl GrammarConstraintState<'_> {
         for (tokenizer_state_id, (parse_states, llm_tokens)) in tokenizer_state_id_to_parse_states {
             let token_trie = self.parent.precomputed[&tokenizer_state_id].clone();
             let token_trie = Arc::new(Mutex::new(token_trie));
-            let glr_parser_state = GLRParser::init_glr_parser_from_parse_states(self.state.parser, parse_states.into_iter().collect());
-            initial_nodes_and_values.push((token_trie, (glr_parser_state, llm_tokens)));
+            // let glr_parser_state = GLRParser::init_glr_parser_from_parse_states(self.state.parser, parse_states.into_iter().collect());
+            let managed_glr_parser_state = GLRParser::init_managed_glr_parser_from_managed_parse_states(self.state.parser, parse_states.into_iter().collect());
+            initial_nodes_and_values.push((token_trie, managed_glr_parser_state));
         }
         initial_nodes_and_values
     }
@@ -141,40 +141,45 @@ impl GrammarConstraintState<'_> {
         Trie::special_map(
             initial_nodes_and_values,
             // step
-            |(parse_state, llm_tokens), grammar_token_id, node| (parse_state.clone().with_step(*grammar_token_id), llm_tokens.clone()),
+            |managed_parse_state, grammar_token_id, node| {
+                managed_parse_state.clone().with_step(*grammar_token_id)
+            },
             // merge
-            |(state1, llm_tokens1), (state2, llm_tokens2)| {
-                state1.merge_with(state2);
-                *llm_tokens1 |= llm_tokens2;
+            |managed_parse_state1, managed_parse_state2| {
+                managed_parse_state1.merge_with(managed_parse_state2);
             },
             // process
-            |precomputed_node_contents, (parse_state, llm_tokens)| {
+            |precomputed_node_contents, managed_glr_parse_state| {
                 for precomputed_finalizer in &precomputed_node_contents.finalizers {
-                    let tokenizer_state_ids: BTreeSet<_> = vec![precomputed_finalizer.tokenizer_state_id].into_iter().collect();
-                    let mut final_llm_tokens = llm_tokens.clone();
-                    final_llm_tokens |= precomputed_finalizer.compatible_llm_tokens.clone();
-                    if final_llm_tokens.is_empty() { continue; }
-                    if precomputed_finalizer.tokenizer_state_id == TokenizerStateID(0) { continue; }
-                    let mut any_final_grammar_token_parses = false;
-                    for possible_final_grammar_token in &precomputed_finalizer.possible_final_grammar_tokens {
-                        let mut parse_state = parse_state.clone();
-                        parse_state.step(*possible_final_grammar_token);
-                        if parse_state.matches_or_can_match() {
-                            any_final_grammar_token_parses = true;
-                            break;
+                    for managed_parse_state in &managed_glr_parse_state.active_states {
+                        let mut final_llm_tokens = managed_parse_state.llm_tokens.clone();
+                        final_llm_tokens |= precomputed_finalizer.compatible_llm_tokens.clone();
+                        if final_llm_tokens.is_empty() { continue; }
+                        let mut can_finish_here = false;
+                        if precomputed_finalizer.tokenizer_state_id == TokenizerStateID(0) {
+                            can_finish_here = true;
+                        } else {
+                            for possible_final_grammar_token in &precomputed_finalizer.possible_final_grammar_tokens {
+                                let mut parse_state = managed_glr_parse_state.parser.init_glr_parser_from_parse_state(ParseState::from(managed_parse_state.clone()));
+                                parse_state.step(*possible_final_grammar_token);
+                                if parse_state.matches_or_can_match() {
+                                    can_finish_here = true;
+                                    break;
+                                }
+                            }
                         }
                     }
-                    if !any_final_grammar_token_parses {
-                        continue;
-                    }
-                    for active_state in &parse_state.active_states {
-                        final_active_parse_states.push(ManagedParseState::from((active_state.clone(), tokenizer_state_ids.clone(), final_llm_tokens.clone())));
-                    }
-                    for inactive_state in &parse_state.inactive_states {
-                        final_inactive_parse_states.push(ManagedParseState::from((inactive_state.clone(), tokenizer_state_ids.clone(), final_llm_tokens.clone())));
-                    }
+                    // if !any_final_grammar_token_parses {
+                    //     continue;
+                    // }
+                    // for active_state in &managed_parse_state.active_states {
+                    //     final_active_parse_states.push(ManagedParseState::from((active_state.clone(), tokenizer_state_ids.clone(), final_llm_tokens.clone())));
+                    // }
+                    // for inactive_state in &managed_parse_state.inactive_states {
+                    //     final_inactive_parse_states.push(ManagedParseState::from((inactive_state.clone(), tokenizer_state_ids.clone(), final_llm_tokens.clone())));
+                    // }
                 }
-                !parse_state.active_states.is_empty()
+                !managed_glr_parse_state.active_states.is_empty()
             },
         );
 
