@@ -73,7 +73,6 @@ impl GrammarConstraint {
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
         let glr_parser_initial_state = self.parser.init_managed_glr_parser();
-        let tokenizer_initial_state_id = self.tokenizer.initial_state_id();
 
         GrammarConstraintState {
             parent: self,
@@ -83,23 +82,28 @@ impl GrammarConstraint {
 }
 
 impl GrammarConstraintState<'_> {
-    pub fn parse(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(GLRParserState, LLMTokenBV)> {
-        todo!()
-    }
-
     pub fn get_mask(&mut self) -> LLMTokenBV {
-        let all_llm_tokens = LLMTokenBV::repeat(true, self.parent.max_llm_token_id);
         let mut mask = LLMTokenBV::repeat(false, self.parent.max_llm_token_id);
-        let mut results = self.parse(&all_llm_tokens);
-        for (_, llm_tokens) in results {
-            mask |= llm_tokens;
+        for managed_parse_state in &self.state.active_states {
+            mask |= managed_parse_state.llm_tokens.clone();
         }
         mask
     }
 
-    pub fn commit(&mut self, llm_token_id: LLMTokenID) {
-        let mut grammar_token_trie_roots: BTreeMap<TokenizerStateID, Trie<GrammarTokenID, BTreeSet<TokenizerStateID>>> = BTreeMap::new();
+    pub fn step_with_all_llm_tokens(&mut self) {
+        let all_llm_tokens = LLMTokenBV::repeat(true, self.parent.max_llm_token_id);
+        self.step(&all_llm_tokens);
+    }
 
+    pub fn step_with_llm_token(&mut self, llm_token_id: LLMTokenID) {
+        let mut llm_tokens = LLMTokenBV::repeat(false, self.parent.max_llm_token_id);
+        llm_tokens.set(llm_token_id.0, true);
+        self.step(&llm_tokens);
+    }
+
+    pub fn commit(&mut self, llm_token_id: LLMTokenID) {
+        // Keep only the active states for which this LLM token is set
+        self.state.active_states.retain(|managed_parse_state| managed_parse_state.llm_tokens[llm_token_id.0]);
     }
 
     pub fn commit_many(&mut self, llm_token_ids: &[LLMTokenID]) {
@@ -131,7 +135,7 @@ impl GrammarConstraintState<'_> {
         initial_nodes_and_values
     }
 
-    pub fn parse_grammar_token_trie(&mut self, llm_tokens: &LLMTokenBV) {
+    pub fn step(&mut self, llm_tokens: &LLMTokenBV) {
         let initial_nodes_and_values = self.prepare_initial_nodes_and_values_for_special_map(llm_tokens);
 
         let mut final_active_parse_states: Vec<ManagedParseState> = Vec::new();

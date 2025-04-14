@@ -76,9 +76,13 @@ impl GLRParser {
     }
 }
 
-impl From<ManagedGLRParserState<'_>> for GLRParserState<'_> {
-    fn from(managed_glr_parser_state: ManagedGLRParserState) -> Self {
-        todo!()
+impl<'a> From<ManagedGLRParserState<'a>> for GLRParserState<'a> {
+    fn from(managed_glr_parser_state: ManagedGLRParserState<'a>) -> Self {
+        GLRParserState {
+            parser: managed_glr_parser_state.parser,
+            active_states: managed_glr_parser_state.active_states.into_iter().map(|managed_parse_state| managed_parse_state.into()).collect(),
+            inactive_states: managed_glr_parser_state.inactive_states.into_iter().map(|managed_parse_state| managed_parse_state.into()).collect(),
+        }
     }
 }
 
