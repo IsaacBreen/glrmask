@@ -76,6 +76,12 @@ impl GLRParser {
     }
 }
 
+impl From<ManagedGLRParserState<'_>> for GLRParserState<'_> {
+    fn from(managed_glr_parser_state: ManagedGLRParserState) -> Self {
+        todo!()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ManagedGLRParserState<'a> {
     pub parser: &'a GLRParser,
@@ -90,7 +96,15 @@ impl<'a> ManagedGLRParserState<'a> {
     }
 
     pub fn step(&mut self, token_id: TerminalID) {
-        todo!()
+        let mut glr_parser_state = GLRParserState::from(self.clone());
+        glr_parser_state.step(token_id);
+        // Set the tokenizer state IDs to zero.
+        for managed_parse_state in &mut self.active_states {
+            managed_parse_state.tokenizer_state_ids = BTreeSet::new();
+        }
+        for managed_parse_state in &mut self.inactive_states {
+            managed_parse_state.tokenizer_state_ids = BTreeSet::new();
+        }
     }
 
     pub fn merge_active_states(&mut self) {

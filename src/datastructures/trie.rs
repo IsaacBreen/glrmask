@@ -209,7 +209,7 @@ impl<T: Clone, E: Ord + Clone> Trie<E, T> {
         initial_nodes_and_values: Vec<(Arc<Mutex<Trie<E, T>>>, V)>,
         mut step: impl FnMut(&V, &E, &Trie<E, T>) -> V,
         mut merge: impl FnMut(&mut V, V),
-        mut process: impl FnMut(&T, &V) -> bool, // <-- MODIFIED: returns bool
+        mut process: impl FnMut(&Trie<E, T>, &mut V) -> bool, // <-- MODIFIED: returns bool
     ) {
         // state: for each node (by raw pointer), store (merged V, arrival_depth)
         let mut state: HashMap<*const Trie<E, T>, (V, usize)> = HashMap::new();
@@ -241,7 +241,7 @@ impl<T: Clone, E: Ord + Clone> Trie<E, T> {
                 continue;
             }
             // get stored state (merged V and arrival depth) for this node.
-            let (node_val_merged, arr_depth) = match state.get(&ptr) {
+            let (mut node_val_merged, arr_depth) = match state.get(&ptr) {
                 Some(&ref tup) => tup.clone(),
                 // This can happen if a node was queued but later processed via another path
                 // before this queue entry was handled. Or if state wasn't initialized (bug).
@@ -276,7 +276,7 @@ impl<T: Clone, E: Ord + Clone> Trie<E, T> {
             // Capture the boolean result to decide whether to continue.
             let should_continue_processing_children = {
                 let node = node_arc.lock().expect("Mutex poisoned during process call");
-                process(&node.value, &node_val_merged) // <-- MODIFIED: capture return value
+                process(&node, &mut node_val_merged) // <-- MODIFIED: capture return value
             };
 
             // Only propagate to children if process returned true.
@@ -486,8 +486,8 @@ mod tests {
             vec![(root.clone(), 100)],
             |parent_val, _edge, _child_node| parent_val + 1, // step: add one
             |current, new| *current = new, // merge: replace
-            |node_value, computed_val| { // process: always continue
-                processed_node_values.push(*node_value);
+            |node, computed_val| { // process: always continue
+                processed_node_values.push(node.value);
                 computed_values.push(*computed_val);
                 true // <-- Added return value
             },
@@ -544,8 +544,8 @@ mod tests {
             // merge: here we simply replace the current value
             |current, new| { *current = new; },
             // process: always continue
-            |node_value, computed_val| {
-                processed_node_values.push(*node_value);
+            |node, computed_val| {
+                processed_node_values.push(node.value);
                 computed_values.push(*computed_val);
                 true // <-- Added return value
             },
@@ -661,10 +661,10 @@ mod tests {
             { // process: always continue
                 let processed_nodes = processed_nodes.clone();
                 let process_count = process_count.clone();
-                move |node_t, final_v| {
-                    println!("Processing node T={}, V={}", node_t, final_v);
+                move |node, final_v| {
+                    println!("Processing node T={}, V={}", node.value, final_v);
                     let mut map = processed_nodes.lock().unwrap();
-                    map.insert(*node_t, *final_v);
+                    map.insert(node.value, *final_v);
                     process_count.fetch_add(1, Ordering::SeqCst);
                     true // <-- Added return value
                 }
@@ -699,8 +699,8 @@ mod tests {
             vec![(root.clone(), 100)],
             |_p, _e, _n| panic!("Step should not be called for leaf"),
             |_cur, _new| {},
-            |t, v| { // process: always continue
-                assert_eq!(*t, 42);
+            |node, v| { // process: always continue
+                assert_eq!(node.value, 42);
                 assert_eq!(*v, 100);
                 processed = true;
                 true // <-- Added return value
@@ -786,8 +786,8 @@ mod tests {
             vec![(root.clone(), 100)], // Start at root
             |p, _e, _n| p + 1, // Step: increment
             |cur, new| *cur = (*cur).max(new), // Merge: max
-            |t, v| { // process: always continue
-                processed_vals.push(*t);
+            |node, v| { // process: always continue
+                processed_vals.push(node.value);
                 computed_vals.push(*v);
                 true // <-- Added return value
             },
@@ -858,11 +858,11 @@ mod tests {
             {
                 let processed_nodes = processed_nodes.clone();
                 let computed_values = computed_values.clone();
-                move |node_t, final_v| {
-                    println!("Processing node T={}, V={}", node_t, final_v);
-                    processed_nodes.lock().unwrap().insert(*node_t);
-                    computed_values.lock().unwrap().insert(*node_t, *final_v);
-                    if *node_t == 1 { // Stop processing if node value is 1 (child1)
+                move |node, final_v| {
+                    println!("Processing node T={}, V={}", node.value, final_v);
+                    processed_nodes.lock().unwrap().insert(node.value);
+                    computed_values.lock().unwrap().insert(node.value, *final_v);
+                    if node.value == 1 { // Stop processing if node value is 1 (child1)
                         false
                     } else {
                         true
