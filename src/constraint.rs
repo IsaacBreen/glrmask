@@ -125,7 +125,6 @@ impl GrammarConstraintState<'_> {
         for (tokenizer_state_id, (parse_states, llm_tokens)) in tokenizer_state_id_to_parse_states {
             let token_trie = self.parent.precomputed[&tokenizer_state_id].clone();
             let token_trie = Arc::new(Mutex::new(token_trie));
-            // let glr_parser_state = GLRParser::init_glr_parser_from_parse_states(self.state.parser, parse_states.into_iter().collect());
             let managed_glr_parser_state = GLRParser::init_managed_glr_parser_from_managed_parse_states(self.state.parser, parse_states.into_iter().collect());
             initial_nodes_and_values.push((token_trie, managed_glr_parser_state));
         }
