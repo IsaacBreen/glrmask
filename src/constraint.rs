@@ -152,22 +152,26 @@ impl GrammarConstraintState<'_> {
             |precomputed_node_contents, managed_glr_parse_state| {
                 for precomputed_finalizer in &precomputed_node_contents.finalizers {
                     for managed_parse_state in &managed_glr_parse_state.active_states {
-                        let mut final_llm_tokens = managed_parse_state.llm_tokens.clone();
-                        final_llm_tokens |= precomputed_finalizer.compatible_llm_tokens.clone();
-                        if final_llm_tokens.is_empty() { continue; }
-                        let mut can_finish_here = false;
+                        let mut this_managed_parse_state_is_valid = false;
                         if precomputed_finalizer.tokenizer_state_id == TokenizerStateID(0) {
-                            can_finish_here = true;
+                            this_managed_parse_state_is_valid = true;
                         } else {
                             for possible_final_grammar_token in &precomputed_finalizer.possible_final_grammar_tokens {
                                 let mut parse_state = managed_glr_parse_state.parser.init_glr_parser_from_parse_state(ParseState::from(managed_parse_state.clone()));
                                 parse_state.step(*possible_final_grammar_token);
                                 if parse_state.matches_or_can_match() {
-                                    can_finish_here = true;
+                                    this_managed_parse_state_is_valid = true;
                                     break;
                                 }
                             }
                         }
+                        if !this_managed_parse_state_is_valid {
+                            continue;
+                        }
+                        let mut final_llm_tokens = managed_parse_state.llm_tokens.clone();
+                        final_llm_tokens |= precomputed_finalizer.compatible_llm_tokens.clone();
+                        if final_llm_tokens.is_empty() { continue; }
+                        let 
                     }
                     // if !any_final_grammar_token_parses {
                     //     continue;
