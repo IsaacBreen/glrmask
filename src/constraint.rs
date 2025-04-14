@@ -62,7 +62,6 @@ impl GrammarConstraint {
         }
     }
 
-    /// Precomputes a map from state -> token sequence -> LLM token -> state.
     pub fn precompute<'a>(
         tokenizer: &Regex,
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
