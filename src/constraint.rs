@@ -67,6 +67,16 @@ impl GrammarConstraint {
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         max_llm_token_id: usize,
     ) -> Precomputed {
+        let helper = |
+            regex: &Regex,
+            llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+            max_llm_token_id: usize
+        | -> BTreeMap<> {
+            let mut precomputed = Precomputed::new(regex, llm_token_map, max_llm_token_id);
+            precomputed.precompute();
+            precomputed
+        };
+
         todo!()
     }
 
