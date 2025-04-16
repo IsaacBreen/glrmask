@@ -219,3 +219,277 @@ mod tests_apr25 {
         );
     }
 }
+
+use crate::finite_automata::{Expr, ExprGroup, ExprGroups, GroupID, Regex};
+use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::error::Error;
+use std::fs::File;
+use std::io::BufReader;
+
+#[derive(Deserialize, Debug)]
+struct AddedToken {
+    id: GroupID,
+    content: String,
+    // other fields omitted for brevity
+}
+
+#[derive(Deserialize, Debug)]
+struct Model {
+    #[serde(default)] // Handle cases where vocab might be missing or empty
+    vocab: BTreeMap<String, GroupID>,
+    // other fields omitted
+}
+
+#[derive(Deserialize, Debug)]
+struct TokenizerConfig {
+    #[serde(default)] // Handle cases where added_tokens might be missing or empty
+    added_tokens: Vec<AddedToken>,
+    #[serde(default)] // Handle cases where model might be missing
+    model: Option<Model>,
+    // other fields omitted
+}
+
+impl Default for Model {
+    fn default() -> Self {
+        Model {
+            vocab: BTreeMap::new(),
+        }
+    }
+}
+
+
+/// Loads tokenizer definition from a JSON file and builds a Regex DFA.
+///
+/// Each token becomes a group in the DFA, with the GroupID matching the token ID.
+/// Gaps in token IDs are filled with non-matching expressions.
+pub fn build_dfa_from_tokenizer_json(
+    json_path: &str,
+) -> Result<Regex, Box<dyn Error>> {
+    // 1. Read and parse the JSON file
+    let file = File::open(json_path)?;
+    let reader = BufReader::new(file);
+    let config: TokenizerConfig = serde_json::from_reader(reader)?;
+
+    // 2. Collect all token definitions (ID -> Bytes)
+    let mut token_defs: BTreeMap<GroupID, Vec<u8>> = BTreeMap::new();
+    let mut max_id: GroupID = 0;
+
+    // Process added_tokens
+    for added_token in config.added_tokens {
+        let id = added_token.id;
+        let bytes = added_token.content.into_bytes();
+        if token_defs.insert(id, bytes).is_some() {
+            eprintln!("Warning: Duplicate token ID {} found in added_tokens. Overwriting.", id);
+        }
+        max_id = max_id.max(id);
+    }
+
+    // Process model.vocab (if present)
+    if let Some(model) = config.model {
+        for (token_str, id) in model.vocab {
+            // *** IMPORTANT: Check if token_str is base64 encoded ***
+            // If the actual tokenizer.json uses base64 for vocab keys,
+            // you'll need to decode it here. The DeepSeek-V3 snippet
+            // doesn't show the vocab, but many tokenizers do this.
+            // Example using base64 crate (uncomment dependency and lines below):
+            // let bytes = STANDARD.decode(&token_str)
+            //     .map_err(|e| format!("Base64 decode error for token '{}': {}", token_str, e))?;
+            // --- If not base64, just convert string to bytes: ---
+            let bytes = token_str.into_bytes();
+            // ----------------------------------------------------
+
+            if token_defs.insert(id, bytes).is_some() {
+                 // This might happen if a token is in both added_tokens and vocab.
+                 // added_tokens usually take precedence. Let's just warn.
+                eprintln!("Warning: Token ID {} found in both added_tokens and model.vocab. Using definition from model.vocab.", id);
+            }
+            max_id = max_id.max(id);
+        }
+    }
+
+    // 3. Create the ordered list of ExprGroups, filling gaps
+    let num_groups = max_id + 1;
+    let mut expr_groups_vec: Vec<ExprGroup> = Vec::with_capacity(num_groups);
+
+    for id in 0..num_groups {
+        let expr_group = match token_defs.get(&id) {
+            Some(bytes) => {
+                // Create an expression for the token bytes
+                let expr = Expr::U8Seq(bytes.clone());
+                // Make it a greedy group by default
+                ExprGroup { expr, is_non_greedy: false }
+            }
+            None => {
+                // Fill gap with a non-matching expression (empty sequence)
+                // This ensures the GroupID alignment is correct.
+                // This group will never match anything.
+                ExprGroup { expr: Expr::Seq(vec![]), is_non_greedy: false }
+            }
+        };
+        expr_groups_vec.push(expr_group);
+    }
+
+    // 4. Build the ExprGroups and then the Regex (DFA)
+    let expr_groups = ExprGroups { groups: expr_groups_vec };
+    let regex = expr_groups.build(); // This builds NFA -> DFA -> Minimized DFA
+
+    Ok(regex)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+    use std::io::Write;
+
+    // Helper to create a dummy tokenizer file
+    fn create_dummy_tokenizer_file(path: &str, content: &str) -> Result<(), Box<dyn Error>> {
+        let dir = Path::new(path).parent().unwrap();
+        fs::create_dir_all(dir)?;
+        let mut file = File::create(path)?;
+        write!(file, "{}", content)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_simple_tokenizer() -> Result<(), Box<dyn Error>> {
+        let json_content = r#"
+        {
+            "version": "1.0",
+            "added_tokens": [
+                {"id": 0, "content": "<BOS>", "special": true},
+                {"id": 1, "content": "<EOS>", "special": true},
+                {"id": 3, "content": "hello", "special": false}
+            ],
+            "model": {
+                "vocab": {
+                    "world": 2,
+                    "!": 4
+                }
+            }
+        }
+        "#;
+        let file_path = ".cache/test_simple_tokenizer.json";
+        create_dummy_tokenizer_file(file_path, json_content)?;
+
+        let regex = build_dfa_from_tokenizer_json(file_path)?;
+
+        // Check max ID + 1 states were intended in the ExprGroups list
+        // Note: DFA minimization might reduce the *actual* number of states
+        // assert_eq!(regex.dfa.states.len(), ???); // Hard to predict minimized size
+
+        // Test matching specific tokens by their ID
+        let bos_id = 0;
+        let eos_id = 1;
+        let world_id = 2;
+        let hello_id = 3;
+        let bang_id = 4;
+        let gap_id = 5; // Should not exist / match
+
+        // Test <BOS>
+        let mut state_bos = regex.init();
+        state_bos.execute(b"<BOS>");
+        assert!(state_bos.matches.contains_key(&bos_id));
+        assert_eq!(state_bos.matches.get(&bos_id), Some(&5));
+        assert!(state_bos.fully_matches_here());
+        assert!(!state_bos.matches.contains_key(&eos_id)); // Ensure others didn't match
+
+        // Test hello
+        let mut state_hello = regex.init();
+        state_hello.execute(b"hello");
+        assert!(state_hello.matches.contains_key(&hello_id));
+        assert_eq!(state_hello.matches.get(&hello_id), Some(&5));
+        assert!(state_hello.fully_matches_here());
+
+        // Test world
+        let mut state_world = regex.init();
+        state_world.execute(b"world");
+        assert!(state_world.matches.contains_key(&world_id));
+        assert_eq!(state_world.matches.get(&world_id), Some(&5));
+        assert!(state_world.fully_matches_here());
+
+        // Test !
+        let mut state_bang = regex.init();
+        state_bang.execute(b"!");
+        assert!(state_bang.matches.contains_key(&bang_id));
+        assert_eq!(state_bang.matches.get(&bang_id), Some(&1));
+        assert!(state_bang.fully_matches_here());
+
+        // Test something that shouldn't match any full token
+        let mut state_invalid = regex.init();
+        state_invalid.execute(b"hell"); // Prefix of "hello"
+        assert!(!state_invalid.matches.contains_key(&hello_id)); // Not a full match
+        assert!(!state_invalid.fully_matches_here());
+        assert!(state_invalid.could_match()); // Could still match "hello"
+        assert!(!state_invalid.done());
+
+        let mut state_invalid2 = regex.init();
+        state_invalid2.execute(b"xyz");
+        assert!(state_invalid2.matches.is_empty());
+        assert!(!state_invalid2.could_match());
+        assert!(state_invalid2.done()); // Failed immediately
+
+        // Test gap - try to match something for ID 5 (which was a gap)
+        // The DFA shouldn't even have a path that leads to a finalizer for group 5
+        // We can check possible_group_ids
+        let start_state_data = &regex.dfa.states[regex.dfa.start_state];
+        assert!(start_state_data.possible_group_ids.contains(&bos_id));
+        assert!(start_state_data.possible_group_ids.contains(&hello_id));
+        assert!(start_state_data.possible_group_ids.contains(&world_id));
+        assert!(start_state_data.possible_group_ids.contains(&bang_id));
+        assert!(!start_state_data.possible_group_ids.contains(&gap_id)); // ID 5 shouldn't be possible
+
+        // Clean up dummy file
+        fs::remove_file(file_path)?;
+        fs::remove_dir(".cache").ok(); // Ignore error if dir not empty or doesn't exist
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore] // Ignored because it requires downloading the actual file
+    fn test_load_deepseek_tokenizer() -> Result<(), Box<dyn Error>> {
+        let file_path = ".cache/tokenizer.json"; // Assumes you downloaded it here
+        if !Path::new(file_path).exists() {
+            println!("Skipping test_load_deepseek_tokenizer: {} not found.", file_path);
+            return Ok(());
+        }
+
+        println!("Loading tokenizer from {}...", file_path);
+        let regex = build_dfa_from_tokenizer_json(file_path)?;
+        println!("Tokenizer loaded. DFA has {} states.", regex.dfa.states.len());
+
+        // Test some known special tokens
+        let bos_id = 0;
+        let eos_id = 1;
+
+        let mut state_bos = regex.init();
+        state_bos.execute(b"<\xEF\xBD\x9Cbegin of sentence\xEF\xBD\x9C>");
+        assert!(state_bos.matches.contains_key(&bos_id), "BOS token failed");
+        assert_eq!(state_bos.matches.get(&bos_id), Some(&b"<\xEF\xBD\x9Cbegin of sentence\xEF\xBD\x9C>".len()));
+        assert!(state_bos.fully_matches_here());
+
+        let mut state_eos = regex.init();
+        state_eos.execute(b"<\xEF\xBD\x9Cend of sentence\xEF\xBD\x9C>");
+        assert!(state_eos.matches.contains_key(&eos_id), "EOS token failed");
+        assert_eq!(state_eos.matches.get(&eos_id), Some(&b"<\xEF\xBD\x9Cend of sentence\xEF\xBD\x9C>".len()));
+        assert!(state_eos.fully_matches_here());
+
+        // Test a common word likely in the vocab (ID might vary, check file if needed)
+        // Let's assume " the" is a common token.
+        let mut state_the = regex.init();
+        state_the.execute(b" the");
+        assert!(!state_the.matches.is_empty(), "Expected ' the' to match some token ID");
+        // Find the matching ID and verify length
+        let (matched_id, matched_pos) = state_the.matches.iter().next().unwrap(); // Assuming only one match here
+        assert_eq!(*matched_pos, b" the".len(), "Match length incorrect for ' the'");
+        println!("' the' matched token ID: {}", matched_id);
+        assert!(state_the.fully_matches_here());
+
+
+        Ok(())
+    }
+}
