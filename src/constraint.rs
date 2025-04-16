@@ -68,7 +68,7 @@ impl GrammarConstraint {
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         max_llm_token_id: usize,
     ) -> Precomputed {
-        type VocabTrieNode = TrieMap<LLMTokenID>;
+        type VocabTrieNode = TrieMap<Option<LLMTokenID>>;
         type GrammarTokenTrieNode = Arc<Mutex<Trie<GrammarTokenID, ()>>>;
         let helper = |
             state: TokenizerStateID,
@@ -76,7 +76,11 @@ impl GrammarConstraint {
             prev_matches: BTreeMap<GrammarTokenID, GrammarTokenTrieNode>,
             merge_cache: BTreeMap<GrammarTokenTrieNode, VocabTrieNode>,
         | {
-
+            for (byte, &maybe_llm_token_id) in &vocab_trie_node {
+                if let Some(next_state) = tokenizer.get_next_state(state.0, byte) {
+                    
+                }
+            }
         };
 
         todo!()

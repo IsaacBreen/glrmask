@@ -978,6 +978,10 @@ impl Regex {
         self.init_to_state(self.dfa.start_state)
     }
 
+    pub fn get_next_state(&self, current_state: usize, byte: u8) -> Option<usize> {
+        self.dfa.states[current_state].transitions.get(byte).copied()
+    }
+
     pub fn find(&self, text: &[u8]) -> Option<(GroupID, usize)> {
         let mut regex_state = self.init();
         regex_state.execute(text);
