@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use bitvec::macros::internal::funty::Fundamental;
 use keyed_priority_queue::KeyedPriorityQueue;
+use crate::datastructures::charmap::TrieMap;
 use crate::managed_glr_parser::{ManagedGLRParserState, ManagedParseState};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 
@@ -67,14 +68,15 @@ impl GrammarConstraint {
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         max_llm_token_id: usize,
     ) -> Precomputed {
+        type VocabTrieNode = TrieMap<LLMTokenID>;
+        type GrammarTokenTrieNode = Arc<Mutex<Trie<GrammarTokenID, ()>>>;
         let helper = |
-            regex: &Regex,
-            llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-            max_llm_token_id: usize
-        | -> BTreeMap<> {
-            let mut precomputed = Precomputed::new(regex, llm_token_map, max_llm_token_id);
-            precomputed.precompute();
-            precomputed
+            state: TokenizerStateID,
+            vocab_trie_node: VocabTrieNode,
+            prev_matches: BTreeMap<GrammarTokenID, GrammarTokenTrieNode>,
+            merge_cache: BTreeMap<GrammarTokenTrieNode, VocabTrieNode>,
+        | {
+
         };
 
         todo!()
