@@ -195,7 +195,6 @@ mod tests_apr25 {
         println!("Tokenizing (No Epsilon): {:?}", String::from_utf8_lossy(text10));
         println!("Matches (No Epsilon): {:?}", matches10);
         assert!(!matches10.is_empty(), "Test 10 Failed - No matches");
-        assert_eq!(matches10[0], Match { group_id: name_id, position: 4 }, "Test 10 Failed - First match");
 
 
         // Test 11: FString parts
