@@ -7,4 +7,5 @@ mod r#macro;
 mod tokenizer;
 mod managed_glr_parser;
 mod types;
-mod test_apr25;
+mod tests_apr25;
+mod multi_dfa;
