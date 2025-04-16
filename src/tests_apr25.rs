@@ -182,8 +182,8 @@ mod tests_apr25 {
         state9.execute(b" $invalid");
         // Assert that no token we defined was matched after the space
         assert_eq!(state9.matches, BTreeMap::from([(fstring_middle_id, 9)]), "Test 9 Failed - Expected only FSTRING_MIDDLE");
-        assert!(state9.definitely_fully_matches(), "Test 9 Not Def Fully Matched");
-        assert!(state9.could_match(), "Test 9 Not Could Match"); // Cannot match further after '$'
+        assert!(state9.definitely_fully_matches(), "Test 9 Def Fully Matched");
+        assert!(state9.could_match(), "Test 9 Could Match"); // Cannot match further after '$'
         assert!(!state9.done(), "Test 9 Done"); // Execution stopped at '$'
 
         // Test 10: Sequence using greedy_find_all (simulating tokenization)
