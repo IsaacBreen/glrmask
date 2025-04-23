@@ -126,6 +126,8 @@ impl<EK: Ord, EV, T> Trie<EK, EV, T> {
             };
             if should_propagate {
                 // Before recursing, check again whether the child is already in rec_stack.
+                // This check is technically redundant due to the check at the start of the function,
+                // but kept for clarity/safety.
                 if rec_stack.contains(&child_ptr_val) {
                     panic!(
                         "Cycle detected in propagate_max_depth at child node pointer: {:?}",
@@ -374,6 +376,116 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
              eprintln!("Warning: Some initial nodes were not processed: {:?}", initial_set);
         }
     }
+
+    /// Inserts an edge, potentially merging with existing edges/nodes based on provided functions.
+    ///
+    /// This function attempts to reuse existing nodes and edges before creating a new one.
+    /// The priority is:
+    /// 1. Find an existing edge for `edge_key` whose destination node's value can be merged
+    ///    using `merge_node_value`. If found, update the node's value. Then, attempt to merge
+    ///    the edge value using `merge_edge_value` for that specific edge; update if successful.
+    ///    Return the existing destination node.
+    /// 2. If no node value merge was successful, find an existing edge for `edge_key` whose
+    ///    edge value can be merged using `merge_edge_value`. If found, update the edge value
+    ///    and return the existing destination node.
+    /// 3. If neither merge is possible for any existing edge with the given `edge_key`, create
+    ///    a new node with `new_node_value`, insert a new edge using the provided `edge_key`
+    ///    and `edge_value`, and return the new node. `max_depth` propagation and cycle
+    ///    detection are handled by the underlying `insert` call in this case.
+    ///
+    /// # Arguments
+    /// * `edge_key`: The key for the edge.
+    /// * `edge_value`: The value for the edge.
+    /// * `new_node_value`: The value to use if a new node needs to be created.
+    /// * `merge_edge_value`: A function `FnMut(&EV, EV) -> Option<EV>` that takes a reference
+    ///   to the existing edge value and the new edge value (by value), returning `Some(merged_value)`
+    ///   if merging is possible, or `None` otherwise.
+    /// * `merge_node_value`: A function `FnMut(&T, T) -> Option<T>` that takes a reference
+    ///   to the existing node value and the new node value (by value), returning `Some(merged_value)`
+    ///   if merging is possible, or `None` otherwise.
+    ///
+    /// # Returns
+    /// An `Arc<Mutex<Trie<EK, EV, T>>>` pointing to the destination node (either existing or new).
+    pub fn insert_or_merge_edge<FMergeEV, FMergeNV>(
+        &mut self,
+        edge_key: EK,
+        edge_value: EV,
+        new_node_value: T,
+        mut merge_edge_value: FMergeEV,
+        mut merge_node_value: FMergeNV,
+    ) -> Arc<Mutex<Trie<EK, EV, T>>>
+    where
+        FMergeEV: FnMut(&EV, EV) -> Option<EV>, // Takes &existing, new -> Option<merged>
+        FMergeNV: FnMut(&T, T) -> Option<T>,   // Takes &existing, new -> Option<merged>
+    {
+        // Get mutable access to the vector of children for this edge key.
+        // This will create an empty Vec if the key doesn't exist yet.
+        let children_vec = self.children.entry(edge_key.clone()).or_default();
+
+        // --- Pass 1: Try Node Value Merge First ---
+        for i in 0..children_vec.len() {
+            // We need immutable borrow first to check node value without holding mutable borrow of vec
+            let existing_node_arc = children_vec[i].1.clone(); // Clone Arc to avoid borrow issues
+
+            // Lock the potential destination node and try merging its value
+            let merged_node_val_opt = {
+                let mut existing_node = existing_node_arc
+                    .lock()
+                    .expect("Mutex poisoned during node merge check");
+                // Clone new_node_value as it might be used multiple times
+                merge_node_value(&existing_node.value, new_node_value.clone())
+            };
+
+            if let Some(merged_node_val) = merged_node_val_opt {
+                // Node merge successful! Update the node's value.
+                {
+                    let mut existing_node = existing_node_arc
+                        .lock()
+                        .expect("Mutex poisoned during node value update");
+                    existing_node.value = merged_node_val;
+                } // Lock released
+
+                // Now, re-borrow the vec mutably to potentially update the edge value
+                let (ref mut existing_ev_mut, _) = children_vec[i];
+                // Try merging the edge value for this specific edge
+                if let Some(merged_edge_val) = merge_edge_value(existing_ev_mut, edge_value.clone()) {
+                    *existing_ev_mut = merged_edge_val; // Update edge value
+                }
+                // else: Edge merge failed, but node merge succeeded. Keep existing edge value.
+
+                // Return the Arc to the existing (potentially updated) node
+                return existing_node_arc;
+            }
+            // Node merge failed for this child, continue loop
+        }
+
+        // --- Pass 2: Try Edge Value Merge Only (if Node Merge failed for all) ---
+        for i in 0..children_vec.len() {
+            // Borrow mutably to access existing EV and potentially update it
+            let (ref mut existing_ev_mut, ref existing_node_arc) = children_vec[i];
+
+            // Try merging the edge value. Clone edge_value as it might be used multiple times.
+            if let Some(merged_edge_val) = merge_edge_value(existing_ev_mut, edge_value.clone()) {
+                *existing_ev_mut = merged_edge_val; // Update edge value
+                // Return the Arc to the existing node (node value was not merged)
+                return existing_node_arc.clone();
+            }
+            // Edge merge failed for this child, continue loop
+        }
+
+        // --- Pass 3: Create New Node and Edge ---
+        // If we reach here, no suitable existing edge/node was found or merged.
+        let new_node = Arc::new(Mutex::new(Trie::new(new_node_value)));
+
+        // Use the existing `insert` method. It handles adding the new (EV, Arc) tuple
+        // to the `children_vec` (which we got from `entry().or_default()` earlier)
+        // and also handles max_depth calculation, propagation, and cycle detection.
+        // We pass the original `edge_key` (cloned earlier) and `edge_value`.
+        self.insert(edge_key, edge_value, new_node.clone());
+
+        // Return the Arc to the newly created node
+        new_node
+    }
 }
 
 
@@ -419,16 +531,20 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // Use concrete types for tests, e.g., &str for EK, &str for EV, i32 for T
-    type TestTrie = Trie<&'static str, &'static str, i32>;
-    type TestNode = Arc<Mutex<TestTrie>>;
+    // Use concrete types for tests, e.g., &str for EK, Vec<i32> for EV, String for T
+    type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;
+    type TestNodeMerge = Arc<Mutex<TestTrieMerge>>;
 
     #[test]
     fn test_insertion_and_retrieval() {
-        let mut root = TestTrie::new(0);
-        let child1: TestNode = Arc::new(Mutex::new(TestTrie::new(1)));
-        let child2: TestNode = Arc::new(Mutex::new(TestTrie::new(2)));
-        let child3: TestNode = Arc::new(Mutex::new(TestTrie::new(3))); // Another child for 'a'
+        // Use simpler types for this basic test
+        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
+        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
+
+        let mut root = TestTrieBasic::new(0);
+        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+        let child3: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3))); // Another child for 'a'
 
         root.insert("a", "edge_a1", child1.clone());
         root.insert("b", "edge_b", child2.clone());
@@ -438,7 +554,7 @@ mod tests {
         let retrieved_children_a = root.get(&"a").expect("Failed to get children for 'a'");
         assert_eq!(retrieved_children_a.len(), 2);
         // Check pointers and edge values
-        let retrieved_data_a: HashSet<(&str, *const TestTrie)> = retrieved_children_a
+        let retrieved_data_a: HashSet<(&str, *const TestTrieBasic)> = retrieved_children_a
             .iter()
             .map(|(ev, arc)| (*ev, node_ptr(arc)))
             .collect();
@@ -468,13 +584,16 @@ mod tests {
 
     #[test]
     fn test_multiple_children_same_edge_key() {
+        // Use simpler types for this basic test
+        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
+        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
         // Structure:
         //      root (0) --"edge", "val1"--> child1 (1)
         //           |
         //           --"edge", "val2"--> child2 (2)
-        let root: TestNode = Arc::new(Mutex::new(TestTrie::new(0)));
-        let child1: TestNode = Arc::new(Mutex::new(TestTrie::new(1)));
-        let child2: TestNode = Arc::new(Mutex::new(TestTrie::new(2)));
+        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
+        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
 
         {
             let mut r = root.lock().unwrap();
@@ -485,7 +604,7 @@ mod tests {
         // Check retrieval
         let children_tuples = root.lock().unwrap().get(&"edge").unwrap();
         assert_eq!(children_tuples.len(), 2);
-        let child_data: HashSet<(&str, *const TestTrie)> = children_tuples
+        let child_data: HashSet<(&str, *const TestTrieBasic)> = children_tuples
             .iter()
             .map(|(ev, arc)| (*ev, node_ptr(arc)))
             .collect();
@@ -533,6 +652,9 @@ mod tests {
 
     #[test]
     fn test_special_map_bfs_order_with_edges() {
+        // Use simpler types for this basic test
+        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
+        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
         // Structure:
         //      root (0)
         //       /       \
@@ -544,10 +666,10 @@ mod tests {
         //      |
         //   gc (3)
         //
-        let root: TestNode = Arc::new(Mutex::new(TestTrie::new(0)));
-        let child1: TestNode = Arc::new(Mutex::new(TestTrie::new(1)));
-        let child2: TestNode = Arc::new(Mutex::new(TestTrie::new(2)));
-        let grandchild: TestNode = Arc::new(Mutex::new(TestTrie::new(3)));
+        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
+        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+        let grandchild: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
 
         {
             let mut r = root.lock().unwrap();
@@ -604,6 +726,9 @@ mod tests {
 
     #[test]
     fn test_all_nodes_diamond() {
+        // Use simpler types for this basic test
+        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
+        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
         // Diamond structure:
         //       root
         //      /    \
@@ -614,10 +739,10 @@ mod tests {
         // ("c1","e3") ("c2","e4")
         //      \    /
         //    grandchild
-        let root: TestNode = Arc::new(Mutex::new(TestTrie::new(0))); // Use i32 value
-        let child1: TestNode = Arc::new(Mutex::new(TestTrie::new(1)));
-        let child2: TestNode = Arc::new(Mutex::new(TestTrie::new(2)));
-        let grandchild: TestNode = Arc::new(Mutex::new(TestTrie::new(3)));
+        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0))); // Use i32 value
+        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+        let grandchild: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
 
         {
             let mut r = root.lock().unwrap();
@@ -647,11 +772,14 @@ mod tests {
 
     #[test]
     fn test_special_map_diamond_merge_max() {
+        // Use simpler types for this basic test
+        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
+        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
         // Diamond structure (values/depths as before)
-        let root: TestNode = Arc::new(Mutex::new(TestTrie::new(0)));
-        let child1: TestNode = Arc::new(Mutex::new(TestTrie::new(1)));
-        let child2: TestNode = Arc::new(Mutex::new(TestTrie::new(2)));
-        let grandchild: TestNode = Arc::new(Mutex::new(TestTrie::new(3)));
+        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
+        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+        let grandchild: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
 
         // Build the structure with edge values
         {
@@ -708,7 +836,11 @@ mod tests {
 
     #[test]
     fn test_empty_trie() {
-        let root: TestNode = Arc::new(Mutex::new(TestTrie::new(42)));
+        // Use simpler types for this basic test
+        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
+        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
+
+        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(42)));
         let nodes = Trie::all_nodes(root.clone());
         assert_eq!(nodes.len(), 1);
         assert!(Arc::ptr_eq(&nodes[0], &root));
@@ -733,9 +865,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "Cycle detected in propagate_max_depth")]
     fn test_cycle_detection_on_insert() {
+        // Use simpler types for this basic test
+        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
+        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
         // Cycle:  root -> child -> root
-        let root: TestNode = Arc::new(Mutex::new(TestTrie::new(0)));
-        let child: TestNode = Arc::new(Mutex::new(TestTrie::new(1)));
+        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
+        let child: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
 
         {
             let mut r = root.lock().unwrap();
@@ -751,10 +886,13 @@ mod tests {
 
     #[test]
     fn test_cycle_all_nodes_no_panic() {
+        // Use simpler types for this basic test
+        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
+        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
         // Cycle:  root -> child -> root
         // Manually create cycle without insert's propagation.
-        let root: TestNode = Arc::new(Mutex::new(TestTrie::new(0)));
-        let child: TestNode = Arc::new(Mutex::new(TestTrie::new(1)));
+        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
+        let child: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
 
         // Manually create links
         root.lock().unwrap().children.entry("r->c").or_default().push(("e1", child.clone()));
@@ -775,10 +913,13 @@ mod tests {
 
     #[test]
     fn test_cycle_special_map_no_panic_limited_processing() {
+        // Use simpler types for this basic test
+        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
+        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
         // Cycle: root -> child -> root.
         // Manually create cycle.
-        let root: TestNode = Arc::new(Mutex::new(TestTrie::new(0)));
-        let child: TestNode = Arc::new(Mutex::new(TestTrie::new(1)));
+        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
+        let child: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
 
         // Manually create links
         root.lock().unwrap().children.entry("r->c").or_default().push(("e1", child.clone()));
@@ -815,16 +956,19 @@ mod tests {
 
     #[test]
     fn test_special_map_stop_processing() {
+        // Use simpler types for this basic test
+        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
+        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
         // Structure:
         //      root (0) --e1,e2--> c1(1), c2(2)
         //      c1(1) --e3--> gc1(3)
         //      c2(2) --e4--> gc2(4)
         // Process returns false for c1, true otherwise.
-        let root: TestNode = Arc::new(Mutex::new(TestTrie::new(0)));
-        let child1: TestNode = Arc::new(Mutex::new(TestTrie::new(1)));
-        let child2: TestNode = Arc::new(Mutex::new(TestTrie::new(2)));
-        let grandchild1: TestNode = Arc::new(Mutex::new(TestTrie::new(3)));
-        let grandchild2: TestNode = Arc::new(Mutex::new(TestTrie::new(4)));
+        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
+        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+        let grandchild1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
+        let grandchild2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(4)));
 
         {
             let mut r = root.lock().unwrap();
@@ -880,5 +1024,225 @@ mod tests {
         assert_eq!(final_values.get(&2), Some(&101));
         assert_eq!(final_values.get(&3), None);      // Not processed
         assert_eq!(final_values.get(&4), Some(&102)); // Processed via child2
+    }
+
+    // --- Tests for insert_or_merge_edge ---
+
+    // Helper merge functions for tests
+    // Merge edge value (Vec<i32>): Append new vec to existing if existing is not empty
+    fn merge_ev_append(existing_ev: &Vec<i32>, new_ev: Vec<i32>) -> Option<Vec<i32>> {
+        if !existing_ev.is_empty() {
+            let mut merged = existing_ev.clone();
+            merged.extend(new_ev);
+            Some(merged)
+        } else {
+            None // Don't merge into an empty vec
+        }
+    }
+
+    // Merge node value (String): Append new string if existing contains "mergeable"
+    fn merge_nv_append_if_flag(existing_nv: &String, new_nv: String) -> Option<String> {
+        if existing_nv.contains("mergeable") {
+            Some(format!("{}|{}", existing_nv, new_nv))
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn test_insert_or_merge_no_existing_key() {
+        let mut root = TestTrieMerge::new("root".to_string());
+        let edge_key = "new_key";
+        let edge_val = vec![1];
+        let node_val = "new_node".to_string();
+
+        let returned_node = root.insert_or_merge_edge(
+            edge_key,
+            edge_val.clone(),
+            node_val.clone(),
+            merge_ev_append,
+            merge_nv_append_if_flag,
+        );
+
+        // Check that a new node was created
+        assert_eq!(returned_node.lock().unwrap().value, node_val);
+        assert_eq!(returned_node.lock().unwrap().max_depth, 1); // Depth updated by insert
+
+        // Check that the edge was added to the root
+        let children = root.children.get(edge_key).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].0, edge_val); // Original edge value
+        assert!(Arc::ptr_eq(&children[0].1, &returned_node));
+        assert_eq!(root.max_depth, 0); // Root depth unchanged
+    }
+
+    #[test]
+    fn test_insert_or_merge_node_merge_success_edge_merge_success() {
+        let mut root = TestTrieMerge::new("root".to_string());
+        let existing_node: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("child_mergeable".to_string())));
+        root.insert("key", vec![10], existing_node.clone()); // Initial insert
+
+        let edge_key = "key";
+        let edge_val = vec![1]; // New edge value
+        let node_val = "data".to_string(); // New node value data
+
+        let returned_node = root.insert_or_merge_edge(
+            edge_key,
+            edge_val.clone(),
+            node_val.clone(),
+            merge_ev_append, // Should succeed: [10] + [1] -> [10, 1]
+            merge_nv_append_if_flag, // Should succeed: "child_mergeable" + "data" -> "child_mergeable|data"
+        );
+
+        // Check that the existing node was returned and updated
+        assert!(Arc::ptr_eq(&returned_node, &existing_node));
+        assert_eq!(returned_node.lock().unwrap().value, "child_mergeable|data");
+        assert_eq!(returned_node.lock().unwrap().max_depth, 1); // Depth unchanged
+
+        // Check that the edge value was updated in the root
+        let children = root.children.get(edge_key).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].0, vec![10, 1]); // Merged edge value
+        assert!(Arc::ptr_eq(&children[0].1, &existing_node));
+    }
+
+     #[test]
+    fn test_insert_or_merge_node_merge_success_edge_merge_fail() {
+        let mut root = TestTrieMerge::new("root".to_string());
+        // Edge value is empty, so merge_ev_append will fail
+        let existing_node: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("child_mergeable".to_string())));
+        root.insert("key", vec![], existing_node.clone());
+
+        let edge_key = "key";
+        let edge_val = vec![1];
+        let node_val = "data".to_string();
+
+        let returned_node = root.insert_or_merge_edge(
+            edge_key,
+            edge_val.clone(),
+            node_val.clone(),
+            merge_ev_append, // Should fail: existing is empty
+            merge_nv_append_if_flag, // Should succeed
+        );
+
+        // Check existing node returned and updated
+        assert!(Arc::ptr_eq(&returned_node, &existing_node));
+        assert_eq!(returned_node.lock().unwrap().value, "child_mergeable|data");
+
+        // Check edge value was *not* updated
+        let children = root.children.get(edge_key).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].0, vec![]); // Original edge value remains
+        assert!(Arc::ptr_eq(&children[0].1, &existing_node));
+    }
+
+    #[test]
+    fn test_insert_or_merge_node_merge_fail_edge_merge_success() {
+        let mut root = TestTrieMerge::new("root".to_string());
+        // Node value does not contain "mergeable", so merge_nv will fail
+        let existing_node: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("child_not_mergeable".to_string())));
+        root.insert("key", vec![10], existing_node.clone());
+
+        let edge_key = "key";
+        let edge_val = vec![1];
+        let node_val = "data".to_string();
+
+        let returned_node = root.insert_or_merge_edge(
+            edge_key,
+            edge_val.clone(),
+            node_val.clone(),
+            merge_ev_append, // Should succeed
+            merge_nv_append_if_flag, // Should fail
+        );
+
+        // Check existing node returned, but *not* updated
+        assert!(Arc::ptr_eq(&returned_node, &existing_node));
+        assert_eq!(returned_node.lock().unwrap().value, "child_not_mergeable"); // Original value
+
+        // Check edge value *was* updated
+        let children = root.children.get(edge_key).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].0, vec![10, 1]); // Merged edge value
+        assert!(Arc::ptr_eq(&children[0].1, &existing_node));
+    }
+
+    #[test]
+    fn test_insert_or_merge_both_merge_fail_creates_new() {
+        let mut root = TestTrieMerge::new("root".to_string());
+        // Node value not mergeable, edge value empty -> both merges fail
+        let existing_node: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("child_not_mergeable".to_string())));
+        root.insert("key", vec![], existing_node.clone());
+
+        let edge_key = "key";
+        let edge_val = vec![1]; // New edge value
+        let node_val = "new_data".to_string(); // New node value
+
+        let returned_node = root.insert_or_merge_edge(
+            edge_key,
+            edge_val.clone(),
+            node_val.clone(),
+            merge_ev_append, // Fails (existing empty)
+            merge_nv_append_if_flag, // Fails (existing doesn't contain "mergeable")
+        );
+
+        // Check a *new* node was returned
+        assert!(!Arc::ptr_eq(&returned_node, &existing_node));
+        assert_eq!(returned_node.lock().unwrap().value, node_val);
+        assert_eq!(returned_node.lock().unwrap().max_depth, 1); // New node depth
+
+        // Check root now has *two* children for "key"
+        let children = root.children.get(edge_key).unwrap();
+        assert_eq!(children.len(), 2);
+
+        // Find the original edge/node
+        let original_edge = children.iter().find(|(_, arc)| Arc::ptr_eq(arc, &existing_node)).unwrap();
+        assert_eq!(original_edge.0, vec![]); // Original edge value unchanged
+        assert_eq!(existing_node.lock().unwrap().value, "child_not_mergeable"); // Original node value unchanged
+
+        // Find the new edge/node
+        let new_edge = children.iter().find(|(_, arc)| Arc::ptr_eq(arc, &returned_node)).unwrap();
+        assert_eq!(new_edge.0, edge_val); // New edge value used
+    }
+
+     #[test]
+    fn test_insert_or_merge_multiple_edges_picks_first_match() {
+        let mut root = TestTrieMerge::new("root".to_string());
+
+        // Edge 1: Node merge fails, Edge merge succeeds
+        let node1: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("node1_not_mergeable".to_string())));
+        root.insert("key", vec![10], node1.clone());
+
+        // Edge 2: Node merge succeeds, Edge merge fails
+        let node2: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("node2_mergeable".to_string())));
+        root.insert("key", vec![], node2.clone());
+
+        let edge_key = "key";
+        let edge_val = vec![1];
+        let node_val = "data".to_string();
+
+        // Since node merge is checked first, node2 should be selected.
+        let returned_node = root.insert_or_merge_edge(
+            edge_key,
+            edge_val.clone(),
+            node_val.clone(),
+            merge_ev_append, // Fails for node2's edge, succeeds for node1's edge
+            merge_nv_append_if_flag, // Succeeds for node2, fails for node1
+        );
+
+        // Check node2 was returned and updated
+        assert!(Arc::ptr_eq(&returned_node, &node2));
+        assert_eq!(returned_node.lock().unwrap().value, "node2_mergeable|data");
+
+        // Check root's children: node1 unchanged, node2's edge unchanged (because edge merge failed)
+        let children = root.children.get(edge_key).unwrap();
+        assert_eq!(children.len(), 2);
+
+        let edge1_info = children.iter().find(|(_, arc)| Arc::ptr_eq(arc, &node1)).unwrap();
+        assert_eq!(edge1_info.0, vec![10]); // Unchanged
+        assert_eq!(node1.lock().unwrap().value, "node1_not_mergeable"); // Unchanged
+
+        let edge2_info = children.iter().find(|(_, arc)| Arc::ptr_eq(arc, &node2)).unwrap();
+        assert_eq!(edge2_info.0, vec![]); // Unchanged (edge merge failed)
+        // Node value was updated above check.
     }
 }
