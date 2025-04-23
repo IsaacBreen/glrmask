@@ -1,13 +1,16 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::cmp::Ordering;
 
 // Represents a node in the VocabPrefixTree
-#[derive(PartialEq)]
+#[derive(PartialEq)] // Keep derived PartialEq for structural comparison in tests
 pub struct VocabPrefixTreeNode {
     /// The token ID corresponding to the path from the root to this node.
     /// Every node represents a valid token endpoint.
     /// The root node has ID 0 by convention, unless overwritten by an empty string token.
     token_id: usize,
+    /// The length of the byte sequence from the root to this node.
+    prefix_length: usize,
     /// Children nodes, keyed by the byte vector representing the edge label.
     /// BTreeMap ensures edges are sorted lexicographically by byte vector.
     children: BTreeMap<Vec<u8>, VocabPrefixTreeNode>,
@@ -15,9 +18,10 @@ pub struct VocabPrefixTreeNode {
 
 impl VocabPrefixTreeNode {
     /// Creates a new node representing a token endpoint.
-    fn new(token_id: usize) -> Self {
+    fn new(token_id: usize, prefix_length: usize) -> Self {
         VocabPrefixTreeNode {
             token_id,
+            prefix_length,
             children: BTreeMap::new(),
         }
     }
@@ -39,6 +43,7 @@ impl fmt::Debug for VocabPrefixTreeNode {
 
         let mut debug_struct = f.debug_struct("VocabPrefixTreeNode");
         debug_struct.field("token_id", &self.token_id);
+        debug_struct.field("prefix_length", &self.prefix_length);
 
         // Format children concisely using the helper.
         let children_summary: BTreeMap<String, &VocabPrefixTreeNode> = self
@@ -69,8 +74,8 @@ impl VocabPrefixTree {
     /// as not representing an explicit empty string token initially.
     pub fn new() -> Self {
         VocabPrefixTree {
-            // Root node represents the empty prefix, ID 0 by convention.
-            root: VocabPrefixTreeNode::new(0),
+            // Root node represents the empty prefix (length 0), ID 0 by convention.
+            root: VocabPrefixTreeNode::new(0, 0),
             // Initially, assume no empty string token is present.
             has_empty_string_token: false,
         }
@@ -84,7 +89,7 @@ impl VocabPrefixTree {
     /// default ID 0, and the `has_empty_string_token` flag is set.
     pub fn build(tokens: &[(usize, Vec<u8>)]) -> Self {
         let mut tree = VocabPrefixTree::new(); // Root starts with ID 0, flag false
-
+                                               // Root prefix_length is 0
         // 1. Initial population: Add all tokens as direct children of the root.
         //    Each edge uses the full token byte vector as its label, leading
         //    to a leaf node holding the token's ID.
@@ -93,14 +98,15 @@ impl VocabPrefixTree {
                 // Assign the token ID for the empty string directly to the root,
                 // overwriting the default 0 if necessary.
                  tree.root.token_id = *id;
+                 // tree.root.prefix_length remains 0, which is correct.
                  // Mark that the root ID now represents an actual token.
                  tree.has_empty_string_token = true;
                 continue;
             }
             // Insert node. If duplicate byte vecs exist, the last ID wins due to BTreeMap semantics.
-            tree.root
-                .children
-                .insert(bytes.clone(), VocabPrefixTreeNode::new(*id));
+            // The prefix_length is the length of the full token bytes.
+            let node = VocabPrefixTreeNode::new(*id, bytes.len());
+            tree.root.children.insert(bytes.clone(), node);
         }
 
         // 2. Merge nodes recursively starting from the root's children.
@@ -234,6 +240,24 @@ impl Default for VocabPrefixTree {
     }
 }
 
+// Need Eq to implement Ord
+impl Eq for VocabPrefixTreeNode {}
+
+impl PartialOrd for VocabPrefixTreeNode {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for VocabPrefixTreeNode {
+    /// Compares nodes primarily based on `prefix_length` and secondarily on `token_id`.
+    /// Note: This ordering ignores the `children` field and is therefore NOT necessarily
+    /// consistent with the derived `PartialEq` implementation which compares all fields.
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.prefix_length.cmp(&other.prefix_length)
+            .then_with(|| self.token_id.cmp(&other.token_id))
+    }
+}
 
 // --- Tests ---
 #[cfg(test)]
@@ -250,6 +274,7 @@ mod tests {
         let tokens: Vec<(usize, Vec<u8>)> = vec![];
         let tree = VocabPrefixTree::build(&tokens);
         assert_eq!(tree.root.token_id, 0); // Root defaults to 0
+        assert_eq!(tree.root.prefix_length, 0); // Root length is 0
         assert!(!tree.has_empty_string_token()); // No empty token provided
         assert!(tree.root.children.is_empty());
         assert_eq!(tree.find_token(b"a"), None);
@@ -262,12 +287,14 @@ mod tests {
         let tree = VocabPrefixTree::build(&tokens);
 
         assert_eq!(tree.root.token_id, 0); // Root ID remains 0
+        assert_eq!(tree.root.prefix_length, 0);
         assert!(!tree.has_empty_string_token()); // No empty token provided
         assert_eq!(tree.root.children.len(), 1);
         assert!(tree.root.children.contains_key(&b("hello")));
 
         let node = tree.root.children.get(&b("hello")).unwrap();
         assert_eq!(node.token_id, 1);
+        assert_eq!(node.prefix_length, 5); // "hello" has length 5
         assert!(node.children.is_empty());
 
         assert_eq!(tree.find_token(&b("hello")), Some(1));
@@ -283,6 +310,7 @@ mod tests {
         let tree = VocabPrefixTree::build(&tokens);
 
         assert_eq!(tree.root.token_id, 99); // Root gets the ID for ""
+        assert_eq!(tree.root.prefix_length, 0); // Empty string has length 0
         assert!(tree.has_empty_string_token()); // Empty token WAS provided
         assert_eq!(tree.root.children.len(), 1);
         assert!(tree.root.children.contains_key(&b("a")));
@@ -299,6 +327,7 @@ mod tests {
         let tree = VocabPrefixTree::build(&tokens);
 
         assert_eq!(tree.root.token_id, 0); // Root gets the ID 0 for ""
+        assert_eq!(tree.root.prefix_length, 0);
         assert!(tree.has_empty_string_token()); // Empty token WAS provided
         assert_eq!(tree.root.children.len(), 1);
         assert!(tree.root.children.contains_key(&b("a")));
@@ -316,16 +345,19 @@ mod tests {
         let tree = VocabPrefixTree::build(&tokens);
 
         assert_eq!(tree.root.token_id, 0);
+        assert_eq!(tree.root.prefix_length, 0);
         assert!(!tree.has_empty_string_token());
         assert_eq!(tree.root.children.len(), 1);
         assert!(tree.root.children.contains_key(&b("a")));
 
         let node_a = tree.root.children.get(&b("a")).unwrap();
         assert_eq!(node_a.token_id, 1);
+        assert_eq!(node_a.prefix_length, 1); // "a" length 1
         assert_eq!(node_a.children.len(), 1);
         assert!(node_a.children.contains_key(&b("b")));
 
         let node_ab = node_a.children.get(&b("b")).unwrap();
+        assert_eq!(node_ab.prefix_length, 2); // "ab" length 2
         assert_eq!(node_ab.token_id, 2);
         assert!(node_ab.children.is_empty());
 
@@ -343,17 +375,21 @@ mod tests {
         let tree = VocabPrefixTree::build(&tokens);
 
         assert_eq!(tree.root.token_id, 0);
+        assert_eq!(tree.root.prefix_length, 0);
         assert!(!tree.has_empty_string_token());
         assert_eq!(tree.root.children.len(), 1);
         let node_a = tree.root.children.get(&b("a")).unwrap();
         assert_eq!(node_a.token_id, 1);
+        assert_eq!(node_a.prefix_length, 1);
         assert_eq!(node_a.children.len(), 1);
 
         let node_ab = node_a.children.get(&b("b")).unwrap();
         assert_eq!(node_ab.token_id, 2);
+        assert_eq!(node_ab.prefix_length, 2);
         assert_eq!(node_ab.children.len(), 1);
 
         let node_abc = node_ab.children.get(&b("c")).unwrap();
+        assert_eq!(node_abc.prefix_length, 3);
         assert_eq!(node_abc.token_id, 3);
         assert!(node_abc.children.is_empty());
 
@@ -371,21 +407,25 @@ mod tests {
         let tree_with_prefix = VocabPrefixTree::build(&tokens_with_prefix);
 
         assert_eq!(tree_with_prefix.root.token_id, 0);
+        assert_eq!(tree_with_prefix.root.prefix_length, 0);
         assert!(!tree_with_prefix.has_empty_string_token());
         assert_eq!(tree_with_prefix.root.children.len(), 1);
         assert!(tree_with_prefix.root.children.contains_key(&b("app")));
 
         let node_app = tree_with_prefix.root.children.get(&b("app")).unwrap();
         assert_eq!(node_app.token_id, 5);
+        assert_eq!(node_app.prefix_length, 3); // "app" length 3
         assert_eq!(node_app.children.len(), 2);
 
         assert!(node_app.children.contains_key(&b("le")));
         let node_apple = node_app.children.get(&b("le")).unwrap();
         assert_eq!(node_apple.token_id, 10);
+        assert_eq!(node_apple.prefix_length, 5); // "apple" length 5
         assert!(node_apple.children.is_empty());
 
         assert!(node_app.children.contains_key(&b("ly")));
         let node_apply = node_app.children.get(&b("ly")).unwrap();
+        assert_eq!(node_apply.prefix_length, 5); // "apply" length 5
         assert_eq!(node_apply.token_id, 20);
         assert!(node_apply.children.is_empty());
 
@@ -403,16 +443,19 @@ mod tests {
         let tree = VocabPrefixTree::build(&tokens);
 
         assert_eq!(tree.root.token_id, 0);
+        assert_eq!(tree.root.prefix_length, 0);
         assert!(!tree.has_empty_string_token());
         assert_eq!(tree.root.children.len(), 2);
         assert!(tree.root.children.contains_key(&b("apple")));
         assert!(tree.root.children.contains_key(&b("apply")));
 
         let node_apple = tree.root.children.get(&b("apple")).unwrap();
+        assert_eq!(node_apple.prefix_length, 5);
         assert_eq!(node_apple.token_id, 10);
         assert!(node_apple.children.is_empty());
 
         let node_apply = tree.root.children.get(&b("apply")).unwrap();
+        assert_eq!(node_apply.prefix_length, 5);
         assert_eq!(node_apply.token_id, 20);
         assert!(node_apply.children.is_empty());
 
@@ -438,28 +481,39 @@ mod tests {
         let tree = VocabPrefixTree::build(&tokens);
 
         assert_eq!(tree.root.token_id, 99); // Root ID set by "" token
+        assert_eq!(tree.root.prefix_length, 0);
         assert!(tree.has_empty_string_token()); // Flag is true
         assert_eq!(tree.root.children.len(), 2);
         assert!(tree.root.children.contains_key(&b("a")));
         assert!(tree.root.children.contains_key(&b("b")));
 
         // Check branch 'a'
+        // The merge logic places nodes whose token is prefixed by another token
+        // as children of that prefix token's node.
+        // "a" (1) is a token. "ape"(10), "apple"(11), "apply"(12) all start with "a".
+        // So, they become children of the node for "a".
         let node_a = tree.root.children.get(&b("a")).unwrap();
         assert_eq!(node_a.token_id, 1);
+        assert_eq!(node_a.prefix_length, 1);
         assert_eq!(node_a.children.len(), 3);
         assert!(node_a.children.contains_key(&b("pe")));
         assert!(node_a.children.contains_key(&b("pple")));
         assert!(node_a.children.contains_key(&b("pply")));
         assert_eq!(node_a.children.get(&b("pe")).unwrap().token_id, 10);
+        assert_eq!(node_a.children.get(&b("pe")).unwrap().prefix_length, 3); // "ape"
         assert_eq!(node_a.children.get(&b("pple")).unwrap().token_id, 11);
+        assert_eq!(node_a.children.get(&b("pple")).unwrap().prefix_length, 5); // "apple"
         assert_eq!(node_a.children.get(&b("pply")).unwrap().token_id, 12);
+        assert_eq!(node_a.children.get(&b("pply")).unwrap().prefix_length, 5); // "apply"
 
         // Check branch 'b'
         let node_b = tree.root.children.get(&b("b")).unwrap();
         assert_eq!(node_b.token_id, 2);
+        assert_eq!(node_b.prefix_length, 1);
         assert_eq!(node_b.children.len(), 1);
         assert!(node_b.children.contains_key(&b("anana")));
         assert_eq!(node_b.children.get(&b("anana")).unwrap().token_id, 20);
+        assert_eq!(node_b.children.get(&b("anana")).unwrap().prefix_length, 6); // "banana"
 
         // Test lookups
         assert_eq!(tree.find_token(&b("a")), Some(1));
@@ -480,16 +534,19 @@ mod tests {
         let tree = VocabPrefixTree::build(&tokens);
 
         assert_eq!(tree.root.token_id, 0);
+        assert_eq!(tree.root.prefix_length, 0);
         assert!(!tree.has_empty_string_token());
         assert_eq!(tree.root.children.len(), 1);
         assert!(tree.root.children.contains_key(&b("a")));
 
         let node_a = tree.root.children.get(&b("a")).unwrap();
         assert_eq!(node_a.token_id, 3); // Last ID wins
+        assert_eq!(node_a.prefix_length, 1); // Length of "a"
         assert_eq!(node_a.children.len(), 1);
 
         assert!(node_a.children.contains_key(&b("b")));
         let node_ab = node_a.children.get(&b("b")).unwrap();
+        assert_eq!(node_ab.prefix_length, 2); // Length of "ab"
         assert_eq!(node_ab.token_id, 2);
         assert!(node_ab.children.is_empty());
 
