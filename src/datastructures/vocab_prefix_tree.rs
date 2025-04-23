@@ -7,7 +7,7 @@ pub struct VocabPrefixTreeNode {
     /// The token ID corresponding to the path from the root to this node.
     /// Every node represents a valid token endpoint.
     /// The root node has ID 0 by convention, unless overwritten by an empty string token.
-    token_id: u32,
+    token_id: usize,
     /// Children nodes, keyed by the byte vector representing the edge label.
     /// BTreeMap ensures edges are sorted lexicographically by byte vector.
     children: BTreeMap<Vec<u8>, VocabPrefixTreeNode>,
@@ -15,7 +15,7 @@ pub struct VocabPrefixTreeNode {
 
 impl VocabPrefixTreeNode {
     /// Creates a new node representing a token endpoint.
-    fn new(token_id: u32) -> Self {
+    fn new(token_id: usize) -> Self {
         VocabPrefixTreeNode {
             token_id,
             children: BTreeMap::new(),
@@ -82,7 +82,7 @@ impl VocabPrefixTree {
     /// the node for P becomes an ancestor of the node for Q.
     /// If an empty string token "" is provided, its ID overwrites the root's
     /// default ID 0, and the `has_empty_string_token` flag is set.
-    pub fn build(tokens: &[(u32, Vec<u8>)]) -> Self {
+    pub fn build(tokens: &[(usize, Vec<u8>)]) -> Self {
         let mut tree = VocabPrefixTree::new(); // Root starts with ID 0, flag false
 
         // 1. Initial population: Add all tokens as direct children of the root.
@@ -179,7 +179,7 @@ impl VocabPrefixTree {
      /// Returns `None` if the sequence does not correspond to a token in the tree.
      /// Specifically, searching for the empty string `b""` only succeeds if an
      /// empty string token was explicitly added during the build process.
-    pub fn find_token(&self, bytes: &[u8]) -> Option<u32> {
+    pub fn find_token(&self, bytes: &[u8]) -> Option<usize> {
         if bytes.is_empty() {
             // Only return the root's ID if it represents an actual empty string token.
             if self.has_empty_string_token {
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn test_empty_tree() {
-        let tokens: Vec<(u32, Vec<u8>)> = vec![];
+        let tokens: Vec<(usize, Vec<u8>)> = vec![];
         let tree = VocabPrefixTree::build(&tokens);
         assert_eq!(tree.root.token_id, 0); // Root defaults to 0
         assert!(!tree.has_empty_string_token()); // No empty token provided
