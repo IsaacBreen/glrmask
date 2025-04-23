@@ -411,25 +411,18 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         // After the loop, check if any initial nodes were *not* processed.
         if !initial_set.is_empty() {
              eprintln!("Warning: Some initial nodes were not processed: {:?}", initial_set);
-             // Check for nodes left in state but unprocessed (might indicate issues)
-             for (ptr, (_v, arr_depth)) in state.iter() {
-                 if !processed.contains(ptr) {
-                     // Attempt to find the node in the result of all_nodes to get its max_depth for the warning
-                     // This is inefficient but only happens on warning condition.
-                     let all_reachable_nodes = Self::all_nodes(ready.front().cloned().or_else(|| state.keys().next().map(|p| {
-                         // This part is tricky: need an Arc to get max_depth, but only have ptr.
-                         // This warning might lack max_depth info if the node wasn't initially provided.
-                         // For simplicity, omit max_depth in this specific warning case.
-                         eprintln!("Warning: Node {:?} remained in state (arr_depth={}) but was not processed.", ptr, arr_depth);
-                         None::<Arc<Mutex<Trie<EK,EV,T>>>> // Placeholder
-                     })).flatten().unwrap_or_else(|| Arc::new(Mutex::new(Trie::new( T::default() ))))); // Need T: Default here, bad fallback
-
-                     // Find the node arc corresponding to the pointer to get its max_depth
-                     // This is complex and potentially slow. Let's simplify the warning.
-                     eprintln!("Warning: Node {:?} remained in state (arr_depth={}) but was not processed.", ptr, arr_depth);
-
+        }
+        // Also check if any nodes remain in the state map but weren't processed
+        let mut unprocessed_in_state = false;
+        for (ptr, (_v, arr_depth)) in state.iter() {
+            if !processed.contains(ptr) {
+                 if !unprocessed_in_state {
+                     eprintln!("Warning: Nodes remaining in state but not processed (ptr, arrival_depth):");
+                     unprocessed_in_state = true;
                  }
-             }
+                 // Print pointer and arrival depth. Max depth isn't easily available here.
+                 eprintln!("  - ({:?}, {})", ptr, arr_depth);
+            }
         }
     }
 
