@@ -1159,7 +1159,7 @@ mod tests {
         // Check edge value was *not* updated
         let children = root.children.get(edge_key).unwrap();
         assert_eq!(children.len(), 1);
-        assert_eq!(children[0].0, vec![]); // Original edge value remains
+        assert_eq!(children[0].0, Vec::<i32>::new()); // Original edge value remains
         assert!(Arc::ptr_eq(&children[0].1, &existing_node));
     }
 
@@ -1227,7 +1227,7 @@ mod tests {
 
         // Find the original edge/node
         let original_edge = children.iter().find(|(_, arc)| Arc::ptr_eq(arc, &existing_node)).unwrap();
-        assert_eq!(original_edge.0, vec![]); // Original edge value unchanged
+        assert_eq!(original_edge.0, Vec::<i32>::new()); // Original edge value unchanged
         assert_eq!(existing_node.lock().unwrap().value, "child_not_mergeable"); // Original node value unchanged
 
         // Find the new edge/node
@@ -1275,7 +1275,7 @@ mod tests {
         assert_eq!(node1.lock().unwrap().value, "node1_not_mergeable"); // Unchanged
 
         let edge2_info = children.iter().find(|(_, arc)| Arc::ptr_eq(arc, &node2)).unwrap();
-        assert_eq!(edge2_info.0, vec![]); // Unchanged (edge merge failed)
+        assert_eq!(edge2_info.0, Vec::<i32>::new()); // Unchanged (edge merge failed)
         // Node value was updated (checked above).
     }
 
@@ -1304,11 +1304,15 @@ mod tests {
         assert_eq!(merge_result.err(), Some(CycleDetectedError));
 
         // Verify the edge c->r was still added (as try_insert adds before propagating)
-         assert!(child.lock().unwrap().children.contains_key("c->r"));
-         assert_eq!(child.lock().unwrap().children.get("c->r").unwrap().len(), 1);
+         let child_guard = child.lock().unwrap();
+         assert!(child_guard.children.contains_key("c->r"));
+         let child_edges = child_guard.children.get("c->r").unwrap();
+         assert_eq!(child_edges.len(), 1);
          // Check the edge points to the correct node ptr.
-         let edge_target_arc = &child.lock().unwrap().children.get("c->r").unwrap()[0].1;
+         let edge_target_arc = &child_edges[0].1;
          assert!(Arc::ptr_eq(edge_target_arc, &root)); // Should point back to root
+         drop(child_guard); // Explicitly drop guard after use (optional, but good practice)
+
 
          // Verify depths are unchanged from before the failed insert
          assert_eq!(root.lock().unwrap().max_depth, 0);
