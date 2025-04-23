@@ -58,7 +58,7 @@ impl fmt::Debug for VocabPrefixTreeNode {
 /// Edges are labeled with byte vectors.
 #[derive(Debug, PartialEq)]
 pub struct VocabPrefixTree {
-    root: VocabPrefixTreeNode,
+    pub root: VocabPrefixTreeNode,
     /// Flag indicating if the empty string `""` was explicitly provided as a token.
     has_empty_string_token: bool,
 }

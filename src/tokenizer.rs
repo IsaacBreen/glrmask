@@ -44,7 +44,7 @@ impl Regex {
         regex_state.possible_group_ids().iter().cloned().map(|id| GrammarTokenID(id)).collect()
     }
 
-    fn max_state(&self) -> usize {
+    pub(crate) fn max_state(&self) -> usize {
         self.dfa.states.len()
     }
 }

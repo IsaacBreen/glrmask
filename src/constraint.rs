@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use bitvec::macros::internal::funty::Fundamental;
 use keyed_priority_queue::KeyedPriorityQueue;
 use crate::datastructures::charmap::TrieMap;
+use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::managed_glr_parser::{ManagedGLRParserState, ManagedParseState};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 
@@ -23,12 +24,13 @@ pub struct PrecomputedFinalizer {
     pub(crate) tokenizer_state_ids: BTreeSet<TokenizerStateID>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct PrecomputedNodeContents {
     pub(crate) finalizers: Vec<PrecomputedFinalizer>,
 }
 
-type Precomputed = BTreeMap<TokenizerStateID, Trie<GrammarTokenID, LLMTokenBV, PrecomputedNodeContents>>;
+type PrecomputeNode = Trie<GrammarTokenID, LLMTokenBV, PrecomputedNodeContents>;
+type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode>;
 
 #[derive(Debug, Clone)]
 pub struct GrammarConstraint {
@@ -67,20 +69,34 @@ impl GrammarConstraint {
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         max_llm_token_id: usize,
     ) -> Precomputed {
-        type VocabTrieNode = TrieMap<Option<LLMTokenID>>;
-        type GrammarTokenTrieNode = Arc<Mutex<Trie<GrammarTokenID, (), ()>>>;
-        let helper = |
-            state: TokenizerStateID,
-            vocab_trie_node: VocabTrieNode,
-            prev_matches: BTreeMap<GrammarTokenID, GrammarTokenTrieNode>,
-            merge_cache: BTreeMap<GrammarTokenTrieNode, VocabTrieNode>,
-        | {
-            for (byte, &maybe_llm_token_id) in &vocab_trie_node {
-                if let Some(next_state) = tokenizer.get_next_state(state.0, byte) {
-                    
-                }
-            }
-        };
+        #[derive(Clone)]
+struct QueueItem<'a> {
+            vocab_node: &'a VocabPrefixTreeNode,
+            tokenizer_state_id_to_precompute_nodes: BTreeMap<TokenizerStateID, Vec<Arc<Mutex<PrecomputeNode>>>>,
+        }
+
+        // Create the vocab prefix tree.
+        let mut tokens_for_vocab_prefix_tree_builder: Vec<(usize, Vec<u8>)> = vec![];
+        for (content, id) in llm_token_map {
+            tokens_for_vocab_prefix_tree_builder.push((id.0, content.clone()));
+        }
+        let mut vocab_prefix_tree = VocabPrefixTree::build(&tokens_for_vocab_prefix_tree_builder);
+
+        // Create the roots.
+        let mut precompute_roots: BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
+        for tokenizer_state_id in 0..tokenizer.max_state() {
+            let mut node = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
+            precompute_roots.insert(TokenizerStateID(tokenizer_state_id), node.clone());
+        }
+
+        // Queue keyed by position.
+        let mut queue: BTreeMap<u32, Vec<QueueItem>> = BTreeMap::new();
+
+        // Initialize the queue with the roots.
+        queue.insert(0, precompute_roots.clone().into_iter().map(|(tokenizer_state_id, node)| QueueItem {
+            vocab_node: &vocab_prefix_tree.root,
+            tokenizer_state_id_to_precompute_nodes: vec![(tokenizer_state_id, vec![node])].into_iter().collect(),
+        }).collect());
 
         todo!()
     }
@@ -130,7 +146,7 @@ impl GrammarConstraintState<'_> {
         // The BTreeSet<TokenizerStateID> in each Trie node here is the set of terminal states at this node.
         // Each terminal state indicates that the path through the trie can terminate here.
         // (todo: explain this better)
-        let mut initial_nodes_and_values: Vec<(Arc<Mutex<Trie<GrammarTokenID, LLMTokenBV, PrecomputedNodeContents>>>, ManagedGLRParserState)> = Vec::new();
+        let mut initial_nodes_and_values: Vec<(Arc<Mutex<PrecomputeNode>>, ManagedGLRParserState)> = Vec::new();
 
         let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, (BTreeSet<ManagedParseState>, LLMTokenBV)> = BTreeMap::new();
         for managed_parse_state in self.state.active_states.iter() {
