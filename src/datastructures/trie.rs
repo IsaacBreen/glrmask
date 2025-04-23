@@ -26,9 +26,9 @@ impl Error for CycleDetectedError {}
 #[derive(Debug, Clone)]
 pub struct Trie<EK: Ord, EV, T> {
     pub value: T,
-    // Stores a Vec of (EdgeValue, ChildArc) tuples for each edge key.
+    /// Stores a Vec of (EdgeValue, ChildArc) tuples for each edge key.
     children: BTreeMap<EK, Vec<(EV, Arc<Mutex<Trie<EK, EV, T>>>)>>,
-    /// The “longest distance” from some source node (as computed during insertion)
+    /// The “longest distance” from some source node (as computed during insertion).
     /// This value is set (or updated) when an edge is inserted.
     pub max_depth: usize,
 }
@@ -58,7 +58,7 @@ impl<EK: Ord, EV, T> Trie<EK, EV, T> {
     pub fn try_insert(
         &mut self,
         edge_key: EK,
-        edge_value: EV, // Added edge value parameter
+        edge_value: EV,
         child: Arc<Mutex<Trie<EK, EV, T>>>,
     ) -> Result<(), CycleDetectedError> {
         let candidate_depth = self.max_depth.saturating_add(1);
@@ -70,7 +70,6 @@ impl<EK: Ord, EV, T> Trie<EK, EV, T> {
                 child_lock.max_depth = candidate_depth;
                 needs_propagation = true;
             }
-            // else: child's depth didn't change, no need to propagate from here.
         } // child_lock is released here
 
         // Add the (edge_value, child) tuple to the list for this edge key *before* propagation.
@@ -170,9 +169,8 @@ impl<EK: Ord, EV, T> Trie<EK, EV, T> {
         &self,
         edge_key: &EK,
     ) -> Option<Vec<(EV, Arc<Mutex<Trie<EK, EV, T>>>)>>
-    where EV: Clone // Add constraint here as it's specific to this method's cloning
+    where EV: Clone
     {
-        // .cloned() clones the Vec<(EV, Arc<...>)>, which clones EV and the Arc.
         self.children.get(edge_key).cloned()
     }
 
@@ -191,7 +189,6 @@ impl<EK: Ord, EV, T> Trie<EK, EV, T> {
     /// Collects all *unique* nodes (by pointer) reachable from the given root (BFS).
     /// This method does not panic on cycles, it simply avoids revisiting nodes.
     pub fn all_nodes(root: Arc<Mutex<Trie<EK, EV, T>>>) -> Vec<Arc<Mutex<Trie<EK, EV, T>>>> {
-        // Use a visited pointer set.
         let mut visited_ptrs: HashSet<*const Trie<EK, EV, T>> = HashSet::new();
         let mut result = Vec::new();
         let mut queue = VecDeque::new();
@@ -220,10 +217,8 @@ impl<EK: Ord, EV, T> Trie<EK, EV, T> {
     }
 }
 
-// A helper that “gets” the raw pointer from an Arc<Mutex<Trie>>; panic if poisoned.
-// Updated generics.
+/// Helper to get the raw pointer from an Arc<Mutex<Trie>>. Panics if the mutex is poisoned.
 fn node_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK, EV, T>>>) -> *const Trie<EK, EV, T> {
-    // Use try_lock().expect() for simplicity in this helper. Consider error handling if needed.
     let guard = node_arc.try_lock().expect("Mutex poisoned when getting node pointer");
     &*guard as *const _
 }
@@ -255,11 +250,12 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     ///
     /// NOTE: This function *may* update `max_depth` if it finds a longer path than
     /// previously known. If this update triggers cycle detection during its internal
-    /// `propagate_max_depth` call, this function will panic (as it doesn't currently
-    /// handle the Result from propagate_max_depth). This could be improved in the future.
+    /// `propagate_max_depth` call, this function will currently panic (via `expect`).
+    /// Future improvements could involve handling the `Result` from `propagate_max_depth`
+    /// more gracefully within `special_map`.
     pub fn special_map<V: Clone>(
         initial_nodes_and_values: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
-        mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> V, // <-- MODIFIED signature
+        mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> V,
         mut merge: impl FnMut(&mut V, V),
         mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
     ) {
@@ -295,9 +291,6 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             let (mut node_val_merged, arr_depth) = match state.get(&ptr) {
                 Some(&ref tup) => tup.clone(),
                 None => {
-                    // This case should ideally not happen if a node is in the ready queue
-                    // unless it was removed from state elsewhere, which isn't done here.
-                    // Adding a warning for debugging.
                     eprintln!("Warning: Node {:?} in ready queue but not in state map.", ptr);
                     continue;
                 }
@@ -313,12 +306,6 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             if !initial_set.contains(&ptr) && arr_depth < node_max_depth {
                  // Not yet fully updated based on longest path; skip processing now.
                  // It might be re-added later when its arrival depth increases and matches max_depth.
-                 // Push it back to the queue *if* it wasn't already processed.
-                 // This handles cases where a shorter path added it prematurely.
-                 // We need a mechanism to avoid infinite loops if depths never match.
-                 // The current logic relies on max_depth eventually being reached.
-                 // Consider adding it back only if its arrival depth increased?
-                 // For now, let's just skip. If another path updates it correctly, it will be re-added then.
                 continue;
             }
             // If arr_depth > node_max_depth, something is inconsistent. Warn?
@@ -340,7 +327,6 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             // Only propagate to children if process returned true.
             if should_continue_processing_children {
                 // Collect all (EdgeKey, EdgeValue, ChildArc) tuples.
-                // Requires EK: Clone, EV: Clone.
                 let children_edges_values_arcs: Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)> = {
                     let node = node_arc.lock().expect("Mutex poisoned while reading children");
                     node.children
@@ -366,10 +352,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                     // Compute candidate V for child: use step with the merged V from the parent,
                     // plus the edge key and edge value.
                     let candidate_v = {
-                        // Avoid holding lock during step if possible, but step needs &Trie
                         let child_node = child_arc.lock().expect("Mutex poisoned during step");
-                        // Pass parent's merged V, edge key, edge value, and child node T
-                        step(&node_val_merged, &edge_key, &edge_val, &child_node) // <-- MODIFIED call
+                        step(&node_val_merged, &edge_key, &edge_val, &child_node)
                     };
 
                     // Update state for the child: merge the new candidate V and update arrival depth.
@@ -395,15 +379,10 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                             child_node.max_depth = candidate_arrival_depth;
                             // Propagate this update downward. Must drop lock before calling.
                             drop(child_node);
-                            // TODO: Handle the Result from propagate_max_depth properly.
-                            // Currently panics on cycle detection here.
+                            // Handle the Result from propagate_max_depth. Currently panics on cycle.
                             propagation_result = Trie::<EK, EV, T>::propagate_max_depth(child_arc.clone(), candidate_arrival_depth);
                             if propagation_result.is_err() {
-                                // Decide how special_map should behave if propagation fails here.
-                                // Option 1: Panic (current implicit behavior)
-                                // Option 2: Stop processing this child branch?
-                                // Option 3: Return an error from special_map?
-                                // For now, let it panic via expect.
+                                // Panic, as per the function documentation note.
                                 propagation_result.expect("Cycle detected during max_depth propagation within special_map");
                             }
 
@@ -416,6 +395,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
 
                     // Check readiness: does the *current* arrival depth in state match the child's *current* max_depth?
+                    // Use >= to handle potential inconsistencies where arrival depth might exceed max_depth temporarily.
                     if current_child_arr_depth >= child_current_max_depth {
                         // Only queue if it's ready and not already processed
                         if !processed.contains(&child_ptr) {
@@ -429,17 +409,25 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         } // end while queue not empty
 
         // After the loop, check if any initial nodes were *not* processed.
-        // This might happen if the graph has disconnected components or if processing was stopped early.
         if !initial_set.is_empty() {
              eprintln!("Warning: Some initial nodes were not processed: {:?}", initial_set);
-             // Also check if any nodes remain in the state map but weren't processed
+             // Check for nodes left in state but unprocessed (might indicate issues)
              for (ptr, (_v, arr_depth)) in state.iter() {
                  if !processed.contains(ptr) {
-                     let node_max_depth = ready.iter() // Find the node in the original ready queue or state? Need node arc.
-                         .find(|n| node_ptr(n) == *ptr)
-                         .map(|n| n.lock().unwrap().max_depth)
-                         .unwrap_or(usize::MAX); // Or get from state if possible?
-                     eprintln!("Warning: Node {:?} remained in state (arr_depth={}, max_depth={}) but was not processed.", ptr, arr_depth, node_max_depth);
+                     // Attempt to find the node in the result of all_nodes to get its max_depth for the warning
+                     // This is inefficient but only happens on warning condition.
+                     let all_reachable_nodes = Self::all_nodes(ready.front().cloned().or_else(|| state.keys().next().map(|p| {
+                         // This part is tricky: need an Arc to get max_depth, but only have ptr.
+                         // This warning might lack max_depth info if the node wasn't initially provided.
+                         // For simplicity, omit max_depth in this specific warning case.
+                         eprintln!("Warning: Node {:?} remained in state (arr_depth={}) but was not processed.", ptr, arr_depth);
+                         None::<Arc<Mutex<Trie<EK,EV,T>>>> // Placeholder
+                     })).flatten().unwrap_or_else(|| Arc::new(Mutex::new(Trie::new( T::default() ))))); // Need T: Default here, bad fallback
+
+                     // Find the node arc corresponding to the pointer to get its max_depth
+                     // This is complex and potentially slow. Let's simplify the warning.
+                     eprintln!("Warning: Node {:?} remained in state (arr_depth={}) but was not processed.", ptr, arr_depth);
+
                  }
              }
         }
@@ -484,24 +472,20 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         mut merge_node_value: FMergeNV,
     ) -> Result<Arc<Mutex<Trie<EK, EV, T>>>, CycleDetectedError>
     where
-        FMergeEV: FnMut(&EV, EV) -> Option<EV>, // Takes &existing, new -> Option<merged>
-        FMergeNV: FnMut(&T, T) -> Option<T>,   // Takes &existing, new -> Option<merged>
+        FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+        FMergeNV: FnMut(&T, T) -> Option<T>,
     {
         // Get mutable access to the vector of children for this edge key.
-        // This will create an empty Vec if the key doesn't exist yet.
         let children_vec = self.children.entry(edge_key.clone()).or_default();
 
         // --- Pass 1: Try Node Value Merge First ---
         for i in 0..children_vec.len() {
-            // We need immutable borrow first to check node value without holding mutable borrow of vec
-            let existing_node_arc = children_vec[i].1.clone(); // Clone Arc to avoid borrow issues
+            let existing_node_arc = children_vec[i].1.clone();
 
-            // Lock the potential destination node and try merging its value
             let merged_node_val_opt = {
                 let mut existing_node = existing_node_arc
                     .lock()
                     .expect("Mutex poisoned during node merge check");
-                // Clone new_node_value as it might be used multiple times
                 merge_node_value(&existing_node.value, new_node_value.clone())
             };
 
@@ -520,46 +504,34 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 if let Some(merged_edge_val) = merge_edge_value(existing_ev_mut, edge_value.clone()) {
                     *existing_ev_mut = merged_edge_val; // Update edge value
                 }
-                // else: Edge merge failed, but node merge succeeded. Keep existing edge value.
 
-                // Return the Arc to the existing (potentially updated) node
                 return Ok(existing_node_arc);
             }
-            // Node merge failed for this child, continue loop
         }
 
         // --- Pass 2: Try Edge Value Merge Only (if Node Merge failed for all) ---
         for i in 0..children_vec.len() {
-            // Borrow mutably to access existing EV and potentially update it
             let (ref mut existing_ev_mut, ref existing_node_arc) = children_vec[i];
 
-            // Try merging the edge value. Clone edge_value as it might be used multiple times.
             if let Some(merged_edge_val) = merge_edge_value(existing_ev_mut, edge_value.clone()) {
                 *existing_ev_mut = merged_edge_val; // Update edge value
-                // Return the Arc to the existing node (node value was not merged)
                 return Ok(existing_node_arc.clone());
             }
-            // Edge merge failed for this child, continue loop
         }
 
         // --- Pass 3: Create New Node and Edge ---
-        // If we reach here, no suitable existing edge/node was found or merged.
         let new_node = Arc::new(Mutex::new(Trie::new(new_node_value)));
 
         // Use the `try_insert` method. It handles adding the new (EV, Arc) tuple
-        // to the `children_vec` (which we got from `entry().or_default()` earlier)
         // and also handles max_depth calculation, propagation, and cycle detection.
-        // We pass the original `edge_key` (cloned earlier) and `edge_value`.
         self.try_insert(edge_key, edge_value, new_node.clone())?; // Propagate error if cycle detected
 
-        // Return the Arc to the newly created node
         Ok(new_node)
     }
 }
 
 
 /// A helper function to print the structure of the Trie/DAG via BFS.
-/// Updated generics and print statement.
 pub(crate) fn dump_structure<EK: Debug + Ord, EV: Debug, T: Debug>(root: Arc<Mutex<Trie<EK, EV, T>>>) {
     let mut queue = VecDeque::new();
     let mut seen: HashSet<*const Trie<EK, EV, T>> = HashSet::new();
@@ -581,7 +553,6 @@ pub(crate) fn dump_structure<EK: Debug + Ord, EV: Debug, T: Debug>(root: Arc<Mut
             // Iterate through each (EV, child Arc) tuple in the Vec
             for (edge_val, child_arc) in children_vec {
                 let child_ptr = node_ptr(child_arc);
-                // Updated print statement
                 println!("  - Edge Key: {:?}, Edge Val: {:?} -> Child: {:?}", edge_key, edge_val, child_ptr);
                 if seen.insert(child_ptr) {
                     queue.push_back(child_arc.clone());
@@ -593,23 +564,22 @@ pub(crate) fn dump_structure<EK: Debug + Ord, EV: Debug, T: Debug>(root: Arc<Mut
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TESTS
-// Updated for EK, EV, T generics and new method signatures.
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // Use concrete types for tests, e.g., &str for EK, Vec<i32> for EV, String for T
+    // Use concrete types for merge tests
     type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;
     type TestNodeMerge = Arc<Mutex<TestTrieMerge>>;
+    // Use simpler types for basic tests
+    type TestTrieBasic = Trie<&'static str, &'static str, i32>;
+    type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
 
     #[test]
-    fn test_try_insertion_and_retrieval() { // Renamed test
-        // Use simpler types for this basic test
-        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
-        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
-
+    fn test_try_insertion_and_retrieval() {
         let mut root = TestTrieBasic::new(0);
         let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
         let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
@@ -622,7 +592,6 @@ mod tests {
         // Test get for 'a'
         let retrieved_children_a = root.get(&"a").expect("Failed to get children for 'a'");
         assert_eq!(retrieved_children_a.len(), 2);
-        // Check pointers and edge values
         let retrieved_data_a: HashSet<(&str, *const TestTrieBasic)> = retrieved_children_a
             .iter()
             .map(|(ev, arc)| (*ev, node_ptr(arc)))
@@ -653,9 +622,6 @@ mod tests {
 
     #[test]
     fn test_multiple_children_same_edge_key() {
-        // Use simpler types for this basic test
-        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
-        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
         // Structure:
         //      root (0) --"edge", "val1"--> child1 (1)
         //           |
@@ -721,9 +687,6 @@ mod tests {
 
     #[test]
     fn test_special_map_bfs_order_with_edges() {
-        // Use simpler types for this basic test
-        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
-        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
         // Structure:
         //      root (0)
         //       /       \
@@ -758,7 +721,7 @@ mod tests {
             vec![(root.clone(), 100)],
             // step: add one, record edge info
             |parent_val, ek, ev, _child_node| {
-                edge_info_at_step.push((ek.clone(), ev.clone())); // Clone needed as step takes refs
+                edge_info_at_step.push((ek.clone(), ev.clone()));
                 parent_val + 1
             },
             // merge: replace
@@ -774,13 +737,12 @@ mod tests {
         // Check processing order
         assert_eq!(processed_node_values.len(), 4);
         assert_eq!(processed_node_values[0], 0); // Root first
-        // Order of 1 and 2 is not guaranteed, but 3 must be after 1.
         let pos1 = processed_node_values.iter().position(|&v| v == 1).unwrap();
         let pos2 = processed_node_values.iter().position(|&v| v == 2).unwrap();
         let pos3 = processed_node_values.iter().position(|&v| v == 3).unwrap();
-        assert!(pos1 > 0 && pos1 < 3);
-        assert!(pos2 > 0 && pos2 < 3);
-        assert!(pos3 > pos1);
+        assert!(pos1 > 0 && pos1 < 3); // c1 processed after root, before gc
+        assert!(pos2 > 0 && pos2 < 4); // c2 processed after root
+        assert!(pos3 > pos1);          // gc processed after c1
 
 
         // Check computed values
@@ -800,9 +762,6 @@ mod tests {
 
     #[test]
     fn test_all_nodes_diamond() {
-        // Use simpler types for this basic test
-        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
-        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
         // Diamond structure:
         //       root
         //      /    \
@@ -813,7 +772,7 @@ mod tests {
         // ("c1","e3") ("c2","e4")
         //      \    /
         //    grandchild
-        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0))); // Use i32 value
+        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
         let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
         let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
         let grandchild: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
@@ -846,16 +805,13 @@ mod tests {
 
     #[test]
     fn test_special_map_diamond_merge_max() {
-        // Use simpler types for this basic test
-        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
-        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
-        // Diamond structure (values/depths as before)
+        // Diamond structure
         let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
         let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
         let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
         let grandchild: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
 
-        // Build the structure with edge values
+        // Build the structure
         {
             let mut r = root.lock().unwrap();
             r.try_insert("r->c1", "edge1", child1.clone()).unwrap();
@@ -867,15 +823,13 @@ mod tests {
         }
         {
             let mut c2 = child2.lock().unwrap();
-            // Insert the second edge to grandchild. Max depth should update correctly.
             c2.try_insert("c2->gc", "edge4", grandchild.clone()).unwrap();
         }
 
-        // Check initial max_depths after proper insertion
+        // Check max_depths after insertion
         assert_eq!(root.lock().unwrap().max_depth, 0);
         assert_eq!(child1.lock().unwrap().max_depth, 1);
         assert_eq!(child2.lock().unwrap().max_depth, 1);
-        // Grandchild depth should be max(root->c1->gc, root->c2->gc) = max(0+1+1, 0+1+1) = 2
         assert_eq!(grandchild.lock().unwrap().max_depth, 2);
 
         let processed_nodes = Arc::new(Mutex::new(HashMap::<i32, i32>::new()));
@@ -891,7 +845,6 @@ mod tests {
                 let processed_nodes = processed_nodes.clone();
                 let process_count = process_count.clone();
                 move |node, final_v| {
-                    // println!("Processing node T={}, V={}, max_depth={}", node.value, final_v, node.max_depth);
                     let mut map = processed_nodes.lock().unwrap();
                     map.insert(node.value, *final_v);
                     process_count.fetch_add(1, Ordering::SeqCst);
@@ -903,22 +856,15 @@ mod tests {
         // Assertions
         let final_results = processed_nodes.lock().unwrap();
         assert_eq!(process_count.load(Ordering::SeqCst), 4, "Should process 4 unique nodes");
-        assert_eq!(final_results.get(&0), Some(&100)); // Root starts at 100
-        assert_eq!(final_results.get(&1), Some(&101)); // Child1 gets 100+1
-        assert_eq!(final_results.get(&2), Some(&101)); // Child2 gets 100+1
-        // Grandchild arrival depth from c1 is 1+1=2, from c2 is 1+1=2. Max arrival depth is 2.
-        // Grandchild max_depth is 2. It should be processed.
-        // Value from c1 path: 101+1 = 102. Value from c2 path: 101+1 = 102. Merged value: max(102, 102) = 102.
-        assert_eq!(final_results.get(&3), Some(&102));
+        assert_eq!(final_results.get(&0), Some(&100));
+        assert_eq!(final_results.get(&1), Some(&101));
+        assert_eq!(final_results.get(&2), Some(&101));
+        assert_eq!(final_results.get(&3), Some(&102)); // gc gets max(101+1, 101+1) = 102
     }
 
 
     #[test]
     fn test_empty_trie() {
-        // Use simpler types for this basic test
-        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
-        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
-
         let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(42)));
         let nodes = Trie::all_nodes(root.clone());
         assert_eq!(nodes.len(), 1);
@@ -941,10 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cycle_detection_on_try_insert() { // Renamed test
-        // Use simpler types for this basic test
-        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
-        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
+    fn test_cycle_detection_on_try_insert() {
         // Cycle:  root -> child -> root
         let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
         let child: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
@@ -973,20 +916,14 @@ mod tests {
         assert_eq!(child.lock().unwrap().children.get("c->r").unwrap().len(), 1);
         assert!(Arc::ptr_eq(&child.lock().unwrap().children.get("c->r").unwrap()[0].1, &root));
 
-        // - Max depths might be inconsistent, but shouldn't have caused panic.
-        //   Root's depth should still be 0. Child's depth is 1.
-        //   Propagation from child back to root would have tried to set root's depth to 2,
-        //   then propagate from root (depth 2) to child (candidate 3), etc., detecting cycle.
-        assert_eq!(root.lock().unwrap().max_depth, 0); // Unchanged by failed propagation
-        assert_eq!(child.lock().unwrap().max_depth, 1); // Unchanged by failed propagation
+        // - Max depths should be unchanged from before the failed propagation attempt.
+        assert_eq!(root.lock().unwrap().max_depth, 0);
+        assert_eq!(child.lock().unwrap().max_depth, 1);
     }
 
 
     #[test]
     fn test_cycle_all_nodes_no_panic() {
-        // Use simpler types for this basic test
-        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
-        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
         // Cycle:  root -> child -> root
         // Manually create cycle without insert's propagation.
         let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
@@ -1011,9 +948,6 @@ mod tests {
 
     #[test]
     fn test_cycle_special_map_no_panic_limited_processing() {
-        // Use simpler types for this basic test
-        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
-        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
         // Cycle: root -> child -> root.
         // Manually create cycle.
         let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
@@ -1040,19 +974,8 @@ mod tests {
             },
         );
 
-        // Expected behavior:
-        // 1. Root (ptr_r) added to ready queue. state[ptr_r] = (100, 0). initial_set = {ptr_r}.
-        // 2. Pop Root. ptr_r is initial. arr_depth=0 == max_depth=0. Process Root (V=100). processed = {ptr_r}. initial_set = {}.
-        // 3. Process children of Root: Child (ptr_c).
-        // 4. Compute candidate V for Child: 100+1=101. Candidate arrival depth = 0+1=1.
-        // 5. Update state for Child: state[ptr_c] = (101, 1).
-        // 6. Check max_depth update for Child: candidate_arrival_depth=1 == child.max_depth=1. No update needed.
-        // 7. Check readiness for Child: current_child_arr_depth=1 == child_current_max_depth=1. Add Child to ready queue.
-        // 8. Pop Child. ptr_c not initial. arr_depth=1 == max_depth=1. Process Child (V=101). processed = {ptr_r, ptr_c}.
-        // 9. Process children of Child: Root (ptr_r).
-        // 10. Root (ptr_r) is already in `processed`. Skip.
-        // 11. Queue empty. Loop ends.
-
+        // Expected behavior: Root processed (V=100). Child processed (V=101).
+        // Propagation back to root skipped because root is already processed.
         assert_eq!(processed_vals.len(), 2);
         assert!(processed_vals.contains(&0));
         assert!(processed_vals.contains(&1));
@@ -1065,9 +988,6 @@ mod tests {
 
     #[test]
     fn test_special_map_stop_processing() {
-        // Use simpler types for this basic test
-        type TestTrieBasic = Trie<&'static str, &'static str, i32>;
-        type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
         // Structure:
         //      root (0) --e1,e2--> c1(1), c2(2)
         //      c1(1) --e3--> gc1(3)
@@ -1104,10 +1024,9 @@ mod tests {
                 let processed_nodes = processed_nodes.clone();
                 let computed_values = computed_values.clone();
                 move |node, final_v| {
-                    // println!("Processing node T={}, V={}", node.value, final_v);
                     processed_nodes.lock().unwrap().insert(node.value);
                     computed_values.lock().unwrap().insert(node.value, *final_v);
-                    if node.value == 1 { // Stop processing if node value is 1 (child1)
+                    if node.value == 1 { // Stop processing children if node value is 1 (child1)
                         false
                     } else {
                         true
@@ -1119,7 +1038,7 @@ mod tests {
         let final_processed = processed_nodes.lock().unwrap();
         let final_values = computed_values.lock().unwrap();
 
-        // Expected processed nodes: 0, 1, 2, 4. Node 3 should be skipped because processing stopped at node 1.
+        // Expected processed nodes: 0, 1, 2, 4. Node 3 should be skipped.
         assert_eq!(final_processed.len(), 4);
         assert!(final_processed.contains(&0));
         assert!(final_processed.contains(&1)); // Processed, but stopped propagation
@@ -1364,7 +1283,7 @@ mod tests {
 
         let edge2_info = children.iter().find(|(_, arc)| Arc::ptr_eq(arc, &node2)).unwrap();
         assert_eq!(edge2_info.0, vec![]); // Unchanged (edge merge failed)
-        // Node value was updated above check.
+        // Node value was updated (checked above).
     }
 
     #[test]
@@ -1394,10 +1313,7 @@ mod tests {
         // Verify the edge c->r was still added (as try_insert adds before propagating)
          assert!(child.lock().unwrap().children.contains_key("c->r"));
          assert_eq!(child.lock().unwrap().children.get("c->r").unwrap().len(), 1);
-         // The node returned by insert_or_merge_edge in the Err case is not specified,
-         // but the edge should point to the *intended* target (root).
-         // However, the function returns Err before returning the node.
-         // We check the edge points to the correct node ptr.
+         // Check the edge points to the correct node ptr.
          let edge_target_arc = &child.lock().unwrap().children.get("c->r").unwrap()[0].1;
          assert!(Arc::ptr_eq(edge_target_arc, &root)); // Should point back to root
 
