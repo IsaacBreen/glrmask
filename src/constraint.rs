@@ -29,7 +29,7 @@ pub struct PrecomputedNodeContents {
     pub(crate) possible_llm_token_ids: LLMTokenBV,
 }
 
-type Precomputed = BTreeMap<TokenizerStateID, Trie<GrammarTokenID, PrecomputedNodeContents>>;
+type Precomputed = BTreeMap<TokenizerStateID, Trie<GrammarTokenID, (), PrecomputedNodeContents>>;
 
 #[derive(Debug, Clone)]
 pub struct GrammarConstraint {
@@ -69,7 +69,7 @@ impl GrammarConstraint {
         max_llm_token_id: usize,
     ) -> Precomputed {
         type VocabTrieNode = TrieMap<Option<LLMTokenID>>;
-        type GrammarTokenTrieNode = Arc<Mutex<Trie<GrammarTokenID, ()>>>;
+        type GrammarTokenTrieNode = Arc<Mutex<Trie<GrammarTokenID, (), ()>>>;
         let helper = |
             state: TokenizerStateID,
             vocab_trie_node: VocabTrieNode,
@@ -127,11 +127,11 @@ impl GrammarConstraintState<'_> {
         }
     }
 
-    fn prepare_initial_nodes_and_values_for_special_map(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(Arc<Mutex<Trie<TerminalID, PrecomputedNodeContents>>>, ManagedGLRParserState)> {
+    fn prepare_initial_nodes_and_values_for_special_map(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(Arc<Mutex<Trie<TerminalID, (), PrecomputedNodeContents>>>, ManagedGLRParserState)> {
         // The BTreeSet<TokenizerStateID> in each Trie node here is the set of terminal states at this node.
         // Each terminal state indicates that the path through the trie can terminate here.
         // (todo: explain this better)
-        let mut initial_nodes_and_values: Vec<(Arc<Mutex<Trie<GrammarTokenID, PrecomputedNodeContents>>>, ManagedGLRParserState)> = Vec::new();
+        let mut initial_nodes_and_values: Vec<(Arc<Mutex<Trie<GrammarTokenID, (), PrecomputedNodeContents>>>, ManagedGLRParserState)> = Vec::new();
 
         let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, (BTreeSet<ManagedParseState>, LLMTokenBV)> = BTreeMap::new();
         for managed_parse_state in self.state.active_states.iter() {
@@ -159,7 +159,7 @@ impl GrammarConstraintState<'_> {
         Trie::special_map(
             initial_nodes_and_values,
             // step
-            |managed_parse_state, grammar_token_id, child_node| {
+            |managed_parse_state, grammar_token_id, _, child_node| {
                 managed_parse_state.clone().with_step(*grammar_token_id)
             },
             // merge
