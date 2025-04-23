@@ -196,7 +196,7 @@ impl VocabPrefixTree {
         loop {
             let mut found_match = false;
             // Iterate through the children of the current node.
-            for (edge_label, child_node) in ¤t_node.children {
+            for (edge_label, child_node) in &current_node.children {
                 if remaining_bytes.starts_with(edge_label) {
                     // Found an edge matching a prefix of the remaining bytes.
                     remaining_bytes = &remaining_bytes[edge_label.len()..];
