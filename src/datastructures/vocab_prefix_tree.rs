@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::cmp::Ordering;
 
+use std::collections::btree_map;
 // Represents a node in the VocabPrefixTree
 #[derive(PartialEq)] // Keep derived PartialEq for structural comparison in tests
 pub struct VocabPrefixTreeNode {
@@ -24,6 +25,12 @@ impl VocabPrefixTreeNode {
             prefix_length,
             children: BTreeMap::new(),
         }
+    }
+
+    /// Returns an iterator over the children of this node.
+    /// The iterator yields pairs of `(&Vec<u8>, &VocabPrefixTreeNode)`, representing the edge label and the child node.
+    pub fn children(&self) -> btree_map::Iter<'_, Vec<u8>, VocabPrefixTreeNode> {
+        self.children.iter()
     }
 }
 
@@ -231,6 +238,12 @@ impl VocabPrefixTree {
     /// during the build process, `false` otherwise.
     pub fn has_empty_string_token(&self) -> bool {
         self.has_empty_string_token
+    }
+
+    /// Returns an iterator over the direct children of the root node.
+    /// The iterator yields pairs of `(&Vec<u8>, &VocabPrefixTreeNode)`, representing the edge label and the child node.
+    pub fn root_children(&self) -> btree_map::Iter<'_, Vec<u8>, VocabPrefixTreeNode> {
+        self.root.children()
     }
 }
 
@@ -554,4 +567,47 @@ mod tests {
         assert_eq!(tree.find_token(&b("ab")), Some(2));
         assert_eq!(tree.find_token(b""), None); // Flag is false
     }
+
+    #[test]
+    fn test_children_iteration() {
+        let tokens = vec![
+            (1, b("a")),
+            (2, b("b")),
+            (10, b("ape")),
+            (20, b("banana")),
+        ];
+        let tree = VocabPrefixTree::build(&tokens);
+
+        // Iterate root children
+        let mut root_children_iter = tree.root_children();
+
+        let (edge_a, node_a_ref) = root_children_iter.next().unwrap();
+        assert_eq!(edge_a, &b("a"));
+        assert_eq!(node_a_ref.token_id, 1);
+        assert_eq!(node_a_ref.prefix_length, 1);
+
+        let (edge_b, node_b_ref) = root_children_iter.next().unwrap();
+        assert_eq!(edge_b, &b("b"));
+        assert_eq!(node_b_ref.token_id, 2);
+        assert_eq!(node_b_ref.prefix_length, 1);
+
+        assert!(root_children_iter.next().is_none()); // Only 'a' and 'b' are direct children of root
+
+        // Iterate children of node 'a'
+        let mut node_a_children_iter = node_a_ref.children();
+        let (edge_pe, node_ape_ref) = node_a_children_iter.next().unwrap();
+        assert_eq!(edge_pe, &b("pe"));
+        assert_eq!(node_ape_ref.token_id, 10);
+        assert_eq!(node_ape_ref.prefix_length, 3); // "ape"
+        assert!(node_a_children_iter.next().is_none());
+
+        // Iterate children of node 'b'
+        let mut node_b_children_iter = node_b_ref.children();
+        let (edge_anana, node_banana_ref) = node_b_children_iter.next().unwrap();
+        assert_eq!(edge_anana, &b("anana"));
+        assert_eq!(node_banana_ref.token_id, 20);
+        assert_eq!(node_banana_ref.prefix_length, 6); // "banana"
+        assert!(node_b_children_iter.next().is_none());
+    }
 }
+
