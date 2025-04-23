@@ -158,8 +158,12 @@ impl GrammarConstraintState<'_> {
         Trie::special_map(
             initial_nodes_and_values,
             // step
-            |managed_parse_state, grammar_token_id, _, child_node| {
-                Some(managed_parse_state.clone().with_step(*grammar_token_id))
+            |managed_parse_state, grammar_token_id, edge_llm_tokens, child_node| {
+                let mut managed_parse_state = managed_parse_state.clone();
+                for managed_parse_state in &mut managed_parse_state.active_states {
+                    managed_parse_state.llm_tokens |= edge_llm_tokens.clone();
+                }
+                Some(managed_parse_state)
             },
             // merge
             |managed_parse_state1, managed_parse_state2| {
