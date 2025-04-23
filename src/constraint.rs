@@ -159,7 +159,7 @@ impl GrammarConstraintState<'_> {
             initial_nodes_and_values,
             // step
             |managed_parse_state, grammar_token_id, _, child_node| {
-                managed_parse_state.clone().with_step(*grammar_token_id)
+                Some(managed_parse_state.clone().with_step(*grammar_token_id))
             },
             // merge
             |managed_parse_state1, managed_parse_state2| {
