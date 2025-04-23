@@ -219,6 +219,8 @@ impl<EK: Ord, EV, T> Trie<EK, EV, T> {
 
 /// Helper to get the raw pointer from an Arc<Mutex<Trie>>. Panics if the mutex is poisoned.
 fn node_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK, EV, T>>>) -> *const Trie<EK, EV, T> {
+    // Use try_lock().expect() for simplicity in this context, assuming poisoning is fatal.
+    // A production system might handle the poison error more gracefully.
     let guard = node_arc.try_lock().expect("Mutex poisoned when getting node pointer");
     &*guard as *const _
 }
@@ -235,7 +237,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     ///
     /// step: function to compute a new V for a child given a parent’s V, the edge key (EK),
     ///       the edge value (EV), and the child node (which is locked briefly).
-    ///       Signature: FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> V
+    ///       Signature: FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>
+    ///       If it returns `None`, the traversal along this specific edge is skipped.
     ///
     /// merge: function to combine a new V into a stored V (its signature is
     ///        FnMut(&mut V, V) ). For example, merge might “replace” the old value
@@ -255,7 +258,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     /// more gracefully within `special_map`.
     pub fn special_map<V: Clone>(
         initial_nodes_and_values: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
-        mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> V,
+        mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // MODIFIED: Returns Option<V>
         mut merge: impl FnMut(&mut V, V),
         mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
     ) {
@@ -291,7 +294,10 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             let (mut node_val_merged, arr_depth) = match state.get(&ptr) {
                 Some(&ref tup) => tup.clone(),
                 None => {
-                    eprintln!("Warning: Node {:?} in ready queue but not in state map.", ptr);
+                    // This can happen if a node was queued but then pruned by `process` returning false
+                    // on its parent, or if `step` returned None for the path leading to it.
+                    // It's not necessarily an error, just means this path didn't lead to processing.
+                    // eprintln!("Warning: Node {:?} in ready queue but not in state map. Skipping.", ptr);
                     continue;
                 }
             };
@@ -349,62 +355,68 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                     // The candidate arrival depth for this child is one more than parent's arrival depth.
                     let candidate_arrival_depth = arr_depth.saturating_add(1);
 
-                    // Compute candidate V for child: use step with the merged V from the parent,
-                    // plus the edge key and edge value.
-                    let candidate_v = {
+                    // Compute candidate V for child using the potentially failing step function.
+                    let candidate_v_opt = { // Renamed to indicate it's an Option
                         let child_node = child_arc.lock().expect("Mutex poisoned during step");
-                        step(&node_val_merged, &edge_key, &edge_val, &child_node)
+                        step(&node_val_merged, &edge_key, &edge_val, &child_node) // Call the modified step
                     };
 
-                    // Update state for the child: merge the new candidate V and update arrival depth.
-                    let mut current_child_arr_depth = 0; // Will be updated below
-                    state.entry(child_ptr)
-                        .and_modify(|(existing_v, existing_depth)| {
-                            merge(existing_v, candidate_v.clone()); // Merge the value
-                            *existing_depth = (*existing_depth).max(candidate_arrival_depth); // Update depth
-                            current_child_arr_depth = *existing_depth; // Record current depth
-                        })
-                        .or_insert_with(|| {
-                            current_child_arr_depth = candidate_arrival_depth; // Record current depth
-                            (candidate_v, candidate_arrival_depth) // Insert new state
-                        });
+                    // --- MODIFIED: Only proceed if step returned Some(v) ---
+                    if let Some(candidate_v) = candidate_v_opt {
+                        // --- Existing logic moved inside this block ---
+                        // Update state for the child: merge the new candidate V and update arrival depth.
+                        let mut current_child_arr_depth = 0; // Will be updated below
+                        state.entry(child_ptr)
+                            .and_modify(|(existing_v, existing_depth)| {
+                                merge(existing_v, candidate_v.clone()); // Merge the value
+                                *existing_depth = (*existing_depth).max(candidate_arrival_depth); // Update depth
+                                current_child_arr_depth = *existing_depth; // Record current depth
+                            })
+                            .or_insert_with(|| {
+                                current_child_arr_depth = candidate_arrival_depth; // Record current depth
+                                (candidate_v, candidate_arrival_depth) // Insert new state
+                            });
 
-                    // Check if the child's inherent max_depth needs updating *and propagate if necessary*.
-                    // This handles cases where special_map finds a longer path than insertion did.
-                    let child_current_max_depth;
-                    let mut propagation_result = Ok(()); // Track result of propagation
-                    {
-                        let mut child_node = child_arc.lock().expect("Mutex poisoned while updating child max_depth");
-                        if candidate_arrival_depth > child_node.max_depth {
-                            child_node.max_depth = candidate_arrival_depth;
-                            // Propagate this update downward. Must drop lock before calling.
-                            drop(child_node);
-                            // Handle the Result from propagate_max_depth. Currently panics on cycle.
-                            propagation_result = Trie::<EK, EV, T>::propagate_max_depth(child_arc.clone(), candidate_arrival_depth);
-                            if propagation_result.is_err() {
-                                // Panic, as per the function documentation note.
-                                propagation_result.expect("Cycle detected during max_depth propagation within special_map");
+                        // Check if the child's inherent max_depth needs updating *and propagate if necessary*.
+                        // This handles cases where special_map finds a longer path than insertion did.
+                        let child_current_max_depth;
+                        let mut propagation_result = Ok(()); // Track result of propagation
+                        {
+                            let mut child_node = child_arc.lock().expect("Mutex poisoned while updating child max_depth");
+                            if candidate_arrival_depth > child_node.max_depth {
+                                child_node.max_depth = candidate_arrival_depth;
+                                // Propagate this update downward. Must drop lock before calling.
+                                drop(child_node);
+                                // Handle the Result from propagate_max_depth. Currently panics on cycle.
+                                propagation_result = Trie::<EK, EV, T>::propagate_max_depth(child_arc.clone(), candidate_arrival_depth);
+                                if propagation_result.is_err() {
+                                    // Panic, as per the function documentation note.
+                                    propagation_result.expect("Cycle detected during max_depth propagation within special_map");
+                                }
+
+                                // Re-acquire lock briefly to get the potentially updated max_depth
+                                child_current_max_depth = child_arc.lock().expect("Mutex poisoned after propagate").max_depth;
+                            } else {
+                                child_current_max_depth = child_node.max_depth;
                             }
+                        } // child_node lock released here
 
-                            // Re-acquire lock briefly to get the potentially updated max_depth
-                            child_current_max_depth = child_arc.lock().expect("Mutex poisoned after propagate").max_depth;
-                        } else {
-                            child_current_max_depth = child_node.max_depth;
+
+                        // Check readiness: does the *current* arrival depth in state match the child's *current* max_depth?
+                        // Use >= to handle potential inconsistencies where arrival depth might exceed max_depth temporarily.
+                        if current_child_arr_depth >= child_current_max_depth {
+                            // Only queue if it's ready and not already processed
+                            if !processed.contains(&child_ptr) {
+                                 ready.push_back(child_arc.clone());
+                            }
                         }
-                    } // child_node lock released here
-
-
-                    // Check readiness: does the *current* arrival depth in state match the child's *current* max_depth?
-                    // Use >= to handle potential inconsistencies where arrival depth might exceed max_depth temporarily.
-                    if current_child_arr_depth >= child_current_max_depth {
-                        // Only queue if it's ready and not already processed
-                        if !processed.contains(&child_ptr) {
-                             ready.push_back(child_arc.clone());
-                        }
+                        // else: Child is not ready yet (arrival depth < max_depth), it might be queued later
+                        // when another path updates its arrival depth.
+                        // --- End of existing logic moved inside ---
                     }
-                    // else: Child is not ready yet (arrival depth < max_depth), it might be queued later
-                    // when another path updates its arrival depth.
-                } // end for each child
+                    // --- If step returned None, we implicitly do nothing and continue to the next child edge ---
+
+                } // end for each child edge
             } // end if should_continue_processing_children
         } // end while queue not empty
 
@@ -654,7 +666,7 @@ mod tests {
         Trie::special_map(
             vec![(root.clone(), 100)],
             // step: add one, ignore edge key/value
-            |parent_val, _ek, _ev, _child_node| parent_val + 1,
+            |parent_val, _ek, _ev, _child_node| Some(parent_val + 1), // MODIFIED: Return Some
             |current, new| *current = new, // merge: replace
             |node, computed_val| { // process: always continue
                 processed_node_values.push(node.value);
@@ -715,7 +727,7 @@ mod tests {
             // step: add one, record edge info
             |parent_val, ek, ev, _child_node| {
                 edge_info_at_step.push((ek.clone(), ev.clone()));
-                parent_val + 1
+                Some(parent_val + 1) // MODIFIED: Return Some
             },
             // merge: replace
             |current, new| { *current = new; },
@@ -831,7 +843,7 @@ mod tests {
         Trie::special_map(
             vec![(root.clone(), 100)],
             // step: increment value, ignore edges
-            |p_val, _ek, _ev, _child_node| p_val + 1,
+            |p_val, _ek, _ev, _child_node| Some(p_val + 1), // MODIFIED: Return Some
             // merge: take max value
             |current_v, new_v| *current_v = (*current_v).max(new_v),
             { // process: always continue
@@ -958,7 +970,7 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)], // Start at root
-            |p, _ek, _ev, _n| p + 1, // Step: increment
+            |p, _ek, _ev, _n| Some(p + 1), // Step: increment // MODIFIED: Return Some
             |cur, new| *cur = (*cur).max(new), // Merge: max
             |node, v| { // process: always continue
                 processed_vals.push(node.value);
@@ -1011,7 +1023,7 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)],
-            |p_val, _ek, _ev, _child_node| p_val + 1, // step: increment value
+            |p_val, _ek, _ev, _child_node| Some(p_val + 1), // step: increment value // MODIFIED: Return Some
             |current_v, new_v| *current_v = new_v, // merge: replace
             {
                 let processed_nodes = processed_nodes.clone();
@@ -1046,6 +1058,71 @@ mod tests {
         assert_eq!(final_values.get(&3), None);      // Not processed
         assert_eq!(final_values.get(&4), Some(&102)); // Processed via child2
     }
+
+    #[test]
+    fn test_special_map_step_returns_none() {
+        // Structure:
+        //      root (0) --"keep"--> c1(1)
+        //           |
+        //           --"skip"--> c2(2) --"keep"--> gc2(3)
+        // Step returns None if edge key is "skip".
+        let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
+        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+        let grandchild2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
+
+        {
+            let mut r = root.lock().unwrap();
+            r.try_insert("keep", "e1", child1.clone()).unwrap();
+            r.try_insert("skip", "e2", child2.clone()).unwrap();
+        }
+        {
+            let mut c2 = child2.lock().unwrap();
+            c2.try_insert("keep", "e3", grandchild2.clone()).unwrap();
+        }
+
+        let processed_nodes = Arc::new(Mutex::new(HashSet::<i32>::new()));
+        let computed_values = Arc::new(Mutex::new(HashMap::<i32, i32>::new()));
+
+        Trie::special_map(
+            vec![(root.clone(), 100)],
+            // step: increment value only if edge key is "keep"
+            |p_val, ek, _ev, _child_node| {
+                if *ek == "keep" {
+                    Some(p_val + 1)
+                } else {
+                    None // Skip this edge
+                }
+            },
+            |current_v, new_v| *current_v = new_v, // merge: replace
+            {
+                let processed_nodes = processed_nodes.clone();
+                let computed_values = computed_values.clone();
+                move |node, final_v| {
+                    processed_nodes.lock().unwrap().insert(node.value);
+                    computed_values.lock().unwrap().insert(node.value, *final_v);
+                    true // Always continue processing if node is reached
+                }
+            }
+        );
+
+        let final_processed = processed_nodes.lock().unwrap();
+        let final_values = computed_values.lock().unwrap();
+
+        // Expected processed nodes: 0, 1. Nodes 2 and 3 should be skipped.
+        assert_eq!(final_processed.len(), 2);
+        assert!(final_processed.contains(&0));
+        assert!(final_processed.contains(&1)); // Reached via "keep" edge
+        assert!(!final_processed.contains(&2)); // Skipped via "skip" edge
+        assert!(!final_processed.contains(&3)); // Never reached because c2 was skipped
+
+        // Check computed values
+        assert_eq!(final_values.get(&0), Some(&100));
+        assert_eq!(final_values.get(&1), Some(&101));
+        assert_eq!(final_values.get(&2), None); // Not processed
+        assert_eq!(final_values.get(&3), None); // Not processed
+    }
+
 
     // --- Tests for insert_or_merge_edge ---
 
