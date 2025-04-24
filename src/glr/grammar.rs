@@ -118,13 +118,6 @@ pub fn compute_follow_sets(productions: &[Production]) -> BTreeMap<NonTerminal, 
         follow_sets.entry(production.lhs.clone()).or_default();
     }
 
-    if let Some(start_symbol) = productions.first() {
-        follow_sets
-            .get_mut(&start_symbol.lhs)
-            .unwrap()
-            .insert(Terminal("$".to_string()));
-    }
-
     let mut changed = true;
     while changed {
         changed = false;
