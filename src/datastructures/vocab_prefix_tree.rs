@@ -27,15 +27,20 @@ impl VocabPrefixTreeNode {
         }
     }
 
-    /// Returns an iterator over the children of this node.
-    /// The iterator yields pairs of `(&Vec<u8>, &VocabPrefixTreeNode)`, representing the edge label and the child node.
-    pub fn children(&self) -> btree_map::Iter<'_, Vec<u8>, VocabPrefixTreeNode> {
-        self.children.iter()
+    /// Returns the token ID corresponding to the path from the root to this node.
+    pub fn token_id(&self) -> usize {
+        self.token_id
     }
 
     /// Returns the length of the prefix for this node.
     pub fn prefix_length(&self) -> usize {
         self.prefix_length
+    }
+
+    /// Returns an iterator over the children of this node.
+    /// The iterator yields pairs of `(&Vec<u8>, &VocabPrefixTreeNode)`, representing the edge label and the child node.
+    pub fn children(&self) -> btree_map::Iter<'_, Vec<u8>, VocabPrefixTreeNode> {
+        self.children.iter()
     }
 }
 
