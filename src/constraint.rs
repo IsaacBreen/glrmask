@@ -368,16 +368,16 @@ mod tests {
 
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
 
-        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 3);
+        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 2);
 
         let mut constraint_state = constraint.init();
 
         let mask = constraint_state.get_mask();
-        // assert_eq!(mask, LLMTokenBV::from_iter([true, true, false]));
+        assert_eq!(mask, LLMTokenBV::from_iter([true, true, false]));
 
         constraint_state.commit(LLMTokenID(0));
 
         let mask = constraint_state.get_mask();
-        assert_eq!(mask, LLMTokenBV::from_iter([false, false, false, true]));
+        assert_eq!(mask, LLMTokenBV::from_iter([false, false, true]));
     }
 }
