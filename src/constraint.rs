@@ -276,7 +276,7 @@ impl GrammarConstraintState<'_> {
             |managed_parse_state, grammar_token_id, edge_llm_tokens, child_node| {
                 let mut managed_parse_state = managed_parse_state.clone();
                 managed_parse_state.active_states.retain_mut(|managed_parse_state| {
-                    managed_parse_state.llm_tokens |= edge_llm_tokens.clone();
+                    managed_parse_state.llm_tokens &= edge_llm_tokens.clone();
                     !managed_parse_state.llm_tokens.is_empty()
                 });
                 if managed_parse_state.active_states.is_empty() { return None; } else { Some(managed_parse_state) }
@@ -309,7 +309,7 @@ impl GrammarConstraintState<'_> {
                             }
                         }
                         // Compute final LLM token mask
-                        let final_llm_tokens = managed_parse_state.llm_tokens.clone() | precomputed_finalizer.compatible_llm_tokens.clone();
+                        let final_llm_tokens = managed_parse_state.llm_tokens.clone() & precomputed_finalizer.compatible_llm_tokens.clone();
                         if final_llm_tokens.is_empty() { continue; }
                         // Create a new managed parse state
                         let mut managed_parse_state = managed_parse_state.clone();
