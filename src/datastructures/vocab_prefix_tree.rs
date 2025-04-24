@@ -32,6 +32,11 @@ impl VocabPrefixTreeNode {
     pub fn children(&self) -> btree_map::Iter<'_, Vec<u8>, VocabPrefixTreeNode> {
         self.children.iter()
     }
+
+    /// Returns the length of the prefix for this node.
+    pub fn prefix_length(&self) -> usize {
+        self.prefix_length
+    }
 }
 
 // Manual implementation of Debug for concise node representation.
