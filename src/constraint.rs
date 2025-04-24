@@ -73,13 +73,13 @@ impl GrammarConstraint {
         #[derive(Debug, Eq, PartialEq)]
         struct DottedVocabNode<'a> {
             src: &'a VocabPrefixTreeNode,
-            position: usize,
             bytes: &'a [u8],
+            offset: usize,
         }
         impl<'a> Ord for DottedVocabNode<'a> {
             fn cmp(&self, other: &Self) -> Ordering {
-                let self_primary_key = self.src.prefix_length() + self.position;
-                let other_primary_key = other.src.prefix_length() + other.position;
+                let self_primary_key = self.src.prefix_length() + self.offset;
+                let other_primary_key = other.src.prefix_length() + other.offset;
                 (self_primary_key, self.src, self.bytes).cmp(&(other_primary_key, other.src, other.bytes))
             }
         }
@@ -94,26 +94,38 @@ impl GrammarConstraint {
         for (content, id) in llm_token_map {
             tokens_for_vocab_prefix_tree_builder.push((id.0, content.clone()));
         }
-        let mut vocab_prefix_tree = VocabPrefixTree::build(&tokens_for_vocab_prefix_tree_builder);
+        let vocab_prefix_tree = VocabPrefixTree::build(&tokens_for_vocab_prefix_tree_builder);
 
         // Create the roots.
         let mut precomputed_roots: BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
         for tokenizer_state_id in 0..tokenizer.max_state() {
-            let mut node = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
-            precomputed_roots.insert(TokenizerStateID(tokenizer_state_id), node.clone());
+            let precompute_node = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
+            precomputed_roots.insert(TokenizerStateID(tokenizer_state_id), precompute_node);
         }
 
         // Queue keyed by vocab node and tokenizer state ID.
-        let mut queue: BTreeMap<(&VocabPrefixTreeNode, TokenizerStateID), Vec<Arc<Mutex<PrecomputeNode>>>> = BTreeMap::new();
+        let mut queue: BTreeMap<(DottedVocabNode, TokenizerStateID), Vec<Arc<Mutex<PrecomputeNode>>>> = BTreeMap::new();
 
         // Initialize the queue with the roots.
-        for (tokenizer_state_id, node) in precomputed_roots.clone() {
-            queue.insert((&vocab_prefix_tree.root, tokenizer_state_id), vec![node]);
+        for (tokenizer_state_id, precompute_node) in &precomputed_roots {
+            for (bytes, new_vocab_node) in vocab_prefix_tree.root.children() {
+                let dotted_new_vocab_node = DottedVocabNode { src: &vocab_prefix_tree.root, bytes, offset: 0 };
+                queue.insert((dotted_new_vocab_node, *tokenizer_state_id), vec![precompute_node.clone()]);
+            }
         }
 
-        while let Some((((vocab_node, tokenizer_state_id)), precomputed_nodes)) = queue.pop_first() {
-            for (bytes, new_vocab_node) in vocab_node.children() {
-                let results = tokenizer.execute_from_state(bytes, tokenizer_state_id);
+        while let Some((((dotted_vocab_node, tokenizer_state_id)), precomputed_nodes)) = queue.pop_first() {
+            let DottedVocabNode { src, offset, bytes } = dotted_vocab_node;
+
+            let results = tokenizer.execute_from_state(&bytes[offset..], tokenizer_state_id);
+
+            for result in results.matches {}
+
+            if let Some(end_state) = results.end_state {
+                for precompute_node in precomputed_nodes {
+                    let mut precompute_node = precompute_node.lock().unwrap();
+                    
+                }
             }
         }
 
