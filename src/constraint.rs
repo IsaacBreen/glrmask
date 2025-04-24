@@ -18,16 +18,10 @@ use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 pub type LLMTokenBV = BitVec;
 pub type GrammarTokenBV = BitVec;
 
-#[derive(Debug, Clone)]
-pub struct PrecomputedFinalizer {
-    pub(crate) possible_final_grammar_tokens: BTreeSet<GrammarTokenID>,
-    pub(crate) compatible_llm_tokens: LLMTokenBV,
-    pub(crate) tokenizer_state_ids: BTreeSet<TokenizerStateID>,
-}
-
 #[derive(Default, Debug, Clone)]
 pub struct PrecomputedNodeContents {
-    pub(crate) finalizers: Vec<PrecomputedFinalizer>,
+    pub(crate) finalizers: BTreeMap<GrammarTokenID, LLMTokenBV>,
+    pub(crate) finishes_cleanly_for_llm_tokens: LLMTokenBV,
 }
 
 type PrecomputeNode = Trie<GrammarTokenID, LLMTokenBV, PrecomputedNodeContents>;
@@ -124,7 +118,7 @@ impl GrammarConstraint {
             if let Some(end_state) = results.end_state {
                 for precompute_node in precomputed_nodes {
                     let mut precompute_node = precompute_node.lock().unwrap();
-                    
+
                 }
             }
         }
@@ -222,17 +216,14 @@ impl GrammarConstraintState<'_> {
             // process
             |node, managed_glr_parse_state| {
                 // Handle finalizers
-                for precomputed_finalizer in &node.value.finalizers {
+                for (&terminal_id, &llm_tokens) in &node.value.finalizers {
                     for managed_parse_state in &managed_glr_parse_state.active_states {
                         // Ensure at least one of the final tokens parses
                         let mut valid_final_tokenizer_state_ids = BTreeSet::new();
-                        for possible_final_grammar_token in &precomputed_finalizer.possible_final_grammar_tokens {
-                            let mut parse_state = managed_glr_parse_state.parser.init_glr_parser_from_parse_state(ParseState::from(managed_parse_state.clone()));
-                            parse_state.step(*possible_final_grammar_token);
-                            if parse_state.matches_or_can_match() {
-                                valid_final_tokenizer_state_ids = managed_parse_state.tokenizer_state_ids.clone();
-                                break;
-                            }
+                        let mut parse_state = managed_glr_parse_state.parser.init_glr_parser_from_parse_state(ParseState::from(managed_parse_state.clone()));
+                        parse_state.step(terminal_id);
+                        if parse_state.matches_or_can_match() {
+                            valid_final_tokenizer_state_ids = managed_parse_state.tokenizer_state_ids.clone();
                         }
                         if valid_final_tokenizer_state_ids.is_empty() {
                             // If we've reached the initial state, we've matched the final token cleanly, and we can proceed without any additional tokens.
