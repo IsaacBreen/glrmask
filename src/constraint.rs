@@ -212,7 +212,7 @@ impl GrammarConstraint {
 
 impl GrammarConstraintState<'_> {
     pub fn get_mask(&mut self) -> LLMTokenBV {
-        let mut mask = LLMTokenBV::repeat(false, self.parent.max_llm_token_id);
+        let mut mask = LLMTokenBV::repeat(false, self.parent.max_llm_token_id + 1);
         for managed_parse_state in &self.state.active_states {
             mask |= managed_parse_state.llm_tokens.clone();
         }
@@ -220,12 +220,12 @@ impl GrammarConstraintState<'_> {
     }
 
     pub fn step_with_all_llm_tokens(&mut self) {
-        let all_llm_tokens = LLMTokenBV::repeat(true, self.parent.max_llm_token_id);
+        let all_llm_tokens = LLMTokenBV::repeat(true, self.parent.max_llm_token_id + 1);
         self.step(&all_llm_tokens);
     }
 
     pub fn step_with_llm_token(&mut self, llm_token_id: LLMTokenID) {
-        let mut llm_tokens = LLMTokenBV::repeat(false, self.parent.max_llm_token_id);
+        let mut llm_tokens = LLMTokenBV::repeat(false, self.parent.max_llm_token_id + 1);
         llm_tokens.set(llm_token_id.0, true);
         self.step(&llm_tokens);
     }
@@ -344,37 +344,40 @@ mod tests {
         let expr = groups![
             eat_u8(b'a'),
             seq![eat_u8(b'a'), eat_u8(b'b')],
-            choice![eat_u8(b'b'), eat_u8(b'c')]
+            choice![eat_u8(b'b'), eat_u8(b'c')],
+            eat_u8(b'$'),
         ];
         let tokenizer = expr.build();
 
         let mut llm_token_map = LLMTokenMap::new();
         llm_token_map.insert(b"ab".to_vec(), LLMTokenID(0));
         llm_token_map.insert(b"ac".to_vec(), LLMTokenID(1));
+        llm_token_map.insert(b"$".to_vec(), LLMTokenID(2));
 
         let productions = vec![
-            prod("S", vec![t("A")]),
-            prod("S", vec![t("AB")]),
-            prod("S", vec![t("B_OR_C")]),
+            prod("S", vec![t("A"), t("EOF")]),
+            prod("S", vec![t("AB"), t("EOF")]),
+            prod("S", vec![t("B_OR_C"), t("EOF")]),
         ];
 
         let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
         grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0));
         grammar_token_map.insert(Terminal("AB".to_string()), TerminalID(1));
         grammar_token_map.insert(Terminal("B_OR_C".to_string()), TerminalID(2));
+        grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(3));
 
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
 
-        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 2);
+        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 3);
 
         let mut constraint_state = constraint.init();
 
         let mask = constraint_state.get_mask();
-        assert_eq!(mask, LLMTokenBV::repeat(true, 2));
+        // assert_eq!(mask, LLMTokenBV::from_iter([true, true, false]));
 
         constraint_state.commit(LLMTokenID(0));
 
         let mask = constraint_state.get_mask();
-        assert_eq!(mask, LLMTokenBV::repeat(false, 2));
+        assert_eq!(mask, LLMTokenBV::from_iter([false, false, false, true]));
     }
 }
