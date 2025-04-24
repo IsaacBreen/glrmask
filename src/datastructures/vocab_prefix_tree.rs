@@ -2,12 +2,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::cmp::Ordering;
 
-use bitvec::prelude::*;
 use std::collections::btree_map;
-
 // Represents a node in the VocabPrefixTree
 #[derive(PartialEq)] // Keep derived PartialEq for structural comparison in tests
-pub struct VocabPrefixTreeNode<Store = usize> where Store: BitStore {
+pub struct VocabPrefixTreeNode {
     /// The token ID corresponding to the path from the root to this node.
     /// Every node represents a valid token endpoint.
     /// The root node has ID 0 by convention, unless overwritten by an empty string token.
@@ -17,9 +15,6 @@ pub struct VocabPrefixTreeNode<Store = usize> where Store: BitStore {
     /// Children nodes, keyed by the byte vector representing the edge label.
     /// BTreeMap ensures edges are sorted lexicographically by byte vector.
     children: BTreeMap<Vec<u8>, VocabPrefixTreeNode>,
-    /// Bit vector indicating all token IDs reachable from or including this node.
-    /// The length is max_token_id + 1.
-    reachable_token_ids: BitVec<Store>,
 }
 
 impl VocabPrefixTreeNode {
@@ -29,8 +24,6 @@ impl VocabPrefixTreeNode {
             token_id,
             prefix_length,
             children: BTreeMap::new(),
-            // Initialize empty; will be computed after tree structure is built.
-            reachable_token_ids: BitVec::new(),
         }
     }
 
@@ -64,17 +57,11 @@ impl fmt::Debug for VocabPrefixTreeNode {
         debug_struct.field("token_id", &self.token_id);
         debug_struct.field("prefix_length", &self.prefix_length);
 
-        // Summarize reachable_token_ids for brevity
-        let reachable_summary = format!(
-            "{} set bits (len {})",
-            self.reachable_token_ids.count_ones(),
-            self.reachable_token_ids.len()
-        );
-        debug_struct.field("reachable_token_ids", &reachable_summary);
-
         // Format children concisely using the helper.
         let children_summary: BTreeMap<String, &VocabPrefixTreeNode> = self
-            .children()            .map(|(k, v)| (format_bytes(k), v))
+            .children
+            .iter()
+            .map(|(k, v)| (format_bytes(k), v))
             .collect();
         debug_struct.field("children", &children_summary);
 
@@ -90,8 +77,6 @@ impl fmt::Debug for VocabPrefixTreeNode {
 pub struct VocabPrefixTree {
     pub root: VocabPrefixTreeNode,
     /// Flag indicating if the empty string `""` was explicitly provided as a token.
-    max_token_id: usize,
-    /// The maximum token ID encountered during build, used for BitVec sizing.
     has_empty_string_token: bool,
 }
 
@@ -104,8 +89,6 @@ impl VocabPrefixTree {
             // Root node represents the empty prefix (length 0), ID 0 by convention.
             root: VocabPrefixTreeNode::new(0, 0),
             // Initially, assume no empty string token is present.
-            // Max ID is 0 initially, will be updated during build.
-            max_token_id: 0,
             has_empty_string_token: false,
         }
     }
@@ -118,10 +101,6 @@ impl VocabPrefixTree {
     /// default ID 0, and the `has_empty_string_token` flag is set.
     pub fn build(tokens: &[(usize, Vec<u8>)]) -> Self {
         let mut tree = VocabPrefixTree::new(); // Root starts with ID 0, flag false
-
-        // Determine the maximum token ID for BitVec sizing.
-        // Handle empty input gracefully.
-        tree.max_token_id = tokens.iter().map(|(id, _)| *id).max().unwrap_or(0);
                                                // Root prefix_length is 0
         // 1. Initial population: Add all tokens as direct children of the root.
         //    Each edge uses the full token byte vector as its label, leading
@@ -146,14 +125,6 @@ impl VocabPrefixTree {
         //    This step restructures the tree into the compact radix form
         //    based on shared prefixes that are themselves valid tokens.
         Self::merge_nodes(&mut tree.root);
-
-        // 3. Compute reachable token IDs for all nodes in a post-order traversal.
-        Self::compute_reachable_ids_recursive(&mut tree.root, tree.max_token_id);
-
-        // 4. Adjust root's reachable IDs if its ID 0 is just the convention.
-        if !tree.has_empty_string_token && tree.root.token_id == 0 && tree.max_token_id >= 0 && !tree.root.reachable_token_ids.is_empty() {
-            tree.root.reachable_token_ids.set(0, false);
-        }
 
         tree
     }
@@ -222,28 +193,6 @@ impl VocabPrefixTree {
         node.children = new_children;
     }
 
-    /// Recursively computes the `reachable_token_ids` for each node.
-    /// This should be called after the tree structure is finalized by `merge_nodes`.
-    fn compute_reachable_ids_recursive(node: &mut VocabPrefixTreeNode, max_token_id: usize) {
-        // Initialize the BitVec for the current node.
-        let mut current_node_ids = bitvec![0; max_token_id + 1];
-
-        // Set the bit for the node's own token ID, if valid.
-        if node.token_id <= max_token_id {
-            current_node_ids.set(node.token_id, true);
-        }
-
-        // Recursively call on children and merge their results.
-        for child_node in node.children.values_mut() {
-            Self::compute_reachable_ids_recursive(child_node, max_token_id);
-            // OR the child's computed reachable IDs into the current node's set.
-            current_node_ids |= &child_node.reachable_token_ids;
-        }
-
-        // Assign the final computed set to the node.
-        node.reachable_token_ids = current_node_ids;
-    }
-
      /// Finds the token ID corresponding to the exact byte sequence.
      /// Returns `None` if the sequence does not correspond to a token in the tree.
      /// Specifically, searching for the empty string `b""` only succeeds if an
@@ -301,11 +250,6 @@ impl VocabPrefixTree {
     pub fn root_children(&self) -> btree_map::Iter<'_, Vec<u8>, VocabPrefixTreeNode> {
         self.root.children()
     }
-
-    /// Returns the maximum token ID used to build this tree.
-    pub fn max_token_id(&self) -> usize {
-        self.max_token_id
-    }
 }
 
 impl Default for VocabPrefixTree {
@@ -337,7 +281,6 @@ impl Ord for VocabPrefixTreeNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitvec::prelude::*;
 
     // Helper to create byte vecs from strings for tests.
     fn b(s: &str) -> Vec<u8> {
@@ -351,12 +294,9 @@ mod tests {
         assert_eq!(tree.root.token_id, 0); // Root defaults to 0
         assert_eq!(tree.root.prefix_length, 0); // Root length is 0
         assert!(!tree.has_empty_string_token()); // No empty token provided
-        assert_eq!(tree.max_token_id(), 0); // Max ID is 0 for empty input
         assert!(tree.root.children.is_empty());
         assert_eq!(tree.find_token(b"a"), None);
         assert_eq!(tree.find_token(b""), None); // Empty query returns None (flag is false)
-        // Root's reachable IDs should be empty (bit 0 removed as it's conventional)
-        assert!(tree.root.reachable_token_ids.not_any());
     }
 
     #[test]
@@ -367,7 +307,6 @@ mod tests {
         assert_eq!(tree.root.token_id, 0); // Root ID remains 0
         assert_eq!(tree.root.prefix_length, 0);
         assert!(!tree.has_empty_string_token()); // No empty token provided
-        assert_eq!(tree.max_token_id(), 1);
         assert_eq!(tree.root.children.len(), 1);
         assert!(tree.root.children.contains_key(&b("hello")));
 
@@ -375,18 +314,11 @@ mod tests {
         assert_eq!(node.token_id, 1);
         assert_eq!(node.prefix_length, 5); // "hello" has length 5
         assert!(node.children.is_empty());
-        // Node "hello" should only have its own ID reachable
-        let expected_node_bits = bitvec![0, 1]; // Size max_id + 1 = 2
-        assert_eq!(node.reachable_token_ids, expected_node_bits);
 
         assert_eq!(tree.find_token(&b("hello")), Some(1));
         assert_eq!(tree.find_token(&b("hell")), None);
         assert_eq!(tree.find_token(&b("hello world")), None);
         assert_eq!(tree.find_token(b""), None); // Flag is false
-
-        // Root's reachable IDs should contain only ID 1 (ID 0 is conventional)
-        let expected_root_bits = bitvec![0, 1]; // Size max_id + 1 = 2
-        assert_eq!(tree.root.reachable_token_ids, expected_root_bits);
     }
 
      #[test]
@@ -398,25 +330,12 @@ mod tests {
         assert_eq!(tree.root.token_id, 99); // Root gets the ID for ""
         assert_eq!(tree.root.prefix_length, 0); // Empty string has length 0
         assert!(tree.has_empty_string_token()); // Empty token WAS provided
-        assert_eq!(tree.max_token_id(), 99);
         assert_eq!(tree.root.children.len(), 1);
         assert!(tree.root.children.contains_key(&b("a")));
-
-        let node_a = tree.root.children.get(&b("a")).unwrap();
-        assert_eq!(node_a.token_id, 1);
-        // Node "a" should only have its own ID reachable
-        let mut expected_node_a_bits = bitvec![0; 100]; // Size max_id + 1 = 100
-        expected_node_a_bits.set(1, true);
-        assert_eq!(node_a.reachable_token_ids, expected_node_a_bits);
+        assert_eq!(tree.root.children[&b("a")].token_id, 1);
 
         assert_eq!(tree.find_token(&b("")), Some(99)); // Query for "" returns its ID (flag is true)
         assert_eq!(tree.find_token(&b("a")), Some(1));
-
-        // Root's reachable IDs should contain 1 (from child) and 99 (itself)
-        let mut expected_root_bits = bitvec![0; 100];
-        expected_root_bits.set(1, true);
-        expected_root_bits.set(99, true);
-        assert_eq!(tree.root.reachable_token_ids, expected_root_bits);
     }
 
     #[test]
@@ -428,24 +347,12 @@ mod tests {
         assert_eq!(tree.root.token_id, 0); // Root gets the ID 0 for ""
         assert_eq!(tree.root.prefix_length, 0);
         assert!(tree.has_empty_string_token()); // Empty token WAS provided
-        assert_eq!(tree.max_token_id(), 1);
         assert_eq!(tree.root.children.len(), 1);
         assert!(tree.root.children.contains_key(&b("a")));
-
-        let node_a = tree.root.children.get(&b("a")).unwrap();
-        assert_eq!(node_a.token_id, 1);
-        // Node "a" should only have its own ID reachable
-        let expected_node_a_bits = bitvec![0, 1]; // Size max_id + 1 = 2
-        assert_eq!(node_a.reachable_token_ids, expected_node_a_bits);
+        assert_eq!(tree.root.children[&b("a")].token_id, 1);
 
         assert_eq!(tree.find_token(&b("")), Some(0)); // Query for "" returns its ID 0 (flag is true)
         assert_eq!(tree.find_token(&b("a")), Some(1));
-
-        // Root's reachable IDs should contain 1 (from child) and 0 (itself, as it's explicit)
-        let mut expected_root_bits = bitvec![0; 2];
-        expected_root_bits.set(0, true);
-        expected_root_bits.set(1, true);
-        assert_eq!(tree.root.reachable_token_ids, expected_root_bits);
     }
 
 
@@ -458,7 +365,6 @@ mod tests {
         assert_eq!(tree.root.token_id, 0);
         assert_eq!(tree.root.prefix_length, 0);
         assert!(!tree.has_empty_string_token());
-        assert_eq!(tree.max_token_id(), 2);
         assert_eq!(tree.root.children.len(), 1);
         assert!(tree.root.children.contains_key(&b("a")));
 
@@ -472,22 +378,12 @@ mod tests {
         assert_eq!(node_ab.prefix_length, 2); // "ab" length 2
         assert_eq!(node_ab.token_id, 2);
         assert!(node_ab.children.is_empty());
-        // Node "ab" reachable IDs: {2}
-        let expected_ab_bits = bitvec![0, 0, 1]; // Size 3
-        assert_eq!(node_ab.reachable_token_ids, expected_ab_bits);
-
-        // Node "a" reachable IDs: {1, 2}
-        let expected_a_bits = bitvec![0, 1, 1]; // Size 3
-        assert_eq!(node_a.reachable_token_ids, expected_a_bits);
 
         assert_eq!(tree.find_token(&b("a")), Some(1));
         assert_eq!(tree.find_token(&b("ab")), Some(2));
         assert_eq!(tree.find_token(&b("b")), None);
         assert_eq!(tree.find_token(&b("abc")), None);
         assert_eq!(tree.find_token(b""), None); // Flag is false
-
-        // Root reachable IDs: {1, 2} (0 is conventional)
-        assert_eq!(tree.root.reachable_token_ids, expected_a_bits);
     }
 
     #[test]
@@ -499,7 +395,6 @@ mod tests {
         assert_eq!(tree.root.token_id, 0);
         assert_eq!(tree.root.prefix_length, 0);
         assert!(!tree.has_empty_string_token());
-        assert_eq!(tree.max_token_id(), 3);
         assert_eq!(tree.root.children.len(), 1);
         let node_a = tree.root.children.get(&b("a")).unwrap();
         assert_eq!(node_a.token_id, 1);
@@ -515,26 +410,12 @@ mod tests {
         assert_eq!(node_abc.prefix_length, 3);
         assert_eq!(node_abc.token_id, 3);
         assert!(node_abc.children.is_empty());
-        // Node "abc" reachable: {3}
-        let expected_abc_bits = bitvec![0, 0, 0, 1]; // Size 4
-        assert_eq!(node_abc.reachable_token_ids, expected_abc_bits);
-
-        // Node "ab" reachable: {2, 3}
-        let expected_ab_bits = bitvec![0, 0, 1, 1]; // Size 4
-        assert_eq!(node_ab.reachable_token_ids, expected_ab_bits);
-
-        // Node "a" reachable: {1, 2, 3}
-        let expected_a_bits = bitvec![0, 1, 1, 1]; // Size 4
-        assert_eq!(node_a.reachable_token_ids, expected_a_bits);
 
         assert_eq!(tree.find_token(&b("a")), Some(1));
         assert_eq!(tree.find_token(&b("ab")), Some(2));
         assert_eq!(tree.find_token(&b("abc")), Some(3));
         assert_eq!(tree.find_token(&b("b")), None);
         assert_eq!(tree.find_token(&b("abcd")), None);
-
-        // Root reachable: {1, 2, 3}
-        assert_eq!(tree.root.reachable_token_ids, expected_a_bits);
         assert_eq!(tree.find_token(b""), None); // Flag is false
     }
 
@@ -546,7 +427,6 @@ mod tests {
         assert_eq!(tree_with_prefix.root.token_id, 0);
         assert_eq!(tree_with_prefix.root.prefix_length, 0);
         assert!(!tree_with_prefix.has_empty_string_token());
-        assert_eq!(tree_with_prefix.max_token_id(), 20);
         assert_eq!(tree_with_prefix.root.children.len(), 1);
         assert!(tree_with_prefix.root.children.contains_key(&b("app")));
 
@@ -560,35 +440,18 @@ mod tests {
         assert_eq!(node_apple.token_id, 10);
         assert_eq!(node_apple.prefix_length, 5); // "apple" length 5
         assert!(node_apple.children.is_empty());
-        // Node "apple" reachable: {10}
-        let mut expected_apple_bits = bitvec![0; 21];
-        expected_apple_bits.set(10, true);
-        assert_eq!(node_apple.reachable_token_ids, expected_apple_bits);
 
         assert!(node_app.children.contains_key(&b("ly")));
         let node_apply = node_app.children.get(&b("ly")).unwrap();
         assert_eq!(node_apply.prefix_length, 5); // "apply" length 5
         assert_eq!(node_apply.token_id, 20);
         assert!(node_apply.children.is_empty());
-        // Node "apply" reachable: {20}
-        let mut expected_apply_bits = bitvec![0; 21];
-        expected_apply_bits.set(20, true);
-        assert_eq!(node_apply.reachable_token_ids, expected_apply_bits);
-
-        // Node "app" reachable: {5, 10, 20}
-        let mut expected_app_bits = bitvec![0; 21];
-        expected_app_bits.set(5, true);
-        expected_app_bits.set(10, true);
-        expected_app_bits.set(20, true);
-        assert_eq!(node_app.reachable_token_ids, expected_app_bits);
 
         assert_eq!(tree_with_prefix.find_token(&b("app")), Some(5));
         assert_eq!(tree_with_prefix.find_token(&b("apple")), Some(10));
         assert_eq!(tree_with_prefix.find_token(&b("apply")), Some(20));
         assert_eq!(tree_with_prefix.find_token(&b("appl")), None);
         assert_eq!(tree_with_prefix.find_token(&b("ap")), None);
-        // Root reachable: {5, 10, 20}
-        assert_eq!(tree_with_prefix.root.reachable_token_ids, expected_app_bits);
         assert_eq!(tree_with_prefix.find_token(b""), None); // Flag is false
     }
 
@@ -600,7 +463,6 @@ mod tests {
         assert_eq!(tree.root.token_id, 0);
         assert_eq!(tree.root.prefix_length, 0);
         assert!(!tree.has_empty_string_token());
-        assert_eq!(tree.max_token_id(), 20);
         assert_eq!(tree.root.children.len(), 2);
         assert!(tree.root.children.contains_key(&b("apple")));
         assert!(tree.root.children.contains_key(&b("apply")));
@@ -609,30 +471,16 @@ mod tests {
         assert_eq!(node_apple.prefix_length, 5);
         assert_eq!(node_apple.token_id, 10);
         assert!(node_apple.children.is_empty());
-        // Node "apple" reachable: {10}
-        let mut expected_apple_bits = bitvec![0; 21];
-        expected_apple_bits.set(10, true);
-        assert_eq!(node_apple.reachable_token_ids, expected_apple_bits);
 
         let node_apply = tree.root.children.get(&b("apply")).unwrap();
         assert_eq!(node_apply.prefix_length, 5);
         assert_eq!(node_apply.token_id, 20);
         assert!(node_apply.children.is_empty());
-        // Node "apply" reachable: {20}
-        let mut expected_apply_bits = bitvec![0; 21];
-        expected_apply_bits.set(20, true);
-        assert_eq!(node_apply.reachable_token_ids, expected_apply_bits);
 
         assert_eq!(tree.find_token(&b("apple")), Some(10));
         assert_eq!(tree.find_token(&b("apply")), Some(20));
         assert_eq!(tree.find_token(&b("app")), None);
         assert_eq!(tree.find_token(&b("appl")), None);
-
-        // Root reachable: {10, 20}
-        let mut expected_root_bits = bitvec![0; 21];
-        expected_root_bits.set(10, true);
-        expected_root_bits.set(20, true);
-        assert_eq!(tree.root.reachable_token_ids, expected_root_bits);
         assert_eq!(tree.find_token(b""), None); // Flag is false
     }
 
@@ -653,7 +501,6 @@ mod tests {
         assert_eq!(tree.root.token_id, 99); // Root ID set by "" token
         assert_eq!(tree.root.prefix_length, 0);
         assert!(tree.has_empty_string_token()); // Flag is true
-        assert_eq!(tree.max_token_id(), 99);
         assert_eq!(tree.root.children.len(), 2);
         assert!(tree.root.children.contains_key(&b("a")));
         assert!(tree.root.children.contains_key(&b("b")));
@@ -670,24 +517,12 @@ mod tests {
         assert!(node_a.children.contains_key(&b("pe")));
         assert!(node_a.children.contains_key(&b("pple")));
         assert!(node_a.children.contains_key(&b("pply")));
-        let node_ape = node_a.children.get(&b("pe")).unwrap();
-        let node_apple = node_a.children.get(&b("pple")).unwrap();
-        let node_apply = node_a.children.get(&b("pply")).unwrap();
-        assert_eq!(node_ape.token_id, 10);
-        assert_eq!(node_ape.prefix_length, 3); // "ape"
-        assert_eq!(node_apple.token_id, 11);
-        assert_eq!(node_apple.prefix_length, 5); // "apple"
-        assert_eq!(node_apply.token_id, 12);
-        assert_eq!(node_apply.prefix_length, 5); // "apply"
-
-        // Node "a" reachable: {1, 10, 11, 12}
-        let mut expected_a_bits = bitvec![0; 100];
-        expected_a_bits.set(1, true);
-        expected_a_bits.set(10, true);
-        expected_a_bits.set(11, true);
-        expected_a_bits.set(12, true);
-        assert_eq!(node_a.reachable_token_ids, expected_a_bits);
-
+        assert_eq!(node_a.children.get(&b("pe")).unwrap().token_id, 10);
+        assert_eq!(node_a.children.get(&b("pe")).unwrap().prefix_length, 3); // "ape"
+        assert_eq!(node_a.children.get(&b("pple")).unwrap().token_id, 11);
+        assert_eq!(node_a.children.get(&b("pple")).unwrap().prefix_length, 5); // "apple"
+        assert_eq!(node_a.children.get(&b("pply")).unwrap().token_id, 12);
+        assert_eq!(node_a.children.get(&b("pply")).unwrap().prefix_length, 5); // "apply"
 
         // Check branch 'b'
         let node_b = tree.root.children.get(&b("b")).unwrap();
@@ -696,14 +531,7 @@ mod tests {
         assert_eq!(node_b.children.len(), 1);
         assert!(node_b.children.contains_key(&b("anana")));
         assert_eq!(node_b.children.get(&b("anana")).unwrap().token_id, 20);
-        let node_banana = node_b.children.get(&b("anana")).unwrap();
-        assert_eq!(node_banana.prefix_length, 6); // "banana"
-
-        // Node "b" reachable: {2, 20}
-        let mut expected_b_bits = bitvec![0; 100];
-        expected_b_bits.set(2, true);
-        expected_b_bits.set(20, true);
-        assert_eq!(node_b.reachable_token_ids, expected_b_bits);
+        assert_eq!(node_b.children.get(&b("anana")).unwrap().prefix_length, 6); // "banana"
 
         // Test lookups
         assert_eq!(tree.find_token(&b("a")), Some(1));
@@ -715,16 +543,6 @@ mod tests {
         assert_eq!(tree.find_token(&b("app")), None);
         assert_eq!(tree.find_token(&b("ban")), None);
         assert_eq!(tree.find_token(&b("c")), None);
-
-        // Root reachable: {1, 2, 10, 11, 12, 20, 99}
-        let mut expected_root_bits = bitvec![0; 100];
-        expected_root_bits.set(1, true);
-        expected_root_bits.set(2, true);
-        expected_root_bits.set(10, true);
-        expected_root_bits.set(11, true);
-        expected_root_bits.set(12, true);
-        expected_root_bits.set(20, true);
-        expected_root_bits.set(99, true);
         assert_eq!(tree.find_token(b""), Some(99)); // Query for "" returns its ID (flag is true)
     }
 
@@ -736,7 +554,6 @@ mod tests {
         assert_eq!(tree.root.token_id, 0);
         assert_eq!(tree.root.prefix_length, 0);
         assert!(!tree.has_empty_string_token());
-        assert_eq!(tree.max_token_id(), 3);
         assert_eq!(tree.root.children.len(), 1);
         assert!(tree.root.children.contains_key(&b("a")));
 
@@ -750,18 +567,9 @@ mod tests {
         assert_eq!(node_ab.prefix_length, 2); // Length of "ab"
         assert_eq!(node_ab.token_id, 2);
         assert!(node_ab.children.is_empty());
-        // Node "ab" reachable: {2}
-        let expected_ab_bits = bitvec![0, 0, 1, 0]; // Size 4
-        assert_eq!(node_ab.reachable_token_ids, expected_ab_bits);
-
-        // Node "a" reachable: {2, 3} (ID 1 was overwritten)
-        let expected_a_bits = bitvec![0, 0, 1, 1]; // Size 4
-        assert_eq!(node_a.reachable_token_ids, expected_a_bits);
 
         assert_eq!(tree.find_token(&b("a")), Some(3));
         assert_eq!(tree.find_token(&b("ab")), Some(2));
-        // Root reachable: {2, 3}
-        assert_eq!(tree.root.reachable_token_ids, expected_a_bits);
         assert_eq!(tree.find_token(b""), None); // Flag is false
     }
 
