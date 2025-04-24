@@ -51,6 +51,18 @@ impl<EK: Ord, EV, T> Trie<EK, EV, T> {
         new_node.clone()
     }
 
+    pub fn already_has_dst(&self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> bool {
+        self.children.get(&edge_key).map(|children| children.iter().any(|(_, child)| Arc::ptr_eq(dst, child))).unwrap_or(false)
+    }
+
+    pub fn get_edge_value(&self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> Option<&EV> {
+        self.children.get(&edge_key).and_then(|children| children.iter().find(|(_, child)| Arc::ptr_eq(dst, child)).map(|(edge_value, _)| edge_value))
+    }
+
+    pub fn get_edge_value_mut(&mut self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> Option<&mut EV> {
+        self.children.get_mut(&edge_key).and_then(|children| children.iter_mut().find(|(_, child)| Arc::ptr_eq(dst, child)).map(|(edge_value, _)| edge_value))
+    }
+
     /// Attempts to insert a child node associated with the given edge key and edge value.
     /// If the edge key already exists, the (edge_value, child) tuple is added
     /// to the list of children for that edge key.
@@ -174,12 +186,20 @@ impl<EK: Ord, EV, T> Trie<EK, EV, T> {
     pub fn get(
         &self,
         edge_key: &EK,
-    ) -> Option<Vec<(EV, Arc<Mutex<Trie<EK, EV, T>>>)>>
+    ) -> Option<&Vec<(EV, Arc<Mutex<Trie<EK, EV, T>>>)>>
     where EV: Clone
     {
-        self.children.get(edge_key).cloned()
+        self.children.get(edge_key)
     }
 
+    pub fn get_mut(
+        &mut self,
+        edge_key: &EK,
+    ) -> Option<&mut Vec<(EV, Arc<Mutex<Trie<EK, EV, T>>>)>>
+    where EV: Clone
+    {
+        self.children.get_mut(edge_key)
+    }
 
     /// Returns a reference to the map of children nodes.
     /// The map's values are Vecs of (EdgeValue, ChildArc) tuples.
@@ -648,7 +668,8 @@ mod tests {
         }
 
         // Check retrieval
-        let children_tuples = root.lock().unwrap().get(&"edge").unwrap();
+        let binding = root.lock().unwrap();
+        let children_tuples = binding.get(&"edge").unwrap();
         assert_eq!(children_tuples.len(), 2);
         let child_data: HashSet<(&str, *const TestTrieBasic)> = children_tuples
             .iter()

@@ -145,32 +145,40 @@ impl GrammarConstraint {
                     let new_dotted_node = DottedVocabNode { src, dst, offset: new_offset, bytes };
                     let new_queue_key = (new_dotted_node, TokenizerStateID(0));
                     let mut next_precomputed_nodes = Vec::new();
-                    for precompute_node in &precomputed_nodes {
+                    'outer: for precompute_node in &precomputed_nodes {
                         let mut precompute_node = precompute_node.lock().unwrap();
-                        // Try to push to an existing precompute node in the queue if it's possible to do so without creating a cycle.
+                        let llm_tokens = dst.reachable_token_ids().clone();
                         if let Some(existing_precompute_nodes) = queue.get(&new_queue_key) {
+                            // Try to push to an existing precompute node in the queue if it's possible to do so without creating a cycle.
                             for existing_precompute_node in existing_precompute_nodes {
-                                let llm_tokens = dst.reachable_token_ids().clone();
-                                let default_precompute_node_contents = PrecomputedNodeContents::default();
-                                let result = precompute_node.try_insert_or_merge_edge(
-                                    matched_token_id,
-                                    llm_tokens.clone(),
-                                    default_precompute_node_contents,
-                                    |existing_edge_value, new_edge_value| {
-                                        Some(new_edge_value.bitor(existing_edge_value))
-                                    },
-                                    |existing_precompute_node_contents, mut new_precompute_node_contents| {
-                                        new_precompute_node_contents.finalizers.extend(existing_precompute_node_contents.finalizers.clone());
-                                        Some(new_precompute_node_contents)
-                                    }
-                                );
-                                // let dst_precompute_node = result.unwrap_or_else(|_|
-                                //     precompute_node.force_insert(matched_token_id, llm_tokens, PrecomputedNodeContents::default()));
-                                if let Ok(dst_precompute_node)
+                                if let Some(existing_edge_value) = precompute_node.get_edge_value_mut(matched_token_id, existing_precompute_node) {
+                                    // Merge into the edge value.
+                                    *existing_edge_value = existing_edge_value.clone().bitor(llm_tokens.clone());
+                                    continue 'outer;
+                                }
                             }
-                        } else {
 
+                            // Try to insert a new edge to any existing node.
+                            for existing_precompute_node in existing_precompute_nodes {
+                                if let Ok(dst_precomputed_node) = precompute_node.try_insert(matched_token_id, llm_tokens.clone(), existing_precompute_node.clone()) {
+                                    continue 'outer;
+                                }
+                            }
                         }
+
+                        // Use any existing edge on the src node.
+                        if let Some(existing_edges) = precompute_node.get_mut(&matched_token_id) {
+                            if let Some((existing_edge_value, exising_dst)) = existing_edges.iter_mut().next() {
+                                // Merge into the edge value.
+                                *existing_edge_value = existing_edge_value.clone().bitor(llm_tokens.clone());
+                                next_precomputed_nodes.push(exising_dst.clone());
+                                continue 'outer;
+                            }
+                        }
+
+                        // Create a new node.
+                        let new_precomputed_node = precompute_node.force_insert(matched_token_id, llm_tokens.clone(), PrecomputedNodeContents::default());
+                        next_precomputed_nodes.push(new_precomputed_node.clone());
                     }
                     queue.insert(new_queue_key, next_precomputed_nodes);
                 } else { unreachable!(); }
