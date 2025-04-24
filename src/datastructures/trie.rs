@@ -45,6 +45,12 @@ impl<EK: Ord, EV, T> Trie<EK, EV, T> {
         }
     }
 
+    pub fn force_insert(&mut self, edge_key: EK, edge_value: EV, value: T) -> Arc<Mutex<Trie<EK, EV, T>>> {
+        let new_node = Arc::new(Mutex::new(Trie::new(value)));
+        self.children.entry(edge_key).or_insert_with(Vec::new).push((edge_value, new_node.clone()));
+        new_node.clone()
+    }
+
     /// Attempts to insert a child node associated with the given edge key and edge value.
     /// If the edge key already exists, the (edge_value, child) tuple is added
     /// to the list of children for that edge key.

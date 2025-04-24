@@ -7,7 +7,7 @@ use std::collections::btree_map;
 
 // Represents a node in the VocabPrefixTree
 #[derive(PartialEq)] // Keep derived PartialEq for structural comparison in tests
-pub struct VocabPrefixTreeNode<Store = usize> where Store: BitStore {
+pub struct VocabPrefixTreeNode {
     /// The token ID corresponding to the path from the root to this node.
     /// Every node represents a valid token endpoint.
     /// The root node has ID 0 by convention, unless overwritten by an empty string token.
@@ -19,7 +19,7 @@ pub struct VocabPrefixTreeNode<Store = usize> where Store: BitStore {
     children: BTreeMap<Vec<u8>, VocabPrefixTreeNode>,
     /// Bit vector indicating all token IDs reachable from or including this node.
     /// The length is max_token_id + 1.
-    reachable_token_ids: BitVec<Store>,
+    reachable_token_ids: BitVec,
 }
 
 impl VocabPrefixTreeNode {
@@ -48,6 +48,11 @@ impl VocabPrefixTreeNode {
     /// The iterator yields pairs of `(&Vec<u8>, &VocabPrefixTreeNode)`, representing the edge label and the child node.
     pub fn children(&self) -> btree_map::Iter<'_, Vec<u8>, VocabPrefixTreeNode> {
         self.children.iter()
+    }
+
+    /// Returns a bitvec representing the set of token IDs reachable from this node.
+    pub fn reachable_token_ids(&self) -> &BitVec {
+        &self.reachable_token_ids
     }
 }
 

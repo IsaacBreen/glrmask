@@ -7,6 +7,7 @@ use bimap::BiBTreeMap;
 use bitvec::prelude::BitVec;
 use bitvec::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::BitOr;
 use std::sync::{Arc, Mutex};
 use bitvec::macros::internal::funty::Fundamental;
 use keyed_priority_queue::KeyedPriorityQueue;
@@ -125,17 +126,60 @@ impl GrammarConstraint {
             }
         }
 
-        while let Some((((dotted_vocab_node, tokenizer_state_id)), precomputed_nodes)) = queue.pop_first() {
+        while let Some((((dotted_vocab_node, initial_tokenizer_state_id)), precomputed_nodes)) = queue.pop_first() {
             let DottedVocabNode { src, dst, offset, bytes } = dotted_vocab_node;
 
-            let results = tokenizer.execute_from_state(&bytes[offset..], tokenizer_state_id);
+            let results = tokenizer.execute_from_state(&bytes[offset..], initial_tokenizer_state_id);
 
-            for result in results.matches {}
+            for result in results.matches {
+                let matched_token_id = GrammarTokenID(result.id);
+                let new_offset = offset + result.width;
+                if new_offset == bytes.len() {
+                    // Reached the end of the input, so this is a clean match.
+                    let possible_final_grammar_tokens: BTreeSet<_> = tokenizer.tokens_accessible_from_state(TokenizerStateID(0)).into_iter().map(|token_id| GrammarTokenID(token_id.0)).collect(); // Should contain all tokens
+                    for precompute_node in &precomputed_nodes {
+                        precompute_node.lock().unwrap().value.push_finalizer_info(&possible_final_grammar_tokens, dst.token_id(), TokenizerStateID(0));
+                    }
+                } else if new_offset < bytes.len() {
+                    // There's still more input to process. Insert trie edge(s) and update the queue.
+                    let new_dotted_node = DottedVocabNode { src, dst, offset: new_offset, bytes };
+                    let new_queue_key = (new_dotted_node, TokenizerStateID(0));
+                    let mut next_precomputed_nodes = Vec::new();
+                    for precompute_node in &precomputed_nodes {
+                        let mut precompute_node = precompute_node.lock().unwrap();
+                        // Try to push to an existing precompute node in the queue if it's possible to do so without creating a cycle.
+                        if let Some(existing_precompute_nodes) = queue.get(&new_queue_key) {
+                            for existing_precompute_node in existing_precompute_nodes {
+                                let llm_tokens = dst.reachable_token_ids().clone();
+                                let default_precompute_node_contents = PrecomputedNodeContents::default();
+                                let result = precompute_node.try_insert_or_merge_edge(
+                                    matched_token_id,
+                                    llm_tokens.clone(),
+                                    default_precompute_node_contents,
+                                    |existing_edge_value, new_edge_value| {
+                                        Some(new_edge_value.bitor(existing_edge_value))
+                                    },
+                                    |existing_precompute_node_contents, mut new_precompute_node_contents| {
+                                        new_precompute_node_contents.finalizers.extend(existing_precompute_node_contents.finalizers.clone());
+                                        Some(new_precompute_node_contents)
+                                    }
+                                );
+                                // let dst_precompute_node = result.unwrap_or_else(|_|
+                                //     precompute_node.force_insert(matched_token_id, llm_tokens, PrecomputedNodeContents::default()));
+                                if let Ok(dst_precompute_node)
+                            }
+                        } else {
+
+                        }
+                    }
+                    queue.insert(new_queue_key, next_precomputed_nodes);
+                } else { unreachable!(); }
+            }
 
             if let Some(end_state) = results.end_state {
                 let possible_final_grammar_tokens: BTreeSet<_> = tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state)).into_iter().map(|token_id| GrammarTokenID(token_id.0)).collect();
-                for precompute_node in precomputed_nodes {
-                    precompute_node.lock().unwrap().value.push_finalizer_info(&possible_final_grammar_tokens, dst.token_id(), tokenizer_state_id);
+                for precompute_node in &precomputed_nodes {
+                    precompute_node.lock().unwrap().value.push_finalizer_info(&possible_final_grammar_tokens, dst.token_id(), TokenizerStateID(end_state));
                 }
             }
         }
