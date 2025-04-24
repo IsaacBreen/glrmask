@@ -468,7 +468,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     /// # Returns
     /// * `Ok(Arc<Mutex<Trie<EK, EV, T>>>)`: pointing to the destination node (either existing or new).
     /// * `Err(CycleDetectedError)`: if creating a new edge resulted in a cycle.
-    pub fn insert_or_merge_edge<FMergeEV, FMergeNV>(
+    pub fn try_insert_or_merge_edge<FMergeEV, FMergeNV>(
         &mut self,
         edge_key: EK,
         edge_value: EV,
@@ -1154,7 +1154,7 @@ mod tests {
         let edge_val = vec![1];
         let node_val = "new_node".to_string();
 
-        let returned_node_res = root.insert_or_merge_edge(
+        let returned_node_res = root.try_insert_or_merge_edge(
             edge_key,
             edge_val.clone(),
             node_val.clone(),
@@ -1186,7 +1186,7 @@ mod tests {
         let edge_val = vec![1]; // New edge value
         let node_val = "data".to_string(); // New node value data
 
-        let returned_node_res = root.insert_or_merge_edge(
+        let returned_node_res = root.try_insert_or_merge_edge(
             edge_key,
             edge_val.clone(),
             node_val.clone(),
@@ -1219,7 +1219,7 @@ mod tests {
         let edge_val = vec![1];
         let node_val = "data".to_string();
 
-        let returned_node_res = root.insert_or_merge_edge(
+        let returned_node_res = root.try_insert_or_merge_edge(
             edge_key,
             edge_val.clone(),
             node_val.clone(),
@@ -1251,7 +1251,7 @@ mod tests {
         let edge_val = vec![1];
         let node_val = "data".to_string();
 
-        let returned_node_res = root.insert_or_merge_edge(
+        let returned_node_res = root.try_insert_or_merge_edge(
             edge_key,
             edge_val.clone(),
             node_val.clone(),
@@ -1283,7 +1283,7 @@ mod tests {
         let edge_val = vec![1]; // New edge value
         let node_val = "new_data".to_string(); // New node value
 
-        let returned_node_res = root.insert_or_merge_edge(
+        let returned_node_res = root.try_insert_or_merge_edge(
             edge_key,
             edge_val.clone(),
             node_val.clone(),
@@ -1329,7 +1329,7 @@ mod tests {
         let node_val = "data".to_string();
 
         // Since node merge is checked first, node2 should be selected.
-        let returned_node_res = root.insert_or_merge_edge(
+        let returned_node_res = root.try_insert_or_merge_edge(
             edge_key,
             edge_val.clone(),
             node_val.clone(),
@@ -1369,7 +1369,7 @@ mod tests {
         // Now, try to insert child -> root using insert_or_merge_edge, which should fail
         // because try_insert will detect the cycle when creating the new edge.
         // We use merge functions that always fail to ensure it tries to create a new edge.
-        let merge_result = child.lock().unwrap().insert_or_merge_edge(
+        let merge_result = child.lock().unwrap().try_insert_or_merge_edge(
             "c->r",
             vec![2],
             "root".to_string(), // Doesn't matter as node merge fails
