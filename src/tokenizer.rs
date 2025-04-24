@@ -18,7 +18,7 @@ pub struct Token {
 
 pub struct ExecuteResult {
     pub matches: Vec<Token>,
-    pub new_state: Option<usize>,
+    pub end_state: Option<usize>,
 }
 
 impl Regex {
@@ -36,7 +36,7 @@ impl Regex {
 
         let new_state = if regex_state.done { None } else { Some(regex_state.current_state) };
 
-        ExecuteResult { matches, new_state }
+        ExecuteResult { matches, end_state: new_state }
     }
 
     fn tokens_accessible_from_state(&self, state: TokenizerStateID) -> Vec<GrammarTokenID> {
