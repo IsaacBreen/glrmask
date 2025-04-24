@@ -354,14 +354,14 @@ mod tests {
 
         let productions = vec![
             prod("S", vec![t("A")]),
-            prod("S", vec![t("B")]),
-            prod("S", vec![t("C")]),
+            prod("S", vec![t("AB")]),
+            prod("S", vec![t("B_OR_C")]),
         ];
 
         let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
         grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0));
-        grammar_token_map.insert(Terminal("B".to_string()), TerminalID(1));
-        grammar_token_map.insert(Terminal("C".to_string()), TerminalID(2));
+        grammar_token_map.insert(Terminal("AB".to_string()), TerminalID(1));
+        grammar_token_map.insert(Terminal("B_OR_C".to_string()), TerminalID(2));
 
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
 
@@ -372,6 +372,9 @@ mod tests {
         let mask = constraint_state.get_mask();
         assert_eq!(mask, LLMTokenBV::repeat(true, 2));
 
+        constraint_state.commit(LLMTokenID(0));
 
+        let mask = constraint_state.get_mask();
+        assert_eq!(mask, LLMTokenBV::repeat(false, 2));
     }
 }
