@@ -53,6 +53,9 @@ impl PrecomputedNodeContents {
     pub fn push_finalizer_info(&mut self, possible_final_grammar_tokens: &BTreeSet<GrammarTokenID>, token_id: usize, tokenizer_state_id: TokenizerStateID) {
         let mut finalizer = PrecomputedFinalizer::default();
         finalizer.possible_final_grammar_tokens = possible_final_grammar_tokens.clone();
+        if finalizer.compatible_llm_tokens.len() < token_id + 1 {
+            finalizer.compatible_llm_tokens.resize(token_id + 1, false);
+        }
         finalizer.compatible_llm_tokens.set(token_id, true);
         finalizer.tokenizer_state_ids.insert(tokenizer_state_id);
         self.finalizers.push(finalizer);
@@ -322,5 +325,53 @@ impl GrammarConstraintState<'_> {
 
         self.state.active_states = final_active_parse_states;
         self.state.inactive_states.extend(final_inactive_parse_states);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::finite_automata::eat_u8;
+    use crate::{choice, groups, seq};
+    use crate::glr::grammar::{nt, prod, t, NonTerminal, Terminal};
+    use crate::glr::table::{generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
+    use super::*;
+
+    #[test]
+    fn test_constraint_simple() {
+        // LLM tokens: "ab", "ac"
+        // Grammar tokens: "a", "ab", "b|c"
+        // Grammar: S -> "a" | "ab" | "b|c"
+        let expr = groups![
+            eat_u8(b'a'),
+            seq![eat_u8(b'a'), eat_u8(b'b')],
+            choice![eat_u8(b'b'), eat_u8(b'c')]
+        ];
+        let tokenizer = expr.build();
+
+        let mut llm_token_map = LLMTokenMap::new();
+        llm_token_map.insert(b"ab".to_vec(), LLMTokenID(0));
+        llm_token_map.insert(b"ac".to_vec(), LLMTokenID(1));
+
+        let productions = vec![
+            prod("S", vec![t("A")]),
+            prod("S", vec![t("B")]),
+            prod("S", vec![t("C")]),
+        ];
+
+        let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+        grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0));
+        grammar_token_map.insert(Terminal("B".to_string()), TerminalID(1));
+        grammar_token_map.insert(Terminal("C".to_string()), TerminalID(2));
+
+        let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
+
+        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 2);
+
+        let mut constraint_state = constraint.init();
+
+        let mask = constraint_state.get_mask();
+        assert_eq!(mask, LLMTokenBV::repeat(true, 2));
+
+
     }
 }

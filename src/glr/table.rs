@@ -387,6 +387,11 @@ pub fn generate_glr_parser(productions: &[Production], start_production_id: usiz
     generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
 }
 
+pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
+    let non_terminal_map = assign_non_terminal_ids(productions);
+    generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
+}
+
 pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
     let mut terminal_map = BiBTreeMap::new();
     let mut next_terminal_id = 0;
