@@ -235,9 +235,14 @@ impl GrammarConstraintState<'_> {
         self.state.active_states.retain(|managed_parse_state| managed_parse_state.llm_tokens[llm_token_id.0]);
     }
 
-    pub fn commit_many(&mut self, llm_token_ids: &[LLMTokenID]) {
+    pub fn step_and_commit(&mut self, llm_token_id: LLMTokenID) {
+        self.step_with_llm_token(llm_token_id);
+        self.commit(llm_token_id);
+    }
+
+    pub fn commit_and_step_many(&mut self, llm_token_ids: &[LLMTokenID]) {
         for &llm_token_id in llm_token_ids {
-            self.commit(llm_token_id);
+            self.step_with_llm_token(llm_token_id);
         }
     }
 
@@ -372,10 +377,13 @@ mod tests {
 
         let mut constraint_state = constraint.init();
 
+        constraint_state.step_with_all_llm_tokens();
+
         let mask = constraint_state.get_mask();
         assert_eq!(mask, LLMTokenBV::from_iter([true, true, false]));
 
         constraint_state.commit(LLMTokenID(0));
+        constraint_state.step_with_all_llm_tokens();
 
         let mask = constraint_state.get_mask();
         assert_eq!(mask, LLMTokenBV::from_iter([false, false, true]));
