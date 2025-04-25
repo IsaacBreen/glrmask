@@ -11,6 +11,7 @@ use std::ops::BitOr;
 use std::sync::{Arc, Mutex};
 use bitvec::macros::internal::funty::Fundamental;
 use keyed_priority_queue::KeyedPriorityQueue;
+use crate::constraint_extra::print_finalizer;
 use crate::datastructures::charmap::TrieMap;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::managed_glr_parser::{ManagedGLRParserState, ManagedParseState};
@@ -316,6 +317,8 @@ impl GrammarConstraintState<'_> {
                         let final_llm_tokens = managed_parse_state.llm_tokens.clone() & precomputed_finalizer.compatible_llm_tokens.clone();
                         if final_llm_tokens.is_empty() { continue; }
                         // Create a new managed parse state
+                        println!("Creating new managed parse state. Finalizer:");
+                        print_finalizer(&precomputed_finalizer, &"");
                         let mut managed_parse_state = managed_parse_state.clone();
                         managed_parse_state.tokenizer_state_ids = valid_final_tokenizer_state_ids;
                         managed_parse_state.llm_tokens = final_llm_tokens;

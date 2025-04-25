@@ -21,7 +21,7 @@ fn format_bv_indices(bv: &LLMTokenBV) -> String {
 }
 
 /// Helper function to print PrecomputedFinalizer details.
-fn print_finalizer(finalizer: &PrecomputedFinalizer, indent: &str) {
+pub(crate) fn print_finalizer(finalizer: &PrecomputedFinalizer, indent: &str) {
     println!("{}  - Finalizer:", indent);
     let final_grammar_tokens: Vec<String> = finalizer.possible_final_grammar_tokens.iter().map(|id| id.0.to_string()).collect();
     println!("{}    Possible Final Grammar Tokens: [{}]", indent, final_grammar_tokens.join(", "));
