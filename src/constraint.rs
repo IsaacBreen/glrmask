@@ -318,8 +318,8 @@ impl GrammarConstraintState<'_> {
                         if final_llm_tokens.is_empty() { continue; }
                         // Create a new managed parse state
                         println!("Creating new managed parse state.");
-                        println!("Valid tokenizer states: {:?}", valid_final_tokenizer_state_ids);
-                        println!("Final LLM tokens: {:?}", final_llm_tokens);
+                        println!("Valid tokenizer states: {:?}", valid_final_tokenizer_state_ids.iter().map(|id| id.0).collect::<Vec<_>>());
+                        println!("Final LLM tokens: {:?}", final_llm_tokens.iter_ones().collect::<Vec<_>>());
                         println!("Finalizer:");
                         print_finalizer(&precomputed_finalizer, &"");
                         let mut managed_parse_state = managed_parse_state.clone();
