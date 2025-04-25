@@ -102,12 +102,27 @@ impl<'a> ManagedGLRParserState<'a> {
     pub fn step(&mut self, token_id: TerminalID) {
         let mut glr_parser_state = GLRParserState::from(self.clone());
         glr_parser_state.step(token_id);
-        // Set the tokenizer state IDs to zero.
-        for managed_parse_state in &mut self.active_states {
-            managed_parse_state.tokenizer_state_ids = BTreeSet::new();
+        self.active_states.clear();
+        self.inactive_states.clear();
+        for parse_state in glr_parser_state.active_states {
+            let managed_parse_state = ManagedParseState {
+                tokenizer_state_ids: BTreeSet::from([TokenizerStateID(0)]),
+                llm_tokens: todo!(),
+                stack: parse_state.stack.clone(),
+                action_stack: parse_state.action_stack.clone(),
+                status: parse_state.status.clone(),
+            };
+            self.active_states.push(managed_parse_state);
         }
-        for managed_parse_state in &mut self.inactive_states {
-            managed_parse_state.tokenizer_state_ids = BTreeSet::new();
+        for parse_state in glr_parser_state.inactive_states {
+            let managed_parse_state = ManagedParseState {
+                tokenizer_state_ids: BTreeSet::from([TokenizerStateID(0)]),
+                llm_tokens: todo!(),
+                stack: parse_state.stack.clone(),
+                action_stack: parse_state.action_stack.clone(),
+                status: parse_state.status.clone(),
+            };
+            self.inactive_states.push(managed_parse_state);
         }
     }
 
