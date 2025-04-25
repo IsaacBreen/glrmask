@@ -433,13 +433,13 @@ mod tests {
 
         // Test gap - try to match something for ID 5 (which was a gap)
         // The DFA shouldn't even have a path that leads to a finalizer for group 5
-        // We can check possible_group_ids
+        // We can check possible_future_group_ids
         let start_state_data = &regex.dfa.states[regex.dfa.start_state];
-        assert!(start_state_data.possible_group_ids.contains(&bos_id));
-        assert!(start_state_data.possible_group_ids.contains(&hello_id));
-        assert!(start_state_data.possible_group_ids.contains(&world_id));
-        assert!(start_state_data.possible_group_ids.contains(&bang_id));
-        assert!(!start_state_data.possible_group_ids.contains(&gap_id)); // ID 5 shouldn't be possible
+        assert!(start_state_data.possible_future_group_ids.contains(&bos_id));
+        assert!(start_state_data.possible_future_group_ids.contains(&hello_id));
+        assert!(start_state_data.possible_future_group_ids.contains(&world_id));
+        assert!(start_state_data.possible_future_group_ids.contains(&bang_id));
+        assert!(!start_state_data.possible_future_group_ids.contains(&gap_id)); // ID 5 shouldn't be possible
 
         // Clean up dummy file
         fs::remove_file(file_path)?;

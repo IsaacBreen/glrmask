@@ -24,7 +24,7 @@ pub struct NFA {
 pub struct DFAState {
     pub transitions: TrieMap<usize>,
     pub finalizers: BTreeSet<GroupID>,
-    pub possible_group_ids: BTreeSet<GroupID>,
+    pub possible_future_group_ids: BTreeSet<GroupID>,
     pub group_id_to_u8set: BTreeMap<GroupID, U8Set>,
 }
 
@@ -220,8 +220,8 @@ impl Debug for DFA {
                 f.write_str(&format!("  - Finalizers: {:?}\n", state.finalizers))?;
             }
 
-            if !state.possible_group_ids.is_empty() {
-                f.write_str(&format!("  - Possible Group IDs: {:?}\n", state.possible_group_ids))?;
+            if !state.possible_future_group_ids.is_empty() {
+                f.write_str(&format!("  - Possible Future Group IDs: {:?}\n", state.possible_future_group_ids))?;
             }
 
             if !state.group_id_to_u8set.is_empty() {
@@ -432,7 +432,7 @@ impl NFA {
         dfa_states.push(DFAState {
             transitions: TrieMap::new(),
             finalizers,
-            possible_group_ids: BTreeSet::new(), // Will be computed later
+            possible_future_group_ids: BTreeSet::new(), // Will be computed later
             group_id_to_u8set: BTreeMap::new(),  // Will be computed later
         });
 
@@ -479,7 +479,7 @@ impl NFA {
                     dfa_states.push(DFAState {
                         transitions: TrieMap::new(),
                         finalizers: new_finalizers,
-                        possible_group_ids: BTreeSet::new(), // Will be computed later
+                        possible_future_group_ids: BTreeSet::new(), // Will be computed later
                         group_id_to_u8set: BTreeMap::new(),  // Will be computed later
                     });
 
@@ -501,7 +501,7 @@ impl NFA {
             dfa.non_greedy_finalizers.extend(state.non_greedy_finalizers.iter().cloned());
         }
 
-        dfa.compute_possible_group_ids();
+        dfa.compute_possible_future_group_ids();
         dfa.compute_group_id_to_u8set();
 
         dfa
@@ -528,11 +528,11 @@ impl NFA {
 }
 
 impl DFA {
-    pub fn compute_possible_group_ids(&mut self) {
-        // Initialize possible_group_ids as empty. We only want to include
+    pub fn compute_possible_future_group_ids(&mut self) {
+        // Initialize possible_future_group_ids as empty. We only want to include
         // group IDs reachable via *future* transitions.
         for state in &mut self.states {
-            state.possible_group_ids = BTreeSet::new();
+            state.possible_future_group_ids = BTreeSet::new();
         }
 
         loop {
@@ -540,15 +540,15 @@ impl DFA {
             for state_index in 0..self.states.len() {
                 let state = self.states[state_index].clone(); // Clone to avoid borrow checker issues
                 for (_input, &next_state_index) in &state.transitions {
-                    let next_possible_groups = self.states[next_state_index].possible_group_ids.clone();
+                    let next_possible_future_groups = self.states[next_state_index].possible_future_group_ids.clone();
                     let next_finalizers = self.states[next_state_index].finalizers.clone();
-                    let state_possible_groups = &mut self.states[state_index].possible_group_ids;
+                    let state_possible_future_groups = &mut self.states[state_index].possible_future_group_ids;
 
-                    let old_len = state_possible_groups.len();
-                    state_possible_groups.extend(next_finalizers.iter()); // Add finalizers of the *next* state
-                    state_possible_groups.extend(next_possible_groups.iter());
+                    let old_len = state_possible_future_groups.len();
+                    state_possible_future_groups.extend(next_finalizers.iter()); // Add finalizers of the *next* state
+                    state_possible_future_groups.extend(next_possible_future_groups.iter());
 
-                    if state_possible_groups.len() > old_len {
+                    if state_possible_future_groups.len() > old_len {
                         changed = true;
                     }
                 }
@@ -560,9 +560,9 @@ impl DFA {
     }
 
     pub fn compute_group_id_to_u8set(&mut self) {
-        // Create the vector of possible group IDs within a block scope, cloning the data
-        let possible_group_ids: Vec<_> = {
-            self.states.iter().map(|s| s.possible_group_ids.clone()).collect()
+        // Create the vector of possible future group IDs within a block scope, cloning the data
+        let possible_future_group_ids: Vec<_> = {
+            self.states.iter().map(|s| s.possible_future_group_ids.clone()).collect()
         };
 
         // Now that the block has ended, there are no borrows of self.states
@@ -570,10 +570,10 @@ impl DFA {
             let mut group_id_to_u8set: BTreeMap<GroupID, U8Set> = BTreeMap::new();
 
             for (input_u8, &next_state_index) in &state.transitions {
-                // Access possible_group_ids using the precomputed vector (cloned data)
-                let next_possible_groups = &possible_group_ids[next_state_index];
+                // Access possible_future_group_ids using the precomputed vector (cloned data)
+                let next_possible_future_groups = &possible_future_group_ids[next_state_index];
 
-                for &group_id in next_possible_groups {
+                for &group_id in next_possible_future_groups {
                     group_id_to_u8set
                         .entry(group_id)
                         .or_insert_with(U8Set::none)
@@ -724,7 +724,7 @@ impl DFA {
         self.remove_unreachable_states();
 
         // Recompute metadata
-        self.compute_possible_group_ids();
+        self.compute_possible_future_group_ids();
         self.compute_group_id_to_u8set();
     }
 }
@@ -758,7 +758,7 @@ impl RegexState<'_> {
                 // - a non-greedy group that has not been matched yet
                 let matched: BTreeSet<GroupID> = self.matches.keys().cloned().collect();
                 let excluded: BTreeSet<GroupID> = matched.intersection(&dfa.non_greedy_finalizers).cloned().collect();
-                let should_terminate = dfa.states[self.current_state].possible_group_ids.difference(&excluded).next().is_none();
+                let should_terminate = dfa.states[self.current_state].possible_future_group_ids.difference(&excluded).next().is_none();
 
                 if should_terminate {
                     self.position += text.len();
@@ -946,9 +946,9 @@ impl RegexState<'_> {
         self.matches.clear();
     }
 
-    pub fn possible_group_ids(&self) -> BTreeSet<GroupID> {
+    pub fn possible_future_group_ids(&self) -> BTreeSet<GroupID> {
         let state = &self.regex.dfa.states[self.current_state];
-        state.possible_group_ids.clone()
+        state.possible_future_group_ids.clone()
     }
 
     pub fn get_u8set_for_group(&self, group_id: GroupID) -> U8Set {
@@ -1456,17 +1456,17 @@ mod even_more_complex_tests {
 }
 
 #[cfg(test)]
-mod possible_group_ids_tests {
+mod possible_future_group_ids_tests {
     use super::*;
 
-    fn run_test(expr: impl Into<ExprGroups>, expected_possible_group_ids: BTreeSet<GroupID>) {
+    fn run_test(expr: impl Into<ExprGroups>, expected_possible_future_group_ids: BTreeSet<GroupID>) {
         let regex = expr.into().build();
         let state = regex.init();
-        assert_eq!(state.possible_group_ids(), expected_possible_group_ids);
+        assert_eq!(state.possible_future_group_ids(), expected_possible_future_group_ids);
     }
 
     #[test]
-    fn test_possible_group_ids() {
+    fn test_possible_future_group_ids() {
         run_test(seq![], BTreeSet::from([0]));
         run_test(eat_u8(b'a'), BTreeSet::from([0]));
         run_test(groups![eat_u8(b'a'), eat_u8(b'b')], BTreeSet::from([0, 1]));
@@ -1483,7 +1483,7 @@ mod possible_group_ids_tests {
     }
 
     #[test]
-    fn test_possible_group_ids_excludes_current_state() {
+    fn test_possible_future_group_ids_excludes_current_state() {
         // Define a regex where the start state is final, but also has transitions
         // groups![eps(), eat_u8(b'a')]
         // Group 0: eps() -> makes start state final for group 0
@@ -1496,9 +1496,9 @@ mod possible_group_ids_tests {
         let start_state_index = regex.dfa.start_state;
         let start_state_data = &regex.dfa.states[start_state_index];
 
-        // possible_group_ids should only contain group 1, as it's reachable via a transition ('a').
+        // possible_future_group_ids should only contain group 1, as it's reachable via a transition ('a').
         // It should *not* contain group 0, which is final *at* the current state.
-        assert_eq!(start_state_data.possible_group_ids, BTreeSet::from([1]));
+        assert_eq!(start_state_data.possible_future_group_ids, BTreeSet::from([1]));
     }
 }
 
@@ -1641,7 +1641,7 @@ mod group_id_to_u8set_tests {
 
         let group_id_to_u8set = &regex.dfa.states[0].group_id_to_u8set;
         dbg!(&regex);
-        dbg!(&regex.dfa.states[0].possible_group_ids);
+        dbg!(&regex.dfa.states[0].possible_future_group_ids);
         dbg!(group_id_to_u8set);
         assert_eq!(group_id_to_u8set.len(), 2);
 
@@ -1729,16 +1729,16 @@ mod group_id_to_u8set_tests {
 
         // For this test, we'll iterate through possible transitions
 
-        // Verify that in both resulting states, possible_group_ids contain their respective groups
-        // Here, it's likely that the DFA has merged states if they share the same possible_group_ids
+        // Verify that in both resulting states, possible_future_group_ids contain their respective groups
+        // Here, it's likely that the DFA has merged states if they share the same possible_future_group_ids
         // For this test, we'll assume separate states
 
-        // Since the DFA construction merges states with identical possible_group_ids, in this case:
-        // - After 'a', possible_group_ids should still include {0,1} because both 'ab' and 'ac' can follow.
+        // Since the DFA construction merges states with identical possible_future_group_ids, in this case:
+        // - After 'a', possible_future_group_ids should still include {0,1} because both 'ab' and 'ac' can follow.
 
-        // Verify possible_group_ids
+        // Verify possible_future_group_ids
         assert_eq!(
-            regex.dfa.states[regex_state.current_state].possible_group_ids,
+            regex.dfa.states[regex_state.current_state].possible_future_group_ids,
             BTreeSet::from([0, 1])
         );
 
@@ -1789,9 +1789,9 @@ mod group_id_to_u8set_tests {
         let mut regex_state_a = regex.init();
         regex_state_a.execute(b"a");
 
-        // possible_group_ids should still include {0,1,2}
+        // possible_future_group_ids should still include {0,1,2}
         assert_eq!(
-            regex.dfa.states[regex_state_a.current_state].possible_group_ids,
+            regex.dfa.states[regex_state_a.current_state].possible_future_group_ids,
             BTreeSet::from([0, 1, 2])
         );
 
@@ -1818,9 +1818,9 @@ mod group_id_to_u8set_tests {
         let mut regex_state_ab = regex.init();
         regex_state_ab.execute(b"ab");
 
-        // possible_group_ids should still include {0,1,2}
+        // possible_future_group_ids should still include {0,1,2}
         assert_eq!(
-            regex.dfa.states[regex_state_ab.current_state].possible_group_ids,
+            regex.dfa.states[regex_state_ab.current_state].possible_future_group_ids,
             BTreeSet::from([0, 1, 2])
         );
 
@@ -1868,7 +1868,7 @@ mod group_id_to_u8set_tests {
         let mut regex_state_a = regex.init();
         regex_state_a.execute(b"a");
         assert_eq!(
-            regex.dfa.states[regex_state_a.current_state].possible_group_ids,
+            regex.dfa.states[regex_state_a.current_state].possible_future_group_ids,
             BTreeSet::from([0])
         );
 
@@ -1967,7 +1967,7 @@ mod group_u8set_tests {
         dfa.states.push(DFAState {
             transitions: TrieMap::new(),
             finalizers: BTreeSet::new(),
-            possible_group_ids: BTreeSet::new(), // Will be computed
+            possible_future_group_ids: BTreeSet::new(), // Will be computed
             group_id_to_u8set: BTreeMap::new(),   // Will be computed
         });
 
@@ -1975,7 +1975,7 @@ mod group_u8set_tests {
         dfa.states.push(DFAState {
             transitions: TrieMap::new(),
             finalizers: BTreeSet::new(),
-            possible_group_ids: BTreeSet::new(),
+            possible_future_group_ids: BTreeSet::new(),
             group_id_to_u8set: BTreeMap::new(),
         });
 
@@ -1983,7 +1983,7 @@ mod group_u8set_tests {
         dfa.states.push(DFAState {
             transitions: TrieMap::new(),
             finalizers: BTreeSet::from([0]),
-            possible_group_ids: BTreeSet::new(),
+            possible_future_group_ids: BTreeSet::new(),
             group_id_to_u8set: BTreeMap::new(),
         });
 
@@ -1991,7 +1991,7 @@ mod group_u8set_tests {
         dfa.states.push(DFAState {
             transitions: TrieMap::new(),
             finalizers: BTreeSet::from([1]),
-            possible_group_ids: BTreeSet::new(),
+            possible_future_group_ids: BTreeSet::new(),
             group_id_to_u8set: BTreeMap::new(),
         });
 
@@ -2005,8 +2005,8 @@ mod group_u8set_tests {
         // State 1 -- 'c' --> State 3
         dfa.states[1].transitions.insert(b'c', 3);
 
-        // Compute possible_group_ids and group_id_to_u8set for the DFA
-        dfa.compute_possible_group_ids();
+        // Compute possible_future_group_ids and group_id_to_u8set for the DFA
+        dfa.compute_possible_future_group_ids();
         dfa.compute_group_id_to_u8set();
 
         // Create a Regex instance with the constructed DFA
