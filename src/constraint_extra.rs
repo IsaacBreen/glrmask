@@ -111,6 +111,7 @@ mod tests {
     use bimap::BiBTreeMap;
     use super::*;
     use bitvec::prelude::*;
+    use crate::seq;
 
     #[test]
     fn test_format_bv_indices_empty() {
@@ -149,25 +150,27 @@ mod tests {
         // Tokenizer: Matches "a" (token 0) or "$" (token 1)
         let expr = crate::groups![
             eat_u8(b'a'), // Grammar Token 0
-            eat_u8(b'$')  // Grammar Token 1 (EOF)
+            seq![eat_u8(b'a'), eat_u8(b'a')], // Grammar Token 1
+            eat_u8(b'$')  // Grammar Token 2 (EOF)
         ];
         let tokenizer = expr.build();
 
-        // LLM Token Map: "aa" -> 0, "$" -> 1
+        // LLM Token Map: "aaaa" -> 0, "$" -> 1
         let mut llm_token_map = LLMTokenMap::new();
-        llm_token_map.insert(b"aa".to_vec(), LLMTokenID(0));
+        llm_token_map.insert(b"aaaa".to_vec(), LLMTokenID(0));
         llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));
         let max_llm_token_id = 1;
 
         // Grammar: S -> A $
         let productions = vec![
-            prod("S", vec![t("A"), t("A"), t("EOF")]),
+            prod("S", vec![t("A"), t("AA"), t("EOF")]),
         ];
 
         // Map grammar terminals to the tokenizer's token IDs
         let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
         grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0)); // "a" from tokenizer
-        grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(1)); // "$" from tokenizer
+        grammar_token_map.insert(Terminal("AA".to_string()), TerminalID(1)); // "a" from tokenizer
+        grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(2)); // "$" from tokenizer
 
         // Generate parser
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
