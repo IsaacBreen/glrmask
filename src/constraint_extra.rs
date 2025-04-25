@@ -153,9 +153,9 @@ mod tests {
         ];
         let tokenizer = expr.build();
 
-        // LLM Token Map: "a" -> 0, "$" -> 1
+        // LLM Token Map: "aa" -> 0, "$" -> 1
         let mut llm_token_map = LLMTokenMap::new();
-        llm_token_map.insert(b"a".to_vec(), LLMTokenID(0));
+        llm_token_map.insert(b"aa".to_vec(), LLMTokenID(0));
         llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));
         let max_llm_token_id = 1;
 
