@@ -137,53 +137,53 @@ impl GrammarConstraint {
             for result in results.matches {
                 let matched_token_id = GrammarTokenID(result.id);
                 let new_offset = offset + result.width;
-                if new_offset == bytes.len() {
-                    // Reached the end of the input, so this is a clean match.
-                    let possible_final_grammar_tokens: BTreeSet<_> = tokenizer.tokens_accessible_from_state(TokenizerStateID(0)).into_iter().map(|token_id| GrammarTokenID(token_id.0)).collect(); // Should contain all tokens
-                    for precompute_node in &precomputed_nodes {
-                        precompute_node.lock().unwrap().value.push_finalizer_info(&possible_final_grammar_tokens, dst.token_id(), TokenizerStateID(0));
-                    }
-                } else if new_offset < bytes.len() {
-                    // There's still more input to process. Insert trie edge(s) and update the queue.
-                    let new_dotted_node = DottedVocabNode { src, dst, offset: new_offset, bytes };
-                    let new_queue_key = (new_dotted_node, TokenizerStateID(0));
-                    let mut next_precomputed_nodes = Vec::new();
-                    'outer: for precompute_node in &precomputed_nodes {
-                        let mut precompute_node = precompute_node.lock().unwrap();
-                        let llm_tokens = dst.reachable_token_ids().clone();
-                        if let Some(existing_precompute_nodes) = queue.get(&new_queue_key) {
-                            // Try to push to an existing precompute node in the queue if it's possible to do so without creating a cycle.
-                            for existing_precompute_node in existing_precompute_nodes {
-                                if let Some(existing_edge_value) = precompute_node.get_edge_value_mut(matched_token_id, existing_precompute_node) {
-                                    // Merge into the edge value.
-                                    *existing_edge_value = existing_edge_value.clone().bitor(llm_tokens.clone());
-                                    continue 'outer;
-                                }
-                            }
-
-                            // Try to insert a new edge to any existing node.
-                            for existing_precompute_node in existing_precompute_nodes {
-                                if let Ok(dst_precomputed_node) = precompute_node.try_insert(matched_token_id, llm_tokens.clone(), existing_precompute_node.clone()) {
-                                    continue 'outer;
-                                }
-                            }
-                        }
-
-                        // Use any existing edge on the src node.
-                        if let Some(existing_edges) = precompute_node.get_mut(&matched_token_id) {
-                            if let Some((existing_edge_value, exising_dst)) = existing_edges.iter_mut().next() {
+                // There's still more input to process. Insert trie edge(s) and update the queue.
+                let new_dotted_node = DottedVocabNode { src, dst, offset: new_offset, bytes };
+                let new_queue_key = (new_dotted_node, TokenizerStateID(0));
+                let mut next_precomputed_nodes = Vec::new();
+                'outer: for precompute_node in &precomputed_nodes {
+                    let mut precompute_node = precompute_node.lock().unwrap();
+                    let llm_tokens = dst.reachable_token_ids().clone();
+                    if let Some(existing_precompute_nodes) = queue.get(&new_queue_key) {
+                        // Try to push to an existing precompute node in the queue if it's possible to do so without creating a cycle.
+                        for existing_precompute_node in existing_precompute_nodes {
+                            if let Some(existing_edge_value) = precompute_node.get_edge_value_mut(matched_token_id, existing_precompute_node) {
                                 // Merge into the edge value.
                                 *existing_edge_value = existing_edge_value.clone().bitor(llm_tokens.clone());
-                                next_precomputed_nodes.push(exising_dst.clone());
                                 continue 'outer;
                             }
                         }
 
-                        // Create a new node.
-                        let new_precomputed_node = precompute_node.force_insert(matched_token_id, llm_tokens.clone(), PrecomputedNodeContents::default());
-                        next_precomputed_nodes.push(new_precomputed_node.clone());
+                        // Try to insert a new edge to any existing node.
+                        for existing_precompute_node in existing_precompute_nodes {
+                            if let Ok(dst_precomputed_node) = precompute_node.try_insert(matched_token_id, llm_tokens.clone(), existing_precompute_node.clone()) {
+                                continue 'outer;
+                            }
+                        }
                     }
-                    queue.insert(new_queue_key, next_precomputed_nodes);
+
+                    // Use any existing edge on the src node.
+                    if let Some(existing_edges) = precompute_node.get_mut(&matched_token_id) {
+                        if let Some((existing_edge_value, exising_dst)) = existing_edges.iter_mut().next() {
+                            // Merge into the edge value.
+                            *existing_edge_value = existing_edge_value.clone().bitor(llm_tokens.clone());
+                            next_precomputed_nodes.push(exising_dst.clone());
+                            continue 'outer;
+                        }
+                    }
+
+                    // Create a new node.
+                    let new_precomputed_node = precompute_node.force_insert(matched_token_id, llm_tokens.clone(), PrecomputedNodeContents::default());
+                    next_precomputed_nodes.push(new_precomputed_node.clone());
+                }
+                if new_offset == bytes.len() {
+                    // Reached the end of the input, so this is a clean match.
+                    let possible_final_grammar_tokens: BTreeSet<_> = tokenizer.tokens_accessible_from_state(TokenizerStateID(0)).into_iter().map(|token_id| GrammarTokenID(token_id.0)).collect(); // Should contain all tokens
+                    for new_precomputed_node in &next_precomputed_nodes {
+                        new_precomputed_node.lock().unwrap().value.push_finalizer_info(&possible_final_grammar_tokens, dst.token_id(), TokenizerStateID(0));
+                    }
+                } else if new_offset < bytes.len() {
+                    queue.entry(new_queue_key).or_default().extend(next_precomputed_nodes);
                 } else { unreachable!(); }
             }
 
