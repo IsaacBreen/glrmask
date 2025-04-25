@@ -244,7 +244,7 @@ impl<EK: Ord, EV, T> Trie<EK, EV, T> {
 }
 
 /// Helper to get the raw pointer from an Arc<Mutex<Trie>>. Panics if the mutex is poisoned.
-fn node_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK, EV, T>>>) -> *const Trie<EK, EV, T> {
+pub(crate) fn node_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK, EV, T>>>) -> *const Trie<EK, EV, T> {
     // Use try_lock().expect() for simplicity in this context, assuming poisoning is fatal.
     // A production system might handle the poison error more gracefully.
     let guard = node_arc.try_lock().expect("Mutex poisoned when getting node pointer");

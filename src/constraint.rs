@@ -26,16 +26,16 @@ pub struct PrecomputedFinalizer {
     pub(crate) tokenizer_state_ids: BTreeSet<TokenizerStateID>,
 }
 
-#[derive(Default, Debug, Clone)]
-pub struct PrecomputedNodeContents {
+#[derive(Default, Debug, Clone, PartialEq, Eq)] // Added PartialEq, Eq for potential future use/testing
+pub(crate) struct PrecomputedNodeContents {
     pub(crate) finalizers: Vec<PrecomputedFinalizer>,
 }
 
 type PrecomputeNode = Trie<GrammarTokenID, LLMTokenBV, PrecomputedNodeContents>;
 type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode>;
 
-#[derive(Debug, Clone)]
-pub struct GrammarConstraint {
+#[derive(Debug, Clone)] // Removed pub(crate) as it's likely used externally
+pub(crate) struct GrammarConstraint {
     pub(crate) tokenizer: Regex,
     pub(crate) parser: GLRParser,
     pub(crate) precomputed: Precomputed,
