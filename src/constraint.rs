@@ -305,13 +305,12 @@ impl GrammarConstraintState<'_> {
                                 break;
                             }
                         }
+                        // If we've reached the initial state, we've matched the final token cleanly, and we can proceed without any additional tokens.
+                        if precomputed_finalizer.tokenizer_state_ids.contains(&TokenizerStateID(0)) {
+                            valid_final_tokenizer_state_ids.insert(TokenizerStateID(0));
+                        }
                         if valid_final_tokenizer_state_ids.is_empty() {
-                            // If we've reached the initial state, we've matched the final token cleanly, and we can proceed without any additional tokens.
-                            if precomputed_finalizer.tokenizer_state_ids.contains(&TokenizerStateID(0)) {
-                                valid_final_tokenizer_state_ids.insert(TokenizerStateID(0));
-                            } else {
-                                continue;
-                            }
+                            continue;
                         }
                         // Compute final LLM token mask
                         let final_llm_tokens = managed_parse_state.llm_tokens.clone() & precomputed_finalizer.compatible_llm_tokens.clone();
