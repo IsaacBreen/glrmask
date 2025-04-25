@@ -1207,195 +1207,123 @@ messages:
       ```
     metadata:
       filename: src/constraint.rs
-  - user: Write code to visualize/print the `Precomputed` data structure nicely. Put
-      it in `src/constraint_extra.rs`.
+  - user: |-
+      Modify `apply_changes_simple` so that it can create new files if a file path is explicitly specified in the code block opening, e.g.
+      > ```python path/to/file.py
     metadata:
   - assistant: |-
-      Okay, here is the code for `src/constraint_extra.rs` to visualize the `Precomputed` data structure within `GrammarConstraint`.
+      Okay, I will modify the `apply_changes_simple` function to handle file creation when an explicit path is provided in the code block fence and the file doesn't exist.
 
-      ```rust 'src/constraint_extra.rs'
-      use crate::constraint::{
-          GrammarConstraint, PrecomputeNode, PrecomputedNodeContents, LLMTokenBV,
-          PrecomputedFinalizer
-      };
-      use crate::tokenizer::{TokenizerStateID, LLMTokenID};
-      use crate::types::TerminalID as GrammarTokenID;
-      use std::collections::{BTreeMap, BTreeSet};
-      use std::fmt::Write;
-      use std::sync::{Arc, Mutex};
+      ```diff
+      --- a/chatllm.py
+      +++ b/chatllm.py
+      @@ -360,7 +360,7 @@
+           """
+           output_string = ""
+           modified_files: Set[str] = set()
+      -    created_files: List[str] = []  # Simple apply doesn't create
+      +    created_files: Set[str] = set()
+           deleted_files: List[str] = []  # Simple apply doesn't delete
+           has_error = False
+       
+      @@ -426,6 +426,7 @@
+           attached_files = state.local_system.attached_files
+           available_files = set(attached_files)
+           explicitly_handled_files = set()
+      +    files_to_create = set() # Track files identified for creation
+       
+           output_string += f"Found {len(unique_matches)} code blocks.\n"
+           output_string += "Matching against available files:\n"
+      @@ -442,8 +443,14 @@
+                       available_files.remove(filepath)
+                       explicitly_handled_files.add(filepath)
+                       output_string += f"Assigned block to existing file {filepath} based on explicit fence path.\n"
+      +            elif Path(filepath).is_dir():
+      +                 output_string += f"Warning: Explicit file path '{filepath}' in fence points to an existing directory. Skipping block.\n"
+      +                 block_info['assigned_file'] = 'SKIPPED_EXPLICIT_MISMATCH' # Mark as skipped
+                   else:
+      -                output_string += f"Warning: Explicit file path '{filepath}' in fence not in attached files ({list(available_files)}). Skipping block.\n"
+      +                # File doesn't exist and isn't in attached files - mark for creation
+      +                block_info['assigned_file'] = filepath
+      +                files_to_create.add(filepath)
+      +                output_string += f"Identified block for new file creation: {filepath} based on explicit fence path.\n"
+       
+           unassigned_blocks = [b for b in block_info_list if b['assigned_file'] is None]
+           output_string += f"Remaining unassigned blocks: {len(unassigned_blocks)}, Available files: {len(available_files)}\n"
+      @@ -568,10 +575,12 @@
+           applied_count = 0
+           for block_info in block_info_list:
+               filepath = block_info['assigned_file']
+      -        # Check if assigned and not explicitly skipped
+      -        if filepath and filepath != 'SKIPPED_EXPLICIT_MISMATCH':
+      +        is_creation = filepath in files_to_create
+      +
+      +        # Check if assigned and not explicitly skipped due to directory conflict etc.
+      +        if filepath and filepath not in ['SKIPPED_EXPLICIT_MISMATCH']:
+                   code = block_info['code']
+      -            try:
+      +            try: # --- Apply change / Create file ---
+                       # Ensure parent directory exists
+                       directory = os.path.dirname(filepath)
+                       if directory and not os.path.exists(directory):
+      @@ -586,11 +595,21 @@
+                       with open(filepath, "w") as f:
+                           f.write(code)
+       
+      -                # Avoid duplicate success messages if already logged during assignment
+      -                log_identifier = f"to {filepath}"
+      -                if log_identifier not in output_string[-200:]: # Check recent logs
+      -                     output_string += f"Successfully updated file: {filepath}\n"
+      -
+      +                if is_creation:
+      +                    output_string += f"Successfully created new file: {filepath}\n"
+      +                    created_files.add(filepath)
+      +                    # Add to state tracking
+      +                    if filepath not in state.local_system.attached_files:
+      +                        state.local_system.attached_files.append(filepath)
+      +                    state.local_system.initial_file_contents[filepath] = code # Store initial content
+      +                    state.local_system.prev_file_contents[filepath] = code # Also set prev content
+      +                    output_string += f"Added newly created file {filepath} to attached files state.\n"
+      +                else:
+      +                    # Avoid duplicate success messages if already logged during assignment
+      +                    log_identifier = f"to {filepath}"
+      +                    if log_identifier not in output_string[-200:]: # Check recent logs
+      +                         output_string += f"Successfully updated existing file: {filepath}\n"
+      +                # Mark as modified regardless of creation/update for return value consistency? Or only if not created? Let's mark all applied.
+                       modified_files.add(filepath)
+                       applied_count += 1
+                   except Exception as e:
+      @@ -613,7 +632,7 @@
+       
+           # Return modified files (excluding explicitly handled ones if needed? No, return all modified)
+           # Return empty lists for created/deleted as simple apply doesn't handle these.
+      -    return output_string, list(modified_files), created_files, deleted_files, has_error
+      +    return output_string, list(modified_files), list(created_files), deleted_files, has_error
+       
+       
+       def apply_changes_with_git(state: State, user_message_content: Optional[str] = None) -> Tuple[str, list[str], list[str], list[str], bool]:
 
-      // Helper function to format LLMTokenBV into a comma-separated string of LLMTokenIDs
-      fn format_llm_bv(bv: &LLMTokenBV) -> String {
-          bv.iter_ones().map(|id| LLMTokenID(id).to_string()).collect::<Vec<_>>().join(", ")
-      }
-
-      // Helper function to format BTreeSet<GrammarTokenID> into a comma-separated string
-      fn format_grammar_token_set(set: &BTreeSet<GrammarTokenID>) -> String {
-          set.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", ")
-      }
-
-      // Helper function to format BTreeSet<TokenizerStateID> into a comma-separated string
-      fn format_tokenizer_state_set(set: &BTreeSet<TokenizerStateID>) -> String {
-          set.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", ")
-      }
-
-      // Recursive function to print the Trie structure for a single node and its children
-      fn print_trie_node_recursive(
-          node: &PrecomputeNode,
-          node_ptr_id: *const PrecomputeNode, // Use pointer for identity tracking and cycle detection
-          indent: usize,
-          visited: &mut BTreeSet<*const PrecomputeNode>, // Track visited nodes by pointer
-          output: &mut String,
-      ) -> std::fmt::Result {
-          let prefix = "  ".repeat(indent);
-
-          // Check if this node (identified by its memory address) has already been visited
-          // in the current traversal path from the root.
-          if visited.contains(&node_ptr_id) {
-              // If visited, print a marker and stop recursion to prevent infinite loops in case of cycles.
-              writeln!(output, "{prefix}Node @ {:p} (already visited, see above)", node_ptr_id)?;
-              return Ok(());
-          }
-          // Mark the current node as visited for this path.
-          visited.insert(node_ptr_id);
-
-          // Print the node's address (useful for identifying shared nodes)
-          writeln!(output, "{prefix}Node @ {:p}:", node_ptr_id)?;
-
-          // Print the finalizers stored in the node's value
-          if !node.value.finalizers.is_empty() {
-              writeln!(output, "{prefix}  Finalizers:")?;
-              for (i, finalizer) in node.value.finalizers.iter().enumerate() {
-                  writeln!(output, "{prefix}    Finalizer {}:", i)?;
-                  writeln!(output, "{prefix}      Possible Final Grammar Tokens: {{{}}}", format_grammar_token_set(&finalizer.possible_final_grammar_tokens))?;
-                  writeln!(output, "{prefix}      Compatible LLM Tokens: {{{}}}", format_llm_bv(&finalizer.compatible_llm_tokens))?;
-                  writeln!(output, "{prefix}      Tokenizer State IDs: {{{}}}", format_tokenizer_state_set(&finalizer.tokenizer_state_ids))?;
-              }
-          } else {
-               writeln!(output, "{prefix}  No Finalizers")?;
-          }
-
-          // Print the outgoing edges from this node
-          if !node.edges.is_empty() {
-              writeln!(output, "{prefix}  Edges:")?;
-              // Sort edges by GrammarTokenID for consistent output order
-              let mut sorted_edges: Vec<_> = node.edges.iter().collect();
-              sorted_edges.sort_by_key(|(grammar_token_id, _)| *grammar_token_id);
-
-              for (grammar_token_id, edge_list) in sorted_edges {
-                   writeln!(output, "{prefix}    Grammar Token {}:", grammar_token_id)?;
-                   // Each grammar token can lead to multiple child nodes via different LLM token sets
-                   for (i, (edge_llm_bv, child_node_mutex)) in edge_list.iter().enumerate() {
-                       // Get the raw pointer of the child node for identification
-                       let child_node_ptr = Arc::as_ptr(child_node_mutex);
-                       writeln!(output, "{prefix}      Edge {}: LLM Tokens {{{}}} -> Node @ {:p}", i, format_llm_bv(edge_llm_bv), child_node_ptr)?;
-
-                       // Lock the child's mutex to access its data. Handle potential poisoning.
-                       match child_node_mutex.lock() {
-                          Ok(child_node) => {
-                               // Recursively call print function for the child node
-                               print_trie_node_recursive(&child_node, child_node_ptr, indent + 3, visited, output)?;
-                          }
-                          Err(poisoned) => {
-                              // Log an error if the mutex was poisoned (shouldn't normally happen here)
-                              writeln!(output, "{prefix}      Error: Mutex poisoned for child node @ {:p}. Details: {}", child_node_ptr, poisoned)?;
-                              // Continue visualization if possible, or return error
-                              // return Err(std::fmt::Error);
-                          }
-                       }
-                   }
-              }
-          } else {
-              writeln!(output, "{prefix}  No Edges")?;
-          }
-
-          // Remove the current node from the visited set *after* processing its children.
-          // This allows paths through this node from different branches if the graph isn't a strict tree.
-          // If we want to print shared subtrees only once globally, `visited` should not be cleared here.
-          // Keeping it this way prints the structure as reachable from each root/path.
-          visited.remove(&node_ptr_id);
-
-          Ok(())
-      }
-
-
-      impl GrammarConstraint {
-          /// Generates a string visualizing the precomputed Trie structure for debugging.
-          ///
-          /// The visualization shows the Trie associated with each initial TokenizerStateID.
-          /// Each node shows its memory address (for identifying shared nodes),
-          /// finalizers (conditions under which paths ending here are valid), and
-          /// outgoing edges labeled with GrammarTokenIDs and associated LLMToken BVs,
-          /// leading to child nodes.
-          pub fn visualize_precomputed(&self) -> String {
-              let mut output = String::new();
-              writeln!(output, "Precomputed Trie Visualization:").unwrap();
-              writeln!(output, "Max LLM Token ID: {}", self.max_llm_token_id).unwrap();
-
-              // Sort the tokenizer states for consistent output order
-              let mut sorted_states: Vec<_> = self.precomputed.iter().collect();
-              sorted_states.sort_by_key(|(tokenizer_state_id, _)| *tokenizer_state_id);
-
-              for (tokenizer_state_id, root_node) in sorted_states {
-                  writeln!(output, "\n=== Tokenizer State ID: {} ===", tokenizer_state_id).unwrap();
-
-                  // Initialize an empty set to track visited nodes for cycle detection within this specific Trie traversal.
-                  let mut visited = BTreeSet::new();
-                  // Get the raw pointer to the root node for identity tracking
-                  let root_node_ptr: *const PrecomputeNode = root_node as *const _;
-
-                  // Start the recursive printing process from the root node
-                  if let Err(e) = print_trie_node_recursive(root_node, root_node_ptr, 0, &mut visited, &mut output) {
-                       // Log any formatting errors encountered during visualization
-                       writeln!(output, "Error during visualization for state {}: {}", tokenizer_state_id, e).unwrap();
-                  }
-              }
-
-              output
-          }
-      }
-      ```
-
-      **To use this:**
-
-      1.  Save the code above as `src/constraint_extra.rs`.
-      2.  Make sure your `src/lib.rs` (or `src/main.rs` if it's a binary crate) includes this module:
-          ```rust
-          // In src/lib.rs or src/main.rs
-          mod constraint;
-          mod constraint_extra; // Add this line
-          // ... other modules
-          ```
-      3.  Ensure the necessary types (`Trie`, `PrecomputeNode`, etc.) and their fields (`value`, `edges`) are accessible from `constraint_extra.rs`. Since they are `pub(crate)` in `constraint.rs` and `datastructures/trie.rs`, this should work correctly as long as they are part of the same crate.
-      4.  You can now call `constraint.visualize_precomputed()` on a `GrammarConstraint` instance to get the visualization string.
-
-      Example usage:
-
-      ```rust
-      // Assuming 'constraint' is an instance of GrammarConstraint
-      let visualization = constraint.visualize_precomputed();
-      println!("{}", visualization);
       ```
     metadata:
   - user: |
-      Identified target file 'src/constraint_extra.rs' on fence open line 1:
-      ```rust 'src/constraint_extra.rs'
-      Identified target file "// Assuming 'constraint' is an instance of GrammarConstraint" on fence open line 2:
-      ```rust
-      Found 2 code blocks.
+      Identified target file '--- a/chatllm.py' on fence open line 1:
+      ```diff
+      Found 1 code blocks.
       Matching against available files:
         1: src/constraint.rs
       --- Phase 1: Processing explicit file paths in fences ---
-      Warning: Explicit file path 'src/constraint_extra.rs' in fence not in attached files (['src/constraint.rs']). Skipping block.
-      Warning: Explicit file path '// Assuming 'constraint' is an instance of GrammarConstraint' in fence not in attached files (['src/constraint.rs']). Skipping block.
-      Remaining unassigned blocks: 2, Available files: 1
+      Warning: Explicit file path '--- a/chatllm.py' in fence not in attached files (['src/constraint.rs']). Skipping block.
+      Remaining unassigned blocks: 1, Available files: 1
       --- Phase 2: Checking preceding lines for hints ---
-      Remaining unassigned blocks: 2, Available files: 1
+      Remaining unassigned blocks: 1, Available files: 1
       --- Phase 3: Checking first lines inside blocks for hints ---
-      Remaining unassigned blocks: 2, Available files: 1
-      --- Phase 5: Applying fuzzy matching for 2 blocks and 1 files ---
-      Remaining unassigned blocks: 2, Available files: 1
+      Remaining unassigned blocks: 1, Available files: 1
+      --- Phase 4: Applying single remaining block heuristic ---
+      Attempting single block heuristic for 1 available files.
+        - Similarity with src/constraint.rs: 0.00
+      Assigned single remaining block to best match: src/constraint.rs (similarity: 0.00).
+      Remaining unassigned blocks: 0, Available files: 0
       --- Phase 6: Applying changes to assigned files ---
-      Warning: Code blocks were found but none could be successfully applied to the remaining attached files.
+      Successfully updated file: src/constraint.rs
     metadata:
 ...
