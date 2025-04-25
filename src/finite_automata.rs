@@ -529,19 +529,23 @@ impl NFA {
 
 impl DFA {
     pub fn compute_possible_group_ids(&mut self) {
+        // Initialize possible_group_ids as empty. We only want to include
+        // group IDs reachable via *future* transitions.
         for state in &mut self.states {
-            state.possible_group_ids = state.finalizers.clone();
+            state.possible_group_ids = BTreeSet::new();
         }
 
         loop {
             let mut changed = false;
             for state_index in 0..self.states.len() {
-                let state = self.states[state_index].clone();
+                let state = self.states[state_index].clone(); // Clone to avoid borrow checker issues
                 for (_input, &next_state_index) in &state.transitions {
                     let next_possible_groups = self.states[next_state_index].possible_group_ids.clone();
+                    let next_finalizers = self.states[next_state_index].finalizers.clone();
                     let state_possible_groups = &mut self.states[state_index].possible_group_ids;
 
                     let old_len = state_possible_groups.len();
+                    state_possible_groups.extend(next_finalizers.iter()); // Add finalizers of the *next* state
                     state_possible_groups.extend(next_possible_groups.iter());
 
                     if state_possible_groups.len() > old_len {
@@ -1476,6 +1480,25 @@ mod possible_group_ids_tests {
             eat_u8(b'a'),
             seq![eat_u8(b'a'), eat_u8(b'a')],
         ], BTreeSet::from([0, 1]));
+    }
+
+    #[test]
+    fn test_possible_group_ids_excludes_current_state() {
+        // Define a regex where the start state is final, but also has transitions
+        // groups![eps(), eat_u8(b'a')]
+        // Group 0: eps() -> makes start state final for group 0
+        // Group 1: eat_u8(b'a') -> transition 'a' from start to a state final for group 1
+        let expr = groups![
+            eps(),        // Group 0
+            eat_u8(b'a'), // Group 1
+        ];
+        let regex = expr.build();
+        let start_state_index = regex.dfa.start_state;
+        let start_state_data = &regex.dfa.states[start_state_index];
+
+        // possible_group_ids should only contain group 1, as it's reachable via a transition ('a').
+        // It should *not* contain group 0, which is final *at* the current state.
+        assert_eq!(start_state_data.possible_group_ids, BTreeSet::from([1]));
     }
 }
 
