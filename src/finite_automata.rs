@@ -1466,7 +1466,7 @@ mod possible_future_group_ids_tests {
 
     #[test]
     fn test_possible_future_group_ids() {
-        run_test(seq![], BTreeSet::from([0]));
+        run_test(seq![], BTreeSet::new());
         run_test(eat_u8(b'a'), BTreeSet::from([0]));
         run_test(groups![eat_u8(b'a'), eat_u8(b'b')], BTreeSet::from([0, 1]));
         run_test(seq![eat_u8(b'a'), eat_u8(b'b')], BTreeSet::from([0]));
