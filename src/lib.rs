@@ -1,6 +1,7 @@
 pub mod finite_automata;
 pub mod glr;
 mod constraint;
+pub mod constraint_extra;
 mod datastructures;
 pub mod interface;
 mod r#macro;
