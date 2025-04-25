@@ -161,7 +161,7 @@ mod tests {
 
         // Grammar: S -> A $
         let productions = vec![
-            prod("S", vec![t("A"), t("EOF")]),
+            prod("S", vec![t("A"), t("A"), t("EOF")]),
         ];
 
         // Map grammar terminals to the tokenizer's token IDs
