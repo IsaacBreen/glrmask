@@ -561,8 +561,8 @@ impl DFA {
 
     pub fn compute_group_id_to_u8set(&mut self) {
         // Create the vector of possible future group IDs within a block scope, cloning the data
-        let possible_future_group_ids: Vec<_> = {
-            self.states.iter().map(|s| s.possible_future_group_ids.clone()).collect()
+        let possible_current_or_future_group_ids: Vec<BTreeSet<GroupID>> = {
+            self.states.iter().map(|state| &state.possible_future_group_ids | &state.finalizers).collect()
         };
 
         // Now that the block has ended, there are no borrows of self.states
@@ -570,10 +570,9 @@ impl DFA {
             let mut group_id_to_u8set: BTreeMap<GroupID, U8Set> = BTreeMap::new();
 
             for (input_u8, &next_state_index) in &state.transitions {
-                // Access possible_future_group_ids using the precomputed vector (cloned data)
-                let next_possible_future_groups = &possible_future_group_ids[next_state_index];
+                let next_possible_current_or_future_group_ids = &possible_current_or_future_group_ids[next_state_index];
 
-                for &group_id in next_possible_future_groups {
+                for &group_id in next_possible_current_or_future_group_ids {
                     group_id_to_u8set
                         .entry(group_id)
                         .or_insert_with(U8Set::none)
