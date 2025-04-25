@@ -99,3 +99,41 @@ impl GrammarConstraint {
         println!("Dump Complete.");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitvec::prelude::*;
+
+    #[test]
+    fn test_format_bv_indices_empty() {
+        let bv = bitvec![usize, Lsb0;];
+        assert_eq!(format_bv_indices(&bv), "[]");
+
+        let bv = bitvec![usize, Lsb0; 0, 0, 0];
+        assert_eq!(format_bv_indices(&bv), "[]");
+    }
+
+    #[test]
+    fn test_format_bv_indices_single() {
+        let mut bv = bitvec![usize, Lsb0; 0; 5];
+        bv.set(3, true);
+        assert_eq!(format_bv_indices(&bv), "[3]");
+    }
+
+    #[test]
+    fn test_format_bv_indices_multiple_few() {
+        let mut bv = bitvec![usize, Lsb0; 0; 10];
+        bv.set(1, true);
+        bv.set(5, true);
+        bv.set(8, true);
+        assert_eq!(format_bv_indices(&bv), "[1, 5, 8]");
+    }
+
+    #[test]
+    fn test_format_bv_indices_multiple_many() {
+        let mut bv = bitvec![usize, Lsb0; 0; 20];
+        for i in 0..15 { bv.set(i, true); }
+        assert_eq!(format_bv_indices(&bv), "[15 indices starting with 0, 1, 2, 3, 4...]");
+    }
+}
