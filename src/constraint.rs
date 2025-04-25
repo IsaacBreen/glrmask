@@ -285,7 +285,13 @@ impl GrammarConstraintState<'_> {
                     managed_parse_state.llm_tokens &= edge_llm_tokens.clone();
                     !managed_parse_state.llm_tokens.is_empty()
                 });
-                if managed_parse_state.active_states.is_empty() { return None; } else { Some(managed_parse_state) }
+                if managed_parse_state.active_states.is_empty() {
+                    println!("No active states after processing grammar token {}", grammar_token_id.0);
+                    return None;
+                } else {
+                    println!("Processed grammar token {}, {} active states.", grammar_token_id.0, managed_parse_state.active_states.len());
+                    Some(managed_parse_state)
+                }
             },
             // merge
             |managed_parse_state1, managed_parse_state2| {
