@@ -102,6 +102,13 @@ impl GrammarConstraint {
 
 #[cfg(test)]
 mod tests {
+    use crate::finite_automata::{eat_u8, Regex};
+    use crate::glr::grammar::{prod, t, Terminal};
+    use crate::glr::parser::GLRParser;
+    use crate::glr::table::generate_glr_parser_with_terminal_map;
+    use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+    use crate::types::TerminalID;
+    use bimap::BiBTreeMap;
     use super::*;
     use bitvec::prelude::*;
 
@@ -135,5 +142,45 @@ mod tests {
         let mut bv = bitvec![usize, Lsb0; 0; 20];
         for i in 0..15 { bv.set(i, true); }
         assert_eq!(format_bv_indices(&bv), "[15 indices starting with 0, 1, 2, 3, 4...]");
+    }
+
+    // Helper function to create a minimal constraint for testing dump
+    fn create_minimal_constraint() -> GrammarConstraint {
+        // Tokenizer: Matches "a" (token 0) or "$" (token 1)
+        let expr = crate::groups![
+            eat_u8(b'a'), // Grammar Token 0
+            eat_u8(b'$')  // Grammar Token 1 (EOF)
+        ];
+        let tokenizer = expr.build();
+
+        // LLM Token Map: "a" -> 0, "$" -> 1
+        let mut llm_token_map = LLMTokenMap::new();
+        llm_token_map.insert(b"a".to_vec(), LLMTokenID(0));
+        llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));
+        let max_llm_token_id = 1;
+
+        // Grammar: S -> A $
+        let productions = vec![
+            prod("S", vec![t("A"), t("EOF")]),
+        ];
+
+        // Map grammar terminals to the tokenizer's token IDs
+        let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+        grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0)); // "a" from tokenizer
+        grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(1)); // "$" from tokenizer
+
+        // Generate parser
+        let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
+
+        // Create constraint (this runs precomputation)
+        GrammarConstraint::new(tokenizer, parser, llm_token_map, max_llm_token_id)
+    }
+
+    #[test]
+    fn test_dump_precomputed_runs() {
+        let constraint = create_minimal_constraint();
+        println!("--- Starting dump_precomputed test output ---");
+        constraint.dump_precomputed(); // Just ensure it runs without panic
+        println!("--- Finished dump_precomputed test output ---");
     }
 }
