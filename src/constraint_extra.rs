@@ -2,7 +2,7 @@ use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode, Precompu
 use crate::datastructures::trie::{Trie, node_ptr};
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
 use crate::types::TerminalID as GrammarTokenID; // Corrected import path
-use crate::LLMTokenBV;
+use crate::constraint::LLMTokenBV;
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use bitvec::prelude::BitVec;
