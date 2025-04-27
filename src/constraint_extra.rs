@@ -1,11 +1,11 @@
 use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode, PrecomputedNodeContents, PrecomputedFinalizer};
 use crate::datastructures::trie::{Trie, node_ptr};
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
-use crate::types::TerminalID as GrammarTokenID; // Corrected import path
+use crate::types::TerminalID as GrammarTokenID;
 use crate::constraint::LLMTokenBV;
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
-use bitvec::prelude::BitVec;
+use bitvec::prelude::BitVec; // Keep this import
 
 /// Helper function to print the indices of set bits in a BitVec.
 fn format_bv_indices(bv: &LLMTokenBV) -> String {
@@ -32,15 +32,30 @@ pub(crate) fn print_finalizer(grammar_token_id: GrammarTokenID, finalizer: &Prec
 fn dump_precompute_trie_recursive(
     node_arc: &Arc<Mutex<PrecomputeNode>>,
     indent: String,
-    visited: &mut HashSet<*const PrecomputeNode>,
+    visited: &mut HashSet<*const PrecomputeNode>, // Use the type alias directly
 ) {
-    let node_ptr_val = node_ptr(node_arc);
+    // Use the helper function from the trie module to get the pointer
+    let node_ptr_val = match node_arc.try_lock() {
+        Ok(guard) => &*guard as *const PrecomputeNode,
+        Err(_) => {
+            println!("{}-> Mutex poisoned for node, cannot get pointer.", indent);
+            return; // Skip poisoned nodes
+        }
+    };
+
     if !visited.insert(node_ptr_val) {
         println!("{}-> Ref {:?} (already printed)", indent, node_ptr_val);
         return;
     }
 
-    let node = node_arc.lock().expect("Mutex poisoned during dump");
+    // Lock again to access content (handle potential poisoning)
+    let node_lock_result = node_arc.lock();
+    if node_lock_result.is_err() {
+         println!("{}-> Mutex poisoned for node {:?}, cannot print content.", indent, node_ptr_val);
+         return;
+    }
+    let node = node_lock_result.unwrap();
+
 
     println!("{}-> Node {:?} (MaxDepth: {})", indent, node_ptr_val, node.max_depth);
 
@@ -60,21 +75,42 @@ fn dump_precompute_trie_recursive(
     } else {
         println!("{}  Children:", indent);
         let new_indent = format!("{}    ", indent);
-        for (edge_key, children_vec) in node.children() {
-            for (edge_val_bv, child_arc) in children_vec {
-                println!(
-                    "{}Edge GrammarTokenID({}): LLM Tokens: {} -> Child Ptr: {:?}",
-                    indent,
-                    edge_key.0,
-                    format_bv_indices(edge_val_bv),
-                    node_ptr(child_arc)
-                );
-                // Recurse
-                dump_precompute_trie_recursive(child_arc, new_indent.clone(), visited);
-            }
+        // Collect children arcs first to avoid holding lock during recursion
+        let children_to_visit: Vec<(GrammarTokenID, LLMTokenBV, Arc<Mutex<PrecomputeNode>>)> = node.children()
+            .iter()
+            .flat_map(|(edge_key, children_vec)| {
+                children_vec.iter().map(move |(edge_val_bv, child_arc)| {
+                    (*edge_key, edge_val_bv.clone(), child_arc.clone())
+                })
+            })
+            .collect();
+
+        // Drop the lock before recursing
+        drop(node);
+
+        for (edge_key, edge_val_bv, child_arc) in children_to_visit {
+             // Get child pointer again safely
+             let child_ptr_val = match child_arc.try_lock() {
+                 Ok(guard) => &*guard as *const PrecomputeNode,
+                 Err(_) => {
+                     println!("{}Edge GrammarTokenID({}): LLM Tokens: {} -> Child Mutex Poisoned", indent, edge_key.0, format_bv_indices(&edge_val_bv));
+                     continue; // Skip poisoned child
+                 }
+             };
+
+            println!(
+                "{}Edge GrammarTokenID({}): LLM Tokens: {} -> Child Ptr: {:?}",
+                indent,
+                edge_key.0,
+                format_bv_indices(&edge_val_bv),
+                child_ptr_val // Use the safely obtained pointer
+            );
+            // Recurse
+            dump_precompute_trie_recursive(&child_arc, new_indent.clone(), visited);
         }
     }
 }
+
 
 impl GrammarConstraint {
     /// Dumps the structure of the precomputed Trie map for visualization.
@@ -85,9 +121,7 @@ impl GrammarConstraint {
         for (tokenizer_state_id, root_node_trie) in &self.precomputed {
             println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
 
-            // Need to wrap the root_node_trie (which is a Trie, not an Arc<Mutex<Trie>>)
-            // in an Arc<Mutex<>> to match the recursive function's expectation.
-            // This is slightly awkward but necessary for the shared recursive logic.
+            // Wrap the root_node_trie in Arc<Mutex<>> for the recursive function.
             let root_node_arc = Arc::new(Mutex::new(root_node_trie.clone()));
 
             let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
@@ -109,7 +143,7 @@ mod tests {
     use bimap::BiBTreeMap;
     use super::*;
     use bitvec::prelude::*;
-    use crate::seq;
+    use crate::{choice, groups, seq}; // Added imports
 
     #[test]
     fn test_format_bv_indices_empty() {
@@ -145,29 +179,29 @@ mod tests {
 
     // Helper function to create a minimal constraint for testing dump
     fn create_minimal_constraint() -> GrammarConstraint {
-        // Tokenizer: Matches "a" (token 0) or "$" (token 1)
-        let expr = crate::groups![
-            eat_u8(b'a'), // Grammar Token 0
-            seq![eat_u8(b'a'), eat_u8(b'a')], // Grammar Token 1
-            eat_u8(b'$')  // Grammar Token 2 (EOF)
+        // Tokenizer: Matches "a" (token 0), "aa" (token 1), "$" (token 2)
+        let expr = groups![
+            eat_u8(b'a'), // Grammar Token 0 ("A")
+            seq![eat_u8(b'a'), eat_u8(b'a')], // Grammar Token 1 ("AA")
+            eat_u8(b'$')  // Grammar Token 2 ("EOF")
         ];
         let tokenizer = expr.build();
 
-        // LLM Token Map: "aaaa" -> 0, "$" -> 1
+        // LLM Token Map: "aa" -> 0, "$" -> 1
         let mut llm_token_map = LLMTokenMap::new();
-        llm_token_map.insert(b"aaaa".to_vec(), LLMTokenID(0));
-        llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));
+        llm_token_map.insert(b"aa".to_vec(), LLMTokenID(0)); // LLM Token 0
+        llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));  // LLM Token 1
         let max_llm_token_id = 1;
 
-        // Grammar: S -> A $
+        // Grammar: S -> AA $
         let productions = vec![
-            prod("S", vec![t("A"), t("AA"), t("EOF")]),
+            prod("S", vec![t("AA"), t("EOF")]),
         ];
 
         // Map grammar terminals to the tokenizer's token IDs
         let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-        grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0)); // "a" from tokenizer
-        grammar_token_map.insert(Terminal("AA".to_string()), TerminalID(1)); // "a" from tokenizer
+        grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0)); // "a" from tokenizer - unused in grammar
+        grammar_token_map.insert(Terminal("AA".to_string()), TerminalID(1)); // "aa" from tokenizer
         grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(2)); // "$" from tokenizer
 
         // Generate parser
@@ -181,7 +215,9 @@ mod tests {
     fn test_dump_precomputed_runs() {
         let constraint = create_minimal_constraint();
         println!("--- Starting dump_precomputed test output ---");
-        constraint.dump_precomputed(); // Just ensure it runs without panic
+        // This test just ensures the dump function executes without panicking.
+        // Manual inspection of the output is needed for verification.
+        constraint.dump_precomputed();
         println!("--- Finished dump_precomputed test output ---");
     }
 }
