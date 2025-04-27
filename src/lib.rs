@@ -6,7 +6,7 @@ mod datastructures;
 pub mod interface;
 mod r#macro;
 mod tokenizer;
-// mod managed_glr_parser; // Removed this line
+mod managed_glr_parser;
 mod types;
 mod tests_apr25;
 mod multi_dfa;
