@@ -7,6 +7,7 @@ use crate::datastructures::gss::{GSSNode, GSSTrait};
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap}; // Added HashMap
 use std::fmt::{Debug, Display, Formatter};
+use std::hash::Hash;
 use std::sync::Arc;
 use crate::debug;
 

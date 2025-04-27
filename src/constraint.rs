@@ -374,7 +374,7 @@ impl GrammarConstraintState<'_> {
             // step: Propagate GLR states along the precomputed trie edges
             |current_states_and_masks, grammar_token_id, edge_llm_tokens, _child_node| {
                 let mut next_states_and_masks = Vec::new();
-                let parser = self.parent.parser; // Borrow parser reference
+                let parser = &self.parent.parser; // Borrow parser reference
 
                 for (parse_state, current_llm_bv) in current_states_and_masks {
                     // Calculate the mask for the next step by intersecting with edge mask
@@ -408,12 +408,12 @@ impl GrammarConstraintState<'_> {
             // process: Handle finalizers at Trie nodes
             {
                 let collected_results = collected_results.clone();
-                let parser = self.parent.parser; // Borrow parser reference
+                let parser = &self.parent.parser; // Borrow parser reference
 
                 move |trie_node_content, current_states_and_masks| {
                     let mut has_valid_continuation = false; // Track if any state can continue
 
-                    for (possible_final_grammar_token, precomputed_finalizer) in trie_node_content.finalizers() {
+                    for (possible_final_grammar_token, precomputed_finalizer) in trie_node_content.value.finalizers() {
                         for (parse_state, current_llm_bv) in current_states_and_masks.iter() {
                             // Check if the finalizer's grammar token leads to a valid state
                             let mut temp_glr_state = parser.init_glr_parser_from_parse_state(parse_state.clone());
