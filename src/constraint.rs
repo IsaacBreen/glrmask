@@ -198,7 +198,7 @@ impl GrammarConstraint {
                     // Reached the end of the input, so this is a clean match.
                     let possible_final_grammar_tokens: BTreeSet<_> = tokenizer.tokens_accessible_from_state(TokenizerStateID(0)).into_iter().map(|token_id| GrammarTokenID(token_id.0)).collect(); // Should contain all tokens
                     for new_precomputed_node in &next_precomputed_nodes {
-                        new_precomputed_node.lock().unwrap().value_mut().push_finalizer_info(&possible_final_grammar_tokens, dst.token_id(), TokenizerStateID(0));
+                        new_precomputed_node.lock().unwrap().value.push_finalizer_info(&possible_final_grammar_tokens, dst.token_id(), TokenizerStateID(0));
                     }
                 } else if new_offset < bytes.len() {
                     queue.entry(new_queue_key).or_default().extend(next_precomputed_nodes);
@@ -318,7 +318,7 @@ impl GrammarConstraintState<'_> {
             // process
             |node, managed_glr_parse_state| {
                 // Handle finalizers
-                for precomputed_finalizer in node.value().finalizers() {
+                for precomputed_finalizer in node.value.finalizers() {
                     for managed_parse_state in &managed_glr_parse_state.active_states {
                         // Ensure at least one of the final tokens parses
                         let mut valid_final_tokenizer_state_ids = BTreeSet::new();
