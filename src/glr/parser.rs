@@ -5,34 +5,17 @@ use crate::glr::table::{NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Sta
 use crate::datastructures::gss::{GSSNode, GSSTrait};
 
 use bimap::BiBTreeMap;
-use std::collections::{BTreeMap, BTreeSet, HashMap}; // Added HashMap
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display, Formatter};
-use std::hash::Hash;
 use std::sync::Arc;
 use crate::debug;
 
-// Represents the state of a single path in the GLR parse forest.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseState {
     pub stack: Arc<GSSNode<StateID>>,
-    // action_stack might be useful for reconstructing parse trees, but isn't strictly
-    // necessary for determining valid next tokens. Keep it optional for now.
     pub action_stack: Option<Arc<GSSNode<Action>>>,
     pub status: ParseStatus,
 }
-
-// Custom Debug implementation to avoid overly verbose GSSNode output
-impl Debug for ParseState {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ParseState")
-         .field("stack_top", &self.stack.peek())
-         // Optionally add more fields like stack depth or action stack top if needed
-         // .field("action_stack_top", &self.action_stack.as_ref().map(|a| a.peek()))
-         .field("status", &self.status)
-         .finish()
-    }
-}
-
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Action {
@@ -48,8 +31,8 @@ pub enum ParseStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StopReason {
-    ActionNotFound, // No shift/reduce action defined for the current state and lookahead token
-    GotoNotFound,   // After a reduction, no GOTO state defined for the revealed state and non-terminal
+    ActionNotFound,
+    GotoNotFound,
 }
 
 
@@ -90,43 +73,27 @@ impl GLRParser {
             inactive_states: Vec::new(),
         }
     }
-
+    
     pub fn init_glr_parser_from_parse_state(&self, parse_state: ParseState) -> GLRParserState {
-        let mut active_states = Vec::new();
-        let mut inactive_states = Vec::new();
-        if parse_state.status == ParseStatus::Active {
-            active_states.push(parse_state);
-        } else {
-            inactive_states.push(parse_state);
-        }
         GLRParserState {
             parser: self,
-            active_states,
-            inactive_states,
+            active_states: vec![parse_state],
+            inactive_states: Vec::new(),
         }
     }
 
     pub fn init_glr_parser_from_parse_states(&self, parse_states: Vec<ParseState>) -> GLRParserState {
-         let mut active_states = Vec::new();
-         let mut inactive_states = Vec::new();
-         for state in parse_states {
-             if state.status == ParseStatus::Active {
-                 active_states.push(state);
-             } else {
-                 inactive_states.push(state);
-             }
-         }
         GLRParserState {
             parser: self,
-            active_states,
-            inactive_states,
+            active_states: parse_states,
+            inactive_states: Vec::new(),
         }
     }
 
     pub fn init_parse_state(&self) -> ParseState {
         ParseState {
             stack: Arc::new(GSSNode::new(self.start_state_id)),
-            action_stack: None, // Initialize action stack as None
+            action_stack: None,
             status: ParseStatus::Active,
         }
     }
@@ -227,7 +194,6 @@ impl Display for GLRParser {
     }
 }
 
-// Represents the collection of all active and inactive parse states at a point in time.
 #[derive(Debug, Clone)]
 pub struct GLRParserState<'a> {
     pub parser: &'a GLRParser,
@@ -243,105 +209,70 @@ impl<'a> GLRParserState<'a> {
     pub fn parse_part(&mut self, input: &[TerminalID]) {
         for &token_id in input {
             self.step(token_id);
-            // Optional: Merge after each token if performance becomes an issue
-            // self.merge_active_states();
         }
-        // Final merge after processing all tokens in the part
-        self.merge_active_states();
     }
 
-    pub fn with_step(mut self, token_id: TerminalID) -> Self {
-        self.step(token_id);
-        self.merge_active_states(); // Merge after the step
-        self
+    pub fn with_step(self, token_id: TerminalID) -> Self {
+        let mut parser = self;
+        parser.step(token_id);
+        parser
     }
 
-    // Processes one input token (TerminalID) and updates the active/inactive states.
     pub fn step(&mut self, token_id: TerminalID) {
         let mut next_active_states = Vec::new();
-        let mut current_inactive_states = std::mem::take(&mut self.inactive_states); // Keep previous inactive states
+        let mut inactive_states = Vec::new();
 
-        // Use a temporary vector for states generated during reductions to avoid modifying
-        // self.active_states while iterating.
-        let mut reduction_generated_states = Vec::new();
-
-        let mut current_active = std::mem::take(&mut self.active_states);
-
-        while !current_active.is_empty() || !reduction_generated_states.is_empty() {
-            // Process states generated by reductions first if any exist
-            let state = if !reduction_generated_states.is_empty() {
-                reduction_generated_states.pop().unwrap()
-            } else {
-                current_active.pop().unwrap()
-            };
-
-            // Ensure we only process active states
-            if state.status != ParseStatus::Active {
-                 current_inactive_states.push(state);
-                 continue;
-            }
-
+        while let Some(state) = self.active_states.pop() {
             let stack = state.stack;
-            let action_stack = state.action_stack; // Keep track of action stack
+            let action_stack = state.action_stack;
             let state_id = *stack.peek();
 
-            // Lookup actions for the current state and input token
-            let row = self.parser.stage_7_table.get(&state_id)
-                .expect(&format!("State ID {:?} not found in parse table", state_id)); // More informative panic
+            let row = self.parser.stage_7_table.get(&state_id).unwrap();
 
             if let Some(action) = row.shifts_and_reduces.get(&token_id) {
                 match action {
                     Stage7ShiftsAndReduces::Shift(next_state_id) => {
-                        debug!(3, "Shifting to state {:?}", next_state_id);
+                        debug!(3, "Shifting");
                         let new_stack = stack.push(*next_state_id);
-                        // Push Shift action onto the action stack
-                        let new_actions = action_stack.push_or_init(Action::Shift(token_id));
+                        let new_actions = action_stack.push(Action::Shift(token_id));
                         next_active_states.push(ParseState {
                             stack: Arc::new(new_stack),
                             action_stack: Some(Arc::new(new_actions)),
                             status: ParseStatus::Active,
                         });
                     }
-                    Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len } => {
-                        debug!(3, "Reducing by production {:?} (len {})", production_id, len);
-                        // Pop states from the GSS stack
-                        let popped_stack_nodes = stack.popn(*len);
-                        // popped_stack_nodes.bulk_merge(); // Merging happens later
-
+                    Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
+                        debug!(3, "Reducing by production {:?} with len {}", production_id, len);
+                        let mut popped_stack_nodes = stack.popn(*len);
+                        popped_stack_nodes.bulk_merge();
                         for stack_node in popped_stack_nodes {
                             let revealed_state = *stack_node.peek();
-                            let goto_row = self.parser.stage_7_table.get(&revealed_state)
-                                .expect(&format!("State ID {:?} not found in parse table during GOTO lookup", revealed_state));
+                            let goto_row = self.parser.stage_7_table.get(&revealed_state).unwrap();
 
-                            if let Some(&goto_state) = goto_row.gotos.get(nonterminal_id) {
-                                debug!(3, "GOTO state {:?}", goto_state);
+                            if let Some(&goto_state) = goto_row.gotos.get(nonterminal) {
+                                debug!(3, "Going to state {:?}", goto_state);
                                 let new_stack = stack_node.push(goto_state);
-                                // Push Reduce action onto the action stack
-                                let new_actions = action_stack.clone().push_or_init(Action::Reduce { production_id: *production_id, len: *len, nonterminal_id: *nonterminal_id });
-                                // Add to reduction_generated_states to re-process in the same step
-                                reduction_generated_states.push(ParseState {
+                                let new_actions = action_stack.clone().push(Action::Reduce { production_id: *production_id, len: *len, nonterminal_id: *nonterminal });
+                                self.active_states.push(ParseState {
                                     stack: Arc::new(new_stack),
                                     action_stack: Some(Arc::new(new_actions)),
                                     status: ParseStatus::Active,
                                 });
                             } else {
-                                // No GOTO defined: This path becomes inactive
-                                debug!(3, "No GOTO found for state {:?} and non-terminal {:?}", revealed_state, nonterminal_id);
-                                current_inactive_states.push(ParseState {
-                                    stack: stack_node, // Keep the stack state before GOTO failure
-                                    action_stack: action_stack.clone(), // Keep action stack up to this point
+                                inactive_states.push(ParseState {
+                                    stack: stack_node,
+                                    action_stack: None,
                                     status: ParseStatus::Inactive(StopReason::GotoNotFound),
                                 });
                             }
                         }
                     }
                     Stage7ShiftsAndReduces::Split { shift, reduces } => {
-                        debug!(3, "Split action");
-                        // Handle Shift part of the split
+                        debug!(3, "Split");
                         if let Some(shift_state) = shift {
-                            debug!(3, "Split: Shifting to state {:?}", shift_state);
                             let new_stack = stack.push(*shift_state);
-                            let new_actions = action_stack.clone().push_or_init(Action::Shift(token_id));
+                            let new_actions = action_stack.clone().push(Action::Shift(token_id));
+
                             next_active_states.push(ParseState {
                                 stack: Arc::new(new_stack),
                                 action_stack: Some(Arc::new(new_actions)),
@@ -349,35 +280,25 @@ impl<'a> GLRParserState<'a> {
                             });
                         }
 
-                        // Handle Reduce parts of the split
-                        for (len, nt_ids_to_prod_ids) in reduces {
-                            debug!(3, "Split: Reducing with len {}", len);
-                            let popped_stack_nodes = stack.popn(*len);
-                            // popped_stack_nodes.bulk_merge(); // Merging happens later
-
-                            for (nt_id, prod_ids) in nt_ids_to_prod_ids {
+                        for (len, nt_ids) in reduces {
+                            let mut popped_stack_nodes = stack.popn(*len);
+                            popped_stack_nodes.bulk_merge();
+                            for (nt_id, prod_ids) in nt_ids {
                                 for stack_node in &popped_stack_nodes {
                                     let revealed_state = *stack_node.peek();
-                                    let goto_row = self.parser.stage_7_table.get(&revealed_state)
-                                        .expect(&format!("State ID {:?} not found in parse table during GOTO lookup", revealed_state));
-
+                                    let goto_row = self.parser.stage_7_table.get(&revealed_state).unwrap();
                                     if let Some(&goto_state) = goto_row.gotos.get(nt_id) {
-                                        debug!(3, "Split: GOTO state {:?}", goto_state);
-                                        let new_stack_base = stack_node.push(goto_state);
-                                        let new_stack_arc = Arc::new(new_stack_base); // Create Arc once
-
+                                        let new_stack = Arc::new(stack_node.push(goto_state));
                                         for prod_id in prod_ids {
-                                            let new_actions = action_stack.clone().push_or_init(Action::Reduce { production_id: *prod_id, len: *len, nonterminal_id: *nt_id });
-                                            // Add to reduction_generated_states
-                                            reduction_generated_states.push(ParseState {
-                                                stack: new_stack_arc.clone(), // Clone Arc
+                                            let new_actions = action_stack.clone().push(Action::Reduce { production_id: *prod_id, len: *len, nonterminal_id: *nt_id });
+                                            self.active_states.push(ParseState {
+                                                stack: new_stack.clone(),
                                                 action_stack: Some(Arc::new(new_actions)),
                                                 status: ParseStatus::Active,
                                             });
                                         }
                                     } else {
-                                        debug!(3, "Split: No GOTO found for state {:?} and non-terminal {:?}", revealed_state, nt_id);
-                                        current_inactive_states.push(ParseState {
+                                        inactive_states.push(ParseState {
                                             stack: stack_node.clone(),
                                             action_stack: action_stack.clone(),
                                             status: ParseStatus::Inactive(StopReason::GotoNotFound),
@@ -389,154 +310,91 @@ impl<'a> GLRParserState<'a> {
                     }
                 }
             } else {
-                // No action defined for this state and token: This path becomes inactive
-                 debug!(3, "No action found for state {:?} and token {:?}", state_id, token_id);
-                current_inactive_states.push(ParseState {
-                    stack, // Keep the stack state where the action failed
-                    action_stack, // Keep action stack up to this point
+                inactive_states.push(ParseState {
+                    stack,
+                    action_stack,
                     status: ParseStatus::Inactive(StopReason::ActionNotFound),
                 });
             }
-        } // end while loop processing active/reduction states
-
-        self.active_states = next_active_states;
-        self.inactive_states = current_inactive_states;
-        // Optional: Merge active states here if not done per token or after full parse
-        // self.merge_active_states();
-    }
-
-
-    // Merges active states that have the same key (top stack state, top action).
-    pub fn merge_active_states(&mut self) {
-        if self.active_states.len() <= 1 { return; } // No need to merge 0 or 1 state
-
-        let mut active_state_map: HashMap<ParseStateKey, ParseState> = HashMap::with_capacity(self.active_states.len());
-
-        for state in std::mem::take(&mut self.active_states) {
-             let key = state.key();
-             match active_state_map.entry(key) {
-                 std::collections::hash_map::Entry::Occupied(mut entry) => {
-                     // Merge the incoming state into the existing one
-                     entry.get_mut().merge(state);
-                 }
-                 std::collections::hash_map::Entry::Vacant(entry) => {
-                     // Insert the new state
-                     entry.insert(state);
-                 }
-             }
         }
-        self.active_states = active_state_map.into_values().collect();
+        self.active_states = next_active_states;
+        self.inactive_states.extend(inactive_states);
     }
 
-    // Merges another GLRParserState into this one.
-    pub fn merge_with(&mut self, other: GLRParserState) {
-        // Ensure parsers are compatible (optional but recommended)
-        assert!(std::ptr::eq(self.parser, other.parser), "Cannot merge states from different GLRParser instances");
+    pub fn merge_active_states(&mut self) {
+        let mut active_state_map: BTreeMap<ParseStateKey, ParseState> = BTreeMap::new();
 
+        let mut new_active_states = Vec::new();
+
+        for mut state in std::mem::take(&mut self.active_states) {
+            let key = state.key();
+            if let Some(existing) = active_state_map.get_mut(&key) {
+                Arc::make_mut(&mut existing.stack).merge(state.stack.as_ref().clone());
+                if let Some(existing_action_stack) = existing.action_stack.as_mut() {
+                    Arc::make_mut(existing_action_stack).merge(state.action_stack.unwrap().as_ref().clone());
+                }
+            } else {
+                active_state_map.insert(key, state.clone());
+                new_active_states.push(state);
+            }
+        }
+        self.active_states = new_active_states;
+    }
+
+    pub fn merge_with(&mut self, other: GLRParserState) {
+        assert!(std::ptr::eq(&self.parser, &other.parser));
         self.active_states.extend(other.active_states);
         self.inactive_states.extend(other.inactive_states);
-        // Merge the combined active states
-        self.merge_active_states();
     }
 
-    // Checks if any inactive state represents a fully successful parse (stopped due to GotoNotFound, potentially at the end state).
-    // Note: This is a basic check. A more robust check might involve verifying if the stack contains only the start symbol after reduction.
     pub fn fully_matches(&self) -> bool {
         !self.fully_matching_states().is_empty()
     }
 
-    // Returns references to inactive states that stopped due to GotoNotFound.
     pub fn fully_matching_states(&self) -> Vec<&ParseState> {
-        self.inactive_states.iter().filter(|state|
-            state.status == ParseStatus::Inactive(StopReason::GotoNotFound)
-            // Add more conditions here if needed, e.g., check stack content
-        ).collect()
+        self.inactive_states.iter().filter(|state| state.status == ParseStatus::Inactive(StopReason::GotoNotFound)).collect()
     }
 
-    // Checks if there are any active states remaining.
     pub fn can_match(&self) -> bool {
         !self.active_states.is_empty()
     }
 
-    // Checks if the parser is in a state where it has either already fully matched
-    // or could potentially match with further input.
     pub fn matches_or_can_match(&self) -> bool {
         self.can_match() || self.fully_matches()
     }
 
-    // Checks if the parser is in an "ok" state (can continue parsing or has successfully parsed).
-    // This is often used to detect errors (when is_ok() is false).
     pub fn is_ok(&self) -> bool {
         !self.active_states.is_empty() || self.fully_matches()
     }
 }
 
-// Key used for merging ParseStates. Based on the top state ID on the stack
-// and optionally the last action performed.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)] // Use Hash for HashMap key
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseStateKey {
-    stack_top_state: StateID,
-    // Including action_stack_top makes merging less aggressive but might be necessary
-    // if the action history affects future parsing possibilities differently.
-    // For constraint checking, often only the stack_top_state matters.
-    // action_stack_top: Option<Action>,
+    stack: StateID,
+    action_stack: Option<Action>,
 }
 
 impl ParseState {
-    // Generates the key for this ParseState used for merging.
     pub fn key(&self) -> ParseStateKey {
         ParseStateKey {
-            stack_top_state: *self.stack.peek(),
-            // action_stack_top: self.action_stack.peek().cloned(),
+            stack: *self.stack.peek(),
+            action_stack: self.action_stack.peek().cloned(),
         }
     }
 
-    // Merges the 'other' ParseState into 'self'. Assumes keys are identical.
     pub fn merge(&mut self, other: ParseState) {
-        // Basic assertion: Ensure keys match before merging.
-        // If action_stack_top is included in the key, this assertion is sufficient.
-        // If only stack_top_state is used, further checks might be needed if action stacks differ.
-        assert_eq!(self.key(), other.key(), "Attempting to merge ParseStates with different keys");
-
-        // Merge the GSS stacks. This handles the core graph merging.
-        // `Arc::make_mut` ensures we don't modify shared Arcs unnecessarily.
+        assert_eq!(self.key(), other.key());
         Arc::make_mut(&mut self.stack).merge(Arc::unwrap_or_clone(other.stack));
-
-        // Merge action stacks if they exist.
         match (&mut self.action_stack, other.action_stack) {
-            (Some(self_actions), Some(other_actions)) => {
-                Arc::make_mut(self_actions).merge(Arc::unwrap_or_clone(other_actions));
+            (Some(a), Some(b)) => {
+                Arc::make_mut(a).merge(Arc::unwrap_or_clone(b));
             }
-            (None, None) => { /* Both None, nothing to do */ }
-            // If one is Some and the other is None, this indicates an inconsistency
-            // if the keys (which might include action_stack_top) were supposed to match.
-            // If keys *don't* include action_stack_top, decide on merging strategy:
-            // - Keep self's action stack?
-            // - Keep other's action stack?
-            // - Set to None?
-            // Current implementation assumes keys match fully, so this case is unreachable.
-            _ => unreachable!("Mismatched action stack presence during merge with matching keys"),
-        }
-        // Status should be the same if keys match, no need to merge status.
-    }
-}
-
-// Helper trait/impl for GSSNode to simplify pushing actions
-trait PushOrInit<T: Clone + Ord + Hash + Debug> {
-    fn push_or_init(&self, value: T) -> GSSNode<T>;
-}
-
-impl<T: Clone + Ord + Hash + Debug> PushOrInit<T> for Option<Arc<GSSNode<T>>> {
-    fn push_or_init(&self, value: T) -> GSSNode<T> {
-        match self {
-            Some(arc_node) => arc_node.push(value),
-            None => GSSNode::new(value),
+            (None, None) => {}
+            _ => unreachable!(),
         }
     }
 }
 
-
-// Helper trait for inserting/merging into BTreeMap (already present, kept for reference)
 pub trait InsertWith<K, V> {
     fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F);
 }
