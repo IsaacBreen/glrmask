@@ -23,10 +23,10 @@ fn format_bv_indices(bv: &LLMTokenBV) -> String {
 /// Helper function to print PrecomputedFinalizer details.
 pub(crate) fn print_finalizer(finalizer: &PrecomputedFinalizer, indent: &str) {
     println!("{}  - Finalizer:", indent);
-    let final_grammar_tokens: Vec<String> = finalizer.possible_final_grammar_tokens.iter().map(|id| id.0.to_string()).collect();
+    let final_grammar_tokens: Vec<String> = finalizer.possible_final_grammar_tokens().iter().map(|id| id.0.to_string()).collect();
     println!("{}    Possible Final Grammar Tokens: [{}]", indent, final_grammar_tokens.join(", "));
-    println!("{}    Compatible LLM Tokens: {}", indent, format_bv_indices(&finalizer.compatible_llm_tokens));
-    let tokenizer_states: Vec<String> = finalizer.tokenizer_state_ids.iter().map(|id| id.0.to_string()).collect();
+    println!("{}    Compatible LLM Tokens: {}", indent, format_bv_indices(finalizer.compatible_llm_tokens()));
+    let tokenizer_states: Vec<String> = finalizer.tokenizer_state_ids().iter().map(|id| id.0.to_string()).collect();
     println!("{}    Tokenizer States: [{}]", indent, tokenizer_states.join(", "));
 }
 
@@ -47,9 +47,9 @@ fn dump_precompute_trie_recursive(
     println!("{}-> Node {:?} (MaxDepth: {})", indent, node_ptr_val, node.max_depth);
 
     // Print Node Value (Finalizers)
-    if !node.value.finalizers.is_empty() {
+    if !node.value().finalizers().is_empty() {
         println!("{}  Value (Finalizers):", indent);
-        for finalizer in &node.value.finalizers {
+        for finalizer in node.value().finalizers() {
             print_finalizer(finalizer, &indent);
         }
     } else {
