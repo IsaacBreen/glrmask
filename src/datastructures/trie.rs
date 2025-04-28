@@ -283,10 +283,10 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     /// Future improvements could involve handling the `Result` from `propagate_max_depth`
     /// more gracefully within `special_map`.
     pub fn special_map<V: Clone>(
-        initial_nodes_and_values: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
-        mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // MODIFIED: Returns Option<V>
+        initial_nodes_and_values: Vec<(Arc<Mutex<Self>>, V)>,
+        mut step: impl FnMut(&V, &EK, &EV, &Self) -> Option<V>, // MODIFIED: Returns Option<V>
         mut merge: impl FnMut(&mut V, V),
-        mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
+        mut process: impl FnMut(&Self, &mut V) -> bool,
     ) {
         // state: for each node (by raw pointer), store (merged V, arrival_depth)
         let mut state: HashMap<*const Trie<EK, EV, T>, (V, usize)> = HashMap::new();
@@ -383,7 +383,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
                     // Compute candidate V for child using the potentially failing step function.
                     let candidate_v_opt = { // Renamed to indicate it's an Option
-                        let child_node = child_arc.lock().expect("Mutex poisoned during step");
+                        let child_node = child_arc.lock().expect("Mutex poisoned during step call");
                         step(&node_val_merged, &edge_key, &edge_val, &child_node) // Call the modified step
                     };
 
@@ -414,7 +414,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                                 // Propagate this update downward. Must drop lock before calling.
                                 drop(child_node);
                                 // Handle the Result from propagate_max_depth. Currently panics on cycle.
-                                propagation_result = Trie::<EK, EV, T>::propagate_max_depth(child_arc.clone(), candidate_arrival_depth);
+                                propagation_result = Self::propagate_max_depth(child_arc.clone(), candidate_arrival_depth);
                                 if propagation_result.is_err() {
                                     // Panic, as per the function documentation note.
                                     propagation_result.expect("Cycle detected during max_depth propagation within special_map");
