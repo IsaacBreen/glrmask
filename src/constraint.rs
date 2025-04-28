@@ -365,7 +365,7 @@ impl<'a> GrammarConstraintState<'a> {
                     // Check if this final step leads to a valid (match or potential match) state
                     if temp_glr_state_final.matches_or_can_match() {
                         // Calculate the LLM token mask for this specific path completion
-                        let current_path_mask = precomputed_finalizer.compatible_llm_tokens() & &llm_tokens_clone; // Intersect with input mask (use reference)
+                        let current_path_mask = precomputed_finalizer.compatible_llm_tokens().clone() & llm_tokens_clone.clone(); // Intersect with input mask (use reference)
 
                         if !current_path_mask.is_empty() {
                             // Update the overall mask for the next step
