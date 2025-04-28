@@ -12,7 +12,6 @@ use std::sync::{Arc, Mutex};
 use crate::constraint_extra::print_finalizer;
 use crate::datastructures::charmap::TrieMap;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
-use crate::managed_glr_parser::{ManagedGLRParserState, ManagedParseState};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 
 pub type LLMTokenBV = BitVec;
@@ -55,7 +54,7 @@ pub(crate) struct GrammarConstraint {
 
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintState<'a> {
-    parent: &'a GrammarConstraint,
+    pub(crate) parent: &'a GrammarConstraint, // Made pub(crate)
     // Map from TokenizerStateID to the GLR ParseStates reached *before* consuming
     // the next LLM token that would start from that tokenizer state.
     states: BTreeMap<TokenizerStateID, Vec<ParseState>>,
@@ -227,7 +226,7 @@ impl GrammarConstraint {
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
-        let glr_parser_initial_state = self.parser.init_managed_glr_parser();
+        // Get the single initial ParseState
         let initial_parse_state = self.parser.init_parse_state();
         let initial_states = BTreeMap::from([(TokenizerStateID(0), vec![initial_parse_state])]);
         let initial_mask = LLMTokenBV::repeat(true, self.max_llm_token_id + 1); // Initially, any token might be possible
@@ -366,7 +365,7 @@ impl<'a> GrammarConstraintState<'a> {
                     // Check if this final step leads to a valid (match or potential match) state
                     if temp_glr_state_final.matches_or_can_match() {
                         // Calculate the LLM token mask for this specific path completion
-                        let current_path_mask = precomputed_finalizer.compatible_llm_tokens() & llm_tokens_clone; // Intersect with input mask
+                        let current_path_mask = precomputed_finalizer.compatible_llm_tokens() & &llm_tokens_clone; // Intersect with input mask (use reference)
 
                         if !current_path_mask.is_empty() {
                             // Update the overall mask for the next step
