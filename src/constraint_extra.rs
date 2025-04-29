@@ -47,12 +47,14 @@ fn dump_precompute_trie_recursive(
 
     // Print Node Value (Finalizers)
     if !node.value.finalizers().is_empty() {
-        println!("{}  Value:", indent);
+        println!("{}  Finalizers:", indent);
         for (grammar_token_id, finalizer) in node.value.finalizers() {
             print_finalizer(*grammar_token_id, finalizer, &indent);
         }
-    } else {
-         println!("{}  Value: (No finalizers)", indent);
+    }
+    if let Some(clean_end) = &node.value.clean_end {
+        println!("{}  Clean End:", indent);
+        println!("{}    LLM Tokens: {}", indent, format_bv_indices(clean_end));
     }
 
     // Print Children (Edges)

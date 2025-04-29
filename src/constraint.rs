@@ -34,7 +34,7 @@ impl PrecomputedFinalizer {
 #[derive(Default, Debug, Clone)]
 pub(crate) struct PrecomputedNodeContents {
     finalizers: BTreeMap<GrammarTokenID, PrecomputedFinalizer>,
-    clean_end: Option<LLMTokenBV>,
+    pub(crate) clean_end: Option<LLMTokenBV>,
 }
 
 pub(crate) type PrecomputeNode = Trie<GrammarTokenID, LLMTokenBV, PrecomputedNodeContents>;
