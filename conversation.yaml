@@ -454,6 +454,8 @@ local_system:
       use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
       use std::collections::{BTreeMap, BTreeSet};
       use bimap::BiBTreeMap;
+      use std::sync::Arc;
+      use ouroboros::self_referencing;
       use numpy::{IntoPyArray, PyArray1, ToPyArray};
 
       #[pyclass]
@@ -647,13 +649,13 @@ local_system:
       #[pyclass]
       #[derive(Clone)]
       pub struct PyGrammarConstraint {
-          inner: GrammarConstraint,
+          inner: Arc<GrammarConstraint>,
       }
 
       #[pymethods]
       impl PyGrammarConstraint {
           #[new]
-          fn new(py: Python, grammar: PyGrammar, token_to_id: &PyDict, eof_llm_token_id: usize, max_llm_token_id: usize) -> PyResult<Self> {
+          fn new(py: Python, grammar: PyGrammar, token_to_id: &Bound<'_, PyDict>, max_llm_token_id: usize) -> PyResult<Self> {
               let mut llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = BiBTreeMap::new();
               for (key, value) in token_to_id.iter() {
                   let token = key.extract::<&[u8]>()?;
@@ -661,37 +663,65 @@ local_system:
                   llm_token_map.insert(token.to_vec(), LLMTokenID(id));
               }
 
-              let inner = GrammarConstraint::from_grammar(grammar.inner, llm_token_map, eof_llm_token_id, max_llm_token_id);
-              Ok(Self { inner })
+              // Assuming Grammar has methods to get tokenizer and parser
+              // You might need to adjust this based on your actual Grammar implementation
+              let tokenizer = grammar.inner.tokenizer.clone(); // Placeholder
+              let parser = grammar.inner.glr_parser(); // Placeholder
+
+              let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, max_llm_token_id);
+              Ok(Self { inner: Arc::new(constraint) })
           }
 
           fn print(&self) {
-              print_precomputed(&self.inner.precomputed);
+              // Assuming a function like print_precomputed exists and takes &Precomputed
+              // Or implement a method on GrammarConstraint to print/dump its state
+              // print_precomputed(&self.inner.precomputed);
+              println!("Printing precomputed data is not implemented in this binding yet.");
           }
       }
 
 
+      #[self_referencing]
+      struct PyGrammarConstraintStateWrapper {
+          // Owns the Arc'd constraint
+          constraint: PyGrammarConstraint,
+          // Borrows from the owned constraint via the 'this lifetime
+          #[borrows(constraint)]
+          #[covariant] // Allows the lifetime 'this to be shortened
+          inner: GrammarConstraintState<'this>,
+      }
+
       #[pyclass]
-      pub struct PyGrammarConstraintState<'a> {
-          inner: GrammarConstraintState<'a, Regex>,
+      pub struct PyGrammarConstraintState {
+          inner: PyGrammarConstraintStateWrapper,
       }
 
       #[pymethods]
       impl PyGrammarConstraintState {
           #[new]
-          fn new(grammar_constraint: PyGrammarConstraint) -> Self {
-              Self { inner: grammar_constraint.inner.init() }
+          fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
+              // Use the builder provided by ouroboros
+              Ok(PyGrammarConstraintState {
+                  inner: PyGrammarConstraintStateWrapperTryBuilder {
+                      constraint,
+                      inner_builder: |constraint: &PyGrammarConstraint| Ok::<_, PyErr>(constraint.inner.init()),
+                  }.try_build()?
+              })
           }
 
-          fn get_mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-              let bitset = self.inner.get_mask();
+          fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
+              let bitset = self.inner.with_inner_mut(|state| state.get_mask());
               let bools: Vec<bool> = bitset.iter().map(|bit_ref| *bit_ref).collect();
               let array = bools.into_pyarray_bound(py);
               Ok(array)
           }
 
           fn commit(&mut self, llm_token_id: usize) {
-              self.inner.commit(LLMTokenID(llm_token_id));
+              self.inner.with_inner_mut(|state| {
+                  state.commit(LLMTokenID(llm_token_id));
+                  state.step_with_all_llm_tokens();
+              });
+              
           }
       }
 
@@ -1156,6 +1186,8 @@ local_system:
       use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
       use std::collections::{BTreeMap, BTreeSet};
       use bimap::BiBTreeMap;
+      use std::sync::Arc;
+      use ouroboros::self_referencing;
       use numpy::{IntoPyArray, PyArray1, ToPyArray};
 
       #[pyclass]
@@ -1349,13 +1381,13 @@ local_system:
       #[pyclass]
       #[derive(Clone)]
       pub struct PyGrammarConstraint {
-          inner: GrammarConstraint,
+          inner: Arc<GrammarConstraint>,
       }
 
       #[pymethods]
       impl PyGrammarConstraint {
           #[new]
-          fn new(py: Python, grammar: PyGrammar, token_to_id: &PyDict, eof_llm_token_id: usize, max_llm_token_id: usize) -> PyResult<Self> {
+          fn new(py: Python, grammar: PyGrammar, token_to_id: &Bound<'_, PyDict>, max_llm_token_id: usize) -> PyResult<Self> {
               let mut llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = BiBTreeMap::new();
               for (key, value) in token_to_id.iter() {
                   let token = key.extract::<&[u8]>()?;
@@ -1363,37 +1395,65 @@ local_system:
                   llm_token_map.insert(token.to_vec(), LLMTokenID(id));
               }
 
-              let inner = GrammarConstraint::from_grammar(grammar.inner, llm_token_map, eof_llm_token_id, max_llm_token_id);
-              Ok(Self { inner })
+              // Assuming Grammar has methods to get tokenizer and parser
+              // You might need to adjust this based on your actual Grammar implementation
+              let tokenizer = grammar.inner.tokenizer.clone(); // Placeholder
+              let parser = grammar.inner.glr_parser(); // Placeholder
+
+              let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, max_llm_token_id);
+              Ok(Self { inner: Arc::new(constraint) })
           }
 
           fn print(&self) {
-              print_precomputed(&self.inner.precomputed);
+              // Assuming a function like print_precomputed exists and takes &Precomputed
+              // Or implement a method on GrammarConstraint to print/dump its state
+              // print_precomputed(&self.inner.precomputed);
+              println!("Printing precomputed data is not implemented in this binding yet.");
           }
       }
 
 
+      #[self_referencing]
+      struct PyGrammarConstraintStateWrapper {
+          // Owns the Arc'd constraint
+          constraint: PyGrammarConstraint,
+          // Borrows from the owned constraint via the 'this lifetime
+          #[borrows(constraint)]
+          #[covariant] // Allows the lifetime 'this to be shortened
+          inner: GrammarConstraintState<'this>,
+      }
+
       #[pyclass]
-      pub struct PyGrammarConstraintState<'a> {
-          inner: GrammarConstraintState<'a, Regex>,
+      pub struct PyGrammarConstraintState {
+          inner: PyGrammarConstraintStateWrapper,
       }
 
       #[pymethods]
       impl PyGrammarConstraintState {
           #[new]
-          fn new(grammar_constraint: PyGrammarConstraint) -> Self {
-              Self { inner: grammar_constraint.inner.init() }
+          fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
+              // Use the builder provided by ouroboros
+              Ok(PyGrammarConstraintState {
+                  inner: PyGrammarConstraintStateWrapperTryBuilder {
+                      constraint,
+                      inner_builder: |constraint: &PyGrammarConstraint| Ok::<_, PyErr>(constraint.inner.init()),
+                  }.try_build()?
+              })
           }
 
-          fn get_mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-              let bitset = self.inner.get_mask();
+          fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
+              let bitset = self.inner.with_inner_mut(|state| state.get_mask());
               let bools: Vec<bool> = bitset.iter().map(|bit_ref| *bit_ref).collect();
               let array = bools.into_pyarray_bound(py);
               Ok(array)
           }
 
           fn commit(&mut self, llm_token_id: usize) {
-              self.inner.commit(LLMTokenID(llm_token_id));
+              self.inner.with_inner_mut(|state| {
+                  state.commit(LLMTokenID(llm_token_id));
+                  state.step_with_all_llm_tokens();
+              });
+              
           }
       }
 
@@ -1884,6 +1944,8 @@ messages:
       use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
       use std::collections::{BTreeMap, BTreeSet};
       use bimap::BiBTreeMap;
+      use std::sync::Arc;
+      use ouroboros::self_referencing;
       use numpy::{IntoPyArray, PyArray1, ToPyArray};
 
       #[pyclass]
@@ -2077,13 +2139,13 @@ messages:
       #[pyclass]
       #[derive(Clone)]
       pub struct PyGrammarConstraint {
-          inner: GrammarConstraint,
+          inner: Arc<GrammarConstraint>,
       }
 
       #[pymethods]
       impl PyGrammarConstraint {
           #[new]
-          fn new(py: Python, grammar: PyGrammar, token_to_id: &PyDict, eof_llm_token_id: usize, max_llm_token_id: usize) -> PyResult<Self> {
+          fn new(py: Python, grammar: PyGrammar, token_to_id: &Bound<'_, PyDict>, max_llm_token_id: usize) -> PyResult<Self> {
               let mut llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = BiBTreeMap::new();
               for (key, value) in token_to_id.iter() {
                   let token = key.extract::<&[u8]>()?;
@@ -2091,37 +2153,65 @@ messages:
                   llm_token_map.insert(token.to_vec(), LLMTokenID(id));
               }
 
-              let inner = GrammarConstraint::from_grammar(grammar.inner, llm_token_map, eof_llm_token_id, max_llm_token_id);
-              Ok(Self { inner })
+              // Assuming Grammar has methods to get tokenizer and parser
+              // You might need to adjust this based on your actual Grammar implementation
+              let tokenizer = grammar.inner.tokenizer.clone(); // Placeholder
+              let parser = grammar.inner.glr_parser(); // Placeholder
+
+              let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, max_llm_token_id);
+              Ok(Self { inner: Arc::new(constraint) })
           }
 
           fn print(&self) {
-              print_precomputed(&self.inner.precomputed);
+              // Assuming a function like print_precomputed exists and takes &Precomputed
+              // Or implement a method on GrammarConstraint to print/dump its state
+              // print_precomputed(&self.inner.precomputed);
+              println!("Printing precomputed data is not implemented in this binding yet.");
           }
       }
 
 
+      #[self_referencing]
+      struct PyGrammarConstraintStateWrapper {
+          // Owns the Arc'd constraint
+          constraint: PyGrammarConstraint,
+          // Borrows from the owned constraint via the 'this lifetime
+          #[borrows(constraint)]
+          #[covariant] // Allows the lifetime 'this to be shortened
+          inner: GrammarConstraintState<'this>,
+      }
+
       #[pyclass]
-      pub struct PyGrammarConstraintState<'a> {
-          inner: GrammarConstraintState<'a, Regex>,
+      pub struct PyGrammarConstraintState {
+          inner: PyGrammarConstraintStateWrapper,
       }
 
       #[pymethods]
       impl PyGrammarConstraintState {
           #[new]
-          fn new(grammar_constraint: PyGrammarConstraint) -> Self {
-              Self { inner: grammar_constraint.inner.init() }
+          fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
+              // Use the builder provided by ouroboros
+              Ok(PyGrammarConstraintState {
+                  inner: PyGrammarConstraintStateWrapperTryBuilder {
+                      constraint,
+                      inner_builder: |constraint: &PyGrammarConstraint| Ok::<_, PyErr>(constraint.inner.init()),
+                  }.try_build()?
+              })
           }
 
-          fn get_mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-              let bitset = self.inner.get_mask();
+          fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
+              let bitset = self.inner.with_inner_mut(|state| state.get_mask());
               let bools: Vec<bool> = bitset.iter().map(|bit_ref| *bit_ref).collect();
               let array = bools.into_pyarray_bound(py);
               Ok(array)
           }
 
           fn commit(&mut self, llm_token_id: usize) {
-              self.inner.commit(LLMTokenID(llm_token_id));
+              self.inner.with_inner_mut(|state| {
+                  state.commit(LLMTokenID(llm_token_id));
+                  state.step_with_all_llm_tokens();
+              });
+              
           }
       }
 
@@ -2139,160 +2229,43 @@ messages:
       ```
     metadata:
       filename: python/src/lib.rs
-  - user: Fix this. Use ouroboros to turn PyGrammarConstraintState into a self-referential
-      struct and hence remove the lifetime parameter from it, and make PyGrammarConstraint
-      contain an Arc of GrammarConstraint.
+  - user: Modify PyGrammarConstraintState::new so it runs step_with_all_llm_tokens
+      right after initializing.
     metadata:
   - assistant: |-
-      Okay, I can help with that. Using `ouroboros` is a good way to handle self-referential structs in Rust, which is necessary here to tie the lifetime of `GrammarConstraintState` to the `PyGrammarConstraint` it borrows from, without exposing the lifetime parameter in Python.
-
-      First, you'll need to add `ouroboros` to your `python/Cargo.toml`:
-
-      ```toml
-      # python/Cargo.toml
-      [dependencies]
-      # ... other dependencies
-      ouroboros = "0.18"
-      # ...
-      ```
-
-      Now, let's modify the Rust files.
-
-      **`src/constraint.rs`**
-
-      No changes are strictly needed in `src/constraint.rs` itself based on the request, as `GrammarConstraintState` already uses a lifetime `'a` for its `parent` field. The core logic remains the same.
-
-      **`python/src/lib.rs`**
-
-      We'll modify `PyGrammarConstraint` to hold an `Arc<GrammarConstraint>` and redefine `PyGrammarConstraintState` using `ouroboros`.
-
       ```diff
+      diff --git a/python/src/lib.rs b/python/src/lib.rs
+      index 1234567..89abcde 100644
       --- a/python/src/lib.rs
       +++ b/python/src/lib.rs
-      @@ -1,6 +1,7 @@
-       use sep1::tokenizer::LLMTokenID;
-       use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq};
-       use sep1::finite_automata::Regex;
-      +use sep1::interface::print_precomputed; // Assuming this exists or is added
-       use pyo3::prelude::*;
-       use pyo3::types::{PyDict};
-       use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-      @@ -10,6 +11,8 @@
-       use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
-       use std::collections::{BTreeMap, BTreeSet};
-       use bimap::BiBTreeMap;
-      +use std::sync::Arc;
-      +use ouroboros::self_referencing;
-       use numpy::{IntoPyArray, PyArray1, ToPyArray};
-       
-       #[pyclass]
-      @@ -156,12 +159,12 @@
-       #[pyclass]
-       #[derive(Clone)]
-       pub struct PyGrammarConstraint {
-      -    inner: GrammarConstraint,
-      +    inner: Arc<GrammarConstraint>,
-       }
-       
-       #[pymethods]
-       impl PyGrammarConstraint {
+      @@ impl PyGrammarConstraintState {
            #[new]
-      -    fn new(py: Python, grammar: PyGrammar, token_to_id: &PyDict, eof_llm_token_id: usize, max_llm_token_id: usize) -> PyResult<Self> {
-      +    fn new(py: Python, grammar: PyGrammar, token_to_id: &PyDict, max_llm_token_id: usize) -> PyResult<Self> {
-               let mut llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = BiBTreeMap::new();
-               for (key, value) in token_to_id.iter() {
-                   let token = key.extract::<&[u8]>()?;
-      @@ -169,36 +172,51 @@
-                   llm_token_map.insert(token.to_vec(), LLMTokenID(id));
-               }
-       
-      -        let inner = GrammarConstraint::from_grammar(grammar.inner, llm_token_map, eof_llm_token_id, max_llm_token_id);
-      -        Ok(Self { inner })
-      +        // Assuming Grammar has methods to get tokenizer and parser
-      +        // You might need to adjust this based on your actual Grammar implementation
-      +        let tokenizer = grammar.inner.tokenizer(); // Placeholder
-      +        let parser = grammar.inner.glr_parser(); // Placeholder
-      +
-      +        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, max_llm_token_id);
-      +        Ok(Self { inner: Arc::new(constraint) })
+           fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
+      -        // Use the builder provided by ouroboros
+      -        Ok(PyGrammarConstraintState {
+      -            inner: PyGrammarConstraintStateWrapperTryBuilder {
+      -                constraint,
+      -                inner_builder: |constraint: &PyGrammarConstraint| Ok::<_, PyErr>(constraint.inner.init()),
+      -            }.try_build()?
+      -        })
+      +        // Use the builder provided by ouroboros, and immediately step
+      +        Ok(PyGrammarConstraintState {
+      +            inner: PyGrammarConstraintStateWrapperTryBuilder {
+      +                constraint,
+      +                inner_builder: |constraint: &PyGrammarConstraint| {
+      +                    // init state and step with all LLM tokens
+      +                    let mut state = constraint.inner.init();
+      +                    state.step_with_all_llm_tokens();
+      +                    Ok::<_, PyErr>(state)
+      +                },
+      +            }
+      +            .try_build()?
+      +        })
            }
-       
-           fn print(&self) {
-      -        print_precomputed(&self.inner.precomputed);
-      +        // Assuming a function like print_precomputed exists and takes &Precomputed
-      +        // Or implement a method on GrammarConstraint to print/dump its state
-      +        // print_precomputed(&self.inner.precomputed);
-      +        println!("Printing precomputed data is not implemented in this binding yet.");
-           }
-       }
-       
-       
-      -#[pyclass]
-      -pub struct PyGrammarConstraintState<'a> {
-      -    inner: GrammarConstraintState<'a, Regex>,
-      +#[pyclass]
-      +#[self_referencing]
-      +pub struct PyGrammarConstraintState {
-      +    // Owns the Arc'd constraint
-      +    constraint: PyGrammarConstraint,
-      +    // Borrows from the owned constraint via the 'this lifetime
-      +    #[borrows(constraint)]
-      +    #[covariant] // Allows the lifetime 'this to be shortened
-      +    inner: GrammarConstraintState<'this>,
-       }
-       
-       #[pymethods]
-       impl PyGrammarConstraintState {
-           #[new]
-      -    fn new(grammar_constraint: PyGrammarConstraint) -> Self {
-      -        Self { inner: grammar_constraint.inner.init() }
-      -    }
-      -
-      -    fn get_mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-      -        let bitset = self.inner.get_mask();
-      +    fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
-      +        // Use the builder provided by ouroboros
-      +        PyGrammarConstraintStateTryBuilder {
-      +            constraint,
-      +            inner_builder: |constraint: &PyGrammarConstraint| Ok::<_, PyErr>(constraint.inner.init()),
-      +        }.try_build()
-      +    }
-      +
-      +    fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-      +        let bitset = self.with_inner_mut(|state| state.get_mask());
-               let bools: Vec<bool> = bitset.iter().map(|bit_ref| *bit_ref).collect();
-               let array = bools.into_pyarray_bound(py);
-               Ok(array)
-           }
-       
-           fn commit(&mut self, llm_token_id: usize) {
-      -        self.inner.commit(LLMTokenID(llm_token_id));
-      +        self.with_inner_mut(|state| state.commit(LLMTokenID(llm_token_id)));
-           }
-       }
-       
-
       ```
 
-      **Explanation of Changes:**
-
-      1.  **`python/Cargo.toml`:** Added `ouroboros`.
-      2.  **`python/src/lib.rs`:**
-          *   Imported `Arc` and `ouroboros::self_referencing`.
-          *   Changed `PyGrammarConstraint.inner` to `Arc<GrammarConstraint>`.
-          *   Updated `PyGrammarConstraint::new` to:
-              *   Remove the unused `eof_llm_token_id` parameter.
-              *   Retrieve the `tokenizer` and `parser` from the `PyGrammar` (you'll need to ensure `grammar.inner` provides these, possibly via methods like `tokenizer()` and `glr_parser()`).
-              *   Create the `GrammarConstraint` and wrap it in an `Arc`.
-          *   Commented out the body of `PyGrammarConstraint::print` as `print_precomputed` might not be directly available or suitable. You might need a dedicated method on `GrammarConstraint` for dumping its state if you want this functionality.
-          *   Removed the lifetime parameter from `PyGrammarConstraintState`.
-          *   Used `#[self_referencing]` from `ouroboros` to define `PyGrammarConstraintState`.
-              *   `constraint: PyGrammarConstraint`: This field owns the data (`Arc`).
-              *   `inner: GrammarConstraintState<'this>`: This field borrows from `constraint`. The `'this` lifetime is managed by `ouroboros`.
-          *   Updated `PyGrammarConstraintState::new` to use the `PyGrammarConstraintStateTryBuilder` provided by `ouroboros` to safely initialize the self-referential struct. It calls `constraint.inner.init()` within the builder closure.
-          *   Updated `get_mask` and `commit` methods to use `self.with_inner_mut(...)`. `ouroboros` provides `with_inner` (for `&self`) and `with_inner_mut` (for `&mut self`) methods to safely access the borrowed field (`inner`). Note that `get_mask` needed to become `&mut self` because the underlying `GrammarConstraintState::get_mask` takes `&mut self`. If your `get_mask` actually takes `&self`, you can use `with_inner` instead.
-
-      Remember to adjust the parts marked with `// Placeholder` in `PyGrammarConstraint::new` based on how your `Grammar` struct actually exposes its tokenizer and parser. You might need to add methods like `tokenizer(&self) -> Regex` and `glr_parser(&self) -> GLRParser` to your `sep1::interface::Grammar` struct.
+      Explanation of changes:
+      - Updated the `inner_builder` closure in `PyGrammarConstraintState::new` to call `step_with_all_llm_tokens` on the freshly initialized `GrammarConstraintState` before storing it, ensuring the state is primed upon construction.
     metadata:
   - user: |
       Git apply result:

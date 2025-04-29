@@ -256,12 +256,18 @@ pub struct PyGrammarConstraintState {
 impl PyGrammarConstraintState {
     #[new]
     fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
-        // Use the builder provided by ouroboros
+        // Use the builder provided by ouroboros, and immediately step
         Ok(PyGrammarConstraintState {
             inner: PyGrammarConstraintStateWrapperTryBuilder {
                 constraint,
-                inner_builder: |constraint: &PyGrammarConstraint| Ok::<_, PyErr>(constraint.inner.init()),
-            }.try_build()?
+                inner_builder: |constraint: &PyGrammarConstraint| {
+                    // init state and step with all LLM tokens
+                    let mut state = constraint.inner.init();
+                    state.step_with_all_llm_tokens();
+                    Ok::<_, PyErr>(state)
+                },
+            }
+            .try_build()?
         })
     }
 
