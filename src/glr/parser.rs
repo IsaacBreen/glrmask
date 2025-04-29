@@ -284,7 +284,7 @@ impl<'a, T: AndAndOr> GLRParserState<'a, T> {
                             let new_stack = stack_node.push(new_content);
                             self.active_states.push(ParseState {
                                 stack: Arc::new(new_stack),
-                            }
+                            });
                         }
                     }
                     Stage7ShiftsAndReduces::Split { shift, reduces } => {
