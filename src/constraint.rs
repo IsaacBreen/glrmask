@@ -445,16 +445,14 @@ mod tests {
         llm_token_map.insert(b")".to_vec(), LLMTokenID(4));
         llm_token_map.insert(b"(i".to_vec(), LLMTokenID(5));
         llm_token_map.insert(b"+i".to_vec(), LLMTokenID(6));
-        llm_token_map.insert(b"$".to_vec(), LLMTokenID(7)); // EOF token
 
-        // Tokenizer regex for grammar tokens '+' '*' '(' ')' 'i' '$'
+        // Tokenizer regex for grammar tokens '+' '*' '(' ')' 'i'
         let expr = groups![
             eat_u8(b'+'),
             eat_u8(b'*'),
             eat_u8(b'('),
             eat_u8(b')'),
             eat_u8(b'i'),
-            eat_u8(b'$'),
         ];
         let tokenizer = expr.build();
 
@@ -478,7 +476,7 @@ mod tests {
         grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(5));
 
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map); // Start production is index 6
-        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 7);
+        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 6);
 
         // Initial state and step
         let mut state = constraint.init();
