@@ -53,8 +53,7 @@ fn dump_precompute_trie_recursive(
         }
     }
     if let Some(clean_end) = &node.value.clean_end {
-        println!("{}  Clean End:", indent);
-        println!("{}    LLM Tokens: {}", indent, format_bv_indices(clean_end));
+        println!("{}  Clean End LLM Tokens: {}", indent, format_bv_indices(clean_end));
     }
 
     // Print Children (Edges)
