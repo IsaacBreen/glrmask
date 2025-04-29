@@ -476,7 +476,9 @@ mod tests {
         grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(5));
 
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map); // Start production is index 6
+        dbg!(&parser);
         let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 6);
+        constraint.dump_precomputed();
 
         // Initial state and step
         let mut state = constraint.init();
@@ -484,5 +486,13 @@ mod tests {
         let mask = state.get_mask();
         // Expect LLM tokens that can start an expression: i (0), '(' (3), "(i" (5)
         assert_eq!(mask, LLMTokenBV::from_iter([true, false, false, true, false, true, false]));
+
+        // Commit "i(" twice
+        state.commit(LLMTokenID(5));
+        state.step_with_all_llm_tokens();
+        state.commit(LLMTokenID(5));
+        state.step_with_all_llm_tokens();
+        let mask = state.get_mask();
+        assert_eq!(mask, LLMTokenBV::from_iter([false, false, false, false, false, false, false]));
     }
 }
