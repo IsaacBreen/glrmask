@@ -273,10 +273,7 @@ impl<'a, T: AndAndOr> GLRParserState<'a, T> {
                             let revealed_content = stack_node.peek(); // &ParseStateNodeContent<T>
                             let revealed_state_id = revealed_content.state_id;
                             let revealed_t = &revealed_content.t;
-                            // Assuming goto exists if the table is correct for a valid grammar
-                            let goto_state = *self.parser.stage_7_table.get(&revealed_state_id)
-                                .and_then(|row| row.gotos.get(nonterminal))
-                                .expect(&format!("Goto not found for state {} and non-terminal {:?}", revealed_state_id.0, nonterminal));
+                            let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nonterminal];
 
                             debug!(3, "Going to state {:?}", goto_state);
                             let combined_t = revealed_t.and(current_t);
