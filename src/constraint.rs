@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use crate::datastructures::trie::Trie;
 use crate::finite_automata::Regex;
-use crate::glr::parser::{GLRParser, GLRParserState, ParseState, ParseStateKey};
+use crate::glr::parser::{AndAndOr, GLRParser, GLRParserState, ParseState, ParseStateKey};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use bimap::BiBTreeMap;
 use bitvec::prelude::BitVec;
@@ -14,7 +14,6 @@ use keyed_priority_queue::KeyedPriorityQueue;
 use crate::constraint_extra::print_finalizer;
 use crate::datastructures::charmap::TrieMap;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
-use crate::managed_glr_parser::{ManagedGLRParserState, ManagedParseState};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 
 pub type LLMTokenBV = BitVec;
@@ -58,7 +57,17 @@ pub(crate) struct GrammarConstraint {
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintState<'a> {
     pub(crate) parent: &'a GrammarConstraint,
-    pub(crate) state: ManagedGLRParserState<'a>,
+    pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, LLMTokenBV>>,
+}
+
+impl AndAndOr for LLMTokenBV {
+    fn and(&self, other: &Self) -> Self {
+        self.clone() & other.clone()
+    }
+
+    fn or(&self, other: &Self) -> Self {
+        self.clone() | other.clone()
+    }
 }
 
 impl PrecomputedNodeContents {
@@ -226,11 +235,13 @@ impl GrammarConstraint {
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
-        let glr_parser_initial_state = self.parser.init_managed_glr_parser();
+        let initial_glr_parser_state: GLRParserState<'_, LLMTokenBV> = self.parser.init_glr_parser();
+        let mut state = BTreeMap::new();
+        state.insert(self.tokenizer.initial_state_id(), initial_glr_parser_state);
 
         GrammarConstraintState {
             parent: self,
-            state: glr_parser_initial_state,
+            state,
         }
     }
 }
@@ -271,13 +282,13 @@ impl GrammarConstraintState<'_> {
         }
     }
 
-    fn prepare_initial_nodes_and_values_for_special_map(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(Arc<Mutex<Trie<TerminalID, LLMTokenBV, PrecomputedNodeContents>>>, ManagedGLRParserState)> {
+    fn prepare_initial_nodes_and_values_for_special_map(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(Arc<Mutex<Trie<TerminalID, LLMTokenBV, PrecomputedNodeContents>>>, GLRParserState<'_, LLMTokenBV>)> {
         // The BTreeSet<TokenizerStateID> in each Trie node here is the set of terminal states at this node.
         // Each terminal state indicates that the path through the trie can terminate here.
         // (todo: explain this better)
-        let mut initial_nodes_and_values: Vec<(Arc<Mutex<PrecomputeNode>>, ManagedGLRParserState)> = Vec::new();
+        let mut initial_nodes_and_values: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'_, LLMTokenBV>)> = Vec::new();
 
-        let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, (BTreeSet<ManagedParseState>, LLMTokenBV)> = BTreeMap::new();
+        let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, (BTreeSet<GLRParserState<'_, LLMTokenBV>>, LLMTokenBV)> = BTreeMap::new();
         for managed_parse_state in self.state.active_states.iter() {
             for tokenizer_state_id in managed_parse_state.tokenizer_state_ids.iter() {
                 tokenizer_state_id_to_parse_states.entry(*tokenizer_state_id).or_default().0.insert(managed_parse_state.clone());
@@ -297,8 +308,8 @@ impl GrammarConstraintState<'_> {
     pub fn step(&mut self, llm_tokens: &LLMTokenBV) {
         let initial_nodes_and_values = self.prepare_initial_nodes_and_values_for_special_map(llm_tokens);
 
-        let mut final_active_parse_states: Vec<ManagedParseState> = Vec::new();
-        let mut final_inactive_parse_states: Vec<ManagedParseState> = Vec::new();
+        let mut final_active_parse_states: Vec<GLRParserState<'_, LLMTokenBV>> = Vec::new();
+        let mut final_inactive_parse_states: Vec<GLRParserState<'_, LLMTokenBV>> = Vec::new();
 
         Trie::special_map(
             initial_nodes_and_values,

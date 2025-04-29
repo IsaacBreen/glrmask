@@ -1,5 +1,5 @@
 use crate::glr::grammar::{nt, prod, t, Terminal};
-use crate::glr::parser::GLRParser;
+use crate::glr::parser::{GLRParser, GLRParserState};
 use crate::glr::table::{generate_glr_parser, TerminalID};
 
 fn create_simple_parser() -> GLRParser {
@@ -45,7 +45,7 @@ fn test_simple_parse_table() {
     ];
 
     for (input, expected_match) in test_cases {
-        let result = parser.parse(&tokenize(&parser, input));
+        let result: GLRParserState<'_, ()> = parser.parse(&tokenize(&parser, input));
         assert_eq!(
             result.fully_matches(), 
             expected_match, 
@@ -71,7 +71,7 @@ fn test_parse_simple_expression() {
     ];
 
     for (input, expected_match) in test_cases {
-        let result = parser.parse(&tokenize(&parser, input));
+        let result: GLRParserState<'_, ()> = parser.parse(&tokenize(&parser, input));
         assert_eq!(
             result.fully_matches(), 
             expected_match, 

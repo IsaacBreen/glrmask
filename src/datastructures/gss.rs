@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GSSNode<T> {
-    value: T,
+    pub value: T,
     predecessors: Vec<Arc<GSSNode<T>>>,
 }
 
@@ -87,6 +87,13 @@ impl<T> GSSNode<T> {
         T: PartialEq,
     {
         assert!(self.value == other.value);
+        self.predecessors.append(&mut other.predecessors);
+    }
+
+    pub fn merge_unchecked(&mut self, mut other: Self)
+    where
+        T: PartialEq,
+    {
         self.predecessors.append(&mut other.predecessors);
     }
 

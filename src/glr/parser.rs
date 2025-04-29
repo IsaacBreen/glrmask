@@ -18,6 +18,11 @@ pub trait AndAndOr: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + 
     fn or(&self, other: &Self) -> Self;
 }
 
+impl AndAndOr for () {
+    fn and(&self, _: &Self) -> Self { () }
+    fn or(&self, _: &Self) -> Self { () }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseStateNodeContent<T: AndAndOr> {
     pub state_id: StateID,
@@ -50,7 +55,7 @@ pub enum StopReason {
 
 // TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
 #[derive(Clone)]
-pub struct GLRParser<T: AndAndOr + Default> {
+pub struct GLRParser {
     pub stage_7_table: Stage7Table,
     pub productions: Vec<Production>,
     pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
@@ -59,7 +64,7 @@ pub struct GLRParser<T: AndAndOr + Default> {
     pub start_state_id: StateID,
 }
 
-impl<T: AndAndOr + Default> GLRParser<T> {
+impl GLRParser {
     pub fn new(
         stage_7_table: Stage7Table,
         productions: Vec<Production>,
@@ -78,7 +83,7 @@ impl<T: AndAndOr + Default> GLRParser<T> {
         }
     }
 
-    pub fn init_glr_parser(&self) -> GLRParserState<T> {
+    pub fn init_glr_parser<T: AndAndOr + Default>(&self) -> GLRParserState<T> {
         GLRParserState {
             parser: self,
             active_states: vec![self.init_parse_state()],
@@ -86,7 +91,7 @@ impl<T: AndAndOr + Default> GLRParser<T> {
         }
     }
 
-    pub fn init_glr_parser_from_parse_state(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
+    pub fn init_glr_parser_from_parse_state<T: AndAndOr + Default>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
         GLRParserState {
             parser: self,
             active_states: vec![parse_state],
@@ -94,7 +99,7 @@ impl<T: AndAndOr + Default> GLRParser<T> {
         }
     }
 
-    pub fn init_glr_parser_from_parse_states(
+    pub fn init_glr_parser_from_parse_states<T: AndAndOr + Default>(
         &self,
         parse_states: Vec<ParseState<T>>,
     ) -> GLRParserState<T> {
@@ -105,7 +110,7 @@ impl<T: AndAndOr + Default> GLRParser<T> {
         }
     }
 
-    pub fn init_parse_state(&self) -> ParseState<T> {
+    pub fn init_parse_state<T: AndAndOr + Default>(&self) -> ParseState<T> {
         let initial_content = ParseStateNodeContent {
             state_id: self.start_state_id,
             t: T::default(),
@@ -115,20 +120,20 @@ impl<T: AndAndOr + Default> GLRParser<T> {
             status: ParseStatus::Active,
         }
     }
-    pub fn parse(&self, input: &[TerminalID]) -> GLRParserState<T> {
+    pub fn parse<T: AndAndOr + Default>(&self, input: &[TerminalID]) -> GLRParserState<T> {
         let mut state = self.init_glr_parser();
         state.parse(input);
         state
     }
 }
 
-impl<T: AndAndOr + Default> Debug for GLRParser<T> {
+impl Debug for GLRParser {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self)
     }
 }
 
-impl<T: AndAndOr + Default> Display for GLRParser<T> {
+impl Display for GLRParser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let stage_7_table = &self.stage_7_table;
         let terminal_map = &self.terminal_map;
@@ -213,7 +218,7 @@ impl<T: AndAndOr + Default> Display for GLRParser<T> {
 
 #[derive(Debug, Clone)]
 pub struct GLRParserState<'a, T: AndAndOr + Default> {
-    pub parser: &'a GLRParser<T>,
+    pub parser: &'a GLRParser,
     pub active_states: Vec<ParseState<T>>,
     pub inactive_states: Vec<ParseState<T>>,
 }
@@ -409,13 +414,13 @@ impl<T: AndAndOr + Default> ParseState<T> {
         let combined_t = self_content.t.or(&other_content.t);
 
         // Get mutable access to self.stack, potentially cloning if shared (Arc > 1)
-        let mutable_stack = Arc::make_mut(&mut self.stack);
+        let mut mutable_stack = Arc::make_mut(&mut self.stack);
 
         // Update the 't' value in the mutable top node's content
-        mutable_stack.content.t = combined_t; // Assumes GSSNode.content is public or has a setter
+        mutable_stack.value.t = combined_t;
 
         // Merge the parent structures using GSSNode's merge
-        mutable_stack.merge(Arc::unwrap_or_clone(other.stack)); // Assumes GSSNode::merge handles parent merging
+        mutable_stack.merge_unchecked(Arc::unwrap_or_clone(other.stack));
     }
 }
 
