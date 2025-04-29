@@ -346,7 +346,7 @@ impl<'a> GrammarConstraintState<'a> {
                 }
 
                 // Handle finalizers
-                for (possible_final_grammar_token, precomputed_finalizer) in node.value.finalizers() {
+                for (possible_final_grammar_token, precomputed_finalizer) in &node.value.finalizers {
                     // Ensure the final tokens parses
                     let mut semi_final_glr_parse_state = glr_parse_state.clone();
                     semi_final_glr_parse_state.step(*possible_final_grammar_token);
