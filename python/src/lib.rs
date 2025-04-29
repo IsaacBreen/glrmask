@@ -211,13 +211,16 @@ pub struct PyGrammarConstraint {
 #[pymethods]
 impl PyGrammarConstraint {
     #[new]
-    fn new(py: Python, grammar: PyGrammar, token_to_id: &Bound<'_, PyDict>, max_llm_token_id: usize) -> PyResult<Self> {
+    fn new(py: Python, grammar: PyGrammar, token_to_id: &Bound<'_, PyDict>) -> PyResult<Self> {
         let mut llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = BiBTreeMap::new();
+        let mut max_llm_token_id = 0;
         for (key, value) in token_to_id.iter() {
             let token = key.extract::<&[u8]>()?;
             let id = value.extract::<usize>()?;
             llm_token_map.insert(token.to_vec(), LLMTokenID(id));
+            max_llm_token_id = max_llm_token_id.max(id);
         }
+
 
         // Assuming Grammar has methods to get tokenizer and parser
         // You might need to adjust this based on your actual Grammar implementation
