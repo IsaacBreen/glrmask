@@ -1,4 +1,6 @@
 llm_logs/
+.partial_completion.txt
+restore-chat-history
 
 # Created by https://www.toptal.com/developers/gitignore/api/rust,jetbrains,macos,python
 # Edit at https://www.toptal.com/developers/gitignore?templates=rust,jetbrains,macos,python
