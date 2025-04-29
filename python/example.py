@@ -1,4 +1,5 @@
 import _sep1
+import numpy as np
 
 # Define regexes using PyRegexExpr
 plus_regex = _sep1.PyRegexExpr.eat_u8(ord('+'))
@@ -52,7 +53,7 @@ def llm_tokens_to_ids(tokens):
 mask = grammar_constraint_state.get_mask()
 expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
 print(f"Initial Mask: {mask}")
-assert set(np.where(mask)[0]) == expected_mask
+assert set(np.where(mask)[0]) == expected_mask, f"Mask: {mask}, Expected: {expected_mask}"
 
 # Commit prefill tokens
 prefill = llm_tokens_to_ids([b"(i", b"+", b"i", b"*", b"i"])
@@ -63,4 +64,4 @@ for token_id in prefill:
 mask = grammar_constraint_state.get_mask()
 expected_mask = set(llm_tokens_to_ids([b"+", b"*", b")", b"+i"]))
 print(f"Mask after committing prefill: {mask}")
-assert set(np.where(mask)[0]) == expected_mask
+assert set(np.where(mask)[0]) == expected_mask, f"Mask: {mask}, Expected: {expected_mask}"
