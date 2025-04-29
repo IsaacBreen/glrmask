@@ -477,7 +477,7 @@ mod tests {
         grammar_token_map.insert(Terminal("I".to_string()), TerminalID(4));
         grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(5));
 
-        let parser = generate_glr_parser_with_terminal_map(&productions, 6, grammar_token_map); // Start production is index 6
+        let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map); // Start production is index 6
         let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 7);
 
         // Initial state and step
