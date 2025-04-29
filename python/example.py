@@ -55,20 +55,22 @@ expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unord
 print(f"Initial Mask: {mask}")
 assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
 
+
+# # Commit prefill tokens
+# prefill = llm_tokens_to_ids([b"i", b"+"])
+# for token_id in prefill:
+#     grammar_constraint_state.commit(token_id)
+#
+# # Mask check after prefill
+# mask = grammar_constraint_state.get_mask()
+# expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
+# print(f"Mask after committing prefill: {mask}")
+# assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+
+
 # Commit prefill tokens
-prefill = llm_tokens_to_ids([b"i", b"+"])
-for token_id in prefill:
-    grammar_constraint_state.commit(token_id)
-
-# Mask check after prefill
-mask = grammar_constraint_state.get_mask()
-expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
-print(f"Mask after committing prefill: {mask}")
-assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
-
-
-# Commit prefill tokens
-prefill = llm_tokens_to_ids([b"(i", b"+", b"i", b"*", b"i"])
+# prefill = llm_tokens_to_ids([b"(i", b"+", b"i", b"*", b"i"])
+prefill = llm_tokens_to_ids([b"(i", b"(i"])
 for token_id in prefill:
     grammar_constraint_state.commit(token_id)
 
