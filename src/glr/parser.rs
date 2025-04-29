@@ -395,7 +395,7 @@ impl<'a, T: AndAndOr> GLRParserState<'a, T> {
     }
 
     pub fn is_ok(&self) -> bool {
-        !self.active_states.is_empty() || self.fully_matches()
+        self.matches_or_can_match()
     }
 }
 
