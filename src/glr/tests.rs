@@ -35,6 +35,7 @@ fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
 #[test]
 fn test_simple_parse_table() {
     let parser = create_simple_parser();
+    dbg!(&parser);
     
     let test_cases = [
         ("b", true),
@@ -57,6 +58,7 @@ fn test_simple_parse_table() {
 #[test]
 fn test_parse_simple_expression() {
     let parser = create_expression_parser();
+    dbg!(&parser);
     
     let test_cases = [
         ("i", true),
