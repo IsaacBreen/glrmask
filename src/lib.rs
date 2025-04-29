@@ -1,11 +1,11 @@
 pub mod finite_automata;
 pub mod glr;
-mod constraint;
+pub mod constraint;
 mod constraint_extra;
 mod datastructures;
 pub mod interface;
 mod r#macro;
-mod tokenizer;
+pub mod tokenizer;
 mod types;
 mod tests_apr25;
 mod multi_dfa;

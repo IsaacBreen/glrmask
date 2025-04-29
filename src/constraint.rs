@@ -41,7 +41,7 @@ pub(crate) type PrecomputeNode = Trie<GrammarTokenID, LLMTokenBV, PrecomputedNod
 pub(crate) type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode>;
 
 #[derive(Debug, Clone)] // Removed pub(crate) as it's likely used externally
-pub(crate) struct GrammarConstraint {
+pub struct GrammarConstraint {
     pub(crate) tokenizer: Regex,
     pub(crate) parser: GLRParser,
     pub(crate) precomputed: Precomputed,

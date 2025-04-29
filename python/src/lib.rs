@@ -1,3 +1,4 @@
+use sep1::tokenizer::LLMTokenID;
 use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq};
 use sep1::finite_automata::Regex;
 use pyo3::prelude::*;
@@ -6,12 +7,10 @@ use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use sep1::glr::parser::GLRParser;
 use sep1::glr::table::{generate_glr_parser, StateID};
 use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence};
-use sep1::constraint_runtime::{GrammarConstraint, GrammarConstraintState};
-use sep1::constraint_creation::{print_precomputed, LLMTokenID, Tokenizer};
+use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
 use std::collections::{BTreeMap, BTreeSet};
 use bimap::BiBTreeMap;
 use numpy::{IntoPyArray, PyArray1, ToPyArray};
-use sep1::u8set::U8Set;
 
 #[pyclass]
 #[derive(Clone)]
