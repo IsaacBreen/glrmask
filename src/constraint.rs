@@ -25,8 +25,8 @@ pub struct PrecomputedFinalizer {
 }
 
 impl PrecomputedFinalizer {
-    pub(crate) fn new(compatible_llm_tokens: LLMTokenBV, tokenizer_state_ids: BTreeSet<TokenizerStateID>) -> Self {
-        let content = BTreeMap::from([(TokenizerStateID(0), compatible_llm_tokens)]);
+    pub(crate) fn new(compatible_llm_tokens: LLMTokenBV, tokenizer_state_id: TokenizerStateID) -> Self {
+        let content = BTreeMap::from([(tokenizer_state_id, compatible_llm_tokens)]);
         Self { content }
     }
 }
@@ -74,15 +74,13 @@ impl PrecomputedNodeContents {
         let mut current_compatible_llm_tokens = LLMTokenBV::repeat(false, max_llm_token_id + 1);
         current_compatible_llm_tokens.set(llm_token_id.0, true);
 
-        let current_tokenizer_state_ids = BTreeSet::from([tokenizer_state_id]);
-
         self.finalizers.entry(possible_final_grammar_token)
             .and_modify(|existing_finalizer| {
                 existing_finalizer.content.entry(tokenizer_state_id).and_modify(|existing_llm_tokens| {
                     *existing_llm_tokens |= &current_compatible_llm_tokens;
                 }).or_insert(current_compatible_llm_tokens.clone());
             })
-            .or_insert_with(|| PrecomputedFinalizer::new(current_compatible_llm_tokens, current_tokenizer_state_ids));
+            .or_insert_with(|| PrecomputedFinalizer::new(current_compatible_llm_tokens, tokenizer_state_id));
     }
 }
 
@@ -202,11 +200,8 @@ impl GrammarConstraint {
                 }
                 if new_offset == bytes.len() {
                     // Reached the end of the input, so this is a clean match.
-                    let possible_final_grammar_tokens: BTreeSet<_> = tokenizer.tokens_accessible_from_state(TokenizerStateID(0)).into_iter().map(|token_id| GrammarTokenID(token_id.0)).collect(); // Should contain all tokens
-                    for possible_final_grammar_token in possible_final_grammar_tokens {
-                        for new_precomputed_node in &next_precomputed_nodes {
-                            new_precomputed_node.lock().unwrap().value.push_finalizer_info(possible_final_grammar_token, LLMTokenID(dst.token_id()), TokenizerStateID(0), max_llm_token_id);
-                        }
+                    for new_precomputed_node in &next_precomputed_nodes {
+                        new_precomputed_node.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
                     }
                 } else if new_offset < bytes.len() {
                     queue.entry(new_queue_key).or_default().extend(next_precomputed_nodes);
