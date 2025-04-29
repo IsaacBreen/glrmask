@@ -224,7 +224,8 @@ impl GrammarConstraint {
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
-        let initial_glr_parser_state: GLRParserState<'_, LLMTokenBV> = self.parser.init_glr_parser();
+        let llm_tokens = LLMTokenBV::repeat(true, self.max_llm_token_id + 1);
+        let initial_glr_parser_state: GLRParserState<'_, LLMTokenBV> = self.parser.init_glr_parser_with_t(llm_tokens);
         let mut state = BTreeMap::new();
         state.insert(self.tokenizer.initial_state_id(), initial_glr_parser_state);
 
@@ -286,7 +287,7 @@ impl<'a> GrammarConstraintState<'a> {
         for (tokenizer_state_id, state) in &self.state {
             let mut state = state.clone();
             for parse_state in state.active_states.iter_mut() {
-                Arc::make_mut(&mut parse_state.stack).value.t |= llm_tokens.clone();
+                Arc::make_mut(&mut parse_state.stack).value.t = llm_tokens.clone();
             }
             tokenizer_state_id_to_parse_states.insert(*tokenizer_state_id, state);
         }

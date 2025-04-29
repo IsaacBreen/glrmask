@@ -84,14 +84,18 @@ impl GLRParser {
     }
 
     pub fn init_glr_parser<T: AndAndOr + Default>(&self) -> GLRParserState<T> {
+        self.init_glr_parser_with_t(T::default())
+    }
+
+    pub fn init_glr_parser_with_t<T: AndAndOr>(&self, t: T) -> GLRParserState<T> {
         GLRParserState {
             parser: self,
-            active_states: vec![self.init_parse_state()],
+            active_states: vec![self.init_parse_state_with_t(t)],
             inactive_states: Vec::new(),
         }
     }
 
-    pub fn init_glr_parser_from_parse_state<T: AndAndOr + Default>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
+    pub fn init_glr_parser_from_parse_state<T: AndAndOr>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
         GLRParserState {
             parser: self,
             active_states: vec![parse_state],
@@ -99,7 +103,7 @@ impl GLRParser {
         }
     }
 
-    pub fn init_glr_parser_from_parse_states<T: AndAndOr + Default>(
+    pub fn init_glr_parser_from_parse_states<T: AndAndOr>(
         &self,
         parse_states: Vec<ParseState<T>>,
     ) -> GLRParserState<T> {
@@ -111,15 +115,20 @@ impl GLRParser {
     }
 
     pub fn init_parse_state<T: AndAndOr + Default>(&self) -> ParseState<T> {
+        self.init_parse_state_with_t(T::default())
+    }
+
+    pub fn init_parse_state_with_t<T: AndAndOr>(&self, t: T) -> ParseState<T> {
         let initial_content = ParseStateNodeContent {
             state_id: self.start_state_id,
-            t: T::default(),
+            t,
         };
         ParseState {
             stack: Arc::new(GSSNode::new(initial_content)),
             status: ParseStatus::Active,
         }
     }
+
     pub fn parse<T: AndAndOr + Default>(&self, input: &[TerminalID]) -> GLRParserState<T> {
         let mut state = self.init_glr_parser();
         state.parse(input);
@@ -217,13 +226,13 @@ impl Display for GLRParser {
 }
 
 #[derive(Debug, Clone)]
-pub struct GLRParserState<'a, T: AndAndOr + Default> {
+pub struct GLRParserState<'a, T: AndAndOr> {
     pub parser: &'a GLRParser,
     pub active_states: Vec<ParseState<T>>,
     pub inactive_states: Vec<ParseState<T>>,
 }
 
-impl<'a, T: AndAndOr + Default> GLRParserState<'a, T> {
+impl<'a, T: AndAndOr> GLRParserState<'a, T> {
     pub fn parse(&mut self, input: &[TerminalID]) {
         self.parse_part(input);
     }
@@ -396,7 +405,7 @@ pub struct ParseStateKey {
     // Removed action_stack
 }
 
-impl<T: AndAndOr + Default> ParseState<T> {
+impl<T: AndAndOr> ParseState<T> {
     pub fn key(&self) -> ParseStateKey {
         ParseStateKey {
             stack_state_id: self.stack.peek().state_id,
