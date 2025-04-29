@@ -22,7 +22,67 @@ pub type GrammarTokenBV = BitVec;
 #[derive(Default, Debug, Clone)]
 pub struct PrecomputedFinalizer {
     pub(crate) content: BTreeMap<TokenizerStateID, LLMTokenBV>,
-}
+
+    #[test]
+    fn test_constraint_expression() {
+        // Example grammar: E -> E '+' T | T; T -> T '*' F | F; F -> '(' E ')' | 'i'
+        // LLM token vocabulary: i, +, *, (, ), (i, +i
+        let mut llm_token_map = LLMTokenMap::new();
+        llm_token_map.insert(b"i".to_vec(), LLMTokenID(0));
+        llm_token_map.insert(b"+".to_vec(), LLMTokenID(1));
+        llm_token_map.insert(b"*".to_vec(), LLMTokenID(2));
+        llm_token_map.insert(b"(".to_vec(), LLMTokenID(3));
+        llm_token_map.insert(b")".to_vec(), LLMTokenID(4));
+        llm_token_map.insert(b"(i".to_vec(), LLMTokenID(5));
+        llm_token_map.insert(b"+i".to_vec(), LLMTokenID(6));
+
+        // Tokenizer regex for grammar tokens '+' '*' '(' ')' 'i'
+        let expr = groups![
+            eat_u8(b'+'),
+            eat_u8(b'*'),
+            eat_u8(b'('),
+            eat_u8(b')'),
+            eat_u8(b'i'),
+        ];
+        let tokenizer = expr.build();
+
+        // Grammar productions
+        let productions = vec![
+            prod("E", vec![nt("E"), t("PLUS"), nt("T")]),
+            prod("E", vec![nt("T")]),
+            prod("T", vec![nt("T"), t("TIMES"), nt("F")]),
+            prod("T", vec![nt("F")]),
+            prod("F", vec![t("LPAREN"), nt("E"), t("RPAREN")]),
+            prod("F", vec![t("I")]),
+        ];
+        // Map grammar terminals to IDs matching regex order
+        let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+        grammar_token_map.insert(Terminal("PLUS".to_string()), TerminalID(0));
+        grammar_token_map.insert(Terminal("TIMES".to_string()), TerminalID(1));
+        grammar_token_map.insert(Terminal("LPAREN".to_string()), TerminalID(2));
+        grammar_token_map.insert(Terminal("RPAREN".to_string()), TerminalID(3));
+        grammar_token_map.insert(Terminal("I".to_string()), TerminalID(4));
+
+        let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
+        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 6);
+
+        // Initial state and step
+        let mut state = constraint.init();
+        state.step_with_all_llm_tokens();
+        let mask = state.get_mask();
+        // Expect LLM tokens that can start an expression: i (0), '(' (3), "(i" (5)
+        assert_eq!(mask, LLMTokenBV::from_iter([true, false, false, true, false, true, false]));
+
+        // Commit "(i" twice (simulate consuming "(i" twice)
+        for _ in 0..2 {
+            state.commit(LLMTokenID(5));
+            state.step_with_all_llm_tokens();
+        }
+        let mask = state.get_mask();
+        // Now expect '+', '*', ')', '+i' => IDs 1,2,4,6
+        assert_eq!(mask, LLMTokenBV::from_iter([false, true, true, false, true, false, true]));
+    }
+} // end mod tests
 
 impl PrecomputedFinalizer {
     pub(crate) fn new(compatible_llm_tokens: LLMTokenBV, tokenizer_state_id: TokenizerStateID) -> Self {

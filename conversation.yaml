@@ -2,6 +2,7 @@ local_system:
   attached_files:
     - src/constraint.rs
     - python/src/lib.rs
+    - python/example.py
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -700,12 +701,18 @@ local_system:
       impl PyGrammarConstraintState {
           #[new]
           fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
-              // Use the builder provided by ouroboros
+              // Use the builder provided by ouroboros, and immediately step
               Ok(PyGrammarConstraintState {
                   inner: PyGrammarConstraintStateWrapperTryBuilder {
                       constraint,
-                      inner_builder: |constraint: &PyGrammarConstraint| Ok::<_, PyErr>(constraint.inner.init()),
-                  }.try_build()?
+                      inner_builder: |constraint: &PyGrammarConstraint| {
+                          // init state and step with all LLM tokens
+                          let mut state = constraint.inner.init();
+                          state.step_with_all_llm_tokens();
+                          Ok::<_, PyErr>(state)
+                      },
+                  }
+                  .try_build()?
               })
           }
 
@@ -736,6 +743,88 @@ local_system:
           m.add_class::<PyGrammarConstraintState>()?;
           Ok(())
       }
+    python/example.py: |-
+      import _sep1
+      import numpy as np
+
+      # Define regexes using PyRegexExpr
+      plus_regex = _sep1.PyRegexExpr.eat_u8(ord('+'))
+      times_regex = _sep1.PyRegexExpr.eat_u8(ord('*'))
+      open_paren_regex = _sep1.PyRegexExpr.eat_u8(ord('('))
+      close_paren_regex = _sep1.PyRegexExpr.eat_u8(ord(')'))
+      i_regex = _sep1.PyRegexExpr.eat_u8(ord('i'))
+
+      # Define grammar rules using the regexes
+      exprs = [
+          ("E", _sep1.PyGrammarExpr.choice([
+              _sep1.PyGrammarExpr.sequence([
+                  _sep1.PyGrammarExpr.ref("E"),
+                  _sep1.PyGrammarExpr.regex(plus_regex),
+                  _sep1.PyGrammarExpr.ref("T"),
+              ]),
+              _sep1.PyGrammarExpr.ref("T"),
+          ])),
+          ("T", _sep1.PyGrammarExpr.choice([
+              _sep1.PyGrammarExpr.sequence([
+                  _sep1.PyGrammarExpr.ref("T"),
+                  _sep1.PyGrammarExpr.regex(times_regex),
+                  _sep1.PyGrammarExpr.ref("F"),
+              ]),
+              _sep1.PyGrammarExpr.ref("F"),
+          ])),
+          ("F", _sep1.PyGrammarExpr.choice([
+              _sep1.PyGrammarExpr.sequence([
+                  _sep1.PyGrammarExpr.regex(open_paren_regex),
+                  _sep1.PyGrammarExpr.ref("E"),
+                  _sep1.PyGrammarExpr.regex(close_paren_regex),
+              ]),
+              _sep1.PyGrammarExpr.regex(i_regex),
+          ])),
+      ]
+
+      grammar = _sep1.PyGrammar(exprs)
+
+      # Define LLM tokens
+      llm_tokens = [b"i", b"+", b"*", b"(", b")", b"(i", b"+i"]
+      llm_token_to_id = {token: i for i, token in enumerate(llm_tokens)}
+
+      # Create grammar constraint
+      grammar_constraint = _sep1.PyGrammarConstraint(grammar, llm_token_to_id, len(llm_tokens))
+      grammar_constraint_state = _sep1.PyGrammarConstraintState(grammar_constraint)
+
+      def llm_tokens_to_ids(tokens):
+          return [llm_token_to_id[token] for token in tokens]
+
+      # Initial mask check
+      mask = grammar_constraint_state.get_mask()
+      expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
+      print(f"Initial Mask: {mask}")
+      assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+
+
+      # # Commit prefill tokens
+      # prefill = llm_tokens_to_ids([b"i", b"+"])
+      # for token_id in prefill:
+      #     grammar_constraint_state.commit(token_id)
+      #
+      # # Mask check after prefill
+      # mask = grammar_constraint_state.get_mask()
+      # expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
+      # print(f"Mask after committing prefill: {mask}")
+      # assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+
+
+      # Commit prefill tokens
+      # prefill = llm_tokens_to_ids([b"(i", b"+", b"i", b"*", b"i"])
+      prefill = llm_tokens_to_ids([b"(i", b"(i"])
+      for token_id in prefill:
+          grammar_constraint_state.commit(token_id)
+
+      # Mask check after prefill
+      mask = grammar_constraint_state.get_mask()
+      expected_mask = set(llm_tokens_to_ids([b"+", b"*", b")", b"+i"]))
+      print(f"Mask after committing prefill: {mask}")
+      assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
   prev_file_contents:
     src/constraint.rs: |-
       use std::cmp::Ordering;
@@ -1432,12 +1521,18 @@ local_system:
       impl PyGrammarConstraintState {
           #[new]
           fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
-              // Use the builder provided by ouroboros
+              // Use the builder provided by ouroboros, and immediately step
               Ok(PyGrammarConstraintState {
                   inner: PyGrammarConstraintStateWrapperTryBuilder {
                       constraint,
-                      inner_builder: |constraint: &PyGrammarConstraint| Ok::<_, PyErr>(constraint.inner.init()),
-                  }.try_build()?
+                      inner_builder: |constraint: &PyGrammarConstraint| {
+                          // init state and step with all LLM tokens
+                          let mut state = constraint.inner.init();
+                          state.step_with_all_llm_tokens();
+                          Ok::<_, PyErr>(state)
+                      },
+                  }
+                  .try_build()?
               })
           }
 
@@ -1468,6 +1563,88 @@ local_system:
           m.add_class::<PyGrammarConstraintState>()?;
           Ok(())
       }
+    python/example.py: |-
+      import _sep1
+      import numpy as np
+
+      # Define regexes using PyRegexExpr
+      plus_regex = _sep1.PyRegexExpr.eat_u8(ord('+'))
+      times_regex = _sep1.PyRegexExpr.eat_u8(ord('*'))
+      open_paren_regex = _sep1.PyRegexExpr.eat_u8(ord('('))
+      close_paren_regex = _sep1.PyRegexExpr.eat_u8(ord(')'))
+      i_regex = _sep1.PyRegexExpr.eat_u8(ord('i'))
+
+      # Define grammar rules using the regexes
+      exprs = [
+          ("E", _sep1.PyGrammarExpr.choice([
+              _sep1.PyGrammarExpr.sequence([
+                  _sep1.PyGrammarExpr.ref("E"),
+                  _sep1.PyGrammarExpr.regex(plus_regex),
+                  _sep1.PyGrammarExpr.ref("T"),
+              ]),
+              _sep1.PyGrammarExpr.ref("T"),
+          ])),
+          ("T", _sep1.PyGrammarExpr.choice([
+              _sep1.PyGrammarExpr.sequence([
+                  _sep1.PyGrammarExpr.ref("T"),
+                  _sep1.PyGrammarExpr.regex(times_regex),
+                  _sep1.PyGrammarExpr.ref("F"),
+              ]),
+              _sep1.PyGrammarExpr.ref("F"),
+          ])),
+          ("F", _sep1.PyGrammarExpr.choice([
+              _sep1.PyGrammarExpr.sequence([
+                  _sep1.PyGrammarExpr.regex(open_paren_regex),
+                  _sep1.PyGrammarExpr.ref("E"),
+                  _sep1.PyGrammarExpr.regex(close_paren_regex),
+              ]),
+              _sep1.PyGrammarExpr.regex(i_regex),
+          ])),
+      ]
+
+      grammar = _sep1.PyGrammar(exprs)
+
+      # Define LLM tokens
+      llm_tokens = [b"i", b"+", b"*", b"(", b")", b"(i", b"+i"]
+      llm_token_to_id = {token: i for i, token in enumerate(llm_tokens)}
+
+      # Create grammar constraint
+      grammar_constraint = _sep1.PyGrammarConstraint(grammar, llm_token_to_id, len(llm_tokens))
+      grammar_constraint_state = _sep1.PyGrammarConstraintState(grammar_constraint)
+
+      def llm_tokens_to_ids(tokens):
+          return [llm_token_to_id[token] for token in tokens]
+
+      # Initial mask check
+      mask = grammar_constraint_state.get_mask()
+      expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
+      print(f"Initial Mask: {mask}")
+      assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+
+
+      # # Commit prefill tokens
+      # prefill = llm_tokens_to_ids([b"i", b"+"])
+      # for token_id in prefill:
+      #     grammar_constraint_state.commit(token_id)
+      #
+      # # Mask check after prefill
+      # mask = grammar_constraint_state.get_mask()
+      # expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
+      # print(f"Mask after committing prefill: {mask}")
+      # assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+
+
+      # Commit prefill tokens
+      # prefill = llm_tokens_to_ids([b"(i", b"+", b"i", b"*", b"i"])
+      prefill = llm_tokens_to_ids([b"(i", b"(i"])
+      for token_id in prefill:
+          grammar_constraint_state.commit(token_id)
+
+      # Mask check after prefill
+      mask = grammar_constraint_state.get_mask()
+      expected_mask = set(llm_tokens_to_ids([b"+", b"*", b")", b"+i"]))
+      print(f"Mask after committing prefill: {mask}")
+      assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
   diffs_applied_this_send: true
 system:
   message: |2
@@ -1481,7 +1658,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - copy-one/paste
+    - o4-mini
   code_completion_model:
     - gemini/gemini-2.0-flash-thinking-exp-01-21
   commit_message_model:
@@ -2190,12 +2367,18 @@ messages:
       impl PyGrammarConstraintState {
           #[new]
           fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
-              // Use the builder provided by ouroboros
+              // Use the builder provided by ouroboros, and immediately step
               Ok(PyGrammarConstraintState {
                   inner: PyGrammarConstraintStateWrapperTryBuilder {
                       constraint,
-                      inner_builder: |constraint: &PyGrammarConstraint| Ok::<_, PyErr>(constraint.inner.init()),
-                  }.try_build()?
+                      inner_builder: |constraint: &PyGrammarConstraint| {
+                          // init state and step with all LLM tokens
+                          let mut state = constraint.inner.init();
+                          state.step_with_all_llm_tokens();
+                          Ok::<_, PyErr>(state)
+                      },
+                  }
+                  .try_build()?
               })
           }
 
@@ -2229,51 +2412,177 @@ messages:
       ```
     metadata:
       filename: python/src/lib.rs
-  - user: Modify PyGrammarConstraintState::new so it runs step_with_all_llm_tokens
-      right after initializing.
+  - user: |-
+      ```python 'python/example.py'
+      import _sep1
+      import numpy as np
+
+      # Define regexes using PyRegexExpr
+      plus_regex = _sep1.PyRegexExpr.eat_u8(ord('+'))
+      times_regex = _sep1.PyRegexExpr.eat_u8(ord('*'))
+      open_paren_regex = _sep1.PyRegexExpr.eat_u8(ord('('))
+      close_paren_regex = _sep1.PyRegexExpr.eat_u8(ord(')'))
+      i_regex = _sep1.PyRegexExpr.eat_u8(ord('i'))
+
+      # Define grammar rules using the regexes
+      exprs = [
+          ("E", _sep1.PyGrammarExpr.choice([
+              _sep1.PyGrammarExpr.sequence([
+                  _sep1.PyGrammarExpr.ref("E"),
+                  _sep1.PyGrammarExpr.regex(plus_regex),
+                  _sep1.PyGrammarExpr.ref("T"),
+              ]),
+              _sep1.PyGrammarExpr.ref("T"),
+          ])),
+          ("T", _sep1.PyGrammarExpr.choice([
+              _sep1.PyGrammarExpr.sequence([
+                  _sep1.PyGrammarExpr.ref("T"),
+                  _sep1.PyGrammarExpr.regex(times_regex),
+                  _sep1.PyGrammarExpr.ref("F"),
+              ]),
+              _sep1.PyGrammarExpr.ref("F"),
+          ])),
+          ("F", _sep1.PyGrammarExpr.choice([
+              _sep1.PyGrammarExpr.sequence([
+                  _sep1.PyGrammarExpr.regex(open_paren_regex),
+                  _sep1.PyGrammarExpr.ref("E"),
+                  _sep1.PyGrammarExpr.regex(close_paren_regex),
+              ]),
+              _sep1.PyGrammarExpr.regex(i_regex),
+          ])),
+      ]
+
+      grammar = _sep1.PyGrammar(exprs)
+
+      # Define LLM tokens
+      llm_tokens = [b"i", b"+", b"*", b"(", b")", b"(i", b"+i"]
+      llm_token_to_id = {token: i for i, token in enumerate(llm_tokens)}
+
+      # Create grammar constraint
+      grammar_constraint = _sep1.PyGrammarConstraint(grammar, llm_token_to_id, len(llm_tokens))
+      grammar_constraint_state = _sep1.PyGrammarConstraintState(grammar_constraint)
+
+      def llm_tokens_to_ids(tokens):
+          return [llm_token_to_id[token] for token in tokens]
+
+      # Initial mask check
+      mask = grammar_constraint_state.get_mask()
+      expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
+      print(f"Initial Mask: {mask}")
+      assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+
+
+      # # Commit prefill tokens
+      # prefill = llm_tokens_to_ids([b"i", b"+"])
+      # for token_id in prefill:
+      #     grammar_constraint_state.commit(token_id)
+      #
+      # # Mask check after prefill
+      # mask = grammar_constraint_state.get_mask()
+      # expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
+      # print(f"Mask after committing prefill: {mask}")
+      # assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+
+
+      # Commit prefill tokens
+      # prefill = llm_tokens_to_ids([b"(i", b"+", b"i", b"*", b"i"])
+      prefill = llm_tokens_to_ids([b"(i", b"(i"])
+      for token_id in prefill:
+          grammar_constraint_state.commit(token_id)
+
+      # Mask check after prefill
+      mask = grammar_constraint_state.get_mask()
+      expected_mask = set(llm_tokens_to_ids([b"+", b"*", b")", b"+i"]))
+      print(f"Mask after committing prefill: {mask}")
+      assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+      ```
+    metadata:
+      filename: python/example.py
+  - user: Add the example grammar from example.py to constraint.rs.
     metadata:
   - assistant: |-
       ```diff
-      diff --git a/python/src/lib.rs b/python/src/lib.rs
-      index 1234567..89abcde 100644
-      --- a/python/src/lib.rs
-      +++ b/python/src/lib.rs
-      @@ impl PyGrammarConstraintState {
-           #[new]
-           fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
-      -        // Use the builder provided by ouroboros
-      -        Ok(PyGrammarConstraintState {
-      -            inner: PyGrammarConstraintStateWrapperTryBuilder {
-      -                constraint,
-      -                inner_builder: |constraint: &PyGrammarConstraint| Ok::<_, PyErr>(constraint.inner.init()),
-      -            }.try_build()?
-      -        })
-      +        // Use the builder provided by ouroboros, and immediately step
-      +        Ok(PyGrammarConstraintState {
-      +            inner: PyGrammarConstraintStateWrapperTryBuilder {
-      +                constraint,
-      +                inner_builder: |constraint: &PyGrammarConstraint| {
-      +                    // init state and step with all LLM tokens
-      +                    let mut state = constraint.inner.init();
-      +                    state.step_with_all_llm_tokens();
-      +                    Ok::<_, PyErr>(state)
-      +                },
-      +            }
-      +            .try_build()?
-      +        })
-           }
+      diff --git a/src/constraint.rs b/src/constraint.rs
+      index e3f1a2b..c7d5e4f 100644
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ #[cfg(test)]
+           #[test]
+           fn test_constraint_simple() {
+               // LLM tokens: "ab", "ac"
+               // Grammar tokens: "a", "ab", "b|c"
+               // Grammar: S -> "a" | "ab" | "b|c"
+      @@     }
+      +
+      +    #[test]
+      +    fn test_constraint_expression() {
+      +        // Example grammar: E -> E '+' T | T; T -> T '*' F | F; F -> '(' E ')' | 'i'
+      +        // LLM token vocabulary: i, +, *, (, ), (i, +i
+      +        let mut llm_token_map = LLMTokenMap::new();
+      +        llm_token_map.insert(b"i".to_vec(), LLMTokenID(0));
+      +        llm_token_map.insert(b"+".to_vec(), LLMTokenID(1));
+      +        llm_token_map.insert(b"*".to_vec(), LLMTokenID(2));
+      +        llm_token_map.insert(b"(".to_vec(), LLMTokenID(3));
+      +        llm_token_map.insert(b")".to_vec(), LLMTokenID(4));
+      +        llm_token_map.insert(b"(i".to_vec(), LLMTokenID(5));
+      +        llm_token_map.insert(b"+i".to_vec(), LLMTokenID(6));
+      +
+      +        // Tokenizer regex for grammar tokens '+' '*' '(' ')' 'i'
+      +        let expr = groups![
+      +            eat_u8(b'+'),
+      +            eat_u8(b'*'),
+      +            eat_u8(b'('),
+      +            eat_u8(b')'),
+      +            eat_u8(b'i'),
+      +        ];
+      +        let tokenizer = expr.build();
+      +
+      +        // Grammar productions
+      +        let productions = vec![
+      +            prod("E", vec![nt("E"), t("PLUS"), nt("T")]),
+      +            prod("E", vec![nt("T")]),
+      +            prod("T", vec![nt("T"), t("TIMES"), nt("F")]),
+      +            prod("T", vec![nt("F")]),
+      +            prod("F", vec![t("LPAREN"), nt("E"), t("RPAREN")]),
+      +            prod("F", vec![t("I")]),
+      +        ];
+      +        // Map grammar terminals to IDs matching regex order
+      +        let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+      +        grammar_token_map.insert(Terminal("PLUS".to_string()), TerminalID(0));
+      +        grammar_token_map.insert(Terminal("TIMES".to_string()), TerminalID(1));
+      +        grammar_token_map.insert(Terminal("LPAREN".to_string()), TerminalID(2));
+      +        grammar_token_map.insert(Terminal("RPAREN".to_string()), TerminalID(3));
+      +        grammar_token_map.insert(Terminal("I".to_string()), TerminalID(4));
+      +
+      +        let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
+      +        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 6);
+      +
+      +        // Initial state and step
+      +        let mut state = constraint.init();
+      +        state.step_with_all_llm_tokens();
+      +        let mask = state.get_mask();
+      +        // Expect LLM tokens that can start an expression: i (0), '(' (3), "(i" (5)
+      +        assert_eq!(mask, LLMTokenBV::from_iter([true, false, false, true, false, true, false]));
+      +
+      +        // Commit "(i" twice (simulate consuming "(i" twice)
+      +        for _ in 0..2 {
+      +            state.commit(LLMTokenID(5));
+      +            state.step_with_all_llm_tokens();
+      +        }
+      +        let mask = state.get_mask();
+      +        // Now expect '+', '*', ')', '+i' => IDs 1,2,4,6
+      +        assert_eq!(mask, LLMTokenBV::from_iter([false, true, true, false, true, false, true]));
+      +    }
+       } // end mod tests
       ```
-
-      Explanation of changes:
-      - Updated the `inner_builder` closure in `PyGrammarConstraintState::new` to call `step_with_all_llm_tokens` on the freshly initialized `GrammarConstraintState` before storing it, ensuring the state is primed upon construction.
     metadata:
   - user: |
       Git apply result:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/src/lib.rs
-      Applying patch to 'python/src/lib.rs' using custom patcher...
-      Successfully applied patch and wrote to python/src/lib.rs.
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
     metadata:
 ...
