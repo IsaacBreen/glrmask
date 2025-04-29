@@ -414,6 +414,7 @@ mod tests {
         grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(3));
 
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
+        dbg!(&parser);
 
         let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 2);
         constraint.dump_precomputed();
