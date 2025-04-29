@@ -5,7 +5,7 @@ use bimap::BiBTreeMap;
 
 fn create_simple_parser() -> GLRParser {
     let productions = vec![
-        prod("S", vec![nt("A")]),
+        prod("S", vec![nt("A"), t("$")]),
         prod("A", vec![nt("A"), t("a")]),
         prod("A", vec![t("b")]),
     ];
@@ -15,14 +15,13 @@ fn create_simple_parser() -> GLRParser {
 
 fn create_expression_parser() -> GLRParser {
     let productions = vec![
-        prod("S", vec![nt("E")]),
+        prod("S", vec![nt("E"), t("$")]),
         prod("E", vec![nt("E"), t("+"), nt("T")]),
         prod("E", vec![nt("T")]),
         prod("T", vec![nt("T"), t("*"), nt("F")]),
         prod("T", vec![nt("F")]),
         prod("F", vec![t("("), nt("E"), t(")")]),
         prod("F", vec![t("i")]),
-        prod("S'", vec![nt("E"), t("$")]), // Start production ID 7
     ];
     generate_glr_parser(&productions, 7) // Start symbol is S' at index 7
 }
@@ -36,6 +35,7 @@ fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
 #[test]
 fn test_simple_parse_table() {
     let parser = create_simple_parser();
+    let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
     dbg!(&parser);
 
     let test_cases = [
@@ -47,18 +47,17 @@ fn test_simple_parse_table() {
     ];
 
     for (input, expected_match) in test_cases {
-        let result: GLRParserState<'_, ()> = parser.parse(&tokenize(&parser, input));
-        assert_eq!(
-            result.fully_matches(), 
-            expected_match, 
-            "Failed for input: {}", input
-        );
+        let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+        state.parse(&tokenize(&parser, input));
+        state.parse(&[eof]);
+        assert_eq!(state.is_ok(), expected_match, "Failed for input: {}", input);
     }
 }
 
 #[test]
 fn test_parse_simple_expression() {
     let parser = create_expression_parser();
+    let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
     dbg!(&parser);
 
     let test_cases = [
@@ -74,9 +73,11 @@ fn test_parse_simple_expression() {
     ];
 
     for (input, expected_match) in test_cases {
-        let result: GLRParserState<'_, ()> = parser.parse(&tokenize(&parser, input));
+        let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+        state.parse(&tokenize(&parser, input));
+        state.parse(&[eof]);
         assert_eq!(
-            result.fully_matches(), 
+            state.is_ok(),
             expected_match, 
             "Failed for input: {}", input
         );

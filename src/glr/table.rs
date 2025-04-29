@@ -353,7 +353,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
             gotos.insert(non_terminal_id, next_state_id);
         }
 
-        stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos, accept: is_accepting_state });
+        stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos });
     }
 
     let start_item = Item {

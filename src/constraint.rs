@@ -336,7 +336,7 @@ impl<'a> GrammarConstraintState<'a> {
                         Arc::make_mut(&mut parse_state.stack).value.t |= clean_end.clone();
                         !parse_state.stack.value.t.is_empty()
                     });
-                    if final_glr_parse_state.has_active_states() {
+                    if final_glr_parse_state.is_ok() {
                         if let Some(existing) = self.state.get_mut(&TokenizerStateID(0)) {
                             existing.merge_with(final_glr_parse_state.clone());
                         } else {
@@ -350,7 +350,7 @@ impl<'a> GrammarConstraintState<'a> {
                     // Ensure the final tokens parses
                     let mut semi_final_glr_parse_state = glr_parse_state.clone();
                     semi_final_glr_parse_state.step(*possible_final_grammar_token);
-                    if semi_final_glr_parse_state.has_active_states() {
+                    if semi_final_glr_parse_state.is_ok() {
                         for (tokenizer_state_id, llm_tokens) in &precomputed_finalizer.content {
                             // Merge LLM tokens
                             let mut semi_final_glr_parse_state = semi_final_glr_parse_state.clone();
@@ -358,7 +358,7 @@ impl<'a> GrammarConstraintState<'a> {
                                 Arc::make_mut(&mut parse_state.stack).value.t |= llm_tokens.clone();
                                 !parse_state.stack.value.t.is_empty()
                             });
-                            if semi_final_glr_parse_state.has_active_states() {
+                            if semi_final_glr_parse_state.is_ok() {
                                 if let Some(existing) = self.state.get_mut(tokenizer_state_id) {
                                     existing.merge_with(semi_final_glr_parse_state.clone());
                                 } else {
@@ -460,13 +460,13 @@ mod tests {
 
         // Grammar productions
         let productions = vec![
+            prod("S", vec![nt("E"), t("EOF")]), // Start production
             prod("E", vec![nt("E"), t("PLUS"), nt("T")]),
             prod("E", vec![nt("T")]),
             prod("T", vec![nt("T"), t("TIMES"), nt("F")]),
             prod("T", vec![nt("F")]),
             prod("F", vec![t("LPAREN"), nt("E"), t("RPAREN")]),
             prod("F", vec![t("I")]),
-            prod(start_nt, vec![nt("E"), t("EOF")]), // Start production
         ];
         // Map grammar terminals to IDs matching regex order
         let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();

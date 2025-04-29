@@ -350,26 +350,8 @@ impl<'a, T: AndAndOr> GLRParserState<'a, T> {
         // self.merge_active_states();
     }
 
-    pub fn fully_matches(&self) -> bool {
-        self.active_states.iter().any(|state| {
-            let content = state.stack.peek();
-            self.parser.stage_7_table
-                .get(&content.state_id)
-                .map_or(false, |row| row.accept)
-        })
-        // Also check action_not_found_states? No, acceptance is defined by active states reaching an accept row.
-    }
-
-    pub fn can_match(&self) -> bool {
-        !self.active_states.is_empty()
-    }
-
-    pub fn matches_or_can_match(&self) -> bool {
-        self.can_match() || self.fully_matches() // A state can be both active and accepting
-    }
-
     pub fn is_ok(&self) -> bool {
-        self.matches_or_can_match()
+        !self.active_states.is_empty()
     }
 }
 
