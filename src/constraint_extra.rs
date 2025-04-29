@@ -23,9 +23,9 @@ fn format_bv_indices(bv: &LLMTokenBV) -> String {
 /// Helper function to print PrecomputedFinalizer details.
 pub(crate) fn print_finalizer(grammar_token_id: GrammarTokenID, finalizer: &PrecomputedFinalizer, indent: &str) {
     println!("{}  - Finalizer for GrammarTokenID({}):", indent, grammar_token_id.0);
-    println!("{}    Compatible LLM Tokens: {}", indent, format_bv_indices(finalizer.compatible_llm_tokens()));
-    let tokenizer_states: Vec<String> = finalizer.tokenizer_state_ids().iter().map(|id| id.0.to_string()).collect();
-    println!("{}    Tokenizer States: [{}]", indent, tokenizer_states.join(", "));
+    // println!("{}    Compatible LLM Tokens: {}", indent, format_bv_indices(finalizer.compatible_llm_tokens()));
+    // let tokenizer_states: Vec<String> = finalizer.tokenizer_state_ids().iter().map(|id| id.0.to_string()).collect();
+    // println!("{}    Tokenizer States: [{}]", indent, tokenizer_states.join(", "));
 }
 
 /// Helper function to recursively dump the structure of a PrecomputeNode Trie.

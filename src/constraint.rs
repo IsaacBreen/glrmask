@@ -21,26 +21,20 @@ pub type GrammarTokenBV = BitVec;
 
 #[derive(Default, Debug, Clone)]
 pub struct PrecomputedFinalizer {
-    compatible_llm_tokens: LLMTokenBV,
-    tokenizer_state_ids: BTreeSet<TokenizerStateID>,
+    content: BTreeMap<TokenizerStateID, LLMTokenBV>,
 }
 
 impl PrecomputedFinalizer {
     pub(crate) fn new(compatible_llm_tokens: LLMTokenBV, tokenizer_state_ids: BTreeSet<TokenizerStateID>) -> Self {
-        Self {
-            compatible_llm_tokens,
-            tokenizer_state_ids,
-        }
+        let content = BTreeMap::from([(TokenizerStateID(0), compatible_llm_tokens)]);
+        Self { content }
     }
-
-    pub(crate) fn compatible_llm_tokens(&self) -> &LLMTokenBV { &self.compatible_llm_tokens }
-    pub(crate) fn tokenizer_state_ids(&self) -> &BTreeSet<TokenizerStateID> { &self.tokenizer_state_ids }
 }
 
 #[derive(Default, Debug, Clone)]
 pub(crate) struct PrecomputedNodeContents {
     finalizers: BTreeMap<GrammarTokenID, PrecomputedFinalizer>,
-    clean_end: LLMTokenBV,
+    clean_end: Option<LLMTokenBV>,
 }
 
 pub(crate) type PrecomputeNode = Trie<GrammarTokenID, LLMTokenBV, PrecomputedNodeContents>;
@@ -84,10 +78,9 @@ impl PrecomputedNodeContents {
 
         self.finalizers.entry(possible_final_grammar_token)
             .and_modify(|existing_finalizer| {
-                // Merge LLM tokens
-                existing_finalizer.compatible_llm_tokens |= &current_compatible_llm_tokens;
-                // Merge tokenizer states
-                existing_finalizer.tokenizer_state_ids.extend(&current_tokenizer_state_ids);
+                existing_finalizer.content.entry(tokenizer_state_id).and_modify(|existing_llm_tokens| {
+                    *existing_llm_tokens |= &current_compatible_llm_tokens;
+                }).or_insert(current_compatible_llm_tokens.clone());
             })
             .or_insert_with(|| PrecomputedFinalizer::new(current_compatible_llm_tokens, current_tokenizer_state_ids));
     }
@@ -340,37 +333,46 @@ impl<'a> GrammarConstraintState<'a> {
             },
             // process
             |node, glr_parse_state| {
+                // Handle clean end
+                if let Some(clean_end) = &node.value.clean_end {
+                    let mut final_glr_parse_state = glr_parse_state.clone();
+                    final_glr_parse_state.active_states.retain_mut(|parse_state| {
+                        Arc::make_mut(&mut parse_state.stack).value.t |= clean_end.clone();
+                        !parse_state.stack.value.t.is_empty()
+                    });
+                    if final_glr_parse_state.matches_or_can_match() {
+                        if let Some(existing) = self.state.get_mut(&TokenizerStateID(0)) {
+                            existing.merge_with(final_glr_parse_state.clone());
+                        } else {
+                            self.state.insert(TokenizerStateID(0), final_glr_parse_state.clone());
+                        }
+                    }
+                }
+
                 // Handle finalizers
                 for (possible_final_grammar_token, precomputed_finalizer) in node.value.finalizers() {
                     // Ensure the final tokens parses
                     let mut semi_final_glr_parse_state = glr_parse_state.clone();
                     semi_final_glr_parse_state.step(*possible_final_grammar_token);
                     if semi_final_glr_parse_state.matches_or_can_match() {
-                        for tokenizer_state_id in &precomputed_finalizer.tokenizer_state_ids {
-                            if let Some(existing) = self.state.get_mut(tokenizer_state_id) {
-                                existing.merge_with(semi_final_glr_parse_state.clone());
-                            } else {
-                                self.state.insert(*tokenizer_state_id, semi_final_glr_parse_state.clone());
+                        for (tokenizer_state_id, llm_tokens) in &precomputed_finalizer.content {
+                            // Merge LLM tokens
+                            let mut semi_final_glr_parse_state = semi_final_glr_parse_state.clone();
+                            semi_final_glr_parse_state.active_states.retain_mut(|parse_state| {
+                                Arc::make_mut(&mut parse_state.stack).value.t |= llm_tokens.clone();
+                                !parse_state.stack.value.t.is_empty()
+                            });
+                            if semi_final_glr_parse_state.matches_or_can_match() {
+                                if let Some(existing) = self.state.get_mut(tokenizer_state_id) {
+                                    existing.merge_with(semi_final_glr_parse_state.clone());
+                                } else {
+                                    self.state.insert(*tokenizer_state_id, semi_final_glr_parse_state.clone());
+                                }
                             }
                         }
                     }
-
-                    // // If we've reached the initial state, we've matched the final token cleanly, and we can proceed without any additional tokens.
-                    // // Compute final LLM token mask by intersecting the current state's mask with the finalizer's compatible tokens
-                    // let final_llm_tokens = semi_final_glr_parse_state.llm_tokens.clone() & precomputed_finalizer.compatible_llm_tokens.clone();
-                    // if final_llm_tokens.is_empty() { continue; }
-                    // // Create a new managed parse state
-                    // println!("Creating new managed parse state.");
-                    // println!("Valid tokenizer states: {:?}", valid_final_tokenizer_state_ids.iter().map(|id| id.0).collect::<Vec<_>>());
-                    // println!("Final LLM tokens: {:?}", final_llm_tokens.iter_ones().collect::<Vec<_>>());
-                    // println!("Finalizer:");
-                    // print_finalizer(*possible_final_grammar_token, &precomputed_finalizer, &"");
-                    // let mut final_glr_parse_state = semi_final_glr_parse_state.clone();
-                    // final_glr_parse_state.tokenizer_state_ids = valid_final_tokenizer_state_ids;
-                    // final_glr_parse_state.llm_tokens = final_llm_tokens;
-                    // final_active_parse_states.push(final_glr_parse_state);
                 }
-                // glr_parse_state.active_states.retain(|managed_parse_state| !managed_parse_state.llm_tokens.is_empty());
+                glr_parse_state.active_states.retain(|parse_state| !parse_state.stack.value.t.is_empty());
                 !glr_parse_state.active_states.is_empty()
             },
         );
