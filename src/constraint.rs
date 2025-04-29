@@ -403,8 +403,8 @@ mod tests {
 
         let productions = vec![
             prod("S", vec![nt("X")]),
-            prod("X", vec![t("A"), t("B_OR_C"), t("EOF")]),
-            // prod("X", vec![t("AB"), t("EOF")]),
+            prod("X", vec![t("A"), t("B_OR_C"), t("B_OR_C"), t("EOF")]),
+            prod("X", vec![t("AB"), t("EOF")]),
         ];
 
         let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
@@ -426,7 +426,7 @@ mod tests {
         let mask = constraint_state.get_mask();
         assert_eq!(mask, LLMTokenBV::from_iter([true, true, false]));
 
-        constraint_state.commit(LLMTokenID(1));
+        constraint_state.commit(LLMTokenID(0));
         constraint_state.step_with_all_llm_tokens();
 
         let mask = constraint_state.get_mask();
