@@ -298,27 +298,20 @@ impl<'a, T: AndAndOr> GLRParserState<'a, T> {
                         for (len, nt_ids) in reduces {
                             let mut popped_stack_nodes = stack.popn(*len);
                             popped_stack_nodes.bulk_merge();
-                            for (nt_id, prod_ids) in nt_ids {
+                            for nt_id in nt_ids.keys() {
                                 for stack_node in &popped_stack_nodes {
                                     // Reduce part (same as above)
                                     let revealed_content = stack_node.peek();
                                     let revealed_state_id = revealed_content.state_id;
                                     let revealed_t = &revealed_content.t;
-                                    // Assuming goto exists
-                                    let goto_state = *self.parser.stage_7_table.get(&revealed_state_id)
-                                        .and_then(|row| row.gotos.get(nt_id))
-                                        .expect(&format!("Goto not found for state {} and non-terminal {:?}", revealed_state_id.0, nt_id));
+                                    let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id];
 
                                     let combined_t = revealed_t.and(current_t);
                                     let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
-                                    let new_stack = Arc::new(stack_node.push(new_content));
-                                    // Add one state for each production ID associated with this reduction path
-                                    // Note: The stack itself is shared among these states until further divergence.
-                                    for _prod_id in prod_ids {
-                                        self.active_states.push(ParseState {
-                                            stack: new_stack.clone(),
-                                        });
-                                    }
+                                    let new_stack = stack_node.push(new_content);
+                                    self.active_states.push(ParseState {
+                                        stack: Arc::new(new_stack),
+                                    });
                                 }
                             }
                         }
