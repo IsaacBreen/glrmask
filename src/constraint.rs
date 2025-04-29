@@ -203,6 +203,12 @@ impl GrammarConstraint {
                     for new_precomputed_node in &next_precomputed_nodes {
                         new_precomputed_node.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
                     }
+                    let next_src = dst;
+                    for (next_bytes, next_dst) in next_src.children() {
+                        let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
+                        let new_queue_key = (new_dotted_node, TokenizerStateID(0));
+                        queue.entry(new_queue_key).or_default().extend(next_precomputed_nodes.iter().cloned());
+                    }
                 } else if new_offset < bytes.len() {
                     queue.entry(new_queue_key).or_default().extend(next_precomputed_nodes);
                 } else { unreachable!(); }
@@ -214,6 +220,12 @@ impl GrammarConstraint {
                     for precompute_node in &precomputed_nodes {
                         precompute_node.lock().unwrap().value.push_finalizer_info(possible_final_grammar_token, LLMTokenID(dst.token_id()), TokenizerStateID(end_state), max_llm_token_id);
                     }
+                }
+                let next_src = dst;
+                for (next_bytes, next_dst) in next_src.children() {
+                    let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
+                    let new_queue_key = (new_dotted_node, TokenizerStateID(0));
+                    queue.entry(new_queue_key).or_default().extend(precomputed_nodes.iter().cloned());
                 }
             }
         }
