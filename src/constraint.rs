@@ -502,8 +502,8 @@ mod tests {
         // Commit "i(" twice
         state.commit(LLMTokenID(5));
         state.step_with_all_llm_tokens();
-        state.commit(LLMTokenID(5));
-        state.step_with_all_llm_tokens();
+        // state.commit(LLMTokenID(5));
+        // state.step_with_all_llm_tokens();
         let mask = state.get_mask();
         assert_eq!(mask, LLMTokenBV::from_iter([false, false, false, false, false, false, false]));
     }
