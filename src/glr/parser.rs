@@ -1,19 +1,31 @@
 use crate::datastructures::gss::BulkMerge;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
-use crate::glr::table::{NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID};
+use crate::glr::table::{
+    NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID,
+};
 use crate::datastructures::gss::{GSSNode, GSSTrait};
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display, Formatter};
+use std::hash::Hash;
 use std::sync::Arc;
 use crate::debug;
 
+pub trait AndAndOr: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
+    fn and(&self, other: &Self) -> Self;
+    fn or(&self, other: &Self) -> Self;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ParseState {
-    pub stack: Arc<GSSNode<StateID>>,
-    pub action_stack: Option<Arc<GSSNode<Action>>>,
+pub struct ParseStateNodeContent<T: AndAndOr> {
+    pub state_id: StateID,
+    pub t: T,
+}
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ParseState<T: AndAndOr> {
+    pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
     pub status: ParseStatus,
 }
 
@@ -38,7 +50,7 @@ pub enum StopReason {
 
 // TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
 #[derive(Clone)]
-pub struct GLRParser {
+pub struct GLRParser<T: AndAndOr + Default> {
     pub stage_7_table: Stage7Table,
     pub productions: Vec<Production>,
     pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
@@ -47,7 +59,7 @@ pub struct GLRParser {
     pub start_state_id: StateID,
 }
 
-impl GLRParser {
+impl<T: AndAndOr + Default> GLRParser<T> {
     pub fn new(
         stage_7_table: Stage7Table,
         productions: Vec<Production>,
@@ -66,15 +78,15 @@ impl GLRParser {
         }
     }
 
-    pub fn init_glr_parser(&self) -> GLRParserState {
+    pub fn init_glr_parser(&self) -> GLRParserState<T> {
         GLRParserState {
             parser: self,
             active_states: vec![self.init_parse_state()],
             inactive_states: Vec::new(),
         }
     }
-    
-    pub fn init_glr_parser_from_parse_state(&self, parse_state: ParseState) -> GLRParserState {
+
+    pub fn init_glr_parser_from_parse_state(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
         GLRParserState {
             parser: self,
             active_states: vec![parse_state],
@@ -82,7 +94,10 @@ impl GLRParser {
         }
     }
 
-    pub fn init_glr_parser_from_parse_states(&self, parse_states: Vec<ParseState>) -> GLRParserState {
+    pub fn init_glr_parser_from_parse_states(
+        &self,
+        parse_states: Vec<ParseState<T>>,
+    ) -> GLRParserState<T> {
         GLRParserState {
             parser: self,
             active_states: parse_states,
@@ -90,28 +105,30 @@ impl GLRParser {
         }
     }
 
-    pub fn init_parse_state(&self) -> ParseState {
+    pub fn init_parse_state(&self) -> ParseState<T> {
+        let initial_content = ParseStateNodeContent {
+            state_id: self.start_state_id,
+            t: T::default(),
+        };
         ParseState {
-            stack: Arc::new(GSSNode::new(self.start_state_id)),
-            action_stack: None,
+            stack: Arc::new(GSSNode::new(initial_content)),
             status: ParseStatus::Active,
         }
     }
-
-    pub fn parse(&self, input: &[TerminalID]) -> GLRParserState {
+    pub fn parse(&self, input: &[TerminalID]) -> GLRParserState<T> {
         let mut state = self.init_glr_parser();
         state.parse(input);
         state
     }
 }
 
-impl Debug for GLRParser {
+impl<T: AndAndOr + Default> Debug for GLRParser<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self)
     }
 }
 
-impl Display for GLRParser {
+impl<T: AndAndOr + Default> Display for GLRParser<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let stage_7_table = &self.stage_7_table;
         let terminal_map = &self.terminal_map;
@@ -195,13 +212,13 @@ impl Display for GLRParser {
 }
 
 #[derive(Debug, Clone)]
-pub struct GLRParserState<'a> {
-    pub parser: &'a GLRParser,
-    pub active_states: Vec<ParseState>,
-    pub inactive_states: Vec<ParseState>,
+pub struct GLRParserState<'a, T: AndAndOr + Default> {
+    pub parser: &'a GLRParser<T>,
+    pub active_states: Vec<ParseState<T>>,
+    pub inactive_states: Vec<ParseState<T>>,
 }
 
-impl<'a> GLRParserState<'a> {
+impl<'a, T: AndAndOr + Default> GLRParserState<'a, T> {
     pub fn parse(&mut self, input: &[TerminalID]) {
         self.parse_part(input);
     }
@@ -212,7 +229,7 @@ impl<'a> GLRParserState<'a> {
         }
     }
 
-    pub fn with_step(self, token_id: TerminalID) -> Self {
+    pub fn with_step(mut self, token_id: TerminalID) -> Self {
         let mut parser = self;
         parser.step(token_id);
         parser
@@ -223,21 +240,22 @@ impl<'a> GLRParserState<'a> {
         let mut inactive_states = Vec::new();
 
         while let Some(state) = self.active_states.pop() {
-            let stack = state.stack;
-            let action_stack = state.action_stack;
-            let state_id = *stack.peek();
+            let stack = state.stack; // Arc<GSSNode<ParseStateNodeContent<T>>>
+            let current_content = stack.peek(); // &ParseStateNodeContent<T>
+            let current_state_id = current_content.state_id;
+            let current_t = &current_content.t;
 
-            let row = self.parser.stage_7_table.get(&state_id).unwrap();
+            let row = self.parser.stage_7_table.get(&current_state_id).unwrap();
 
             if let Some(action) = row.shifts_and_reduces.get(&token_id) {
                 match action {
                     Stage7ShiftsAndReduces::Shift(next_state_id) => {
                         debug!(3, "Shifting");
-                        let new_stack = stack.push(*next_state_id);
-                        let new_actions = action_stack.push(Action::Shift(token_id));
+                        let new_content = ParseStateNodeContent { state_id: *next_state_id, t: current_t.clone() };
+                        let new_stack = stack.push(new_content);
                         next_active_states.push(ParseState {
+                            // stack: Arc::new(new_stack), // GSSNode::push now returns Arc
                             stack: Arc::new(new_stack),
-                            action_stack: Some(Arc::new(new_actions)),
                             status: ParseStatus::Active,
                         });
                     }
@@ -246,22 +264,25 @@ impl<'a> GLRParserState<'a> {
                         let mut popped_stack_nodes = stack.popn(*len);
                         popped_stack_nodes.bulk_merge();
                         for stack_node in popped_stack_nodes {
-                            let revealed_state = *stack_node.peek();
-                            let goto_row = self.parser.stage_7_table.get(&revealed_state).unwrap();
+                            // stack_node is Arc<GSSNode<ParseStateNodeContent<T>>>
+                            let revealed_content = stack_node.peek(); // &ParseStateNodeContent<T>
+                            let revealed_state_id = revealed_content.state_id;
+                            let revealed_t = &revealed_content.t;
+                            let goto_row = self.parser.stage_7_table.get(&revealed_state_id).unwrap();
 
                             if let Some(&goto_state) = goto_row.gotos.get(nonterminal) {
                                 debug!(3, "Going to state {:?}", goto_state);
-                                let new_stack = stack_node.push(goto_state);
-                                let new_actions = action_stack.clone().push(Action::Reduce { production_id: *production_id, len: *len, nonterminal_id: *nonterminal });
+                                // Apply 'and' operation
+                                let combined_t = revealed_t.and(current_t);
+                                let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
+                                let new_stack = stack_node.push(new_content);
                                 self.active_states.push(ParseState {
                                     stack: Arc::new(new_stack),
-                                    action_stack: Some(Arc::new(new_actions)),
                                     status: ParseStatus::Active,
                                 });
                             } else {
                                 inactive_states.push(ParseState {
                                     stack: stack_node,
-                                    action_stack: None,
                                     status: ParseStatus::Inactive(StopReason::GotoNotFound),
                                 });
                             }
@@ -270,12 +291,11 @@ impl<'a> GLRParserState<'a> {
                     Stage7ShiftsAndReduces::Split { shift, reduces } => {
                         debug!(3, "Split");
                         if let Some(shift_state) = shift {
-                            let new_stack = stack.push(*shift_state);
-                            let new_actions = action_stack.clone().push(Action::Shift(token_id));
-
+                            // Shift part (same as above)
+                            let new_content = ParseStateNodeContent { state_id: *shift_state, t: current_t.clone() };
+                            let new_stack = stack.push(new_content);
                             next_active_states.push(ParseState {
                                 stack: Arc::new(new_stack),
-                                action_stack: Some(Arc::new(new_actions)),
                                 status: ParseStatus::Active,
                             });
                         }
@@ -285,22 +305,26 @@ impl<'a> GLRParserState<'a> {
                             popped_stack_nodes.bulk_merge();
                             for (nt_id, prod_ids) in nt_ids {
                                 for stack_node in &popped_stack_nodes {
-                                    let revealed_state = *stack_node.peek();
-                                    let goto_row = self.parser.stage_7_table.get(&revealed_state).unwrap();
+                                    // Reduce part (same as above)
+                                    let revealed_content = stack_node.peek();
+                                    let revealed_state_id = revealed_content.state_id;
+                                    let revealed_t = &revealed_content.t;
+                                    let goto_row = self.parser.stage_7_table.get(&revealed_state_id).unwrap();
+
                                     if let Some(&goto_state) = goto_row.gotos.get(nt_id) {
-                                        let new_stack = Arc::new(stack_node.push(goto_state));
+                                        // Apply 'and' operation
+                                        let combined_t = revealed_t.and(current_t);
+                                        let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
+                                        let new_stack = Arc::new(stack_node.push(new_content));
                                         for prod_id in prod_ids {
-                                            let new_actions = action_stack.clone().push(Action::Reduce { production_id: *prod_id, len: *len, nonterminal_id: *nt_id });
                                             self.active_states.push(ParseState {
                                                 stack: new_stack.clone(),
-                                                action_stack: Some(Arc::new(new_actions)),
                                                 status: ParseStatus::Active,
                                             });
                                         }
                                     } else {
                                         inactive_states.push(ParseState {
                                             stack: stack_node.clone(),
-                                            action_stack: action_stack.clone(),
                                             status: ParseStatus::Inactive(StopReason::GotoNotFound),
                                         });
                                     }
@@ -312,7 +336,6 @@ impl<'a> GLRParserState<'a> {
             } else {
                 inactive_states.push(ParseState {
                     stack,
-                    action_stack,
                     status: ParseStatus::Inactive(StopReason::ActionNotFound),
                 });
             }
@@ -321,27 +344,21 @@ impl<'a> GLRParserState<'a> {
         self.inactive_states.extend(inactive_states);
     }
 
+    // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
     pub fn merge_active_states(&mut self) {
-        let mut active_state_map: BTreeMap<ParseStateKey, ParseState> = BTreeMap::new();
+        let mut active_state_map: BTreeMap<ParseStateKey, ParseState<T>> = BTreeMap::new();
 
-        let mut new_active_states = Vec::new();
-
-        for mut state in std::mem::take(&mut self.active_states) {
+        for state in std::mem::take(&mut self.active_states) {
             let key = state.key();
-            if let Some(existing) = active_state_map.get_mut(&key) {
-                Arc::make_mut(&mut existing.stack).merge(state.stack.as_ref().clone());
-                if let Some(existing_action_stack) = existing.action_stack.as_mut() {
-                    Arc::make_mut(existing_action_stack).merge(state.action_stack.unwrap().as_ref().clone());
-                }
-            } else {
-                active_state_map.insert(key, state.clone());
-                new_active_states.push(state);
-            }
+            active_state_map.insert_with(key, state, |existing, new_state| {
+                existing.merge(new_state);
+            });
         }
-        self.active_states = new_active_states;
+
+        self.active_states = active_state_map.into_values().collect();
     }
 
-    pub fn merge_with(&mut self, other: GLRParserState) {
+    pub fn merge_with(&mut self, other: GLRParserState<T>) {
         assert!(std::ptr::eq(&self.parser, &other.parser));
         self.active_states.extend(other.active_states);
         self.inactive_states.extend(other.inactive_states);
@@ -351,7 +368,7 @@ impl<'a> GLRParserState<'a> {
         !self.fully_matching_states().is_empty()
     }
 
-    pub fn fully_matching_states(&self) -> Vec<&ParseState> {
+    pub fn fully_matching_states(&self) -> Vec<&ParseState<T>> {
         self.inactive_states.iter().filter(|state| state.status == ParseStatus::Inactive(StopReason::GotoNotFound)).collect()
     }
 
@@ -370,28 +387,35 @@ impl<'a> GLRParserState<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseStateKey {
-    stack: StateID,
-    action_stack: Option<Action>,
+    stack_state_id: StateID,
+    // Removed action_stack
 }
 
-impl ParseState {
+impl<T: AndAndOr + Default> ParseState<T> {
     pub fn key(&self) -> ParseStateKey {
         ParseStateKey {
-            stack: *self.stack.peek(),
-            action_stack: self.action_stack.peek().cloned(),
+            stack_state_id: self.stack.peek().state_id,
         }
     }
 
-    pub fn merge(&mut self, other: ParseState) {
+    /// Merges `other` into `self`. Assumes `self.key() == other.key()`.
+    /// Merges the GSS structures and combines the `t` value at the top node using `AndAndOr::or`.
+    pub fn merge(&mut self, other: ParseState<T>) {
         assert_eq!(self.key(), other.key());
-        Arc::make_mut(&mut self.stack).merge(Arc::unwrap_or_clone(other.stack));
-        match (&mut self.action_stack, other.action_stack) {
-            (Some(a), Some(b)) => {
-                Arc::make_mut(a).merge(Arc::unwrap_or_clone(b));
-            }
-            (None, None) => {}
-            _ => unreachable!(),
-        }
+
+        // Combine 't' values at the top node using 'or'
+        let self_content = self.stack.peek();
+        let other_content = other.stack.peek();
+        let combined_t = self_content.t.or(&other_content.t);
+
+        // Get mutable access to self.stack, potentially cloning if shared (Arc > 1)
+        let mutable_stack = Arc::make_mut(&mut self.stack);
+
+        // Update the 't' value in the mutable top node's content
+        mutable_stack.content.t = combined_t; // Assumes GSSNode.content is public or has a setter
+
+        // Merge the parent structures using GSSNode's merge
+        mutable_stack.merge(Arc::unwrap_or_clone(other.stack)); // Assumes GSSNode::merge handles parent merging
     }
 }
 
