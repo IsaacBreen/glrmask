@@ -486,16 +486,5 @@ mod tests {
         let mask = state.get_mask();
         // Expect LLM tokens that can start an expression: i (0), '(' (3), "(i" (5)
         assert_eq!(mask, LLMTokenBV::from_iter([true, false, false, true, false, true, false]));
-/* // TODO: Fix this test case logic after removing acceptance
-        // Commit "(i" twice (simulate consuming "(i" twice)
-        for _ in 0..2 {
-            state.commit(LLMTokenID(5));
-            state.step_with_all_llm_tokens();
-        }
-        let mask = state.get_mask();
-        // Now expect '+', '*', ')', '+i' => IDs 1,2,4,6
-        // Also expect EOF ($) -> ID 7 if the expression is complete
-        assert_eq!(mask, LLMTokenBV::from_iter([false, true, true, false, true, false, true, true]));
-        */
     }
 }

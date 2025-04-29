@@ -23,7 +23,7 @@ fn create_expression_parser() -> GLRParser {
         prod("F", vec![t("("), nt("E"), t(")")]),
         prod("F", vec![t("i")]),
     ];
-    generate_glr_parser(&productions, 7) // Start symbol is S' at index 7
+    generate_glr_parser(&productions, 0)
 }
 
 fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
