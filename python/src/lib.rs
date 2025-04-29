@@ -273,7 +273,11 @@ impl PyGrammarConstraintState {
     }
 
     fn commit(&mut self, llm_token_id: usize) {
-        self.inner.with_inner_mut(|state| state.commit(LLMTokenID(llm_token_id)));
+        self.inner.with_inner_mut(|state| {
+            state.commit(LLMTokenID(llm_token_id));
+            state.step_with_all_llm_tokens();
+        });
+        
     }
 }
 
