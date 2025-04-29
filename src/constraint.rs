@@ -345,7 +345,7 @@ impl<'a> GrammarConstraintState<'a> {
                 if let Some(clean_end) = &node.value.clean_end {
                     let mut final_glr_parse_state = glr_parse_state.clone();
                     final_glr_parse_state.active_states.retain_mut(|parse_state| {
-                        Arc::make_mut(&mut parse_state.stack).value.t |= clean_end.clone();
+                        Arc::make_mut(&mut parse_state.stack).value.t &= clean_end.clone();
                         !parse_state.stack.value.t.is_empty()
                     });
                     if final_glr_parse_state.is_ok() {
@@ -367,7 +367,7 @@ impl<'a> GrammarConstraintState<'a> {
                             // Merge LLM tokens
                             let mut semi_final_glr_parse_state = semi_final_glr_parse_state.clone();
                             semi_final_glr_parse_state.active_states.retain_mut(|parse_state| {
-                                Arc::make_mut(&mut parse_state.stack).value.t |= llm_tokens.clone();
+                                Arc::make_mut(&mut parse_state.stack).value.t &= llm_tokens.clone();
                                 !parse_state.stack.value.t.is_empty()
                             });
                             if semi_final_glr_parse_state.is_ok() {
