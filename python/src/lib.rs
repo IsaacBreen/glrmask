@@ -1,6 +1,7 @@
 use sep1::tokenizer::LLMTokenID;
 use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq};
 use sep1::finite_automata::Regex;
+use sep1::interface::print_precomputed; // Assuming this exists or is added
 use pyo3::prelude::*;
 use pyo3::types::{PyDict};
 use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
@@ -10,6 +11,8 @@ use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, optional a
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
 use std::collections::{BTreeMap, BTreeSet};
 use bimap::BiBTreeMap;
+use std::sync::Arc;
+use ouroboros::self_referencing;
 use numpy::{IntoPyArray, PyArray1, ToPyArray};
 
 #[pyclass]
@@ -203,13 +206,13 @@ pub struct PyGLRParser {
 #[pyclass]
 #[derive(Clone)]
 pub struct PyGrammarConstraint {
-    inner: GrammarConstraint,
+    inner: Arc<GrammarConstraint>,
 }
 
 #[pymethods]
 impl PyGrammarConstraint {
     #[new]
-    fn new(py: Python, grammar: PyGrammar, token_to_id: &PyDict, eof_llm_token_id: usize, max_llm_token_id: usize) -> PyResult<Self> {
+    fn new(py: Python, grammar: PyGrammar, token_to_id: &PyDict, max_llm_token_id: usize) -> PyResult<Self> {
         let mut llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = BiBTreeMap::new();
         for (key, value) in token_to_id.iter() {
             let token = key.extract::<&[u8]>()?;
@@ -217,37 +220,55 @@ impl PyGrammarConstraint {
             llm_token_map.insert(token.to_vec(), LLMTokenID(id));
         }
 
-        let inner = GrammarConstraint::from_grammar(grammar.inner, llm_token_map, eof_llm_token_id, max_llm_token_id);
-        Ok(Self { inner })
+        // Assuming Grammar has methods to get tokenizer and parser
+        // You might need to adjust this based on your actual Grammar implementation
+        let tokenizer = grammar.inner.tokenizer(); // Placeholder
+        let parser = grammar.inner.glr_parser(); // Placeholder
+
+        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, max_llm_token_id);
+        Ok(Self { inner: Arc::new(constraint) })
     }
 
     fn print(&self) {
-        print_precomputed(&self.inner.precomputed);
+        // Assuming a function like print_precomputed exists and takes &Precomputed
+        // Or implement a method on GrammarConstraint to print/dump its state
+        // print_precomputed(&self.inner.precomputed);
+        println!("Printing precomputed data is not implemented in this binding yet.");
     }
 }
 
 
 #[pyclass]
-pub struct PyGrammarConstraintState<'a> {
-    inner: GrammarConstraintState<'a, Regex>,
+#[self_referencing]
+pub struct PyGrammarConstraintState {
+    // Owns the Arc'd constraint
+    constraint: PyGrammarConstraint,
+    // Borrows from the owned constraint via the 'this lifetime
+    #[borrows(constraint)]
+    #[covariant] // Allows the lifetime 'this to be shortened
+    inner: GrammarConstraintState<'this>,
 }
 
 #[pymethods]
 impl PyGrammarConstraintState {
     #[new]
-    fn new(grammar_constraint: PyGrammarConstraint) -> Self {
-        Self { inner: grammar_constraint.inner.init() }
+    fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
+        // Use the builder provided by ouroboros
+        PyGrammarConstraintStateTryBuilder {
+            constraint,
+            inner_builder: |constraint: &PyGrammarConstraint| Ok::<_, PyErr>(constraint.inner.init()),
+        }.try_build()
     }
 
-    fn get_mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-        let bitset = self.inner.get_mask();
+    fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
+        let bitset = self.with_inner_mut(|state| state.get_mask());
         let bools: Vec<bool> = bitset.iter().map(|bit_ref| *bit_ref).collect();
         let array = bools.into_pyarray_bound(py);
         Ok(array)
     }
 
     fn commit(&mut self, llm_token_id: usize) {
-        self.inner.commit(LLMTokenID(llm_token_id));
+        self.with_inner_mut(|state| state.commit(LLMTokenID(llm_token_id)));
     }
 }
 
