@@ -499,12 +499,17 @@ mod tests {
         // Expect LLM tokens that can start an expression: i (0), '(' (3), "(i" (5)
         assert_eq!(mask, LLMTokenBV::from_iter([true, false, false, true, false, true, false]));
 
-        // Commit "i(" twice
+        // Commit "(i"
         state.commit(LLMTokenID(5));
         state.step_with_all_llm_tokens();
+        let mask = state.get_mask();
+        // Now expect '+', '*', ')', '+i' => IDs 1,2,4,6
+        assert_eq!(mask, LLMTokenBV::from_iter([false, true, true, false, true, false, true]));
+
+        // // Commit "(i"
         // state.commit(LLMTokenID(5));
         // state.step_with_all_llm_tokens();
-        let mask = state.get_mask();
-        assert_eq!(mask, LLMTokenBV::from_iter([false, false, false, false, false, false, false]));
+        // let mask = state.get_mask();
+        // assert_eq!(mask, LLMTokenBV::from_iter([false, false, false, false, false, false, false]));
     }
 }
