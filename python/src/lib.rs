@@ -174,7 +174,7 @@ impl PyRegex {
 #[pyclass]
 #[derive(Clone)]
 pub struct PyGrammar {
-    inner: Grammar<Regex>,
+    inner: Grammar,
 }
 
 #[pymethods]
@@ -203,7 +203,7 @@ pub struct PyGLRParser {
 #[pyclass]
 #[derive(Clone)]
 pub struct PyGrammarConstraint {
-    inner: GrammarConstraint<Regex>,
+    inner: GrammarConstraint,
 }
 
 #[pymethods]
@@ -228,8 +228,8 @@ impl PyGrammarConstraint {
 
 
 #[pyclass]
-pub struct PyGrammarConstraintState {
-    inner: GrammarConstraintState<Regex>,
+pub struct PyGrammarConstraintState<'a> {
+    inner: GrammarConstraintState<'a, Regex>,
 }
 
 #[pymethods]
