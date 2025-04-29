@@ -237,9 +237,8 @@ impl PyGrammarConstraint {
 }
 
 
-#[pyclass]
 #[self_referencing]
-pub struct PyGrammarConstraintState {
+struct PyGrammarConstraintStateWrapper {
     // Owns the Arc'd constraint
     constraint: PyGrammarConstraint,
     // Borrows from the owned constraint via the 'this lifetime
@@ -248,17 +247,33 @@ pub struct PyGrammarConstraintState {
     inner: GrammarConstraintState<'this>,
 }
 
+#[pyclass]
+pub struct PyGrammarConstraintState {
+    inner: PyGrammarConstraintStateWrapper,
+}
+
 #[pymethods]
 impl PyGrammarConstraintState {
+    #[new]
+    fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
+        // Use the builder provided by ouroboros
+        Ok(PyGrammarConstraintState {
+            inner: PyGrammarConstraintStateWrapperTryBuilder {
+                constraint,
+                inner_builder: |constraint: &PyGrammarConstraint| Ok::<_, PyErr>(constraint.inner.init()),
+            }.try_build()?
+        })
+    }
+
     fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-        let bitset = self.with_inner_mut(|state| state.get_mask());
+        let bitset = self.inner.with_inner_mut(|state| state.get_mask());
         let bools: Vec<bool> = bitset.iter().map(|bit_ref| *bit_ref).collect();
         let array = bools.into_pyarray_bound(py);
         Ok(array)
     }
 
     fn commit(&mut self, llm_token_id: usize) {
-        self.with_inner_mut(|state| state.commit(LLMTokenID(llm_token_id)));
+        self.inner.with_inner_mut(|state| state.commit(LLMTokenID(llm_token_id)));
     }
 }
 

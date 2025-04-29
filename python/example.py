@@ -42,7 +42,7 @@ llm_tokens = [b"i", b"+", b"*", b"(", b")", b"(i", b"+i"]
 llm_token_to_id = {token: i for i, token in enumerate(llm_tokens)}
 
 # Create grammar constraint
-grammar_constraint = _sep1.PyGrammarConstraint(grammar, llm_tokens)
+grammar_constraint = _sep1.PyGrammarConstraint(grammar, llm_token_to_id, len(llm_tokens))
 grammar_constraint_state = _sep1.PyGrammarConstraintState(grammar_constraint)
 
 def llm_tokens_to_ids(tokens):
