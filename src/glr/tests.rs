@@ -1,6 +1,7 @@
 use crate::glr::grammar::{nt, prod, t, Terminal};
 use crate::glr::parser::{GLRParser, GLRParserState};
 use crate::glr::table::{generate_glr_parser, TerminalID};
+use bimap::BiBTreeMap;
 
 fn create_simple_parser() -> GLRParser {
     let productions = vec![
@@ -21,9 +22,9 @@ fn create_expression_parser() -> GLRParser {
         prod("T", vec![nt("F")]),
         prod("F", vec![t("("), nt("E"), t(")")]),
         prod("F", vec![t("i")]),
+        prod("S'", vec![nt("E"), t("$")]), // Start production ID 7
     ];
-
-    generate_glr_parser(&productions, 0)
+    generate_glr_parser(&productions, 7) // Start symbol is S' at index 7
 }
 
 fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
@@ -36,7 +37,7 @@ fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
 fn test_simple_parse_table() {
     let parser = create_simple_parser();
     dbg!(&parser);
-    
+
     let test_cases = [
         ("b", true),
         ("ba", true),
@@ -59,7 +60,7 @@ fn test_simple_parse_table() {
 fn test_parse_simple_expression() {
     let parser = create_expression_parser();
     dbg!(&parser);
-    
+
     let test_cases = [
         ("i", true),
         ("i+i*i", true),

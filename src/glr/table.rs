@@ -67,7 +67,6 @@ pub enum Stage7ShiftsAndReduces {
 pub struct Stage7Row {
     pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
     pub gotos: BTreeMap<NonTerminalID, StateID>,
-    pub accept: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

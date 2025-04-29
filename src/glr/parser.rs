@@ -31,8 +31,8 @@ pub struct ParseStateNodeContent<T: AndAndOr> {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseState<T: AndAndOr> {
     pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
-    // Removed status field
-}
+        // self.merge_active_states();
+    }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StopReason {
