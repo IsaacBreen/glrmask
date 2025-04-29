@@ -250,15 +250,6 @@ pub struct PyGrammarConstraintState {
 
 #[pymethods]
 impl PyGrammarConstraintState {
-    // #[new]
-    // fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
-    //     // Use the builder provided by ouroboros
-    //     PyGrammarConstraintStateTryBuilder {
-    //         constraint,
-    //         inner_builder: |constraint: &PyGrammarConstraint| Ok::<_, PyErr>(constraint.inner.init()),
-    //     }.try_build()
-    // }
-
     fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
         let bitset = self.with_inner_mut(|state| state.get_mask());
         let bools: Vec<bool> = bitset.iter().map(|bit_ref| *bit_ref).collect();
