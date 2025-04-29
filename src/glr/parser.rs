@@ -373,7 +373,7 @@ impl<'a, T: AndAndOr> GLRParserState<'a, T> {
     }
 
     pub fn merge_with(&mut self, other: GLRParserState<T>) {
-        assert!(std::ptr::eq(&self.parser, &other.parser));
+        assert!(std::ptr::eq(self.parser, other.parser));
         self.active_states.extend(other.active_states);
         self.inactive_states.extend(other.inactive_states);
     }
