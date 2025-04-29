@@ -31,19 +31,7 @@ pub struct ParseStateNodeContent<T: AndAndOr> {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseState<T: AndAndOr> {
     pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
-    pub status: ParseStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Action {
-    Shift(TerminalID),
-    Reduce { production_id: ProductionID, len: usize, nonterminal_id: NonTerminalID },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ParseStatus {
-    Active,
-    Inactive(StopReason),
+    // Removed status field
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -91,7 +79,7 @@ impl GLRParser {
         GLRParserState {
             parser: self,
             active_states: vec![self.init_parse_state_with_t(t)],
-            inactive_states: Vec::new(),
+            action_not_found_states: Vec::new(),
         }
     }
 
@@ -99,7 +87,7 @@ impl GLRParser {
         GLRParserState {
             parser: self,
             active_states: vec![parse_state],
-            inactive_states: Vec::new(),
+            action_not_found_states: Vec::new(),
         }
     }
 
@@ -110,7 +98,7 @@ impl GLRParser {
         GLRParserState {
             parser: self,
             active_states: parse_states,
-            inactive_states: Vec::new(),
+            action_not_found_states: Vec::new(),
         }
     }
 
@@ -125,7 +113,6 @@ impl GLRParser {
         };
         ParseState {
             stack: Arc::new(GSSNode::new(initial_content)),
-            status: ParseStatus::Active,
         }
     }
 
@@ -229,7 +216,7 @@ impl Display for GLRParser {
 pub struct GLRParserState<'a, T: AndAndOr> {
     pub parser: &'a GLRParser,
     pub active_states: Vec<ParseState<T>>,
-    pub inactive_states: Vec<ParseState<T>>,
+    pub action_not_found_states: Vec<ParseState<T>>,
 }
 
 impl<'a, T: AndAndOr> GLRParserState<'a, T> {
@@ -243,15 +230,20 @@ impl<'a, T: AndAndOr> GLRParserState<'a, T> {
         }
     }
 
-    pub fn with_step(mut self, token_id: TerminalID) -> Self {
-        let mut parser = self;
-        parser.step(token_id);
-        parser
+    pub fn and_step(mut self, token_id: TerminalID) -> Self {
+        self.step(token_id);
+        self
+    }
+
+    pub fn and_parse(mut self, input: &[TerminalID]) -> Self {
+        self.parse(input);
+        self
     }
 
     pub fn step(&mut self, token_id: TerminalID) {
         let mut next_active_states = Vec::new();
-        let mut inactive_states = Vec::new();
+        // This will store states where the current token_id leads to no action.
+        let mut current_action_not_found_states = Vec::new();
 
         while let Some(state) = self.active_states.pop() {
             let stack = state.stack; // Arc<GSSNode<ParseStateNodeContent<T>>>
@@ -270,7 +262,6 @@ impl<'a, T: AndAndOr> GLRParserState<'a, T> {
                         next_active_states.push(ParseState {
                             // stack: Arc::new(new_stack), // GSSNode::push now returns Arc
                             stack: Arc::new(new_stack),
-                            status: ParseStatus::Active,
                         });
                     }
                     Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
@@ -282,23 +273,17 @@ impl<'a, T: AndAndOr> GLRParserState<'a, T> {
                             let revealed_content = stack_node.peek(); // &ParseStateNodeContent<T>
                             let revealed_state_id = revealed_content.state_id;
                             let revealed_t = &revealed_content.t;
-                            let goto_row = self.parser.stage_7_table.get(&revealed_state_id).unwrap();
+                            // Assuming goto exists if the table is correct for a valid grammar
+                            let goto_state = *self.parser.stage_7_table.get(&revealed_state_id)
+                                .and_then(|row| row.gotos.get(nonterminal))
+                                .expect(&format!("Goto not found for state {} and non-terminal {:?}", revealed_state_id.0, nonterminal));
 
-                            if let Some(&goto_state) = goto_row.gotos.get(nonterminal) {
-                                debug!(3, "Going to state {:?}", goto_state);
-                                // Apply 'and' operation
-                                let combined_t = revealed_t.and(current_t);
-                                let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
-                                let new_stack = stack_node.push(new_content);
-                                self.active_states.push(ParseState {
-                                    stack: Arc::new(new_stack),
-                                    status: ParseStatus::Active,
-                                });
-                            } else {
-                                inactive_states.push(ParseState {
-                                    stack: stack_node,
-                                    status: ParseStatus::Inactive(StopReason::GotoNotFound),
-                                });
+                            debug!(3, "Going to state {:?}", goto_state);
+                            let combined_t = revealed_t.and(current_t);
+                            let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
+                            let new_stack = stack_node.push(new_content);
+                            self.active_states.push(ParseState {
+                                stack: Arc::new(new_stack),
                             }
                         }
                     }
@@ -310,7 +295,6 @@ impl<'a, T: AndAndOr> GLRParserState<'a, T> {
                             let new_stack = stack.push(new_content);
                             next_active_states.push(ParseState {
                                 stack: Arc::new(new_stack),
-                                status: ParseStatus::Active,
                             });
                         }
 
@@ -323,23 +307,19 @@ impl<'a, T: AndAndOr> GLRParserState<'a, T> {
                                     let revealed_content = stack_node.peek();
                                     let revealed_state_id = revealed_content.state_id;
                                     let revealed_t = &revealed_content.t;
-                                    let goto_row = self.parser.stage_7_table.get(&revealed_state_id).unwrap();
+                                    // Assuming goto exists
+                                    let goto_state = *self.parser.stage_7_table.get(&revealed_state_id)
+                                        .and_then(|row| row.gotos.get(nt_id))
+                                        .expect(&format!("Goto not found for state {} and non-terminal {:?}", revealed_state_id.0, nt_id));
 
-                                    if let Some(&goto_state) = goto_row.gotos.get(nt_id) {
-                                        // Apply 'and' operation
-                                        let combined_t = revealed_t.and(current_t);
-                                        let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
-                                        let new_stack = Arc::new(stack_node.push(new_content));
-                                        for prod_id in prod_ids {
-                                            self.active_states.push(ParseState {
-                                                stack: new_stack.clone(),
-                                                status: ParseStatus::Active,
-                                            });
-                                        }
-                                    } else {
-                                        inactive_states.push(ParseState {
-                                            stack: stack_node.clone(),
-                                            status: ParseStatus::Inactive(StopReason::GotoNotFound),
+                                    let combined_t = revealed_t.and(current_t);
+                                    let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
+                                    let new_stack = Arc::new(stack_node.push(new_content));
+                                    // Add one state for each production ID associated with this reduction path
+                                    // Note: The stack itself is shared among these states until further divergence.
+                                    for _prod_id in prod_ids {
+                                        self.active_states.push(ParseState {
+                                            stack: new_stack.clone(),
                                         });
                                     }
                                 }
@@ -348,14 +328,14 @@ impl<'a, T: AndAndOr> GLRParserState<'a, T> {
                     }
                 }
             } else {
-                inactive_states.push(ParseState {
+                // No action found for this token in this state
+                current_action_not_found_states.push(ParseState {
                     stack,
-                    status: ParseStatus::Inactive(StopReason::ActionNotFound),
                 });
             }
         }
         self.active_states = next_active_states;
-        self.inactive_states.extend(inactive_states);
+        self.action_not_found_states = current_action_not_found_states; // Replace previous not-found states
     }
 
     // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
@@ -375,15 +355,19 @@ impl<'a, T: AndAndOr> GLRParserState<'a, T> {
     pub fn merge_with(&mut self, other: GLRParserState<T>) {
         assert!(std::ptr::eq(self.parser, other.parser));
         self.active_states.extend(other.active_states);
-        self.inactive_states.extend(other.inactive_states);
+        self.action_not_found_states.extend(other.action_not_found_states);
+        // Consider merging active states here if performance becomes an issue
+        // self.merge_active_states();
     }
 
     pub fn fully_matches(&self) -> bool {
-        !self.fully_matching_states().is_empty()
-    }
-
-    pub fn fully_matching_states(&self) -> Vec<&ParseState<T>> {
-        self.inactive_states.iter().filter(|state| state.status == ParseStatus::Inactive(StopReason::GotoNotFound)).collect()
+        self.active_states.iter().any(|state| {
+            let content = state.stack.peek();
+            self.parser.stage_7_table
+                .get(&content.state_id)
+                .map_or(false, |row| row.accept)
+        })
+        // Also check action_not_found_states? No, acceptance is defined by active states reaching an accept row.
     }
 
     pub fn can_match(&self) -> bool {
@@ -391,7 +375,7 @@ impl<'a, T: AndAndOr> GLRParserState<'a, T> {
     }
 
     pub fn matches_or_can_match(&self) -> bool {
-        self.can_match() || self.fully_matches()
+        self.can_match() || self.fully_matches() // A state can be both active and accepting
     }
 
     pub fn is_ok(&self) -> bool {

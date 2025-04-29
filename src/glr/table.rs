@@ -67,6 +67,7 @@ pub enum Stage7ShiftsAndReduces {
 pub struct Stage7Row {
     pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
     pub gotos: BTreeMap<NonTerminalID, StateID>,
+    pub accept: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -312,6 +313,13 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
         let mut shifts_and_reduces = BTreeMap::new();
         let mut gotos = BTreeMap::new();
 
+        // Determine if this state is an accepting state
+        let is_accepting_state = item_set.iter().any(|item| {
+            item.production == productions[start_production_id] && item.dot_position == item.production.rhs.len()
+        });
+
+
+
         for (terminal, action) in row.shifts_and_reduces {
             let terminal_id = *terminal_map.get_by_left(&terminal).expect(format!("{:?} not found in terminal map {:?}", terminal, terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
             let converted_action = match action {
@@ -346,7 +354,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
             gotos.insert(non_terminal_id, next_state_id);
         }
 
-        stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos });
+        stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos, accept: is_accepting_state });
     }
 
     let start_item = Item {
@@ -429,3 +437,4 @@ pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerm
     }
     non_terminal_map
 }
+

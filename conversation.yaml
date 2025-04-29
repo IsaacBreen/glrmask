@@ -1,8 +1,8 @@
 local_system:
   attached_files:
     - src/constraint.rs
-    - python/src/lib.rs
-    - python/example.py
+    - src/glr/table.rs
+    - src/glr/parser.rs
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -441,390 +441,952 @@ local_system:
               let mask = constraint_state.get_mask();
               assert_eq!(mask, LLMTokenBV::from_iter([false, false, true]));
           }
-      }
-    python/src/lib.rs: |-
-      use sep1::tokenizer::LLMTokenID;
-      use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq};
-      use sep1::finite_automata::Regex;
-      use pyo3::prelude::*;
-      use pyo3::types::{PyDict};
-      use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-      use sep1::glr::parser::GLRParser;
-      use sep1::glr::table::{generate_glr_parser, StateID};
-      use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence};
-      use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
-      use std::collections::{BTreeMap, BTreeSet};
-      use bimap::BiBTreeMap;
-      use std::sync::Arc;
-      use ouroboros::self_referencing;
-      use numpy::{IntoPyArray, PyArray1, ToPyArray};
 
-      #[pyclass]
-      #[derive(Clone)]
-      struct PyGrammarExpr {
-          inner: GrammarExpr,
-      }
+          #[test]
+          fn test_constraint_expression() {
+              // Example grammar: E -> E '+' T | T; T -> T '*' F | F; F -> '(' E ')' | 'i'
+              // LLM token vocabulary: i, +, *, (, ), (i, +i
+              let mut llm_token_map = LLMTokenMap::new();
+              llm_token_map.insert(b"i".to_vec(), LLMTokenID(0));
+              llm_token_map.insert(b"+".to_vec(), LLMTokenID(1));
+              llm_token_map.insert(b"*".to_vec(), LLMTokenID(2));
+              llm_token_map.insert(b"(".to_vec(), LLMTokenID(3));
+              llm_token_map.insert(b")".to_vec(), LLMTokenID(4));
+              llm_token_map.insert(b"(i".to_vec(), LLMTokenID(5));
+              llm_token_map.insert(b"+i".to_vec(), LLMTokenID(6));
 
-      #[pymethods]
-      impl PyGrammarExpr {
-          #[staticmethod]
-          fn r#ref(name: &str) -> PyResult<Self> {
-              Ok(Self {
-                  inner: grammar_ref(name),
-              })
-          }
+              // Tokenizer regex for grammar tokens '+' '*' '(' ')' 'i'
+              let expr = groups![
+                  eat_u8(b'+'),
+                  eat_u8(b'*'),
+                  eat_u8(b'('),
+                  eat_u8(b')'),
+                  eat_u8(b'i'),
+              ];
+              let tokenizer = expr.build();
 
-          #[staticmethod]
-          fn sequence(exprs: Vec<PyGrammarExpr>) -> Self {
-              Self {
-                  inner: grammar_sequence(exprs.into_iter().map(|e| e.inner).collect()),
-              }
-          }
+              // Grammar productions
+              let productions = vec![
+                  prod("E", vec![nt("E"), t("PLUS"), nt("T")]),
+                  prod("E", vec![nt("T")]),
+                  prod("T", vec![nt("T"), t("TIMES"), nt("F")]),
+                  prod("T", vec![nt("F")]),
+                  prod("F", vec![t("LPAREN"), nt("E"), t("RPAREN")]),
+                  prod("F", vec![t("I")]),
+              ];
+              // Map grammar terminals to IDs matching regex order
+              let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+              grammar_token_map.insert(Terminal("PLUS".to_string()), TerminalID(0));
+              grammar_token_map.insert(Terminal("TIMES".to_string()), TerminalID(1));
+              grammar_token_map.insert(Terminal("LPAREN".to_string()), TerminalID(2));
+              grammar_token_map.insert(Terminal("RPAREN".to_string()), TerminalID(3));
+              grammar_token_map.insert(Terminal("I".to_string()), TerminalID(4));
 
-          #[staticmethod]
-          fn choice(exprs: Vec<PyGrammarExpr>) -> Self {
-              Self {
-                  inner: grammar_choice(exprs.into_iter().map(|e| e.inner).collect()),
-              }
-          }
+              let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
+              let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 6);
 
-          #[staticmethod]
-          fn optional(expr: PyGrammarExpr) -> Self {
-              Self {
-                  inner: grammar_optional(expr.inner),
-              }
-          }
+              // Initial state and step
+              let mut state = constraint.init();
+              state.step_with_all_llm_tokens();
+              let mask = state.get_mask();
+              // Expect LLM tokens that can start an expression: i (0), '(' (3), "(i" (5)
+              assert_eq!(mask, LLMTokenBV::from_iter([true, false, false, true, false, true, false]));
 
-          #[staticmethod]
-          fn repeat(expr: PyGrammarExpr) -> Self {
-              Self {
-                  inner: grammar_repeat(expr.inner),
-              }
-          }
-
-          #[staticmethod]
-          fn regex(regex: PyRegexExpr) -> Self {
-              Self {
-                  inner: grammar_regex(regex.inner)
-              }
-          }
-      }
-
-      #[pyclass]
-      #[derive(Clone)]
-      struct PyRegexExpr {
-          inner: RegexExpr,
-      }
-
-      #[pymethods]
-      impl PyRegexExpr {
-          #[staticmethod]
-          fn eat_u8(c: u8) -> Self {
-              Self { inner: eat_u8(c) }
-          }
-
-          #[staticmethod]
-          fn eat_u8_negation(c: u8) -> Self {
-              Self { inner: eat_u8_negation(c) }
-          }
-
-          #[staticmethod]
-          fn rep(expr: PyRegexExpr) -> Self {
-              Self { inner: rep(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn rep1(expr: PyRegexExpr) -> Self {
-              Self { inner: rep1(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn opt(expr: PyRegexExpr) -> Self {
-              Self { inner: opt(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn prec(precedence: isize, expr: PyRegexExpr) -> PyRegexGroup {
-              PyRegexGroup { inner: prec(precedence, expr.inner) }
-          }
-
-          #[staticmethod]
-          fn eps() -> Self {
-              Self { inner: eps() }
-          }
-
-          #[staticmethod]
-          fn seq(exprs: Vec<PyRegexExpr>) -> Self {
-              Self { inner: regex_seq(exprs.into_iter().map(|e| e.inner).collect()) }
-          }
-
-          #[staticmethod]
-          fn choice(exprs: Vec<PyRegexExpr>) -> Self {
-              Self { inner: regex_choice(exprs.into_iter().map(|e| e.inner).collect()) }
-          }
-
-          fn build(&self) -> PyResult<PyRegex> {
-              Ok(PyRegex { inner: self.inner.clone().build() })
-          }
-      }
-
-      #[pyclass]
-      #[derive(Clone)]
-      struct PyRegexGroup {
-          inner: sep1::finite_automata::ExprGroup,
-      }
-
-      #[pymethods]
-      impl PyRegexGroup {
-          #[staticmethod]
-          fn greedy_group(expr: PyRegexExpr) -> Self {
-              Self { inner: greedy_group(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn non_greedy_group(expr: PyRegexExpr) -> Self {
-              Self { inner: non_greedy_group(expr.inner) }
-          }
-      }
-
-      #[pyclass]
-      #[derive(Clone)]
-      struct PyRegexGroups {
-          inner: RegexGroups,
-      }
-
-      #[pymethods]
-      impl PyRegexGroups {
-          #[staticmethod]
-          fn groups(groups: Vec<PyRegexGroup>) -> Self {
-              Self {
-                  inner: regex_groups(groups.into_iter().map(|g| g.inner).collect()),
-              }
-          }
-
-          fn build(&self) -> PyResult<PyRegex> {
-              Ok(PyRegex { inner: self.inner.clone().build() })
-          }
-      }
-
-      #[pyclass]
-      #[derive(Clone)]
-      pub struct PyRegex {
-          inner: Regex,
-      }
-
-      #[pymethods]
-      impl PyRegex {
-      }
-
-
-      #[pyclass]
-      #[derive(Clone)]
-      pub struct PyGrammar {
-          inner: Grammar,
-      }
-
-      #[pymethods]
-      impl PyGrammar {
-          #[new]
-          fn new(exprs: Vec<(String, PyGrammarExpr)>) -> Self {
-              let inner = Grammar::from_exprs(exprs.into_iter().map(|(s, e)| (s, e.inner)).collect());
-              Self { inner }
-          }
-
-          fn glr_parser(&self) -> PyGLRParser {
-              PyGLRParser { inner: self.inner.glr_parser() }
-          }
-
-          fn print(&self) {
-              println!("{:?}", self.inner)
-          }
-      }
-
-      #[pyclass]
-      #[derive(Clone)]
-      pub struct PyGLRParser {
-          inner: GLRParser,
-      }
-
-      #[pyclass]
-      #[derive(Clone)]
-      pub struct PyGrammarConstraint {
-          inner: Arc<GrammarConstraint>,
-      }
-
-      #[pymethods]
-      impl PyGrammarConstraint {
-          #[new]
-          fn new(py: Python, grammar: PyGrammar, token_to_id: &Bound<'_, PyDict>, max_llm_token_id: usize) -> PyResult<Self> {
-              let mut llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = BiBTreeMap::new();
-              for (key, value) in token_to_id.iter() {
-                  let token = key.extract::<&[u8]>()?;
-                  let id = value.extract::<usize>()?;
-                  llm_token_map.insert(token.to_vec(), LLMTokenID(id));
-              }
-
-              // Assuming Grammar has methods to get tokenizer and parser
-              // You might need to adjust this based on your actual Grammar implementation
-              let tokenizer = grammar.inner.tokenizer.clone(); // Placeholder
-              let parser = grammar.inner.glr_parser(); // Placeholder
-
-              let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, max_llm_token_id);
-              Ok(Self { inner: Arc::new(constraint) })
-          }
-
-          fn print(&self) {
-              // Assuming a function like print_precomputed exists and takes &Precomputed
-              // Or implement a method on GrammarConstraint to print/dump its state
-              // print_precomputed(&self.inner.precomputed);
-              println!("Printing precomputed data is not implemented in this binding yet.");
-          }
-      }
-
-
-      #[self_referencing]
-      struct PyGrammarConstraintStateWrapper {
-          // Owns the Arc'd constraint
-          constraint: PyGrammarConstraint,
-          // Borrows from the owned constraint via the 'this lifetime
-          #[borrows(constraint)]
-          #[covariant] // Allows the lifetime 'this to be shortened
-          inner: GrammarConstraintState<'this>,
-      }
-
-      #[pyclass]
-      pub struct PyGrammarConstraintState {
-          inner: PyGrammarConstraintStateWrapper,
-      }
-
-      #[pymethods]
-      impl PyGrammarConstraintState {
-          #[new]
-          fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
-              // Use the builder provided by ouroboros, and immediately step
-              Ok(PyGrammarConstraintState {
-                  inner: PyGrammarConstraintStateWrapperTryBuilder {
-                      constraint,
-                      inner_builder: |constraint: &PyGrammarConstraint| {
-                          // init state and step with all LLM tokens
-                          let mut state = constraint.inner.init();
-                          state.step_with_all_llm_tokens();
-                          Ok::<_, PyErr>(state)
-                      },
-                  }
-                  .try_build()?
-              })
-          }
-
-          fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-              let bitset = self.inner.with_inner_mut(|state| state.get_mask());
-              let bools: Vec<bool> = bitset.iter().map(|bit_ref| *bit_ref).collect();
-              let array = bools.into_pyarray_bound(py);
-              Ok(array)
-          }
-
-          fn commit(&mut self, llm_token_id: usize) {
-              self.inner.with_inner_mut(|state| {
-                  state.commit(LLMTokenID(llm_token_id));
+              // Commit "(i" twice (simulate consuming "(i" twice)
+              for _ in 0..2 {
+                  state.commit(LLMTokenID(5));
                   state.step_with_all_llm_tokens();
-              });
-              
+              }
+              let mask = state.get_mask();
+              // Now expect '+', '*', ')', '+i' => IDs 1,2,4,6
+              assert_eq!(mask, LLMTokenBV::from_iter([false, true, true, false, true, false, true]));
+          }
+      }
+    src/glr/table.rs: |-
+      use super::items::{compute_closure, compute_goto, split_on_dot, Item};
+      use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::parser::GLRParser;
+      use bimap::BiBTreeMap;
+      use std::collections::{HashMap, VecDeque};
+      use std::collections::{BTreeMap, BTreeSet};
+      use std::fmt::Display;
+      use crate::glr::analyze::{drop_dead, validate};
+      pub use crate::types::{TerminalID};
+
+      type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
+      type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
+      type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
+      type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Row>;
+      type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
+      type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
+      pub type Stage7Table = BTreeMap<StateID, Stage7Row>;
+
+
+      type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
+      #[derive(Debug)]
+      struct Stage2Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeSet<Item>,
+      }
+      #[derive(Debug)]
+      struct Stage3Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Terminal, BTreeSet<Item>>,
+      }
+      #[derive(Debug)]
+      struct Stage4Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+      }
+      type Stage5Row = Stage4Row;
+      #[derive(Debug)]
+      struct Stage6Row {
+          shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+      }
+
+      #[derive(Debug)]
+      enum Stage6ShiftsAndReduces {
+          Shift(BTreeSet<Item>),
+          Reduce(ProductionID),
+          Split {
+              shift: Option<BTreeSet<Item>>,
+              reduces: BTreeSet<ProductionID>,
+          },
+      }
+
+      #[derive(Debug, Clone)]
+      pub enum Stage7ShiftsAndReduces {
+          Shift(StateID),
+          Reduce { production_id: ProductionID, nonterminal_id: NonTerminalID, len: usize },
+          Split {
+              shift: Option<StateID>,
+              reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>,
+          },
+      }
+
+      #[derive(Debug, Clone)]
+      pub struct Stage7Row {
+          pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
+          pub gotos: BTreeMap<NonTerminalID, StateID>,
+      }
+
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct StateID(pub usize);
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct ProductionID(pub usize);
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct NonTerminalID(pub usize);
+
+      type Stage1Result = Stage1Table;
+      type Stage2Result = Stage2Table;
+      type Stage3Result = Stage3Table;
+      type Stage4Result = Stage4Table;
+      type Stage5Result = Stage5Table;
+      type Stage6Result = Stage6Table;
+      type Stage7Result = (
+          Stage7Table,
+          BiBTreeMap<BTreeSet<Item>, StateID>,
+          StateID,
+      );
+
+      fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+          let initial_item = Item {
+              production: productions[start_production_id].clone(),
+              dot_position: 0,
+          };
+          let initial_closure = BTreeSet::from([initial_item]);
+          let mut worklist = VecDeque::from([initial_closure.clone()]);
+
+          let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
+
+          while let Some(items) = worklist.pop_front() {
+              if transitions.contains_key(&items) {
+                  continue;
+              }
+
+              let closure = compute_closure(&items, productions);
+              let splits = split_on_dot(&closure);
+              let mut row = BTreeMap::new();
+
+              for (symbol, items) in splits {
+                  if symbol.is_none() {
+                      continue;
+                  }
+                  let goto_set = compute_goto(&items);
+                  row.insert(symbol.clone(), goto_set.clone());
+                  worklist.push_back(goto_set);
+              }
+
+              transitions.insert(items.clone(), row);
+          }
+
+          transitions
+      }
+
+      fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
+          let mut stage_2_table = BTreeMap::new();
+          for (item_set, transitions) in stage_1_table {
+              let mut shifts = BTreeMap::new();
+              let mut gotos = BTreeMap::new();
+              let mut reduces = BTreeSet::new();
+
+              for item in &item_set {
+                  if item.dot_position >= item.production.rhs.len() {
+                      reduces.insert(item.clone());
+                  }
+              }
+
+              for (symbol_opt, next_item_set) in &transitions {
+                  if let Some(symbol) = symbol_opt {
+                      match symbol {
+                          Symbol::Terminal(t) => {
+                              shifts.insert(t.clone(), next_item_set.clone());
+                          }
+                          Symbol::NonTerminal(nt) => {
+                              gotos.insert(nt.clone(), next_item_set.clone());
+                          }
+                      }
+                  }
+              }
+
+              stage_2_table.insert(
+                  item_set,
+                  Stage2Row {
+                      shifts,
+                      gotos,
+                      reduces,
+                  },
+              );
+          }
+          stage_2_table
+      }
+
+      fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
+          let follow_sets = compute_follow_sets(productions);
+
+          let mut stage_3_table = BTreeMap::new();
+
+          for (item_set, row) in stage_2_table {
+              let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
+
+              for item in &row.reduces {
+                  let lhs = &item.production.lhs;
+                  let lookaheads = follow_sets.get(lhs).unwrap();
+
+                  for terminal in lookaheads {
+                      reduces
+                          .entry(terminal.clone())
+                          .or_default()
+                          .insert(item.clone());
+                  }
+              }
+
+              stage_3_table.insert(
+                  item_set,
+                  Stage3Row {
+                      shifts: row.shifts,
+                      gotos: row.gotos,
+                      reduces,
+                  },
+              );
+          }
+
+          stage_3_table
+      }
+
+      fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
+          let production_ids: BTreeMap<Production, ProductionID> = productions
+              .iter()
+              .enumerate()
+              .map(|(i, p)| (p.clone(), ProductionID(i)))
+              .collect();
+
+          let mut stage_4_table = BTreeMap::new();
+
+          for (item_set, row) in stage_3_table {
+              let mut reduces = BTreeMap::new();
+
+              for (terminal, items) in row.reduces {
+                  let mut prod_ids = BTreeSet::new();
+                  for item in items {
+                      let prod_id = production_ids.get(&item.production).unwrap();
+                      prod_ids.insert(*prod_id);
+                  }
+                  reduces.insert(terminal.clone(), prod_ids);
+              }
+
+              stage_4_table.insert(
+                  item_set,
+                  Stage4Row {
+                      shifts: row.shifts,
+                      gotos: row.gotos,
+                      reduces,
+                  },
+              );
+          }
+
+          stage_4_table
+      }
+
+      fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
+          // todo: remove this
+          stage_4_table
+      }
+
+      fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
+          let mut stage_6_table = BTreeMap::new();
+
+          for (item_set, row) in stage_5_table {
+              let mut shifts_and_reduces = BTreeMap::new();
+
+              for (terminal, next_item_set) in row.shifts {
+                  shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Shift(next_item_set));
+              }
+
+              for (terminal, mut production_ids) in row.reduces {
+                  if let Some(mut existing) = shifts_and_reduces.remove(&terminal) {
+                      match existing {
+                          Stage6ShiftsAndReduces::Shift(shift_set) => {
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
+                                  shift: Some(shift_set.clone()),
+                                  reduces: production_ids.clone(),
+                              });
+                          }
+                          Stage6ShiftsAndReduces::Reduce(existing_production_id) => {
+                              production_ids.insert(existing_production_id);
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
+                                  shift: None,
+                                  reduces: production_ids,
+                              });
+                          }
+                          Stage6ShiftsAndReduces::Split { shift, mut reduces } => {
+                              reduces.extend(production_ids.into_iter());
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift, reduces });
+                          }
+                      }
+                  } else {
+                      // If there's only one production ID, we can optimize by storing it directly
+                      if production_ids.len() == 1 {
+                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Reduce(production_ids.iter().next().unwrap().clone()));
+                      } else {
+                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift: None, reduces: production_ids });
+                      }
+                  }
+              }
+
+              stage_6_table.insert(
+                  item_set,
+                  Stage6Row {
+                      shifts_and_reduces,
+                      gotos: row.gotos,
+                  },
+              );
+          }
+
+          stage_6_table
+      }
+
+      fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
+          let mut item_set_map = BiBTreeMap::new();
+          let mut next_state_id = 0;
+
+          let mut terminals = BTreeSet::new();
+          let mut non_terminals = BTreeSet::new();
+
+          for (item_set, row) in &stage_6_table {
+              item_set_map.insert(item_set.clone(), StateID(next_state_id));
+              next_state_id += 1;
+
+              for t in row.shifts_and_reduces.keys() {
+                  terminals.insert(t.clone());
+              }
+
+              for nt in row.gotos.keys() {
+                  non_terminals.insert(nt.clone());
+              }
+          }
+
+          let mut stage_7_table = BTreeMap::new();
+
+          for (item_set, row) in stage_6_table {
+              let state_id = *item_set_map.get_by_left(&item_set).unwrap();
+              let mut shifts_and_reduces = BTreeMap::new();
+              let mut gotos = BTreeMap::new();
+
+              for (terminal, action) in row.shifts_and_reduces {
+                  let terminal_id = *terminal_map.get_by_left(&terminal).expect(format!("{:?} not found in terminal map {:?}", terminal, terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+                  let converted_action = match action {
+                      Stage6ShiftsAndReduces::Shift(next_item_set) => {
+                          let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
+                          Stage7ShiftsAndReduces::Shift(next_state_id)
+                      }
+                      Stage6ShiftsAndReduces::Reduce(production_id) => {
+                          let production = productions.get(production_id.0).unwrap();
+                          let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
+                          let len = production.rhs.len();
+                          Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len }
+                      }
+                      Stage6ShiftsAndReduces::Split { shift, reduces } => {
+                          let shift_state_id = shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
+                          let mut len_to_nt_to_production_id: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
+                          for production_id in reduces {
+                              let production = productions.get(production_id.0).unwrap();
+                              let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
+                              let len = production.rhs.len();
+                              len_to_nt_to_production_id.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id);
+                          }
+                          Stage7ShiftsAndReduces::Split { shift: shift_state_id, reduces: len_to_nt_to_production_id }
+                      }
+                  };
+                  shifts_and_reduces.insert(terminal_id, converted_action);
+              }
+
+              for (nonterminal, next_item_set) in row.gotos {
+                  let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
+                  let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
+                  gotos.insert(non_terminal_id, next_state_id);
+              }
+
+              stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos });
+          }
+
+          let start_item = Item {
+              production: productions[start_production_id].clone(),
+              dot_position: 0,
+          };
+          let start_state_id = *item_set_map.get_by_left(&BTreeSet::from([start_item])).unwrap();
+
+          (stage_7_table, item_set_map, start_state_id)
+      }
+
+      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
+          crate::debug!(2, "Validating");
+          validate(productions).expect("Validation error");
+
+          crate::debug!(2, "Stage 1");
+          let stage_1_table = stage_1(productions, start_production_id);
+          crate::debug!(2, &stage_1_table);
+          crate::debug!(2, "Stage 2");
+          let stage_2_table = stage_2(stage_1_table, productions);
+          crate::debug!(2, &stage_2_table);
+          crate::debug!(2, "Stage 3");
+          let stage_3_table = stage_3(stage_2_table, productions);
+          crate::debug!(2, &stage_3_table);
+          crate::debug!(2, "Stage 4");
+          let stage_4_table = stage_4(stage_3_table, productions);
+          crate::debug!(2, &stage_4_table);
+          crate::debug!(2, "Stage 5");
+          let stage_5_table = stage_5(stage_4_table, productions);
+          crate::debug!(2, &stage_5_table);
+          crate::debug!(2, "Stage 6");
+          let stage_6_table = stage_6(stage_5_table);
+          crate::debug!(2, &stage_6_table);
+          crate::debug!(2, "Stage 7");
+          let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, productions, start_production_id, &terminal_map, &non_terminal_map);
+          crate::debug!(2, &stage_7_table);
+          crate::debug!(2, "Done generating GLR parser");
+
+          GLRParser::new(stage_7_table, productions.to_vec(), terminal_map, non_terminal_map, item_set_map, start_state_id)
+      }
+
+      pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
+          let terminal_map = assign_terminal_ids(productions);
+          let non_terminal_map = assign_non_terminal_ids(productions);
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
+      }
+
+      pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
+          let non_terminal_map = assign_non_terminal_ids(productions);
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
+      }
+
+      pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
+          let mut terminal_map = BiBTreeMap::new();
+          let mut next_terminal_id = 0;
+
+          for p in productions {
+              for symbol in &p.rhs {
+                  if let Symbol::Terminal(t) = symbol {
+                      if !terminal_map.contains_left(t) {
+                          terminal_map.insert(t.clone(), TerminalID(next_terminal_id));
+                          next_terminal_id += 1;
+                      }
+                  }
+              }
+          }
+
+          terminal_map
+      }
+
+      pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerminal, NonTerminalID> {
+          let mut non_terminal_map = BiBTreeMap::new();
+          let mut next_non_terminal_id = 0;
+
+          for p in productions {
+              if !non_terminal_map.contains_left(&p.lhs) {
+                  non_terminal_map.insert(p.lhs.clone(), NonTerminalID(next_non_terminal_id));
+                  next_non_terminal_id += 1;
+              }
+          }
+          non_terminal_map
+      }
+    src/glr/parser.rs: |-
+      use crate::datastructures::gss::BulkMerge;
+      use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::items::Item;
+      use crate::glr::table::{
+          NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID,
+      };
+      use crate::datastructures::gss::{GSSNode, GSSTrait};
+
+      use bimap::BiBTreeMap;
+      use std::collections::{BTreeMap, BTreeSet};
+      use std::fmt::{Debug, Display, Formatter};
+      use std::hash::Hash;
+      use std::sync::Arc;
+      use crate::debug;
+
+      pub trait AndAndOr: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
+          fn and(&self, other: &Self) -> Self;
+          fn or(&self, other: &Self) -> Self;
+      }
+
+      impl AndAndOr for () {
+          fn and(&self, _: &Self) -> Self { () }
+          fn or(&self, _: &Self) -> Self { () }
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct ParseStateNodeContent<T: AndAndOr> {
+          pub state_id: StateID,
+          pub t: T,
+      }
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct ParseState<T: AndAndOr> {
+          pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
+          pub status: ParseStatus,
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub enum Action {
+          Shift(TerminalID),
+          Reduce { production_id: ProductionID, len: usize, nonterminal_id: NonTerminalID },
+      }
+
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub enum ParseStatus {
+          Active,
+          Inactive(StopReason),
+      }
+
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub enum StopReason {
+          ActionNotFound,
+          GotoNotFound,
+      }
+
+
+      // TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
+      #[derive(Clone)]
+      pub struct GLRParser {
+          pub stage_7_table: Stage7Table,
+          pub productions: Vec<Production>,
+          pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
+          pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+          pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+          pub start_state_id: StateID,
+      }
+
+      impl GLRParser {
+          pub fn new(
+              stage_7_table: Stage7Table,
+              productions: Vec<Production>,
+              terminal_map: BiBTreeMap<Terminal, TerminalID>,
+              non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+              item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+              start_state_id: StateID,
+          ) -> Self {
+              Self {
+                  stage_7_table,
+                  productions,
+                  terminal_map,
+                  non_terminal_map,
+                  item_set_map,
+                  start_state_id,
+              }
+          }
+
+          pub fn init_glr_parser<T: AndAndOr + Default>(&self) -> GLRParserState<T> {
+              self.init_glr_parser_with_t(T::default())
+          }
+
+          pub fn init_glr_parser_with_t<T: AndAndOr>(&self, t: T) -> GLRParserState<T> {
+              GLRParserState {
+                  parser: self,
+                  active_states: vec![self.init_parse_state_with_t(t)],
+                  inactive_states: Vec::new(),
+              }
+          }
+
+          pub fn init_glr_parser_from_parse_state<T: AndAndOr>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
+              GLRParserState {
+                  parser: self,
+                  active_states: vec![parse_state],
+                  inactive_states: Vec::new(),
+              }
+          }
+
+          pub fn init_glr_parser_from_parse_states<T: AndAndOr>(
+              &self,
+              parse_states: Vec<ParseState<T>>,
+          ) -> GLRParserState<T> {
+              GLRParserState {
+                  parser: self,
+                  active_states: parse_states,
+                  inactive_states: Vec::new(),
+              }
+          }
+
+          pub fn init_parse_state<T: AndAndOr + Default>(&self) -> ParseState<T> {
+              self.init_parse_state_with_t(T::default())
+          }
+
+          pub fn init_parse_state_with_t<T: AndAndOr>(&self, t: T) -> ParseState<T> {
+              let initial_content = ParseStateNodeContent {
+                  state_id: self.start_state_id,
+                  t,
+              };
+              ParseState {
+                  stack: Arc::new(GSSNode::new(initial_content)),
+                  status: ParseStatus::Active,
+              }
+          }
+
+          pub fn parse<T: AndAndOr + Default>(&self, input: &[TerminalID]) -> GLRParserState<T> {
+              let mut state = self.init_glr_parser();
+              state.parse(input);
+              state
           }
       }
 
-      #[pymodule]
-      fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-          m.add_class::<PyGrammarExpr>()?;
-          m.add_class::<PyRegexExpr>()?;
-          m.add_class::<PyRegexGroup>()?;
-          m.add_class::<PyRegexGroups>()?;
-          m.add_class::<PyGrammar>()?;
-          m.add_class::<PyGrammarConstraint>()?;
-          m.add_class::<PyGrammarConstraintState>()?;
-          Ok(())
+      impl Debug for GLRParser {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              write!(f, "{}", self)
+          }
       }
-    python/example.py: |-
-      import _sep1
-      import numpy as np
 
-      # Define regexes using PyRegexExpr
-      plus_regex = _sep1.PyRegexExpr.eat_u8(ord('+'))
-      times_regex = _sep1.PyRegexExpr.eat_u8(ord('*'))
-      open_paren_regex = _sep1.PyRegexExpr.eat_u8(ord('('))
-      close_paren_regex = _sep1.PyRegexExpr.eat_u8(ord(')'))
-      i_regex = _sep1.PyRegexExpr.eat_u8(ord('i'))
+      impl Display for GLRParser {
+          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+              let stage_7_table = &self.stage_7_table;
+              let terminal_map = &self.terminal_map;
+              let non_terminal_map = &self.non_terminal_map;
+              let item_set_map = &self.item_set_map;
 
-      # Define grammar rules using the regexes
-      exprs = [
-          ("E", _sep1.PyGrammarExpr.choice([
-              _sep1.PyGrammarExpr.sequence([
-                  _sep1.PyGrammarExpr.ref("E"),
-                  _sep1.PyGrammarExpr.regex(plus_regex),
-                  _sep1.PyGrammarExpr.ref("T"),
-              ]),
-              _sep1.PyGrammarExpr.ref("T"),
-          ])),
-          ("T", _sep1.PyGrammarExpr.choice([
-              _sep1.PyGrammarExpr.sequence([
-                  _sep1.PyGrammarExpr.ref("T"),
-                  _sep1.PyGrammarExpr.regex(times_regex),
-                  _sep1.PyGrammarExpr.ref("F"),
-              ]),
-              _sep1.PyGrammarExpr.ref("F"),
-          ])),
-          ("F", _sep1.PyGrammarExpr.choice([
-              _sep1.PyGrammarExpr.sequence([
-                  _sep1.PyGrammarExpr.regex(open_paren_regex),
-                  _sep1.PyGrammarExpr.ref("E"),
-                  _sep1.PyGrammarExpr.regex(close_paren_regex),
-              ]),
-              _sep1.PyGrammarExpr.regex(i_regex),
-          ])),
-      ]
+              writeln!(f, "Parse Table:")?;
+              writeln!(f, "  Start State: {}", self.start_state_id.0)?;
+              for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
+                  writeln!(f, "  State {}:", state_id.0)?;
 
-      grammar = _sep1.PyGrammar(exprs)
+                  writeln!(f, "    Items:")?;
+                  let item_set = item_set_map.get_by_right(&state_id).unwrap();
+                  for item in item_set {
+                      write!(f, "      - {} ->", item.production.lhs.0)?;
+                      for (i, symbol) in item.production.rhs.iter().enumerate() {
+                          if i == item.dot_position {
+                              write!(f, " •")?;
+                          }
+                          match symbol {
+                              Symbol::Terminal(terminal) => write!(f, " {:?}", terminal.0)?,
+                              Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
+                          }
+                      }
+                      if item.dot_position == item.production.rhs.len() {
+                          write!(f, " •")?;
+                      }
+                      writeln!(f)?;
+                  }
 
-      # Define LLM tokens
-      llm_tokens = [b"i", b"+", b"*", b"(", b")", b"(i", b"+i"]
-      llm_token_to_id = {token: i for i, token in enumerate(llm_tokens)}
+                  writeln!(f, "    Actions:")?;
+                  for (&terminal_id, action) in &row.shifts_and_reduces {
+                      let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
+                      match action {
+                          Stage7ShiftsAndReduces::Shift(next_state_id) => {
+                              writeln!(f, "      - {:?} -> Shift {}", terminal.0, next_state_id.0)?;
+                          }
+                          Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
+                              let nt = non_terminal_map.get_by_right(nonterminal).unwrap();
+                              writeln!(f, "      - {:?} -> Reduce {} (len {})", terminal.0, nt.0, len)?;
+                          }
+                          Stage7ShiftsAndReduces::Split { shift, reduces } => {
+                              writeln!(f, "      - {:?} -> Conflict:", terminal.0)?;
+                              if let Some(shift_state) = shift {
+                                  writeln!(f, "        - Shift {}", shift_state.0)?;
+                              }
+                              for (len, nt_id_to_prod_ids) in reduces {
+                                  writeln!(f, "        - Reduce (len {}):", len)?;
+                                  for (nt_id, prod_ids) in nt_id_to_prod_ids {
+                                      let nt = non_terminal_map.get_by_right(nt_id).unwrap();
+                                      for prod_id in prod_ids {
+                                          let prod = self.productions.get(prod_id.0).unwrap();
+                                          writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
+                                      }
+                                  }
 
-      # Create grammar constraint
-      grammar_constraint = _sep1.PyGrammarConstraint(grammar, llm_token_to_id, len(llm_tokens))
-      grammar_constraint_state = _sep1.PyGrammarConstraintState(grammar_constraint)
+                              }
+                          }
+                      }
+                  }
 
-      def llm_tokens_to_ids(tokens):
-          return [llm_token_to_id[token] for token in tokens]
+                  writeln!(f, "    Gotos:")?;
+                  for (&non_terminal_id, &next_state_id) in &row.gotos {
+                      let non_terminal = non_terminal_map.get_by_right(&non_terminal_id).unwrap();
+                      writeln!(f, "      - {} -> {}", non_terminal.0, next_state_id.0)?;
+                  }
+              }
 
-      # Initial mask check
-      mask = grammar_constraint_state.get_mask()
-      expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
-      print(f"Initial Mask: {mask}")
-      assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+              writeln!(f, "\nTerminal Map (name to terminal ID):")?;
+              for (terminal, terminal_id) in terminal_map {
+                  writeln!(f, "  {} -> {}", terminal.0, terminal_id.0)?;
+              }
 
+              writeln!(f, "\nNon-Terminal Map:")?;
+              for (non_terminal, non_terminal_id) in non_terminal_map {
+                  writeln!(f, "  {} -> {}", non_terminal.0, non_terminal_id.0)?;
+              }
 
-      # # Commit prefill tokens
-      # prefill = llm_tokens_to_ids([b"i", b"+"])
-      # for token_id in prefill:
-      #     grammar_constraint_state.commit(token_id)
-      #
-      # # Mask check after prefill
-      # mask = grammar_constraint_state.get_mask()
-      # expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
-      # print(f"Mask after committing prefill: {mask}")
-      # assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+              Ok(())
+          }
+      }
 
+      #[derive(Debug, Clone)]
+      pub struct GLRParserState<'a, T: AndAndOr> {
+          pub parser: &'a GLRParser,
+          pub active_states: Vec<ParseState<T>>,
+          pub inactive_states: Vec<ParseState<T>>,
+      }
 
-      # Commit prefill tokens
-      # prefill = llm_tokens_to_ids([b"(i", b"+", b"i", b"*", b"i"])
-      prefill = llm_tokens_to_ids([b"(i", b"(i"])
-      for token_id in prefill:
-          grammar_constraint_state.commit(token_id)
+      impl<'a, T: AndAndOr> GLRParserState<'a, T> {
+          pub fn parse(&mut self, input: &[TerminalID]) {
+              self.parse_part(input);
+          }
 
-      # Mask check after prefill
-      mask = grammar_constraint_state.get_mask()
-      expected_mask = set(llm_tokens_to_ids([b"+", b"*", b")", b"+i"]))
-      print(f"Mask after committing prefill: {mask}")
-      assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+          pub fn parse_part(&mut self, input: &[TerminalID]) {
+              for &token_id in input {
+                  self.step(token_id);
+              }
+          }
+
+          pub fn with_step(mut self, token_id: TerminalID) -> Self {
+              let mut parser = self;
+              parser.step(token_id);
+              parser
+          }
+
+          pub fn step(&mut self, token_id: TerminalID) {
+              let mut next_active_states = Vec::new();
+              let mut inactive_states = Vec::new();
+
+              while let Some(state) = self.active_states.pop() {
+                  let stack = state.stack; // Arc<GSSNode<ParseStateNodeContent<T>>>
+                  let current_content = stack.peek(); // &ParseStateNodeContent<T>
+                  let current_state_id = current_content.state_id;
+                  let current_t = &current_content.t;
+
+                  let row = self.parser.stage_7_table.get(&current_state_id).unwrap();
+
+                  if let Some(action) = row.shifts_and_reduces.get(&token_id) {
+                      match action {
+                          Stage7ShiftsAndReduces::Shift(next_state_id) => {
+                              debug!(3, "Shifting");
+                              let new_content = ParseStateNodeContent { state_id: *next_state_id, t: current_t.clone() };
+                              let new_stack = stack.push(new_content);
+                              next_active_states.push(ParseState {
+                                  // stack: Arc::new(new_stack), // GSSNode::push now returns Arc
+                                  stack: Arc::new(new_stack),
+                                  status: ParseStatus::Active,
+                              });
+                          }
+                          Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
+                              debug!(3, "Reducing by production {:?} with len {}", production_id, len);
+                              let mut popped_stack_nodes = stack.popn(*len);
+                              popped_stack_nodes.bulk_merge();
+                              for stack_node in popped_stack_nodes {
+                                  // stack_node is Arc<GSSNode<ParseStateNodeContent<T>>>
+                                  let revealed_content = stack_node.peek(); // &ParseStateNodeContent<T>
+                                  let revealed_state_id = revealed_content.state_id;
+                                  let revealed_t = &revealed_content.t;
+                                  let goto_row = self.parser.stage_7_table.get(&revealed_state_id).unwrap();
+
+                                  if let Some(&goto_state) = goto_row.gotos.get(nonterminal) {
+                                      debug!(3, "Going to state {:?}", goto_state);
+                                      // Apply 'and' operation
+                                      let combined_t = revealed_t.and(current_t);
+                                      let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
+                                      let new_stack = stack_node.push(new_content);
+                                      self.active_states.push(ParseState {
+                                          stack: Arc::new(new_stack),
+                                          status: ParseStatus::Active,
+                                      });
+                                  } else {
+                                      inactive_states.push(ParseState {
+                                          stack: stack_node,
+                                          status: ParseStatus::Inactive(StopReason::GotoNotFound),
+                                      });
+                                  }
+                              }
+                          }
+                          Stage7ShiftsAndReduces::Split { shift, reduces } => {
+                              debug!(3, "Split");
+                              if let Some(shift_state) = shift {
+                                  // Shift part (same as above)
+                                  let new_content = ParseStateNodeContent { state_id: *shift_state, t: current_t.clone() };
+                                  let new_stack = stack.push(new_content);
+                                  next_active_states.push(ParseState {
+                                      stack: Arc::new(new_stack),
+                                      status: ParseStatus::Active,
+                                  });
+                              }
+
+                              for (len, nt_ids) in reduces {
+                                  let mut popped_stack_nodes = stack.popn(*len);
+                                  popped_stack_nodes.bulk_merge();
+                                  for (nt_id, prod_ids) in nt_ids {
+                                      for stack_node in &popped_stack_nodes {
+                                          // Reduce part (same as above)
+                                          let revealed_content = stack_node.peek();
+                                          let revealed_state_id = revealed_content.state_id;
+                                          let revealed_t = &revealed_content.t;
+                                          let goto_row = self.parser.stage_7_table.get(&revealed_state_id).unwrap();
+
+                                          if let Some(&goto_state) = goto_row.gotos.get(nt_id) {
+                                              // Apply 'and' operation
+                                              let combined_t = revealed_t.and(current_t);
+                                              let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
+                                              let new_stack = Arc::new(stack_node.push(new_content));
+                                              for prod_id in prod_ids {
+                                                  self.active_states.push(ParseState {
+                                                      stack: new_stack.clone(),
+                                                      status: ParseStatus::Active,
+                                                  });
+                                              }
+                                          } else {
+                                              inactive_states.push(ParseState {
+                                                  stack: stack_node.clone(),
+                                                  status: ParseStatus::Inactive(StopReason::GotoNotFound),
+                                              });
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  } else {
+                      inactive_states.push(ParseState {
+                          stack,
+                          status: ParseStatus::Inactive(StopReason::ActionNotFound),
+                      });
+                  }
+              }
+              self.active_states = next_active_states;
+              self.inactive_states.extend(inactive_states);
+          }
+
+          // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
+          pub fn merge_active_states(&mut self) {
+              let mut active_state_map: BTreeMap<ParseStateKey, ParseState<T>> = BTreeMap::new();
+
+              for state in std::mem::take(&mut self.active_states) {
+                  let key = state.key();
+                  active_state_map.insert_with(key, state, |existing, new_state| {
+                      existing.merge(new_state);
+                  });
+              }
+
+              self.active_states = active_state_map.into_values().collect();
+          }
+
+          pub fn merge_with(&mut self, other: GLRParserState<T>) {
+              assert!(std::ptr::eq(self.parser, other.parser));
+              self.active_states.extend(other.active_states);
+              self.inactive_states.extend(other.inactive_states);
+          }
+
+          pub fn fully_matches(&self) -> bool {
+              !self.fully_matching_states().is_empty()
+          }
+
+          pub fn fully_matching_states(&self) -> Vec<&ParseState<T>> {
+              self.inactive_states.iter().filter(|state| state.status == ParseStatus::Inactive(StopReason::GotoNotFound)).collect()
+          }
+
+          pub fn can_match(&self) -> bool {
+              !self.active_states.is_empty()
+          }
+
+          pub fn matches_or_can_match(&self) -> bool {
+              self.can_match() || self.fully_matches()
+          }
+
+          pub fn is_ok(&self) -> bool {
+              self.matches_or_can_match()
+          }
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct ParseStateKey {
+          stack_state_id: StateID,
+          // Removed action_stack
+      }
+
+      impl<T: AndAndOr> ParseState<T> {
+          pub fn key(&self) -> ParseStateKey {
+              ParseStateKey {
+                  stack_state_id: self.stack.peek().state_id,
+              }
+          }
+
+          /// Merges `other` into `self`. Assumes `self.key() == other.key()`.
+          /// Merges the GSS structures and combines the `t` value at the top node using `AndAndOr::or`.
+          pub fn merge(&mut self, other: ParseState<T>) {
+              assert_eq!(self.key(), other.key());
+
+              // Combine 't' values at the top node using 'or'
+              let self_content = self.stack.peek();
+              let other_content = other.stack.peek();
+              let combined_t = self_content.t.or(&other_content.t);
+
+              // Get mutable access to self.stack, potentially cloning if shared (Arc > 1)
+              let mut mutable_stack = Arc::make_mut(&mut self.stack);
+
+              // Update the 't' value in the mutable top node's content
+              mutable_stack.value.t = combined_t;
+
+              // Merge the parent structures using GSSNode's merge
+              mutable_stack.merge_unchecked(Arc::unwrap_or_clone(other.stack));
+          }
+      }
+
+      pub trait InsertWith<K, V> {
+          fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F);
+      }
+
+      impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
+          fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F) {
+              match self.entry(k) {
+                  std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                      let value = occupied.get_mut();
+                      combine(value, v);
+                  }
+                  std::collections::btree_map::Entry::Vacant(vacant) => {
+                      vacant.insert(v);
+                  }
+              }
+          }
+      }
   prev_file_contents:
     src/constraint.rs: |-
       use std::cmp::Ordering;
@@ -1261,390 +1823,952 @@ local_system:
               let mask = constraint_state.get_mask();
               assert_eq!(mask, LLMTokenBV::from_iter([false, false, true]));
           }
-      }
-    python/src/lib.rs: |-
-      use sep1::tokenizer::LLMTokenID;
-      use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq};
-      use sep1::finite_automata::Regex;
-      use pyo3::prelude::*;
-      use pyo3::types::{PyDict};
-      use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-      use sep1::glr::parser::GLRParser;
-      use sep1::glr::table::{generate_glr_parser, StateID};
-      use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence};
-      use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
-      use std::collections::{BTreeMap, BTreeSet};
-      use bimap::BiBTreeMap;
-      use std::sync::Arc;
-      use ouroboros::self_referencing;
-      use numpy::{IntoPyArray, PyArray1, ToPyArray};
 
-      #[pyclass]
-      #[derive(Clone)]
-      struct PyGrammarExpr {
-          inner: GrammarExpr,
-      }
+          #[test]
+          fn test_constraint_expression() {
+              // Example grammar: E -> E '+' T | T; T -> T '*' F | F; F -> '(' E ')' | 'i'
+              // LLM token vocabulary: i, +, *, (, ), (i, +i
+              let mut llm_token_map = LLMTokenMap::new();
+              llm_token_map.insert(b"i".to_vec(), LLMTokenID(0));
+              llm_token_map.insert(b"+".to_vec(), LLMTokenID(1));
+              llm_token_map.insert(b"*".to_vec(), LLMTokenID(2));
+              llm_token_map.insert(b"(".to_vec(), LLMTokenID(3));
+              llm_token_map.insert(b")".to_vec(), LLMTokenID(4));
+              llm_token_map.insert(b"(i".to_vec(), LLMTokenID(5));
+              llm_token_map.insert(b"+i".to_vec(), LLMTokenID(6));
 
-      #[pymethods]
-      impl PyGrammarExpr {
-          #[staticmethod]
-          fn r#ref(name: &str) -> PyResult<Self> {
-              Ok(Self {
-                  inner: grammar_ref(name),
-              })
-          }
+              // Tokenizer regex for grammar tokens '+' '*' '(' ')' 'i'
+              let expr = groups![
+                  eat_u8(b'+'),
+                  eat_u8(b'*'),
+                  eat_u8(b'('),
+                  eat_u8(b')'),
+                  eat_u8(b'i'),
+              ];
+              let tokenizer = expr.build();
 
-          #[staticmethod]
-          fn sequence(exprs: Vec<PyGrammarExpr>) -> Self {
-              Self {
-                  inner: grammar_sequence(exprs.into_iter().map(|e| e.inner).collect()),
-              }
-          }
+              // Grammar productions
+              let productions = vec![
+                  prod("E", vec![nt("E"), t("PLUS"), nt("T")]),
+                  prod("E", vec![nt("T")]),
+                  prod("T", vec![nt("T"), t("TIMES"), nt("F")]),
+                  prod("T", vec![nt("F")]),
+                  prod("F", vec![t("LPAREN"), nt("E"), t("RPAREN")]),
+                  prod("F", vec![t("I")]),
+              ];
+              // Map grammar terminals to IDs matching regex order
+              let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+              grammar_token_map.insert(Terminal("PLUS".to_string()), TerminalID(0));
+              grammar_token_map.insert(Terminal("TIMES".to_string()), TerminalID(1));
+              grammar_token_map.insert(Terminal("LPAREN".to_string()), TerminalID(2));
+              grammar_token_map.insert(Terminal("RPAREN".to_string()), TerminalID(3));
+              grammar_token_map.insert(Terminal("I".to_string()), TerminalID(4));
 
-          #[staticmethod]
-          fn choice(exprs: Vec<PyGrammarExpr>) -> Self {
-              Self {
-                  inner: grammar_choice(exprs.into_iter().map(|e| e.inner).collect()),
-              }
-          }
+              let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
+              let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 6);
 
-          #[staticmethod]
-          fn optional(expr: PyGrammarExpr) -> Self {
-              Self {
-                  inner: grammar_optional(expr.inner),
-              }
-          }
+              // Initial state and step
+              let mut state = constraint.init();
+              state.step_with_all_llm_tokens();
+              let mask = state.get_mask();
+              // Expect LLM tokens that can start an expression: i (0), '(' (3), "(i" (5)
+              assert_eq!(mask, LLMTokenBV::from_iter([true, false, false, true, false, true, false]));
 
-          #[staticmethod]
-          fn repeat(expr: PyGrammarExpr) -> Self {
-              Self {
-                  inner: grammar_repeat(expr.inner),
-              }
-          }
-
-          #[staticmethod]
-          fn regex(regex: PyRegexExpr) -> Self {
-              Self {
-                  inner: grammar_regex(regex.inner)
-              }
-          }
-      }
-
-      #[pyclass]
-      #[derive(Clone)]
-      struct PyRegexExpr {
-          inner: RegexExpr,
-      }
-
-      #[pymethods]
-      impl PyRegexExpr {
-          #[staticmethod]
-          fn eat_u8(c: u8) -> Self {
-              Self { inner: eat_u8(c) }
-          }
-
-          #[staticmethod]
-          fn eat_u8_negation(c: u8) -> Self {
-              Self { inner: eat_u8_negation(c) }
-          }
-
-          #[staticmethod]
-          fn rep(expr: PyRegexExpr) -> Self {
-              Self { inner: rep(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn rep1(expr: PyRegexExpr) -> Self {
-              Self { inner: rep1(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn opt(expr: PyRegexExpr) -> Self {
-              Self { inner: opt(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn prec(precedence: isize, expr: PyRegexExpr) -> PyRegexGroup {
-              PyRegexGroup { inner: prec(precedence, expr.inner) }
-          }
-
-          #[staticmethod]
-          fn eps() -> Self {
-              Self { inner: eps() }
-          }
-
-          #[staticmethod]
-          fn seq(exprs: Vec<PyRegexExpr>) -> Self {
-              Self { inner: regex_seq(exprs.into_iter().map(|e| e.inner).collect()) }
-          }
-
-          #[staticmethod]
-          fn choice(exprs: Vec<PyRegexExpr>) -> Self {
-              Self { inner: regex_choice(exprs.into_iter().map(|e| e.inner).collect()) }
-          }
-
-          fn build(&self) -> PyResult<PyRegex> {
-              Ok(PyRegex { inner: self.inner.clone().build() })
-          }
-      }
-
-      #[pyclass]
-      #[derive(Clone)]
-      struct PyRegexGroup {
-          inner: sep1::finite_automata::ExprGroup,
-      }
-
-      #[pymethods]
-      impl PyRegexGroup {
-          #[staticmethod]
-          fn greedy_group(expr: PyRegexExpr) -> Self {
-              Self { inner: greedy_group(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn non_greedy_group(expr: PyRegexExpr) -> Self {
-              Self { inner: non_greedy_group(expr.inner) }
-          }
-      }
-
-      #[pyclass]
-      #[derive(Clone)]
-      struct PyRegexGroups {
-          inner: RegexGroups,
-      }
-
-      #[pymethods]
-      impl PyRegexGroups {
-          #[staticmethod]
-          fn groups(groups: Vec<PyRegexGroup>) -> Self {
-              Self {
-                  inner: regex_groups(groups.into_iter().map(|g| g.inner).collect()),
-              }
-          }
-
-          fn build(&self) -> PyResult<PyRegex> {
-              Ok(PyRegex { inner: self.inner.clone().build() })
-          }
-      }
-
-      #[pyclass]
-      #[derive(Clone)]
-      pub struct PyRegex {
-          inner: Regex,
-      }
-
-      #[pymethods]
-      impl PyRegex {
-      }
-
-
-      #[pyclass]
-      #[derive(Clone)]
-      pub struct PyGrammar {
-          inner: Grammar,
-      }
-
-      #[pymethods]
-      impl PyGrammar {
-          #[new]
-          fn new(exprs: Vec<(String, PyGrammarExpr)>) -> Self {
-              let inner = Grammar::from_exprs(exprs.into_iter().map(|(s, e)| (s, e.inner)).collect());
-              Self { inner }
-          }
-
-          fn glr_parser(&self) -> PyGLRParser {
-              PyGLRParser { inner: self.inner.glr_parser() }
-          }
-
-          fn print(&self) {
-              println!("{:?}", self.inner)
-          }
-      }
-
-      #[pyclass]
-      #[derive(Clone)]
-      pub struct PyGLRParser {
-          inner: GLRParser,
-      }
-
-      #[pyclass]
-      #[derive(Clone)]
-      pub struct PyGrammarConstraint {
-          inner: Arc<GrammarConstraint>,
-      }
-
-      #[pymethods]
-      impl PyGrammarConstraint {
-          #[new]
-          fn new(py: Python, grammar: PyGrammar, token_to_id: &Bound<'_, PyDict>, max_llm_token_id: usize) -> PyResult<Self> {
-              let mut llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = BiBTreeMap::new();
-              for (key, value) in token_to_id.iter() {
-                  let token = key.extract::<&[u8]>()?;
-                  let id = value.extract::<usize>()?;
-                  llm_token_map.insert(token.to_vec(), LLMTokenID(id));
-              }
-
-              // Assuming Grammar has methods to get tokenizer and parser
-              // You might need to adjust this based on your actual Grammar implementation
-              let tokenizer = grammar.inner.tokenizer.clone(); // Placeholder
-              let parser = grammar.inner.glr_parser(); // Placeholder
-
-              let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, max_llm_token_id);
-              Ok(Self { inner: Arc::new(constraint) })
-          }
-
-          fn print(&self) {
-              // Assuming a function like print_precomputed exists and takes &Precomputed
-              // Or implement a method on GrammarConstraint to print/dump its state
-              // print_precomputed(&self.inner.precomputed);
-              println!("Printing precomputed data is not implemented in this binding yet.");
-          }
-      }
-
-
-      #[self_referencing]
-      struct PyGrammarConstraintStateWrapper {
-          // Owns the Arc'd constraint
-          constraint: PyGrammarConstraint,
-          // Borrows from the owned constraint via the 'this lifetime
-          #[borrows(constraint)]
-          #[covariant] // Allows the lifetime 'this to be shortened
-          inner: GrammarConstraintState<'this>,
-      }
-
-      #[pyclass]
-      pub struct PyGrammarConstraintState {
-          inner: PyGrammarConstraintStateWrapper,
-      }
-
-      #[pymethods]
-      impl PyGrammarConstraintState {
-          #[new]
-          fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
-              // Use the builder provided by ouroboros, and immediately step
-              Ok(PyGrammarConstraintState {
-                  inner: PyGrammarConstraintStateWrapperTryBuilder {
-                      constraint,
-                      inner_builder: |constraint: &PyGrammarConstraint| {
-                          // init state and step with all LLM tokens
-                          let mut state = constraint.inner.init();
-                          state.step_with_all_llm_tokens();
-                          Ok::<_, PyErr>(state)
-                      },
-                  }
-                  .try_build()?
-              })
-          }
-
-          fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-              let bitset = self.inner.with_inner_mut(|state| state.get_mask());
-              let bools: Vec<bool> = bitset.iter().map(|bit_ref| *bit_ref).collect();
-              let array = bools.into_pyarray_bound(py);
-              Ok(array)
-          }
-
-          fn commit(&mut self, llm_token_id: usize) {
-              self.inner.with_inner_mut(|state| {
-                  state.commit(LLMTokenID(llm_token_id));
+              // Commit "(i" twice (simulate consuming "(i" twice)
+              for _ in 0..2 {
+                  state.commit(LLMTokenID(5));
                   state.step_with_all_llm_tokens();
-              });
-              
+              }
+              let mask = state.get_mask();
+              // Now expect '+', '*', ')', '+i' => IDs 1,2,4,6
+              assert_eq!(mask, LLMTokenBV::from_iter([false, true, true, false, true, false, true]));
+          }
+      }
+    src/glr/table.rs: |-
+      use super::items::{compute_closure, compute_goto, split_on_dot, Item};
+      use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::parser::GLRParser;
+      use bimap::BiBTreeMap;
+      use std::collections::{HashMap, VecDeque};
+      use std::collections::{BTreeMap, BTreeSet};
+      use std::fmt::Display;
+      use crate::glr::analyze::{drop_dead, validate};
+      pub use crate::types::{TerminalID};
+
+      type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
+      type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
+      type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
+      type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Row>;
+      type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
+      type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
+      pub type Stage7Table = BTreeMap<StateID, Stage7Row>;
+
+
+      type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
+      #[derive(Debug)]
+      struct Stage2Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeSet<Item>,
+      }
+      #[derive(Debug)]
+      struct Stage3Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Terminal, BTreeSet<Item>>,
+      }
+      #[derive(Debug)]
+      struct Stage4Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+      }
+      type Stage5Row = Stage4Row;
+      #[derive(Debug)]
+      struct Stage6Row {
+          shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+      }
+
+      #[derive(Debug)]
+      enum Stage6ShiftsAndReduces {
+          Shift(BTreeSet<Item>),
+          Reduce(ProductionID),
+          Split {
+              shift: Option<BTreeSet<Item>>,
+              reduces: BTreeSet<ProductionID>,
+          },
+      }
+
+      #[derive(Debug, Clone)]
+      pub enum Stage7ShiftsAndReduces {
+          Shift(StateID),
+          Reduce { production_id: ProductionID, nonterminal_id: NonTerminalID, len: usize },
+          Split {
+              shift: Option<StateID>,
+              reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>,
+          },
+      }
+
+      #[derive(Debug, Clone)]
+      pub struct Stage7Row {
+          pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
+          pub gotos: BTreeMap<NonTerminalID, StateID>,
+      }
+
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct StateID(pub usize);
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct ProductionID(pub usize);
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct NonTerminalID(pub usize);
+
+      type Stage1Result = Stage1Table;
+      type Stage2Result = Stage2Table;
+      type Stage3Result = Stage3Table;
+      type Stage4Result = Stage4Table;
+      type Stage5Result = Stage5Table;
+      type Stage6Result = Stage6Table;
+      type Stage7Result = (
+          Stage7Table,
+          BiBTreeMap<BTreeSet<Item>, StateID>,
+          StateID,
+      );
+
+      fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+          let initial_item = Item {
+              production: productions[start_production_id].clone(),
+              dot_position: 0,
+          };
+          let initial_closure = BTreeSet::from([initial_item]);
+          let mut worklist = VecDeque::from([initial_closure.clone()]);
+
+          let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
+
+          while let Some(items) = worklist.pop_front() {
+              if transitions.contains_key(&items) {
+                  continue;
+              }
+
+              let closure = compute_closure(&items, productions);
+              let splits = split_on_dot(&closure);
+              let mut row = BTreeMap::new();
+
+              for (symbol, items) in splits {
+                  if symbol.is_none() {
+                      continue;
+                  }
+                  let goto_set = compute_goto(&items);
+                  row.insert(symbol.clone(), goto_set.clone());
+                  worklist.push_back(goto_set);
+              }
+
+              transitions.insert(items.clone(), row);
+          }
+
+          transitions
+      }
+
+      fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
+          let mut stage_2_table = BTreeMap::new();
+          for (item_set, transitions) in stage_1_table {
+              let mut shifts = BTreeMap::new();
+              let mut gotos = BTreeMap::new();
+              let mut reduces = BTreeSet::new();
+
+              for item in &item_set {
+                  if item.dot_position >= item.production.rhs.len() {
+                      reduces.insert(item.clone());
+                  }
+              }
+
+              for (symbol_opt, next_item_set) in &transitions {
+                  if let Some(symbol) = symbol_opt {
+                      match symbol {
+                          Symbol::Terminal(t) => {
+                              shifts.insert(t.clone(), next_item_set.clone());
+                          }
+                          Symbol::NonTerminal(nt) => {
+                              gotos.insert(nt.clone(), next_item_set.clone());
+                          }
+                      }
+                  }
+              }
+
+              stage_2_table.insert(
+                  item_set,
+                  Stage2Row {
+                      shifts,
+                      gotos,
+                      reduces,
+                  },
+              );
+          }
+          stage_2_table
+      }
+
+      fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
+          let follow_sets = compute_follow_sets(productions);
+
+          let mut stage_3_table = BTreeMap::new();
+
+          for (item_set, row) in stage_2_table {
+              let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
+
+              for item in &row.reduces {
+                  let lhs = &item.production.lhs;
+                  let lookaheads = follow_sets.get(lhs).unwrap();
+
+                  for terminal in lookaheads {
+                      reduces
+                          .entry(terminal.clone())
+                          .or_default()
+                          .insert(item.clone());
+                  }
+              }
+
+              stage_3_table.insert(
+                  item_set,
+                  Stage3Row {
+                      shifts: row.shifts,
+                      gotos: row.gotos,
+                      reduces,
+                  },
+              );
+          }
+
+          stage_3_table
+      }
+
+      fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
+          let production_ids: BTreeMap<Production, ProductionID> = productions
+              .iter()
+              .enumerate()
+              .map(|(i, p)| (p.clone(), ProductionID(i)))
+              .collect();
+
+          let mut stage_4_table = BTreeMap::new();
+
+          for (item_set, row) in stage_3_table {
+              let mut reduces = BTreeMap::new();
+
+              for (terminal, items) in row.reduces {
+                  let mut prod_ids = BTreeSet::new();
+                  for item in items {
+                      let prod_id = production_ids.get(&item.production).unwrap();
+                      prod_ids.insert(*prod_id);
+                  }
+                  reduces.insert(terminal.clone(), prod_ids);
+              }
+
+              stage_4_table.insert(
+                  item_set,
+                  Stage4Row {
+                      shifts: row.shifts,
+                      gotos: row.gotos,
+                      reduces,
+                  },
+              );
+          }
+
+          stage_4_table
+      }
+
+      fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
+          // todo: remove this
+          stage_4_table
+      }
+
+      fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
+          let mut stage_6_table = BTreeMap::new();
+
+          for (item_set, row) in stage_5_table {
+              let mut shifts_and_reduces = BTreeMap::new();
+
+              for (terminal, next_item_set) in row.shifts {
+                  shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Shift(next_item_set));
+              }
+
+              for (terminal, mut production_ids) in row.reduces {
+                  if let Some(mut existing) = shifts_and_reduces.remove(&terminal) {
+                      match existing {
+                          Stage6ShiftsAndReduces::Shift(shift_set) => {
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
+                                  shift: Some(shift_set.clone()),
+                                  reduces: production_ids.clone(),
+                              });
+                          }
+                          Stage6ShiftsAndReduces::Reduce(existing_production_id) => {
+                              production_ids.insert(existing_production_id);
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
+                                  shift: None,
+                                  reduces: production_ids,
+                              });
+                          }
+                          Stage6ShiftsAndReduces::Split { shift, mut reduces } => {
+                              reduces.extend(production_ids.into_iter());
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift, reduces });
+                          }
+                      }
+                  } else {
+                      // If there's only one production ID, we can optimize by storing it directly
+                      if production_ids.len() == 1 {
+                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Reduce(production_ids.iter().next().unwrap().clone()));
+                      } else {
+                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift: None, reduces: production_ids });
+                      }
+                  }
+              }
+
+              stage_6_table.insert(
+                  item_set,
+                  Stage6Row {
+                      shifts_and_reduces,
+                      gotos: row.gotos,
+                  },
+              );
+          }
+
+          stage_6_table
+      }
+
+      fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
+          let mut item_set_map = BiBTreeMap::new();
+          let mut next_state_id = 0;
+
+          let mut terminals = BTreeSet::new();
+          let mut non_terminals = BTreeSet::new();
+
+          for (item_set, row) in &stage_6_table {
+              item_set_map.insert(item_set.clone(), StateID(next_state_id));
+              next_state_id += 1;
+
+              for t in row.shifts_and_reduces.keys() {
+                  terminals.insert(t.clone());
+              }
+
+              for nt in row.gotos.keys() {
+                  non_terminals.insert(nt.clone());
+              }
+          }
+
+          let mut stage_7_table = BTreeMap::new();
+
+          for (item_set, row) in stage_6_table {
+              let state_id = *item_set_map.get_by_left(&item_set).unwrap();
+              let mut shifts_and_reduces = BTreeMap::new();
+              let mut gotos = BTreeMap::new();
+
+              for (terminal, action) in row.shifts_and_reduces {
+                  let terminal_id = *terminal_map.get_by_left(&terminal).expect(format!("{:?} not found in terminal map {:?}", terminal, terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+                  let converted_action = match action {
+                      Stage6ShiftsAndReduces::Shift(next_item_set) => {
+                          let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
+                          Stage7ShiftsAndReduces::Shift(next_state_id)
+                      }
+                      Stage6ShiftsAndReduces::Reduce(production_id) => {
+                          let production = productions.get(production_id.0).unwrap();
+                          let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
+                          let len = production.rhs.len();
+                          Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len }
+                      }
+                      Stage6ShiftsAndReduces::Split { shift, reduces } => {
+                          let shift_state_id = shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
+                          let mut len_to_nt_to_production_id: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
+                          for production_id in reduces {
+                              let production = productions.get(production_id.0).unwrap();
+                              let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
+                              let len = production.rhs.len();
+                              len_to_nt_to_production_id.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id);
+                          }
+                          Stage7ShiftsAndReduces::Split { shift: shift_state_id, reduces: len_to_nt_to_production_id }
+                      }
+                  };
+                  shifts_and_reduces.insert(terminal_id, converted_action);
+              }
+
+              for (nonterminal, next_item_set) in row.gotos {
+                  let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
+                  let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
+                  gotos.insert(non_terminal_id, next_state_id);
+              }
+
+              stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos });
+          }
+
+          let start_item = Item {
+              production: productions[start_production_id].clone(),
+              dot_position: 0,
+          };
+          let start_state_id = *item_set_map.get_by_left(&BTreeSet::from([start_item])).unwrap();
+
+          (stage_7_table, item_set_map, start_state_id)
+      }
+
+      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
+          crate::debug!(2, "Validating");
+          validate(productions).expect("Validation error");
+
+          crate::debug!(2, "Stage 1");
+          let stage_1_table = stage_1(productions, start_production_id);
+          crate::debug!(2, &stage_1_table);
+          crate::debug!(2, "Stage 2");
+          let stage_2_table = stage_2(stage_1_table, productions);
+          crate::debug!(2, &stage_2_table);
+          crate::debug!(2, "Stage 3");
+          let stage_3_table = stage_3(stage_2_table, productions);
+          crate::debug!(2, &stage_3_table);
+          crate::debug!(2, "Stage 4");
+          let stage_4_table = stage_4(stage_3_table, productions);
+          crate::debug!(2, &stage_4_table);
+          crate::debug!(2, "Stage 5");
+          let stage_5_table = stage_5(stage_4_table, productions);
+          crate::debug!(2, &stage_5_table);
+          crate::debug!(2, "Stage 6");
+          let stage_6_table = stage_6(stage_5_table);
+          crate::debug!(2, &stage_6_table);
+          crate::debug!(2, "Stage 7");
+          let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, productions, start_production_id, &terminal_map, &non_terminal_map);
+          crate::debug!(2, &stage_7_table);
+          crate::debug!(2, "Done generating GLR parser");
+
+          GLRParser::new(stage_7_table, productions.to_vec(), terminal_map, non_terminal_map, item_set_map, start_state_id)
+      }
+
+      pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
+          let terminal_map = assign_terminal_ids(productions);
+          let non_terminal_map = assign_non_terminal_ids(productions);
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
+      }
+
+      pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
+          let non_terminal_map = assign_non_terminal_ids(productions);
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
+      }
+
+      pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
+          let mut terminal_map = BiBTreeMap::new();
+          let mut next_terminal_id = 0;
+
+          for p in productions {
+              for symbol in &p.rhs {
+                  if let Symbol::Terminal(t) = symbol {
+                      if !terminal_map.contains_left(t) {
+                          terminal_map.insert(t.clone(), TerminalID(next_terminal_id));
+                          next_terminal_id += 1;
+                      }
+                  }
+              }
+          }
+
+          terminal_map
+      }
+
+      pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerminal, NonTerminalID> {
+          let mut non_terminal_map = BiBTreeMap::new();
+          let mut next_non_terminal_id = 0;
+
+          for p in productions {
+              if !non_terminal_map.contains_left(&p.lhs) {
+                  non_terminal_map.insert(p.lhs.clone(), NonTerminalID(next_non_terminal_id));
+                  next_non_terminal_id += 1;
+              }
+          }
+          non_terminal_map
+      }
+    src/glr/parser.rs: |-
+      use crate::datastructures::gss::BulkMerge;
+      use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::items::Item;
+      use crate::glr::table::{
+          NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID,
+      };
+      use crate::datastructures::gss::{GSSNode, GSSTrait};
+
+      use bimap::BiBTreeMap;
+      use std::collections::{BTreeMap, BTreeSet};
+      use std::fmt::{Debug, Display, Formatter};
+      use std::hash::Hash;
+      use std::sync::Arc;
+      use crate::debug;
+
+      pub trait AndAndOr: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
+          fn and(&self, other: &Self) -> Self;
+          fn or(&self, other: &Self) -> Self;
+      }
+
+      impl AndAndOr for () {
+          fn and(&self, _: &Self) -> Self { () }
+          fn or(&self, _: &Self) -> Self { () }
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct ParseStateNodeContent<T: AndAndOr> {
+          pub state_id: StateID,
+          pub t: T,
+      }
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct ParseState<T: AndAndOr> {
+          pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
+          pub status: ParseStatus,
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub enum Action {
+          Shift(TerminalID),
+          Reduce { production_id: ProductionID, len: usize, nonterminal_id: NonTerminalID },
+      }
+
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub enum ParseStatus {
+          Active,
+          Inactive(StopReason),
+      }
+
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub enum StopReason {
+          ActionNotFound,
+          GotoNotFound,
+      }
+
+
+      // TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
+      #[derive(Clone)]
+      pub struct GLRParser {
+          pub stage_7_table: Stage7Table,
+          pub productions: Vec<Production>,
+          pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
+          pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+          pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+          pub start_state_id: StateID,
+      }
+
+      impl GLRParser {
+          pub fn new(
+              stage_7_table: Stage7Table,
+              productions: Vec<Production>,
+              terminal_map: BiBTreeMap<Terminal, TerminalID>,
+              non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+              item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+              start_state_id: StateID,
+          ) -> Self {
+              Self {
+                  stage_7_table,
+                  productions,
+                  terminal_map,
+                  non_terminal_map,
+                  item_set_map,
+                  start_state_id,
+              }
+          }
+
+          pub fn init_glr_parser<T: AndAndOr + Default>(&self) -> GLRParserState<T> {
+              self.init_glr_parser_with_t(T::default())
+          }
+
+          pub fn init_glr_parser_with_t<T: AndAndOr>(&self, t: T) -> GLRParserState<T> {
+              GLRParserState {
+                  parser: self,
+                  active_states: vec![self.init_parse_state_with_t(t)],
+                  inactive_states: Vec::new(),
+              }
+          }
+
+          pub fn init_glr_parser_from_parse_state<T: AndAndOr>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
+              GLRParserState {
+                  parser: self,
+                  active_states: vec![parse_state],
+                  inactive_states: Vec::new(),
+              }
+          }
+
+          pub fn init_glr_parser_from_parse_states<T: AndAndOr>(
+              &self,
+              parse_states: Vec<ParseState<T>>,
+          ) -> GLRParserState<T> {
+              GLRParserState {
+                  parser: self,
+                  active_states: parse_states,
+                  inactive_states: Vec::new(),
+              }
+          }
+
+          pub fn init_parse_state<T: AndAndOr + Default>(&self) -> ParseState<T> {
+              self.init_parse_state_with_t(T::default())
+          }
+
+          pub fn init_parse_state_with_t<T: AndAndOr>(&self, t: T) -> ParseState<T> {
+              let initial_content = ParseStateNodeContent {
+                  state_id: self.start_state_id,
+                  t,
+              };
+              ParseState {
+                  stack: Arc::new(GSSNode::new(initial_content)),
+                  status: ParseStatus::Active,
+              }
+          }
+
+          pub fn parse<T: AndAndOr + Default>(&self, input: &[TerminalID]) -> GLRParserState<T> {
+              let mut state = self.init_glr_parser();
+              state.parse(input);
+              state
           }
       }
 
-      #[pymodule]
-      fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-          m.add_class::<PyGrammarExpr>()?;
-          m.add_class::<PyRegexExpr>()?;
-          m.add_class::<PyRegexGroup>()?;
-          m.add_class::<PyRegexGroups>()?;
-          m.add_class::<PyGrammar>()?;
-          m.add_class::<PyGrammarConstraint>()?;
-          m.add_class::<PyGrammarConstraintState>()?;
-          Ok(())
+      impl Debug for GLRParser {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              write!(f, "{}", self)
+          }
       }
-    python/example.py: |-
-      import _sep1
-      import numpy as np
 
-      # Define regexes using PyRegexExpr
-      plus_regex = _sep1.PyRegexExpr.eat_u8(ord('+'))
-      times_regex = _sep1.PyRegexExpr.eat_u8(ord('*'))
-      open_paren_regex = _sep1.PyRegexExpr.eat_u8(ord('('))
-      close_paren_regex = _sep1.PyRegexExpr.eat_u8(ord(')'))
-      i_regex = _sep1.PyRegexExpr.eat_u8(ord('i'))
+      impl Display for GLRParser {
+          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+              let stage_7_table = &self.stage_7_table;
+              let terminal_map = &self.terminal_map;
+              let non_terminal_map = &self.non_terminal_map;
+              let item_set_map = &self.item_set_map;
 
-      # Define grammar rules using the regexes
-      exprs = [
-          ("E", _sep1.PyGrammarExpr.choice([
-              _sep1.PyGrammarExpr.sequence([
-                  _sep1.PyGrammarExpr.ref("E"),
-                  _sep1.PyGrammarExpr.regex(plus_regex),
-                  _sep1.PyGrammarExpr.ref("T"),
-              ]),
-              _sep1.PyGrammarExpr.ref("T"),
-          ])),
-          ("T", _sep1.PyGrammarExpr.choice([
-              _sep1.PyGrammarExpr.sequence([
-                  _sep1.PyGrammarExpr.ref("T"),
-                  _sep1.PyGrammarExpr.regex(times_regex),
-                  _sep1.PyGrammarExpr.ref("F"),
-              ]),
-              _sep1.PyGrammarExpr.ref("F"),
-          ])),
-          ("F", _sep1.PyGrammarExpr.choice([
-              _sep1.PyGrammarExpr.sequence([
-                  _sep1.PyGrammarExpr.regex(open_paren_regex),
-                  _sep1.PyGrammarExpr.ref("E"),
-                  _sep1.PyGrammarExpr.regex(close_paren_regex),
-              ]),
-              _sep1.PyGrammarExpr.regex(i_regex),
-          ])),
-      ]
+              writeln!(f, "Parse Table:")?;
+              writeln!(f, "  Start State: {}", self.start_state_id.0)?;
+              for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
+                  writeln!(f, "  State {}:", state_id.0)?;
 
-      grammar = _sep1.PyGrammar(exprs)
+                  writeln!(f, "    Items:")?;
+                  let item_set = item_set_map.get_by_right(&state_id).unwrap();
+                  for item in item_set {
+                      write!(f, "      - {} ->", item.production.lhs.0)?;
+                      for (i, symbol) in item.production.rhs.iter().enumerate() {
+                          if i == item.dot_position {
+                              write!(f, " •")?;
+                          }
+                          match symbol {
+                              Symbol::Terminal(terminal) => write!(f, " {:?}", terminal.0)?,
+                              Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
+                          }
+                      }
+                      if item.dot_position == item.production.rhs.len() {
+                          write!(f, " •")?;
+                      }
+                      writeln!(f)?;
+                  }
 
-      # Define LLM tokens
-      llm_tokens = [b"i", b"+", b"*", b"(", b")", b"(i", b"+i"]
-      llm_token_to_id = {token: i for i, token in enumerate(llm_tokens)}
+                  writeln!(f, "    Actions:")?;
+                  for (&terminal_id, action) in &row.shifts_and_reduces {
+                      let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
+                      match action {
+                          Stage7ShiftsAndReduces::Shift(next_state_id) => {
+                              writeln!(f, "      - {:?} -> Shift {}", terminal.0, next_state_id.0)?;
+                          }
+                          Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
+                              let nt = non_terminal_map.get_by_right(nonterminal).unwrap();
+                              writeln!(f, "      - {:?} -> Reduce {} (len {})", terminal.0, nt.0, len)?;
+                          }
+                          Stage7ShiftsAndReduces::Split { shift, reduces } => {
+                              writeln!(f, "      - {:?} -> Conflict:", terminal.0)?;
+                              if let Some(shift_state) = shift {
+                                  writeln!(f, "        - Shift {}", shift_state.0)?;
+                              }
+                              for (len, nt_id_to_prod_ids) in reduces {
+                                  writeln!(f, "        - Reduce (len {}):", len)?;
+                                  for (nt_id, prod_ids) in nt_id_to_prod_ids {
+                                      let nt = non_terminal_map.get_by_right(nt_id).unwrap();
+                                      for prod_id in prod_ids {
+                                          let prod = self.productions.get(prod_id.0).unwrap();
+                                          writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
+                                      }
+                                  }
 
-      # Create grammar constraint
-      grammar_constraint = _sep1.PyGrammarConstraint(grammar, llm_token_to_id, len(llm_tokens))
-      grammar_constraint_state = _sep1.PyGrammarConstraintState(grammar_constraint)
+                              }
+                          }
+                      }
+                  }
 
-      def llm_tokens_to_ids(tokens):
-          return [llm_token_to_id[token] for token in tokens]
+                  writeln!(f, "    Gotos:")?;
+                  for (&non_terminal_id, &next_state_id) in &row.gotos {
+                      let non_terminal = non_terminal_map.get_by_right(&non_terminal_id).unwrap();
+                      writeln!(f, "      - {} -> {}", non_terminal.0, next_state_id.0)?;
+                  }
+              }
 
-      # Initial mask check
-      mask = grammar_constraint_state.get_mask()
-      expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
-      print(f"Initial Mask: {mask}")
-      assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+              writeln!(f, "\nTerminal Map (name to terminal ID):")?;
+              for (terminal, terminal_id) in terminal_map {
+                  writeln!(f, "  {} -> {}", terminal.0, terminal_id.0)?;
+              }
 
+              writeln!(f, "\nNon-Terminal Map:")?;
+              for (non_terminal, non_terminal_id) in non_terminal_map {
+                  writeln!(f, "  {} -> {}", non_terminal.0, non_terminal_id.0)?;
+              }
 
-      # # Commit prefill tokens
-      # prefill = llm_tokens_to_ids([b"i", b"+"])
-      # for token_id in prefill:
-      #     grammar_constraint_state.commit(token_id)
-      #
-      # # Mask check after prefill
-      # mask = grammar_constraint_state.get_mask()
-      # expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
-      # print(f"Mask after committing prefill: {mask}")
-      # assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+              Ok(())
+          }
+      }
 
+      #[derive(Debug, Clone)]
+      pub struct GLRParserState<'a, T: AndAndOr> {
+          pub parser: &'a GLRParser,
+          pub active_states: Vec<ParseState<T>>,
+          pub inactive_states: Vec<ParseState<T>>,
+      }
 
-      # Commit prefill tokens
-      # prefill = llm_tokens_to_ids([b"(i", b"+", b"i", b"*", b"i"])
-      prefill = llm_tokens_to_ids([b"(i", b"(i"])
-      for token_id in prefill:
-          grammar_constraint_state.commit(token_id)
+      impl<'a, T: AndAndOr> GLRParserState<'a, T> {
+          pub fn parse(&mut self, input: &[TerminalID]) {
+              self.parse_part(input);
+          }
 
-      # Mask check after prefill
-      mask = grammar_constraint_state.get_mask()
-      expected_mask = set(llm_tokens_to_ids([b"+", b"*", b")", b"+i"]))
-      print(f"Mask after committing prefill: {mask}")
-      assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+          pub fn parse_part(&mut self, input: &[TerminalID]) {
+              for &token_id in input {
+                  self.step(token_id);
+              }
+          }
+
+          pub fn with_step(mut self, token_id: TerminalID) -> Self {
+              let mut parser = self;
+              parser.step(token_id);
+              parser
+          }
+
+          pub fn step(&mut self, token_id: TerminalID) {
+              let mut next_active_states = Vec::new();
+              let mut inactive_states = Vec::new();
+
+              while let Some(state) = self.active_states.pop() {
+                  let stack = state.stack; // Arc<GSSNode<ParseStateNodeContent<T>>>
+                  let current_content = stack.peek(); // &ParseStateNodeContent<T>
+                  let current_state_id = current_content.state_id;
+                  let current_t = &current_content.t;
+
+                  let row = self.parser.stage_7_table.get(&current_state_id).unwrap();
+
+                  if let Some(action) = row.shifts_and_reduces.get(&token_id) {
+                      match action {
+                          Stage7ShiftsAndReduces::Shift(next_state_id) => {
+                              debug!(3, "Shifting");
+                              let new_content = ParseStateNodeContent { state_id: *next_state_id, t: current_t.clone() };
+                              let new_stack = stack.push(new_content);
+                              next_active_states.push(ParseState {
+                                  // stack: Arc::new(new_stack), // GSSNode::push now returns Arc
+                                  stack: Arc::new(new_stack),
+                                  status: ParseStatus::Active,
+                              });
+                          }
+                          Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
+                              debug!(3, "Reducing by production {:?} with len {}", production_id, len);
+                              let mut popped_stack_nodes = stack.popn(*len);
+                              popped_stack_nodes.bulk_merge();
+                              for stack_node in popped_stack_nodes {
+                                  // stack_node is Arc<GSSNode<ParseStateNodeContent<T>>>
+                                  let revealed_content = stack_node.peek(); // &ParseStateNodeContent<T>
+                                  let revealed_state_id = revealed_content.state_id;
+                                  let revealed_t = &revealed_content.t;
+                                  let goto_row = self.parser.stage_7_table.get(&revealed_state_id).unwrap();
+
+                                  if let Some(&goto_state) = goto_row.gotos.get(nonterminal) {
+                                      debug!(3, "Going to state {:?}", goto_state);
+                                      // Apply 'and' operation
+                                      let combined_t = revealed_t.and(current_t);
+                                      let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
+                                      let new_stack = stack_node.push(new_content);
+                                      self.active_states.push(ParseState {
+                                          stack: Arc::new(new_stack),
+                                          status: ParseStatus::Active,
+                                      });
+                                  } else {
+                                      inactive_states.push(ParseState {
+                                          stack: stack_node,
+                                          status: ParseStatus::Inactive(StopReason::GotoNotFound),
+                                      });
+                                  }
+                              }
+                          }
+                          Stage7ShiftsAndReduces::Split { shift, reduces } => {
+                              debug!(3, "Split");
+                              if let Some(shift_state) = shift {
+                                  // Shift part (same as above)
+                                  let new_content = ParseStateNodeContent { state_id: *shift_state, t: current_t.clone() };
+                                  let new_stack = stack.push(new_content);
+                                  next_active_states.push(ParseState {
+                                      stack: Arc::new(new_stack),
+                                      status: ParseStatus::Active,
+                                  });
+                              }
+
+                              for (len, nt_ids) in reduces {
+                                  let mut popped_stack_nodes = stack.popn(*len);
+                                  popped_stack_nodes.bulk_merge();
+                                  for (nt_id, prod_ids) in nt_ids {
+                                      for stack_node in &popped_stack_nodes {
+                                          // Reduce part (same as above)
+                                          let revealed_content = stack_node.peek();
+                                          let revealed_state_id = revealed_content.state_id;
+                                          let revealed_t = &revealed_content.t;
+                                          let goto_row = self.parser.stage_7_table.get(&revealed_state_id).unwrap();
+
+                                          if let Some(&goto_state) = goto_row.gotos.get(nt_id) {
+                                              // Apply 'and' operation
+                                              let combined_t = revealed_t.and(current_t);
+                                              let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
+                                              let new_stack = Arc::new(stack_node.push(new_content));
+                                              for prod_id in prod_ids {
+                                                  self.active_states.push(ParseState {
+                                                      stack: new_stack.clone(),
+                                                      status: ParseStatus::Active,
+                                                  });
+                                              }
+                                          } else {
+                                              inactive_states.push(ParseState {
+                                                  stack: stack_node.clone(),
+                                                  status: ParseStatus::Inactive(StopReason::GotoNotFound),
+                                              });
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  } else {
+                      inactive_states.push(ParseState {
+                          stack,
+                          status: ParseStatus::Inactive(StopReason::ActionNotFound),
+                      });
+                  }
+              }
+              self.active_states = next_active_states;
+              self.inactive_states.extend(inactive_states);
+          }
+
+          // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
+          pub fn merge_active_states(&mut self) {
+              let mut active_state_map: BTreeMap<ParseStateKey, ParseState<T>> = BTreeMap::new();
+
+              for state in std::mem::take(&mut self.active_states) {
+                  let key = state.key();
+                  active_state_map.insert_with(key, state, |existing, new_state| {
+                      existing.merge(new_state);
+                  });
+              }
+
+              self.active_states = active_state_map.into_values().collect();
+          }
+
+          pub fn merge_with(&mut self, other: GLRParserState<T>) {
+              assert!(std::ptr::eq(self.parser, other.parser));
+              self.active_states.extend(other.active_states);
+              self.inactive_states.extend(other.inactive_states);
+          }
+
+          pub fn fully_matches(&self) -> bool {
+              !self.fully_matching_states().is_empty()
+          }
+
+          pub fn fully_matching_states(&self) -> Vec<&ParseState<T>> {
+              self.inactive_states.iter().filter(|state| state.status == ParseStatus::Inactive(StopReason::GotoNotFound)).collect()
+          }
+
+          pub fn can_match(&self) -> bool {
+              !self.active_states.is_empty()
+          }
+
+          pub fn matches_or_can_match(&self) -> bool {
+              self.can_match() || self.fully_matches()
+          }
+
+          pub fn is_ok(&self) -> bool {
+              self.matches_or_can_match()
+          }
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct ParseStateKey {
+          stack_state_id: StateID,
+          // Removed action_stack
+      }
+
+      impl<T: AndAndOr> ParseState<T> {
+          pub fn key(&self) -> ParseStateKey {
+              ParseStateKey {
+                  stack_state_id: self.stack.peek().state_id,
+              }
+          }
+
+          /// Merges `other` into `self`. Assumes `self.key() == other.key()`.
+          /// Merges the GSS structures and combines the `t` value at the top node using `AndAndOr::or`.
+          pub fn merge(&mut self, other: ParseState<T>) {
+              assert_eq!(self.key(), other.key());
+
+              // Combine 't' values at the top node using 'or'
+              let self_content = self.stack.peek();
+              let other_content = other.stack.peek();
+              let combined_t = self_content.t.or(&other_content.t);
+
+              // Get mutable access to self.stack, potentially cloning if shared (Arc > 1)
+              let mut mutable_stack = Arc::make_mut(&mut self.stack);
+
+              // Update the 't' value in the mutable top node's content
+              mutable_stack.value.t = combined_t;
+
+              // Merge the parent structures using GSSNode's merge
+              mutable_stack.merge_unchecked(Arc::unwrap_or_clone(other.stack));
+          }
+      }
+
+      pub trait InsertWith<K, V> {
+          fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F);
+      }
+
+      impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
+          fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F) {
+              match self.entry(k) {
+                  std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                      let value = occupied.get_mut();
+                      combine(value, v);
+                  }
+                  std::collections::btree_map::Entry::Vacant(vacant) => {
+                      vacant.insert(v);
+                  }
+              }
+          }
+      }
   diffs_applied_this_send: true
 system:
   message: |2
@@ -1658,11 +2782,11 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - o4-mini
+    - copy-one/paste
   code_completion_model:
-    - gemini/gemini-2.0-flash-thinking-exp-01-21
+    - gemini/gemini-2.5-flash-preview-04-17
   commit_message_model:
-    - gemini/gemini-2.0-flash-thinking-exp-01-21
+    - gemini/gemini-2.5-flash-preview-04-17
   max_completion_tokens:
   temperature: 0.0
   apply_mode: git
@@ -2103,486 +3227,1287 @@ messages:
               let mask = constraint_state.get_mask();
               assert_eq!(mask, LLMTokenBV::from_iter([false, false, true]));
           }
+
+          #[test]
+          fn test_constraint_expression() {
+              // Example grammar: E -> E '+' T | T; T -> T '*' F | F; F -> '(' E ')' | 'i'
+              // LLM token vocabulary: i, +, *, (, ), (i, +i
+              let mut llm_token_map = LLMTokenMap::new();
+              llm_token_map.insert(b"i".to_vec(), LLMTokenID(0));
+              llm_token_map.insert(b"+".to_vec(), LLMTokenID(1));
+              llm_token_map.insert(b"*".to_vec(), LLMTokenID(2));
+              llm_token_map.insert(b"(".to_vec(), LLMTokenID(3));
+              llm_token_map.insert(b")".to_vec(), LLMTokenID(4));
+              llm_token_map.insert(b"(i".to_vec(), LLMTokenID(5));
+              llm_token_map.insert(b"+i".to_vec(), LLMTokenID(6));
+
+              // Tokenizer regex for grammar tokens '+' '*' '(' ')' 'i'
+              let expr = groups![
+                  eat_u8(b'+'),
+                  eat_u8(b'*'),
+                  eat_u8(b'('),
+                  eat_u8(b')'),
+                  eat_u8(b'i'),
+              ];
+              let tokenizer = expr.build();
+
+              // Grammar productions
+              let productions = vec![
+                  prod("E", vec![nt("E"), t("PLUS"), nt("T")]),
+                  prod("E", vec![nt("T")]),
+                  prod("T", vec![nt("T"), t("TIMES"), nt("F")]),
+                  prod("T", vec![nt("F")]),
+                  prod("F", vec![t("LPAREN"), nt("E"), t("RPAREN")]),
+                  prod("F", vec![t("I")]),
+              ];
+              // Map grammar terminals to IDs matching regex order
+              let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+              grammar_token_map.insert(Terminal("PLUS".to_string()), TerminalID(0));
+              grammar_token_map.insert(Terminal("TIMES".to_string()), TerminalID(1));
+              grammar_token_map.insert(Terminal("LPAREN".to_string()), TerminalID(2));
+              grammar_token_map.insert(Terminal("RPAREN".to_string()), TerminalID(3));
+              grammar_token_map.insert(Terminal("I".to_string()), TerminalID(4));
+
+              let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
+              let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 6);
+
+              // Initial state and step
+              let mut state = constraint.init();
+              state.step_with_all_llm_tokens();
+              let mask = state.get_mask();
+              // Expect LLM tokens that can start an expression: i (0), '(' (3), "(i" (5)
+              assert_eq!(mask, LLMTokenBV::from_iter([true, false, false, true, false, true, false]));
+
+              // Commit "(i" twice (simulate consuming "(i" twice)
+              for _ in 0..2 {
+                  state.commit(LLMTokenID(5));
+                  state.step_with_all_llm_tokens();
+              }
+              let mask = state.get_mask();
+              // Now expect '+', '*', ')', '+i' => IDs 1,2,4,6
+              assert_eq!(mask, LLMTokenBV::from_iter([false, true, true, false, true, false, true]));
+          }
       }
       ```
     metadata:
       filename: src/constraint.rs
   - user: |-
-      ```rust 'python/src/lib.rs'
-      use sep1::tokenizer::LLMTokenID;
-      use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq};
-      use sep1::finite_automata::Regex;
-      use pyo3::prelude::*;
-      use pyo3::types::{PyDict};
-      use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-      use sep1::glr::parser::GLRParser;
-      use sep1::glr::table::{generate_glr_parser, StateID};
-      use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence};
-      use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
-      use std::collections::{BTreeMap, BTreeSet};
+      ```rust 'src/glr/table.rs'
+      use super::items::{compute_closure, compute_goto, split_on_dot, Item};
+      use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::parser::GLRParser;
       use bimap::BiBTreeMap;
-      use std::sync::Arc;
-      use ouroboros::self_referencing;
-      use numpy::{IntoPyArray, PyArray1, ToPyArray};
+      use std::collections::{HashMap, VecDeque};
+      use std::collections::{BTreeMap, BTreeSet};
+      use std::fmt::Display;
+      use crate::glr::analyze::{drop_dead, validate};
+      pub use crate::types::{TerminalID};
 
-      #[pyclass]
-      #[derive(Clone)]
-      struct PyGrammarExpr {
-          inner: GrammarExpr,
+      type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
+      type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
+      type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
+      type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Row>;
+      type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
+      type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
+      pub type Stage7Table = BTreeMap<StateID, Stage7Row>;
+
+
+      type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
+      #[derive(Debug)]
+      struct Stage2Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeSet<Item>,
+      }
+      #[derive(Debug)]
+      struct Stage3Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Terminal, BTreeSet<Item>>,
+      }
+      #[derive(Debug)]
+      struct Stage4Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+      }
+      type Stage5Row = Stage4Row;
+      #[derive(Debug)]
+      struct Stage6Row {
+          shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
       }
 
-      #[pymethods]
-      impl PyGrammarExpr {
-          #[staticmethod]
-          fn r#ref(name: &str) -> PyResult<Self> {
-              Ok(Self {
-                  inner: grammar_ref(name),
-              })
-          }
-
-          #[staticmethod]
-          fn sequence(exprs: Vec<PyGrammarExpr>) -> Self {
-              Self {
-                  inner: grammar_sequence(exprs.into_iter().map(|e| e.inner).collect()),
-              }
-          }
-
-          #[staticmethod]
-          fn choice(exprs: Vec<PyGrammarExpr>) -> Self {
-              Self {
-                  inner: grammar_choice(exprs.into_iter().map(|e| e.inner).collect()),
-              }
-          }
-
-          #[staticmethod]
-          fn optional(expr: PyGrammarExpr) -> Self {
-              Self {
-                  inner: grammar_optional(expr.inner),
-              }
-          }
-
-          #[staticmethod]
-          fn repeat(expr: PyGrammarExpr) -> Self {
-              Self {
-                  inner: grammar_repeat(expr.inner),
-              }
-          }
-
-          #[staticmethod]
-          fn regex(regex: PyRegexExpr) -> Self {
-              Self {
-                  inner: grammar_regex(regex.inner)
-              }
-          }
+      #[derive(Debug)]
+      enum Stage6ShiftsAndReduces {
+          Shift(BTreeSet<Item>),
+          Reduce(ProductionID),
+          Split {
+              shift: Option<BTreeSet<Item>>,
+              reduces: BTreeSet<ProductionID>,
+          },
       }
 
-      #[pyclass]
-      #[derive(Clone)]
-      struct PyRegexExpr {
-          inner: RegexExpr,
+      #[derive(Debug, Clone)]
+      pub enum Stage7ShiftsAndReduces {
+          Shift(StateID),
+          Reduce { production_id: ProductionID, nonterminal_id: NonTerminalID, len: usize },
+          Split {
+              shift: Option<StateID>,
+              reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>,
+          },
       }
 
-      #[pymethods]
-      impl PyRegexExpr {
-          #[staticmethod]
-          fn eat_u8(c: u8) -> Self {
-              Self { inner: eat_u8(c) }
-          }
-
-          #[staticmethod]
-          fn eat_u8_negation(c: u8) -> Self {
-              Self { inner: eat_u8_negation(c) }
-          }
-
-          #[staticmethod]
-          fn rep(expr: PyRegexExpr) -> Self {
-              Self { inner: rep(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn rep1(expr: PyRegexExpr) -> Self {
-              Self { inner: rep1(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn opt(expr: PyRegexExpr) -> Self {
-              Self { inner: opt(expr.inner) }
-          }
-
-          #[staticmethod]
-          fn prec(precedence: isize, expr: PyRegexExpr) -> PyRegexGroup {
-              PyRegexGroup { inner: prec(precedence, expr.inner) }
-          }
-
-          #[staticmethod]
-          fn eps() -> Self {
-              Self { inner: eps() }
-          }
-
-          #[staticmethod]
-          fn seq(exprs: Vec<PyRegexExpr>) -> Self {
-              Self { inner: regex_seq(exprs.into_iter().map(|e| e.inner).collect()) }
-          }
-
-          #[staticmethod]
-          fn choice(exprs: Vec<PyRegexExpr>) -> Self {
-              Self { inner: regex_choice(exprs.into_iter().map(|e| e.inner).collect()) }
-          }
-
-          fn build(&self) -> PyResult<PyRegex> {
-              Ok(PyRegex { inner: self.inner.clone().build() })
-          }
+      #[derive(Debug, Clone)]
+      pub struct Stage7Row {
+          pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
+          pub gotos: BTreeMap<NonTerminalID, StateID>,
       }
 
-      #[pyclass]
-      #[derive(Clone)]
-      struct PyRegexGroup {
-          inner: sep1::finite_automata::ExprGroup,
-      }
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct StateID(pub usize);
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct ProductionID(pub usize);
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct NonTerminalID(pub usize);
 
-      #[pymethods]
-      impl PyRegexGroup {
-          #[staticmethod]
-          fn greedy_group(expr: PyRegexExpr) -> Self {
-              Self { inner: greedy_group(expr.inner) }
-          }
+      type Stage1Result = Stage1Table;
+      type Stage2Result = Stage2Table;
+      type Stage3Result = Stage3Table;
+      type Stage4Result = Stage4Table;
+      type Stage5Result = Stage5Table;
+      type Stage6Result = Stage6Table;
+      type Stage7Result = (
+          Stage7Table,
+          BiBTreeMap<BTreeSet<Item>, StateID>,
+          StateID,
+      );
 
-          #[staticmethod]
-          fn non_greedy_group(expr: PyRegexExpr) -> Self {
-              Self { inner: non_greedy_group(expr.inner) }
-          }
-      }
+      fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+          let initial_item = Item {
+              production: productions[start_production_id].clone(),
+              dot_position: 0,
+          };
+          let initial_closure = BTreeSet::from([initial_item]);
+          let mut worklist = VecDeque::from([initial_closure.clone()]);
 
-      #[pyclass]
-      #[derive(Clone)]
-      struct PyRegexGroups {
-          inner: RegexGroups,
-      }
+          let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
 
-      #[pymethods]
-      impl PyRegexGroups {
-          #[staticmethod]
-          fn groups(groups: Vec<PyRegexGroup>) -> Self {
-              Self {
-                  inner: regex_groups(groups.into_iter().map(|g| g.inner).collect()),
-              }
-          }
-
-          fn build(&self) -> PyResult<PyRegex> {
-              Ok(PyRegex { inner: self.inner.clone().build() })
-          }
-      }
-
-      #[pyclass]
-      #[derive(Clone)]
-      pub struct PyRegex {
-          inner: Regex,
-      }
-
-      #[pymethods]
-      impl PyRegex {
-      }
-
-
-      #[pyclass]
-      #[derive(Clone)]
-      pub struct PyGrammar {
-          inner: Grammar,
-      }
-
-      #[pymethods]
-      impl PyGrammar {
-          #[new]
-          fn new(exprs: Vec<(String, PyGrammarExpr)>) -> Self {
-              let inner = Grammar::from_exprs(exprs.into_iter().map(|(s, e)| (s, e.inner)).collect());
-              Self { inner }
-          }
-
-          fn glr_parser(&self) -> PyGLRParser {
-              PyGLRParser { inner: self.inner.glr_parser() }
-          }
-
-          fn print(&self) {
-              println!("{:?}", self.inner)
-          }
-      }
-
-      #[pyclass]
-      #[derive(Clone)]
-      pub struct PyGLRParser {
-          inner: GLRParser,
-      }
-
-      #[pyclass]
-      #[derive(Clone)]
-      pub struct PyGrammarConstraint {
-          inner: Arc<GrammarConstraint>,
-      }
-
-      #[pymethods]
-      impl PyGrammarConstraint {
-          #[new]
-          fn new(py: Python, grammar: PyGrammar, token_to_id: &Bound<'_, PyDict>, max_llm_token_id: usize) -> PyResult<Self> {
-              let mut llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = BiBTreeMap::new();
-              for (key, value) in token_to_id.iter() {
-                  let token = key.extract::<&[u8]>()?;
-                  let id = value.extract::<usize>()?;
-                  llm_token_map.insert(token.to_vec(), LLMTokenID(id));
+          while let Some(items) = worklist.pop_front() {
+              if transitions.contains_key(&items) {
+                  continue;
               }
 
-              // Assuming Grammar has methods to get tokenizer and parser
-              // You might need to adjust this based on your actual Grammar implementation
-              let tokenizer = grammar.inner.tokenizer.clone(); // Placeholder
-              let parser = grammar.inner.glr_parser(); // Placeholder
+              let closure = compute_closure(&items, productions);
+              let splits = split_on_dot(&closure);
+              let mut row = BTreeMap::new();
 
-              let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, max_llm_token_id);
-              Ok(Self { inner: Arc::new(constraint) })
-          }
-
-          fn print(&self) {
-              // Assuming a function like print_precomputed exists and takes &Precomputed
-              // Or implement a method on GrammarConstraint to print/dump its state
-              // print_precomputed(&self.inner.precomputed);
-              println!("Printing precomputed data is not implemented in this binding yet.");
-          }
-      }
-
-
-      #[self_referencing]
-      struct PyGrammarConstraintStateWrapper {
-          // Owns the Arc'd constraint
-          constraint: PyGrammarConstraint,
-          // Borrows from the owned constraint via the 'this lifetime
-          #[borrows(constraint)]
-          #[covariant] // Allows the lifetime 'this to be shortened
-          inner: GrammarConstraintState<'this>,
-      }
-
-      #[pyclass]
-      pub struct PyGrammarConstraintState {
-          inner: PyGrammarConstraintStateWrapper,
-      }
-
-      #[pymethods]
-      impl PyGrammarConstraintState {
-          #[new]
-          fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
-              // Use the builder provided by ouroboros, and immediately step
-              Ok(PyGrammarConstraintState {
-                  inner: PyGrammarConstraintStateWrapperTryBuilder {
-                      constraint,
-                      inner_builder: |constraint: &PyGrammarConstraint| {
-                          // init state and step with all LLM tokens
-                          let mut state = constraint.inner.init();
-                          state.step_with_all_llm_tokens();
-                          Ok::<_, PyErr>(state)
-                      },
+              for (symbol, items) in splits {
+                  if symbol.is_none() {
+                      continue;
                   }
-                  .try_build()?
-              })
+                  let goto_set = compute_goto(&items);
+                  row.insert(symbol.clone(), goto_set.clone());
+                  worklist.push_back(goto_set);
+              }
+
+              transitions.insert(items.clone(), row);
           }
 
-          fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-              let bitset = self.inner.with_inner_mut(|state| state.get_mask());
-              let bools: Vec<bool> = bitset.iter().map(|bit_ref| *bit_ref).collect();
-              let array = bools.into_pyarray_bound(py);
-              Ok(array)
-          }
-
-          fn commit(&mut self, llm_token_id: usize) {
-              self.inner.with_inner_mut(|state| {
-                  state.commit(LLMTokenID(llm_token_id));
-                  state.step_with_all_llm_tokens();
-              });
-              
-          }
+          transitions
       }
 
-      #[pymodule]
-      fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-          m.add_class::<PyGrammarExpr>()?;
-          m.add_class::<PyRegexExpr>()?;
-          m.add_class::<PyRegexGroup>()?;
-          m.add_class::<PyRegexGroups>()?;
-          m.add_class::<PyGrammar>()?;
-          m.add_class::<PyGrammarConstraint>()?;
-          m.add_class::<PyGrammarConstraintState>()?;
-          Ok(())
+      fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
+          let mut stage_2_table = BTreeMap::new();
+          for (item_set, transitions) in stage_1_table {
+              let mut shifts = BTreeMap::new();
+              let mut gotos = BTreeMap::new();
+              let mut reduces = BTreeSet::new();
+
+              for item in &item_set {
+                  if item.dot_position >= item.production.rhs.len() {
+                      reduces.insert(item.clone());
+                  }
+              }
+
+              for (symbol_opt, next_item_set) in &transitions {
+                  if let Some(symbol) = symbol_opt {
+                      match symbol {
+                          Symbol::Terminal(t) => {
+                              shifts.insert(t.clone(), next_item_set.clone());
+                          }
+                          Symbol::NonTerminal(nt) => {
+                              gotos.insert(nt.clone(), next_item_set.clone());
+                          }
+                      }
+                  }
+              }
+
+              stage_2_table.insert(
+                  item_set,
+                  Stage2Row {
+                      shifts,
+                      gotos,
+                      reduces,
+                  },
+              );
+          }
+          stage_2_table
+      }
+
+      fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
+          let follow_sets = compute_follow_sets(productions);
+
+          let mut stage_3_table = BTreeMap::new();
+
+          for (item_set, row) in stage_2_table {
+              let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
+
+              for item in &row.reduces {
+                  let lhs = &item.production.lhs;
+                  let lookaheads = follow_sets.get(lhs).unwrap();
+
+                  for terminal in lookaheads {
+                      reduces
+                          .entry(terminal.clone())
+                          .or_default()
+                          .insert(item.clone());
+                  }
+              }
+
+              stage_3_table.insert(
+                  item_set,
+                  Stage3Row {
+                      shifts: row.shifts,
+                      gotos: row.gotos,
+                      reduces,
+                  },
+              );
+          }
+
+          stage_3_table
+      }
+
+      fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
+          let production_ids: BTreeMap<Production, ProductionID> = productions
+              .iter()
+              .enumerate()
+              .map(|(i, p)| (p.clone(), ProductionID(i)))
+              .collect();
+
+          let mut stage_4_table = BTreeMap::new();
+
+          for (item_set, row) in stage_3_table {
+              let mut reduces = BTreeMap::new();
+
+              for (terminal, items) in row.reduces {
+                  let mut prod_ids = BTreeSet::new();
+                  for item in items {
+                      let prod_id = production_ids.get(&item.production).unwrap();
+                      prod_ids.insert(*prod_id);
+                  }
+                  reduces.insert(terminal.clone(), prod_ids);
+              }
+
+              stage_4_table.insert(
+                  item_set,
+                  Stage4Row {
+                      shifts: row.shifts,
+                      gotos: row.gotos,
+                      reduces,
+                  },
+              );
+          }
+
+          stage_4_table
+      }
+
+      fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
+          // todo: remove this
+          stage_4_table
+      }
+
+      fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
+          let mut stage_6_table = BTreeMap::new();
+
+          for (item_set, row) in stage_5_table {
+              let mut shifts_and_reduces = BTreeMap::new();
+
+              for (terminal, next_item_set) in row.shifts {
+                  shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Shift(next_item_set));
+              }
+
+              for (terminal, mut production_ids) in row.reduces {
+                  if let Some(mut existing) = shifts_and_reduces.remove(&terminal) {
+                      match existing {
+                          Stage6ShiftsAndReduces::Shift(shift_set) => {
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
+                                  shift: Some(shift_set.clone()),
+                                  reduces: production_ids.clone(),
+                              });
+                          }
+                          Stage6ShiftsAndReduces::Reduce(existing_production_id) => {
+                              production_ids.insert(existing_production_id);
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
+                                  shift: None,
+                                  reduces: production_ids,
+                              });
+                          }
+                          Stage6ShiftsAndReduces::Split { shift, mut reduces } => {
+                              reduces.extend(production_ids.into_iter());
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift, reduces });
+                          }
+                      }
+                  } else {
+                      // If there's only one production ID, we can optimize by storing it directly
+                      if production_ids.len() == 1 {
+                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Reduce(production_ids.iter().next().unwrap().clone()));
+                      } else {
+                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift: None, reduces: production_ids });
+                      }
+                  }
+              }
+
+              stage_6_table.insert(
+                  item_set,
+                  Stage6Row {
+                      shifts_and_reduces,
+                      gotos: row.gotos,
+                  },
+              );
+          }
+
+          stage_6_table
+      }
+
+      fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
+          let mut item_set_map = BiBTreeMap::new();
+          let mut next_state_id = 0;
+
+          let mut terminals = BTreeSet::new();
+          let mut non_terminals = BTreeSet::new();
+
+          for (item_set, row) in &stage_6_table {
+              item_set_map.insert(item_set.clone(), StateID(next_state_id));
+              next_state_id += 1;
+
+              for t in row.shifts_and_reduces.keys() {
+                  terminals.insert(t.clone());
+              }
+
+              for nt in row.gotos.keys() {
+                  non_terminals.insert(nt.clone());
+              }
+          }
+
+          let mut stage_7_table = BTreeMap::new();
+
+          for (item_set, row) in stage_6_table {
+              let state_id = *item_set_map.get_by_left(&item_set).unwrap();
+              let mut shifts_and_reduces = BTreeMap::new();
+              let mut gotos = BTreeMap::new();
+
+              for (terminal, action) in row.shifts_and_reduces {
+                  let terminal_id = *terminal_map.get_by_left(&terminal).expect(format!("{:?} not found in terminal map {:?}", terminal, terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+                  let converted_action = match action {
+                      Stage6ShiftsAndReduces::Shift(next_item_set) => {
+                          let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
+                          Stage7ShiftsAndReduces::Shift(next_state_id)
+                      }
+                      Stage6ShiftsAndReduces::Reduce(production_id) => {
+                          let production = productions.get(production_id.0).unwrap();
+                          let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
+                          let len = production.rhs.len();
+                          Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len }
+                      }
+                      Stage6ShiftsAndReduces::Split { shift, reduces } => {
+                          let shift_state_id = shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
+                          let mut len_to_nt_to_production_id: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
+                          for production_id in reduces {
+                              let production = productions.get(production_id.0).unwrap();
+                              let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
+                              let len = production.rhs.len();
+                              len_to_nt_to_production_id.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id);
+                          }
+                          Stage7ShiftsAndReduces::Split { shift: shift_state_id, reduces: len_to_nt_to_production_id }
+                      }
+                  };
+                  shifts_and_reduces.insert(terminal_id, converted_action);
+              }
+
+              for (nonterminal, next_item_set) in row.gotos {
+                  let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
+                  let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
+                  gotos.insert(non_terminal_id, next_state_id);
+              }
+
+              stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos });
+          }
+
+          let start_item = Item {
+              production: productions[start_production_id].clone(),
+              dot_position: 0,
+          };
+          let start_state_id = *item_set_map.get_by_left(&BTreeSet::from([start_item])).unwrap();
+
+          (stage_7_table, item_set_map, start_state_id)
+      }
+
+      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
+          crate::debug!(2, "Validating");
+          validate(productions).expect("Validation error");
+
+          crate::debug!(2, "Stage 1");
+          let stage_1_table = stage_1(productions, start_production_id);
+          crate::debug!(2, &stage_1_table);
+          crate::debug!(2, "Stage 2");
+          let stage_2_table = stage_2(stage_1_table, productions);
+          crate::debug!(2, &stage_2_table);
+          crate::debug!(2, "Stage 3");
+          let stage_3_table = stage_3(stage_2_table, productions);
+          crate::debug!(2, &stage_3_table);
+          crate::debug!(2, "Stage 4");
+          let stage_4_table = stage_4(stage_3_table, productions);
+          crate::debug!(2, &stage_4_table);
+          crate::debug!(2, "Stage 5");
+          let stage_5_table = stage_5(stage_4_table, productions);
+          crate::debug!(2, &stage_5_table);
+          crate::debug!(2, "Stage 6");
+          let stage_6_table = stage_6(stage_5_table);
+          crate::debug!(2, &stage_6_table);
+          crate::debug!(2, "Stage 7");
+          let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, productions, start_production_id, &terminal_map, &non_terminal_map);
+          crate::debug!(2, &stage_7_table);
+          crate::debug!(2, "Done generating GLR parser");
+
+          GLRParser::new(stage_7_table, productions.to_vec(), terminal_map, non_terminal_map, item_set_map, start_state_id)
+      }
+
+      pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
+          let terminal_map = assign_terminal_ids(productions);
+          let non_terminal_map = assign_non_terminal_ids(productions);
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
+      }
+
+      pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
+          let non_terminal_map = assign_non_terminal_ids(productions);
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
+      }
+
+      pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
+          let mut terminal_map = BiBTreeMap::new();
+          let mut next_terminal_id = 0;
+
+          for p in productions {
+              for symbol in &p.rhs {
+                  if let Symbol::Terminal(t) = symbol {
+                      if !terminal_map.contains_left(t) {
+                          terminal_map.insert(t.clone(), TerminalID(next_terminal_id));
+                          next_terminal_id += 1;
+                      }
+                  }
+              }
+          }
+
+          terminal_map
+      }
+
+      pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerminal, NonTerminalID> {
+          let mut non_terminal_map = BiBTreeMap::new();
+          let mut next_non_terminal_id = 0;
+
+          for p in productions {
+              if !non_terminal_map.contains_left(&p.lhs) {
+                  non_terminal_map.insert(p.lhs.clone(), NonTerminalID(next_non_terminal_id));
+                  next_non_terminal_id += 1;
+              }
+          }
+          non_terminal_map
       }
       ```
     metadata:
-      filename: python/src/lib.rs
+      filename: src/glr/table.rs
   - user: |-
-      ```python 'python/example.py'
-      import _sep1
-      import numpy as np
+      ```rust 'src/glr/parser.rs'
+      use crate::datastructures::gss::BulkMerge;
+      use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::items::Item;
+      use crate::glr::table::{
+          NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID,
+      };
+      use crate::datastructures::gss::{GSSNode, GSSTrait};
 
-      # Define regexes using PyRegexExpr
-      plus_regex = _sep1.PyRegexExpr.eat_u8(ord('+'))
-      times_regex = _sep1.PyRegexExpr.eat_u8(ord('*'))
-      open_paren_regex = _sep1.PyRegexExpr.eat_u8(ord('('))
-      close_paren_regex = _sep1.PyRegexExpr.eat_u8(ord(')'))
-      i_regex = _sep1.PyRegexExpr.eat_u8(ord('i'))
+      use bimap::BiBTreeMap;
+      use std::collections::{BTreeMap, BTreeSet};
+      use std::fmt::{Debug, Display, Formatter};
+      use std::hash::Hash;
+      use std::sync::Arc;
+      use crate::debug;
 
-      # Define grammar rules using the regexes
-      exprs = [
-          ("E", _sep1.PyGrammarExpr.choice([
-              _sep1.PyGrammarExpr.sequence([
-                  _sep1.PyGrammarExpr.ref("E"),
-                  _sep1.PyGrammarExpr.regex(plus_regex),
-                  _sep1.PyGrammarExpr.ref("T"),
-              ]),
-              _sep1.PyGrammarExpr.ref("T"),
-          ])),
-          ("T", _sep1.PyGrammarExpr.choice([
-              _sep1.PyGrammarExpr.sequence([
-                  _sep1.PyGrammarExpr.ref("T"),
-                  _sep1.PyGrammarExpr.regex(times_regex),
-                  _sep1.PyGrammarExpr.ref("F"),
-              ]),
-              _sep1.PyGrammarExpr.ref("F"),
-          ])),
-          ("F", _sep1.PyGrammarExpr.choice([
-              _sep1.PyGrammarExpr.sequence([
-                  _sep1.PyGrammarExpr.regex(open_paren_regex),
-                  _sep1.PyGrammarExpr.ref("E"),
-                  _sep1.PyGrammarExpr.regex(close_paren_regex),
-              ]),
-              _sep1.PyGrammarExpr.regex(i_regex),
-          ])),
-      ]
+      pub trait AndAndOr: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
+          fn and(&self, other: &Self) -> Self;
+          fn or(&self, other: &Self) -> Self;
+      }
 
-      grammar = _sep1.PyGrammar(exprs)
+      impl AndAndOr for () {
+          fn and(&self, _: &Self) -> Self { () }
+          fn or(&self, _: &Self) -> Self { () }
+      }
 
-      # Define LLM tokens
-      llm_tokens = [b"i", b"+", b"*", b"(", b")", b"(i", b"+i"]
-      llm_token_to_id = {token: i for i, token in enumerate(llm_tokens)}
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct ParseStateNodeContent<T: AndAndOr> {
+          pub state_id: StateID,
+          pub t: T,
+      }
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct ParseState<T: AndAndOr> {
+          pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
+          pub status: ParseStatus,
+      }
 
-      # Create grammar constraint
-      grammar_constraint = _sep1.PyGrammarConstraint(grammar, llm_token_to_id, len(llm_tokens))
-      grammar_constraint_state = _sep1.PyGrammarConstraintState(grammar_constraint)
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub enum Action {
+          Shift(TerminalID),
+          Reduce { production_id: ProductionID, len: usize, nonterminal_id: NonTerminalID },
+      }
 
-      def llm_tokens_to_ids(tokens):
-          return [llm_token_to_id[token] for token in tokens]
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub enum ParseStatus {
+          Active,
+          Inactive(StopReason),
+      }
 
-      # Initial mask check
-      mask = grammar_constraint_state.get_mask()
-      expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
-      print(f"Initial Mask: {mask}")
-      assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub enum StopReason {
+          ActionNotFound,
+          GotoNotFound,
+      }
 
 
-      # # Commit prefill tokens
-      # prefill = llm_tokens_to_ids([b"i", b"+"])
-      # for token_id in prefill:
-      #     grammar_constraint_state.commit(token_id)
-      #
-      # # Mask check after prefill
-      # mask = grammar_constraint_state.get_mask()
-      # expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
-      # print(f"Mask after committing prefill: {mask}")
-      # assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+      // TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
+      #[derive(Clone)]
+      pub struct GLRParser {
+          pub stage_7_table: Stage7Table,
+          pub productions: Vec<Production>,
+          pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
+          pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+          pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+          pub start_state_id: StateID,
+      }
 
+      impl GLRParser {
+          pub fn new(
+              stage_7_table: Stage7Table,
+              productions: Vec<Production>,
+              terminal_map: BiBTreeMap<Terminal, TerminalID>,
+              non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+              item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+              start_state_id: StateID,
+          ) -> Self {
+              Self {
+                  stage_7_table,
+                  productions,
+                  terminal_map,
+                  non_terminal_map,
+                  item_set_map,
+                  start_state_id,
+              }
+          }
 
-      # Commit prefill tokens
-      # prefill = llm_tokens_to_ids([b"(i", b"+", b"i", b"*", b"i"])
-      prefill = llm_tokens_to_ids([b"(i", b"(i"])
-      for token_id in prefill:
-          grammar_constraint_state.commit(token_id)
+          pub fn init_glr_parser<T: AndAndOr + Default>(&self) -> GLRParserState<T> {
+              self.init_glr_parser_with_t(T::default())
+          }
 
-      # Mask check after prefill
-      mask = grammar_constraint_state.get_mask()
-      expected_mask = set(llm_tokens_to_ids([b"+", b"*", b")", b"+i"]))
-      print(f"Mask after committing prefill: {mask}")
-      assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+          pub fn init_glr_parser_with_t<T: AndAndOr>(&self, t: T) -> GLRParserState<T> {
+              GLRParserState {
+                  parser: self,
+                  active_states: vec![self.init_parse_state_with_t(t)],
+                  inactive_states: Vec::new(),
+              }
+          }
+
+          pub fn init_glr_parser_from_parse_state<T: AndAndOr>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
+              GLRParserState {
+                  parser: self,
+                  active_states: vec![parse_state],
+                  inactive_states: Vec::new(),
+              }
+          }
+
+          pub fn init_glr_parser_from_parse_states<T: AndAndOr>(
+              &self,
+              parse_states: Vec<ParseState<T>>,
+          ) -> GLRParserState<T> {
+              GLRParserState {
+                  parser: self,
+                  active_states: parse_states,
+                  inactive_states: Vec::new(),
+              }
+          }
+
+          pub fn init_parse_state<T: AndAndOr + Default>(&self) -> ParseState<T> {
+              self.init_parse_state_with_t(T::default())
+          }
+
+          pub fn init_parse_state_with_t<T: AndAndOr>(&self, t: T) -> ParseState<T> {
+              let initial_content = ParseStateNodeContent {
+                  state_id: self.start_state_id,
+                  t,
+              };
+              ParseState {
+                  stack: Arc::new(GSSNode::new(initial_content)),
+                  status: ParseStatus::Active,
+              }
+          }
+
+          pub fn parse<T: AndAndOr + Default>(&self, input: &[TerminalID]) -> GLRParserState<T> {
+              let mut state = self.init_glr_parser();
+              state.parse(input);
+              state
+          }
+      }
+
+      impl Debug for GLRParser {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              write!(f, "{}", self)
+          }
+      }
+
+      impl Display for GLRParser {
+          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+              let stage_7_table = &self.stage_7_table;
+              let terminal_map = &self.terminal_map;
+              let non_terminal_map = &self.non_terminal_map;
+              let item_set_map = &self.item_set_map;
+
+              writeln!(f, "Parse Table:")?;
+              writeln!(f, "  Start State: {}", self.start_state_id.0)?;
+              for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
+                  writeln!(f, "  State {}:", state_id.0)?;
+
+                  writeln!(f, "    Items:")?;
+                  let item_set = item_set_map.get_by_right(&state_id).unwrap();
+                  for item in item_set {
+                      write!(f, "      - {} ->", item.production.lhs.0)?;
+                      for (i, symbol) in item.production.rhs.iter().enumerate() {
+                          if i == item.dot_position {
+                              write!(f, " •")?;
+                          }
+                          match symbol {
+                              Symbol::Terminal(terminal) => write!(f, " {:?}", terminal.0)?,
+                              Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
+                          }
+                      }
+                      if item.dot_position == item.production.rhs.len() {
+                          write!(f, " •")?;
+                      }
+                      writeln!(f)?;
+                  }
+
+                  writeln!(f, "    Actions:")?;
+                  for (&terminal_id, action) in &row.shifts_and_reduces {
+                      let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
+                      match action {
+                          Stage7ShiftsAndReduces::Shift(next_state_id) => {
+                              writeln!(f, "      - {:?} -> Shift {}", terminal.0, next_state_id.0)?;
+                          }
+                          Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
+                              let nt = non_terminal_map.get_by_right(nonterminal).unwrap();
+                              writeln!(f, "      - {:?} -> Reduce {} (len {})", terminal.0, nt.0, len)?;
+                          }
+                          Stage7ShiftsAndReduces::Split { shift, reduces } => {
+                              writeln!(f, "      - {:?} -> Conflict:", terminal.0)?;
+                              if let Some(shift_state) = shift {
+                                  writeln!(f, "        - Shift {}", shift_state.0)?;
+                              }
+                              for (len, nt_id_to_prod_ids) in reduces {
+                                  writeln!(f, "        - Reduce (len {}):", len)?;
+                                  for (nt_id, prod_ids) in nt_id_to_prod_ids {
+                                      let nt = non_terminal_map.get_by_right(nt_id).unwrap();
+                                      for prod_id in prod_ids {
+                                          let prod = self.productions.get(prod_id.0).unwrap();
+                                          writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
+                                      }
+                                  }
+
+                              }
+                          }
+                      }
+                  }
+
+                  writeln!(f, "    Gotos:")?;
+                  for (&non_terminal_id, &next_state_id) in &row.gotos {
+                      let non_terminal = non_terminal_map.get_by_right(&non_terminal_id).unwrap();
+                      writeln!(f, "      - {} -> {}", non_terminal.0, next_state_id.0)?;
+                  }
+              }
+
+              writeln!(f, "\nTerminal Map (name to terminal ID):")?;
+              for (terminal, terminal_id) in terminal_map {
+                  writeln!(f, "  {} -> {}", terminal.0, terminal_id.0)?;
+              }
+
+              writeln!(f, "\nNon-Terminal Map:")?;
+              for (non_terminal, non_terminal_id) in non_terminal_map {
+                  writeln!(f, "  {} -> {}", non_terminal.0, non_terminal_id.0)?;
+              }
+
+              Ok(())
+          }
+      }
+
+      #[derive(Debug, Clone)]
+      pub struct GLRParserState<'a, T: AndAndOr> {
+          pub parser: &'a GLRParser,
+          pub active_states: Vec<ParseState<T>>,
+          pub inactive_states: Vec<ParseState<T>>,
+      }
+
+      impl<'a, T: AndAndOr> GLRParserState<'a, T> {
+          pub fn parse(&mut self, input: &[TerminalID]) {
+              self.parse_part(input);
+          }
+
+          pub fn parse_part(&mut self, input: &[TerminalID]) {
+              for &token_id in input {
+                  self.step(token_id);
+              }
+          }
+
+          pub fn with_step(mut self, token_id: TerminalID) -> Self {
+              let mut parser = self;
+              parser.step(token_id);
+              parser
+          }
+
+          pub fn step(&mut self, token_id: TerminalID) {
+              let mut next_active_states = Vec::new();
+              let mut inactive_states = Vec::new();
+
+              while let Some(state) = self.active_states.pop() {
+                  let stack = state.stack; // Arc<GSSNode<ParseStateNodeContent<T>>>
+                  let current_content = stack.peek(); // &ParseStateNodeContent<T>
+                  let current_state_id = current_content.state_id;
+                  let current_t = &current_content.t;
+
+                  let row = self.parser.stage_7_table.get(&current_state_id).unwrap();
+
+                  if let Some(action) = row.shifts_and_reduces.get(&token_id) {
+                      match action {
+                          Stage7ShiftsAndReduces::Shift(next_state_id) => {
+                              debug!(3, "Shifting");
+                              let new_content = ParseStateNodeContent { state_id: *next_state_id, t: current_t.clone() };
+                              let new_stack = stack.push(new_content);
+                              next_active_states.push(ParseState {
+                                  // stack: Arc::new(new_stack), // GSSNode::push now returns Arc
+                                  stack: Arc::new(new_stack),
+                                  status: ParseStatus::Active,
+                              });
+                          }
+                          Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
+                              debug!(3, "Reducing by production {:?} with len {}", production_id, len);
+                              let mut popped_stack_nodes = stack.popn(*len);
+                              popped_stack_nodes.bulk_merge();
+                              for stack_node in popped_stack_nodes {
+                                  // stack_node is Arc<GSSNode<ParseStateNodeContent<T>>>
+                                  let revealed_content = stack_node.peek(); // &ParseStateNodeContent<T>
+                                  let revealed_state_id = revealed_content.state_id;
+                                  let revealed_t = &revealed_content.t;
+                                  let goto_row = self.parser.stage_7_table.get(&revealed_state_id).unwrap();
+
+                                  if let Some(&goto_state) = goto_row.gotos.get(nonterminal) {
+                                      debug!(3, "Going to state {:?}", goto_state);
+                                      // Apply 'and' operation
+                                      let combined_t = revealed_t.and(current_t);
+                                      let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
+                                      let new_stack = stack_node.push(new_content);
+                                      self.active_states.push(ParseState {
+                                          stack: Arc::new(new_stack),
+                                          status: ParseStatus::Active,
+                                      });
+                                  } else {
+                                      inactive_states.push(ParseState {
+                                          stack: stack_node,
+                                          status: ParseStatus::Inactive(StopReason::GotoNotFound),
+                                      });
+                                  }
+                              }
+                          }
+                          Stage7ShiftsAndReduces::Split { shift, reduces } => {
+                              debug!(3, "Split");
+                              if let Some(shift_state) = shift {
+                                  // Shift part (same as above)
+                                  let new_content = ParseStateNodeContent { state_id: *shift_state, t: current_t.clone() };
+                                  let new_stack = stack.push(new_content);
+                                  next_active_states.push(ParseState {
+                                      stack: Arc::new(new_stack),
+                                      status: ParseStatus::Active,
+                                  });
+                              }
+
+                              for (len, nt_ids) in reduces {
+                                  let mut popped_stack_nodes = stack.popn(*len);
+                                  popped_stack_nodes.bulk_merge();
+                                  for (nt_id, prod_ids) in nt_ids {
+                                      for stack_node in &popped_stack_nodes {
+                                          // Reduce part (same as above)
+                                          let revealed_content = stack_node.peek();
+                                          let revealed_state_id = revealed_content.state_id;
+                                          let revealed_t = &revealed_content.t;
+                                          let goto_row = self.parser.stage_7_table.get(&revealed_state_id).unwrap();
+
+                                          if let Some(&goto_state) = goto_row.gotos.get(nt_id) {
+                                              // Apply 'and' operation
+                                              let combined_t = revealed_t.and(current_t);
+                                              let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
+                                              let new_stack = Arc::new(stack_node.push(new_content));
+                                              for prod_id in prod_ids {
+                                                  self.active_states.push(ParseState {
+                                                      stack: new_stack.clone(),
+                                                      status: ParseStatus::Active,
+                                                  });
+                                              }
+                                          } else {
+                                              inactive_states.push(ParseState {
+                                                  stack: stack_node.clone(),
+                                                  status: ParseStatus::Inactive(StopReason::GotoNotFound),
+                                              });
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  } else {
+                      inactive_states.push(ParseState {
+                          stack,
+                          status: ParseStatus::Inactive(StopReason::ActionNotFound),
+                      });
+                  }
+              }
+              self.active_states = next_active_states;
+              self.inactive_states.extend(inactive_states);
+          }
+
+          // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
+          pub fn merge_active_states(&mut self) {
+              let mut active_state_map: BTreeMap<ParseStateKey, ParseState<T>> = BTreeMap::new();
+
+              for state in std::mem::take(&mut self.active_states) {
+                  let key = state.key();
+                  active_state_map.insert_with(key, state, |existing, new_state| {
+                      existing.merge(new_state);
+                  });
+              }
+
+              self.active_states = active_state_map.into_values().collect();
+          }
+
+          pub fn merge_with(&mut self, other: GLRParserState<T>) {
+              assert!(std::ptr::eq(self.parser, other.parser));
+              self.active_states.extend(other.active_states);
+              self.inactive_states.extend(other.inactive_states);
+          }
+
+          pub fn fully_matches(&self) -> bool {
+              !self.fully_matching_states().is_empty()
+          }
+
+          pub fn fully_matching_states(&self) -> Vec<&ParseState<T>> {
+              self.inactive_states.iter().filter(|state| state.status == ParseStatus::Inactive(StopReason::GotoNotFound)).collect()
+          }
+
+          pub fn can_match(&self) -> bool {
+              !self.active_states.is_empty()
+          }
+
+          pub fn matches_or_can_match(&self) -> bool {
+              self.can_match() || self.fully_matches()
+          }
+
+          pub fn is_ok(&self) -> bool {
+              self.matches_or_can_match()
+          }
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct ParseStateKey {
+          stack_state_id: StateID,
+          // Removed action_stack
+      }
+
+      impl<T: AndAndOr> ParseState<T> {
+          pub fn key(&self) -> ParseStateKey {
+              ParseStateKey {
+                  stack_state_id: self.stack.peek().state_id,
+              }
+          }
+
+          /// Merges `other` into `self`. Assumes `self.key() == other.key()`.
+          /// Merges the GSS structures and combines the `t` value at the top node using `AndAndOr::or`.
+          pub fn merge(&mut self, other: ParseState<T>) {
+              assert_eq!(self.key(), other.key());
+
+              // Combine 't' values at the top node using 'or'
+              let self_content = self.stack.peek();
+              let other_content = other.stack.peek();
+              let combined_t = self_content.t.or(&other_content.t);
+
+              // Get mutable access to self.stack, potentially cloning if shared (Arc > 1)
+              let mut mutable_stack = Arc::make_mut(&mut self.stack);
+
+              // Update the 't' value in the mutable top node's content
+              mutable_stack.value.t = combined_t;
+
+              // Merge the parent structures using GSSNode's merge
+              mutable_stack.merge_unchecked(Arc::unwrap_or_clone(other.stack));
+          }
+      }
+
+      pub trait InsertWith<K, V> {
+          fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F);
+      }
+
+      impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
+          fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F) {
+              match self.entry(k) {
+                  std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                      let value = occupied.get_mut();
+                      combine(value, v);
+                  }
+                  std::collections::btree_map::Entry::Vacant(vacant) => {
+                      vacant.insert(v);
+                  }
+              }
+          }
+      }
       ```
     metadata:
-      filename: python/example.py
-  - user: Add the example grammar from example.py to constraint.rs.
+      filename: src/glr/parser.rs
+  - user: |-
+      Modify this so each Stage7Row has an 'accept' boolean.
+      Compute it appropriately in table.rs.
+      Modify parser.rs to use it.
+      Previously, acceptance has been implied by a lack of a goto. Now, we can assume a goto is always present (i.e. instead of `if let Some(&goto_state) = goto_row.gotos.get(nt_id) {` just do `let goto_state = goto_row.gotos[nt_id]`).
+      Remove StopReason. Instead, add two fields to GLRParserState, one for states for which an action wasn't found, and one for partial acceptances.
+
+      ~~Actually scratch that second field; just add a field for states for which an action wasn't found.~~
+      Actually no don't scratch it. But call it past acceptances or something. Step doesn't touch this field, though. Only the other one for actions not found.
+
+      Make it so the  field for states for which an action wasn't gets replaced, no extended, each step.
+      Acceptance won't be handled by step and won't be tracked in the parser state.
+      Instead, fully_matches will loop through parser states and check if they're in glr table states with accept field true.
+
+      ~~Replace parse with parse_completely~~ actually leave parse the same. Except make it clear the accepting state field before starting.
+      replace parse_part with parse_any_prefix_of. Each time this is called, clear the past accept states. Reinitialize it with the current accepting states. After each step, extend it with the current accepting states.
+      parse won't do this. It returns nothing, as it does right now.
+
+      Add methods and_step, and_parse, and and_parse_prefix_of that each return itself, allowing for call chains.
+
+      ~~Replace GotoNotFound with AcceptPart, which indicates part of the input was accepted.~~
+
+      ---
+
+      Actually nah. Let's get rid of the field for partial acceptances. And so get rid of parse_any_prefix_of etc. as well.
+      If the user wants to accumulate acceptancing states along the way, they can do so themselves.
     metadata:
   - assistant: |-
-      ```diff
-      diff --git a/src/constraint.rs b/src/constraint.rs
-      index e3f1a2b..c7d5e4f 100644
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ #[cfg(test)]
-           #[test]
-           fn test_constraint_simple() {
-               // LLM tokens: "ab", "ac"
-               // Grammar tokens: "a", "ab", "b|c"
-               // Grammar: S -> "a" | "ab" | "b|c"
-      @@     }
+      Okay, I understand the requirements. Let's modify the GLR parser implementation to use an explicit `accept` flag in the parse table states and adjust the parser state management accordingly.
+
+      ```diff 'src/glr/table.rs'
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -65,6 +65,7 @@
+       pub struct Stage7Row {
+           pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
+           pub gotos: BTreeMap<NonTerminalID, StateID>,
+      +    pub accept: bool,
+       }
+       
+       #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      @@ -250,6 +251,13 @@
+               let state_id = *item_set_map.get_by_left(&item_set).unwrap();
+               let mut shifts_and_reduces = BTreeMap::new();
+               let mut gotos = BTreeMap::new();
       +
-      +    #[test]
-      +    fn test_constraint_expression() {
-      +        // Example grammar: E -> E '+' T | T; T -> T '*' F | F; F -> '(' E ')' | 'i'
-      +        // LLM token vocabulary: i, +, *, (, ), (i, +i
-      +        let mut llm_token_map = LLMTokenMap::new();
-      +        llm_token_map.insert(b"i".to_vec(), LLMTokenID(0));
-      +        llm_token_map.insert(b"+".to_vec(), LLMTokenID(1));
-      +        llm_token_map.insert(b"*".to_vec(), LLMTokenID(2));
-      +        llm_token_map.insert(b"(".to_vec(), LLMTokenID(3));
-      +        llm_token_map.insert(b")".to_vec(), LLMTokenID(4));
-      +        llm_token_map.insert(b"(i".to_vec(), LLMTokenID(5));
-      +        llm_token_map.insert(b"+i".to_vec(), LLMTokenID(6));
+      +        // Determine if this state is an accepting state
+      +        let is_accepting_state = item_set.iter().any(|item| {
+      +            item.production == productions[start_production_id] && item.dot_position == item.production.rhs.len()
+      +        });
       +
-      +        // Tokenizer regex for grammar tokens '+' '*' '(' ')' 'i'
-      +        let expr = groups![
-      +            eat_u8(b'+'),
-      +            eat_u8(b'*'),
-      +            eat_u8(b'('),
-      +            eat_u8(b')'),
-      +            eat_u8(b'i'),
-      +        ];
-      +        let tokenizer = expr.build();
       +
-      +        // Grammar productions
-      +        let productions = vec![
-      +            prod("E", vec![nt("E"), t("PLUS"), nt("T")]),
-      +            prod("E", vec![nt("T")]),
-      +            prod("T", vec![nt("T"), t("TIMES"), nt("F")]),
-      +            prod("T", vec![nt("F")]),
-      +            prod("F", vec![t("LPAREN"), nt("E"), t("RPAREN")]),
-      +            prod("F", vec![t("I")]),
-      +        ];
-      +        // Map grammar terminals to IDs matching regex order
-      +        let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-      +        grammar_token_map.insert(Terminal("PLUS".to_string()), TerminalID(0));
-      +        grammar_token_map.insert(Terminal("TIMES".to_string()), TerminalID(1));
-      +        grammar_token_map.insert(Terminal("LPAREN".to_string()), TerminalID(2));
-      +        grammar_token_map.insert(Terminal("RPAREN".to_string()), TerminalID(3));
-      +        grammar_token_map.insert(Terminal("I".to_string()), TerminalID(4));
+       
+               for (terminal, action) in row.shifts_and_reduces {
+                   let terminal_id = *terminal_map.get_by_left(&terminal).expect(format!("{:?} not found in terminal map {:?}", terminal, terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+      @@ -285,7 +293,7 @@
+                   gotos.insert(non_terminal_id, next_state_id);
+               }
+       
+      -        stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos });
+      +        stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos, accept: is_accepting_state });
+           }
+       
+           let start_item = Item {
+      @@ -370,4 +378,5 @@
+           }
+           non_terminal_map
+       }
       +
-      +        let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
-      +        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 6);
-      +
-      +        // Initial state and step
-      +        let mut state = constraint.init();
-      +        state.step_with_all_llm_tokens();
-      +        let mask = state.get_mask();
-      +        // Expect LLM tokens that can start an expression: i (0), '(' (3), "(i" (5)
-      +        assert_eq!(mask, LLMTokenBV::from_iter([true, false, false, true, false, true, false]));
-      +
-      +        // Commit "(i" twice (simulate consuming "(i" twice)
-      +        for _ in 0..2 {
-      +            state.commit(LLMTokenID(5));
-      +            state.step_with_all_llm_tokens();
-      +        }
-      +        let mask = state.get_mask();
-      +        // Now expect '+', '*', ')', '+i' => IDs 1,2,4,6
-      +        assert_eq!(mask, LLMTokenBV::from_iter([false, true, true, false, true, false, true]));
+      ```
+
+      ```diff 'src/glr/parser.rs'
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -26,20 +26,8 @@
+       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+       pub struct ParseState<T: AndAndOr> {
+           pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
+      -    pub status: ParseStatus,
+      -}
+      -
+      -#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      -pub enum Action {
+      -    Shift(TerminalID),
+      -    Reduce { production_id: ProductionID, len: usize, nonterminal_id: NonTerminalID },
+      -}
+      -
+      -#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      -pub enum ParseStatus {
+      -    Active,
+      -    Inactive(StopReason),
+      -}
+      +    // Removed status field
+      +}
+       
+       #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+       pub enum StopReason {
+      @@ -83,7 +71,7 @@
+               GLRParserState {
+                   parser: self,
+                   active_states: vec![self.init_parse_state_with_t(t)],
+      -            inactive_states: Vec::new(),
+      +            action_not_found_states: Vec::new(),
+               }
+           }
+       
+      @@ -92,7 +80,7 @@
+               GLRParserState {
+                   parser: self,
+                   active_states: vec![parse_state],
+      -            inactive_states: Vec::new(),
+      +            action_not_found_states: Vec::new(),
+               }
+           }
+       
+      @@ -103,7 +91,7 @@
+               GLRParserState {
+                   parser: self,
+                   active_states: parse_states,
+      -            inactive_states: Vec::new(),
+      +            action_not_found_states: Vec::new(),
+               }
+           }
+       
+      @@ -118,7 +106,6 @@
+               };
+               ParseState {
+                   stack: Arc::new(GSSNode::new(initial_content)),
+      -            status: ParseStatus::Active,
+               }
+           }
+       
+      @@ -199,7 +186,7 @@
+       pub struct GLRParserState<'a, T: AndAndOr> {
+           pub parser: &'a GLRParser,
+           pub active_states: Vec<ParseState<T>>,
+      -    pub inactive_states: Vec<ParseState<T>>,
+      +    pub action_not_found_states: Vec<ParseState<T>>,
+       }
+       
+       impl<'a, T: AndAndOr> GLRParserState<'a, T> {
+      @@ -213,15 +200,20 @@
+               }
+           }
+       
+      -    pub fn with_step(mut self, token_id: TerminalID) -> Self {
+      -        let mut parser = self;
+      -        parser.step(token_id);
+      -        parser
+      +    pub fn and_step(mut self, token_id: TerminalID) -> Self {
+      +        self.step(token_id);
+      +        self
       +    }
-       } // end mod tests
+      +
+      +    pub fn and_parse(mut self, input: &[TerminalID]) -> Self {
+      +        self.parse(input);
+      +        self
+           }
+       
+           pub fn step(&mut self, token_id: TerminalID) {
+               let mut next_active_states = Vec::new();
+      -        let mut inactive_states = Vec::new();
+      +        // This will store states where the current token_id leads to no action.
+      +        let mut current_action_not_found_states = Vec::new();
+       
+               while let Some(state) = self.active_states.pop() {
+                   let stack = state.stack; // Arc<GSSNode<ParseStateNodeContent<T>>>
+      @@ -239,7 +231,6 @@
+                               next_active_states.push(ParseState {
+                                   // stack: Arc::new(new_stack), // GSSNode::push now returns Arc
+                                   stack: Arc::new(new_stack),
+      -                            status: ParseStatus::Active,
+                               });
+                           }
+                           Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
+      @@ -252,23 +243,17 @@
+                                   let revealed_content = stack_node.peek(); // &ParseStateNodeContent<T>
+                                   let revealed_state_id = revealed_content.state_id;
+                                   let revealed_t = &revealed_content.t;
+      -                            let goto_row = self.parser.stage_7_table.get(&revealed_state_id).unwrap();
+      -
+      -                            if let Some(&goto_state) = goto_row.gotos.get(nonterminal) {
+      -                                debug!(3, "Going to state {:?}", goto_state);
+      -                                // Apply 'and' operation
+      -                                let combined_t = revealed_t.and(current_t);
+      -                                let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
+      -                                let new_stack = stack_node.push(new_content);
+      -                                self.active_states.push(ParseState {
+      -                                    stack: Arc::new(new_stack),
+      -                                    status: ParseStatus::Active,
+      -                                });
+      -                            } else {
+      -                                inactive_states.push(ParseState {
+      -                                    stack: stack_node,
+      -                                    status: ParseStatus::Inactive(StopReason::GotoNotFound),
+      -                                });
+      +                            // Assuming goto exists if the table is correct for a valid grammar
+      +                            let goto_state = *self.parser.stage_7_table.get(&revealed_state_id)
+      +                                .and_then(|row| row.gotos.get(nonterminal))
+      +                                .expect(&format!("Goto not found for state {} and non-terminal {:?}", revealed_state_id.0, nonterminal));
+      +
+      +                            debug!(3, "Going to state {:?}", goto_state);
+      +                            let combined_t = revealed_t.and(current_t);
+      +                            let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
+      +                            let new_stack = stack_node.push(new_content);
+      +                            self.active_states.push(ParseState {
+      +                                stack: Arc::new(new_stack),
+                                   }
+                               }
+                           }
+      @@ -280,7 +265,6 @@
+                                   let new_stack = stack.push(new_content);
+                                   next_active_states.push(ParseState {
+                                       stack: Arc::new(new_stack),
+      -                                status: ParseStatus::Active,
+                                   });
+                               }
+       
+      @@ -294,26 +278,21 @@
+                                           let revealed_content = stack_node.peek();
+                                           let revealed_state_id = revealed_content.state_id;
+                                           let revealed_t = &revealed_content.t;
+      -                                    let goto_row = self.parser.stage_7_table.get(&revealed_state_id).unwrap();
+      -
+      -                                    if let Some(&goto_state) = goto_row.gotos.get(nt_id) {
+      -                                        // Apply 'and' operation
+      -                                        let combined_t = revealed_t.and(current_t);
+      -                                        let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
+      -                                        let new_stack = Arc::new(stack_node.push(new_content));
+      -                                        for prod_id in prod_ids {
+      -                                            self.active_states.push(ParseState {
+      -                                                stack: new_stack.clone(),
+      -                                                status: ParseStatus::Active,
+      -                                            });
+      -                                        }
+      -                                    } else {
+      -                                        inactive_states.push(ParseState {
+      -                                            stack: stack_node.clone(),
+      -                                            status: ParseStatus::Inactive(StopReason::GotoNotFound),
+      -                                        });
+      +                                    // Assuming goto exists
+      +                                    let goto_state = *self.parser.stage_7_table.get(&revealed_state_id)
+      +                                        .and_then(|row| row.gotos.get(nt_id))
+      +                                        .expect(&format!("Goto not found for state {} and non-terminal {:?}", revealed_state_id.0, nt_id));
+      +
+      +                                    let combined_t = revealed_t.and(current_t);
+      +                                    let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
+      +                                    let new_stack = Arc::new(stack_node.push(new_content));
+      +                                    // Add one state for each production ID associated with this reduction path
+      +                                    // Note: The stack itself is shared among these states until further divergence.
+      +                                    for _prod_id in prod_ids {
+      +                                        self.active_states.push(ParseState {
+      +                                            stack: new_stack.clone(),
+      +                                        });
+                                           }
+                                       }
+                                   }
+      @@ -321,14 +300,14 @@
+                           }
+                       }
+                   } else {
+      -                inactive_states.push(ParseState {
+      +                // No action found for this token in this state
+      +                current_action_not_found_states.push(ParseState {
+                           stack,
+      -                    status: ParseStatus::Inactive(StopReason::ActionNotFound),
+                       });
+                   }
+               }
+               self.active_states = next_active_states;
+      -        self.inactive_states.extend(inactive_states);
+      +        self.action_not_found_states = current_action_not_found_states; // Replace previous not-found states
+           }
+       
+           // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
+      @@ -347,15 +326,19 @@
+           pub fn merge_with(&mut self, other: GLRParserState<T>) {
+               assert!(std::ptr::eq(self.parser, other.parser));
+               self.active_states.extend(other.active_states);
+      -        self.inactive_states.extend(other.inactive_states);
+      +        self.action_not_found_states.extend(other.action_not_found_states);
+      +        // Consider merging active states here if performance becomes an issue
+      +        // self.merge_active_states();
+           }
+       
+           pub fn fully_matches(&self) -> bool {
+      -        !self.fully_matching_states().is_empty()
+      -    }
+      -
+      -    pub fn fully_matching_states(&self) -> Vec<&ParseState<T>> {
+      -        self.inactive_states.iter().filter(|state| state.status == ParseStatus::Inactive(StopReason::GotoNotFound)).collect()
+      +        self.active_states.iter().any(|state| {
+      +            let content = state.stack.peek();
+      +            self.parser.stage_7_table
+      +                .get(&content.state_id)
+      +                .map_or(false, |row| row.accept)
+      +        })
+      +        // Also check action_not_found_states? No, acceptance is defined by active states reaching an accept row.
+           }
+       
+           pub fn can_match(&self) -> bool {
+      @@ -363,7 +346,7 @@
+           }
+       
+           pub fn matches_or_can_match(&self) -> bool {
+      -        self.can_match() || self.fully_matches()
+      +        self.can_match() || self.fully_matches() // A state can be both active and accepting
+           }
+       
+           pub fn is_ok(&self) -> bool {
       ```
     metadata:
   - user: |
       Git apply result:
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
 ...
