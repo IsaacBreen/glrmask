@@ -403,9 +403,8 @@ mod tests {
 
         let productions = vec![
             prod("S", vec![nt("X")]),
-            prod("X", vec![t("A"), t("EOF")]),
-            prod("X", vec![t("AB"), t("EOF")]),
-            prod("X", vec![t("B_OR_C"), t("EOF")]),
+            prod("X", vec![t("A"), t("B_OR_C"), t("EOF")]),
+            // prod("X", vec![t("AB"), t("EOF")]),
         ];
 
         let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
