@@ -402,9 +402,10 @@ mod tests {
         llm_token_map.insert(b"$".to_vec(), LLMTokenID(2));
 
         let productions = vec![
-            prod("S", vec![t("A"), t("EOF")]),
-            prod("S", vec![t("AB"), t("EOF")]),
-            prod("S", vec![t("B_OR_C"), t("EOF")]),
+            prod("S", vec![nt("X")]),
+            prod("X", vec![t("A"), t("EOF")]),
+            prod("X", vec![t("AB"), t("EOF")]),
+            prod("X", vec![t("B_OR_C"), t("EOF")]),
         ];
 
         let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
