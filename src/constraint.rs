@@ -202,7 +202,7 @@ impl GrammarConstraint {
                         for existing_precompute_node in existing_precompute_nodes {
                             if let Some(existing_edge_value) = precompute_node.get_edge_value_mut(matched_token_id, existing_precompute_node) {
                                 // Merge into the edge value.
-                                *existing_edge_value = existing_edge_value.clone().bitor(llm_tokens.clone());
+                                *existing_edge_value = existing_edge_value.clone() | llm_tokens.clone();
                                 continue 'outer;
                             }
                         }
@@ -219,7 +219,7 @@ impl GrammarConstraint {
                     if let Some(existing_edges) = precompute_node.get_mut(&matched_token_id) {
                         if let Some((existing_edge_value, exising_dst)) = existing_edges.iter_mut().next() {
                             // Merge into the edge value.
-                            *existing_edge_value = existing_edge_value.clone().bitor(llm_tokens.clone());
+                            *existing_edge_value = existing_edge_value.clone() | llm_tokens.clone();
                             next_precomputed_nodes.push(exising_dst.clone());
                             continue 'outer;
                         }
