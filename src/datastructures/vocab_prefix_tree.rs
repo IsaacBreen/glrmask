@@ -136,7 +136,9 @@ impl VocabPrefixTree {
         // 1. Initial population: Add all tokens as direct children of the root.
         //    Each edge uses the full token byte vector as its label, leading
         //    to a leaf node holding the token's ID.
+        crate::debug!(2, "Building vocab prefix tree");
         for (id, bytes) in tokens {
+            crate::debug!(3, "Adding token {} with bytes {:?}", id, bytes);
             if bytes.is_empty() {
                 // Assign the token ID for the empty string directly to the root,
                 // overwriting the default 0 if necessary.
@@ -155,10 +157,13 @@ impl VocabPrefixTree {
         // 2. Merge nodes recursively starting from the root's children.
         //    This step restructures the tree into the compact radix form
         //    based on shared prefixes that are themselves valid tokens.
+        crate::debug!(2, "Merging nodes");
         Self::merge_nodes(&mut tree.root);
 
         // 3. Compute reachable token IDs for all nodes in a post-order traversal.
+        crate::debug!(2, "Computing reachable IDs");
         Self::compute_reachable_ids_recursive(&mut tree.root, tree.max_token_id);
+        crate::debug!(2, "Done computing reachable IDs");
 
         // 4. Adjust root's reachable IDs if its ID 0 is just the convention.
         if !tree.has_empty_string_token && tree.root.token_id == 0 && tree.max_token_id >= 0 && !tree.root.reachable_token_ids.is_empty() {
