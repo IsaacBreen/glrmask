@@ -14,15 +14,15 @@ use std::sync::Arc;
 use crate::debug;
 
 pub trait MergeAndIntersect: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
-    /// Intersects the information represented by `self` and `other`.
-    fn intersect(&self, other: &Self) -> Self;
     /// Merges the information represented by `self` and `other`.
     fn merge(&self, other: &Self) -> Self;
+    /// Intersects the information represented by `self` and `other`.
+    fn intersect(&self, other: &Self) -> Self;
 }
 
 impl MergeAndIntersect for () {
-    fn intersect(&self, _: &Self) -> Self { () }
     fn merge(&self, _: &Self) -> Self { () }
+    fn intersect(&self, _: &Self) -> Self { () }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

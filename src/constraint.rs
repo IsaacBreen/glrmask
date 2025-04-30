@@ -56,12 +56,12 @@ pub struct GrammarConstraintState<'a> {
 }
 
 impl MergeAndIntersect for LLMTokenBV {
-    fn intersect(&self, other: &Self) -> Self {
-        self.clone() & other.clone()
-    }
-
     fn merge(&self, other: &Self) -> Self {
         self.clone() | other.clone()
+    }
+    
+    fn intersect(&self, other: &Self) -> Self {
+        self.clone() & other.clone()
     }
 }
 
