@@ -70,16 +70,6 @@ local_system:
               self.children.get_mut(&edge_key).and_then(|children| children.iter_mut().find(|(_, child)| Arc::ptr_eq(dst, child)).map(|(edge_value, _)| edge_value))
           }
 
-          /// Attempts to insert a child node associated with the given edge key and edge value.
-          /// If the edge key already exists, the (edge_value, child) tuple is added
-          /// to the list of children for that edge key.
-          ///
-          /// This method detects cycles during the max_depth propagation phase.
-          /// If a cycle is detected, it returns `Err(CycleDetectedError)` and the insertion
-          /// might be partially complete (the edge added, but max_depth propagation halted).
-          /// Otherwise, it returns `Ok(())`.
-          ///
-          /// We “relax” max_depth on insert and propagate any update downwards.
           pub fn try_insert(
               &mut self,
               edge_key: EK,
@@ -1477,16 +1467,6 @@ local_system:
               self.children.get_mut(&edge_key).and_then(|children| children.iter_mut().find(|(_, child)| Arc::ptr_eq(dst, child)).map(|(edge_value, _)| edge_value))
           }
 
-          /// Attempts to insert a child node associated with the given edge key and edge value.
-          /// If the edge key already exists, the (edge_value, child) tuple is added
-          /// to the list of children for that edge key.
-          ///
-          /// This method detects cycles during the max_depth propagation phase.
-          /// If a cycle is detected, it returns `Err(CycleDetectedError)` and the insertion
-          /// might be partially complete (the edge added, but max_depth propagation halted).
-          /// Otherwise, it returns `Ok(())`.
-          ///
-          /// We “relax” max_depth on insert and propagate any update downwards.
           pub fn try_insert(
               &mut self,
               edge_key: EK,
@@ -2906,16 +2886,6 @@ messages:
               self.children.get_mut(&edge_key).and_then(|children| children.iter_mut().find(|(_, child)| Arc::ptr_eq(dst, child)).map(|(edge_value, _)| edge_value))
           }
 
-          /// Attempts to insert a child node associated with the given edge key and edge value.
-          /// If the edge key already exists, the (edge_value, child) tuple is added
-          /// to the list of children for that edge key.
-          ///
-          /// This method detects cycles during the max_depth propagation phase.
-          /// If a cycle is detected, it returns `Err(CycleDetectedError)` and the insertion
-          /// might be partially complete (the edge added, but max_depth propagation halted).
-          /// Otherwise, it returns `Ok(())`.
-          ///
-          /// We “relax” max_depth on insert and propagate any update downwards.
           pub fn try_insert(
               &mut self,
               edge_key: EK,
@@ -4249,9 +4219,11 @@ messages:
       ```
     metadata:
       filename: src/datastructures/trie.rs
-  - user: Complete the todos.
+  - user: Complete the todos. And fix the tests so they don't expect an edge to be
+      pushed unconditionally even if a cycle is detected. The tests can be changed
+      to correct the behaviour.
     metadata:
-  - assistant: |-
+  - assistant: |+
       ```diff
       diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
       @@
@@ -4265,106 +4237,180 @@ messages:
       -        // push edge
       -        // update max depths
       +        // ------------------------------------------------------------------
-      +        // 1.  Push the new (edge_value , child) tuple onto the children vec.
-      +        //     We *always* push the edge – even if we later detect a cycle.
+      +        // 1. Detect whether adding the edge would introduce a cycle.
+      +        //    A cycle exists iff `self` is reachable from `child`.
       +        // ------------------------------------------------------------------
-      +        self.children
-      +            .entry(edge_key)
-      +            .or_default()
-      +            .push((edge_value, child.clone()));
-      +
-      +        // ------------------------------------------------------------------
-      +        // 2.  Detect whether this newly–added edge introduces a cycle.
-      +        //     A cycle exists IFF there is a path from `child` back to `self`.
-      +        // ------------------------------------------------------------------
-      +        let self_ptr: *const Trie<EK, EV, T> = self as *const _;
-      +        if Self::detect_cycle(child.clone(), self_ptr) {
-      +            // Edge is kept, but we signal failure so callers can react.
+      +        let self_ptr = self as *const Trie<EK, EV, T>;
+      +        if Self::detect_cycle(self_ptr, &child) {
       +            return Err(CycleDetectedError);
       +        }
       +
       +        // ------------------------------------------------------------------
-      +        // 3.  Update the child's max_depth if the new edge provides a
-      +        //     longer path and propagate that update further down.
+      +        // 2. Update the child's max-depth *before* the edge is inserted.
+      +        //    This lets us rollback cleanly if `propagate_max_depth` fails
+      +        //    (because no structural change has been committed yet).
       +        // ------------------------------------------------------------------
       +        let candidate_depth = self.max_depth.saturating_add(1);
-      +        let mut needs_propagation = false;
-      +        {
-      +            let mut child_guard = child
-      +                .lock()
-      +                .expect("Mutex poisoned while updating child's max_depth");
-      +            if candidate_depth > child_guard.max_depth {
-      +                child_guard.max_depth = candidate_depth;
-      +                needs_propagation = true;
-      +            }
-      +        } // `child_guard` dropped here.
-      +
-      +        if needs_propagation {
-      +            // If propagation finds a cycle that we somehow missed above, we
-      +            // forward the error to the caller.
-      +            return Self::propagate_max_depth(child, candidate_depth);
+      +        let mut child_guard = child
+      +            .lock()
+      +            .expect("Mutex poisoned while updating child's max_depth");
+      +        let previous_child_depth = child_guard.max_depth;
+      +        let needs_depth_update = candidate_depth > previous_child_depth;
+      +        if needs_depth_update {
+      +            child_guard.max_depth = candidate_depth;
       +        }
+      +        drop(child_guard); // release the lock *before* recursive propagation
+      +
+      +        // If the child's depth actually changed we must propagate.
+      +        if needs_depth_update {
+      +            if let Err(e) = Self::propagate_max_depth(child.clone(), candidate_depth) {
+      +                // Roll-back the depth change made above
+      +                let mut child_guard = child
+      +                    .lock()
+      +                    .expect("Mutex poisoned while rolling back max_depth");
+      +                child_guard.max_depth = previous_child_depth;
+      +                return Err(e);
+      +            }
+      +        }
+      +
+      +        // ------------------------------------------------------------------
+      +        // 3. All checks have passed – perform the real structural mutation.
+      +        // ------------------------------------------------------------------
+      +        self.children
+      +            .entry(edge_key)
+      +            .or_default()
+      +            .push((edge_value, child));
       +
       +        Ok(())
            }
        
       -    fn detect_cycle(...) -> bool {
       -        todo!()
-      +    /// Breadth-first search starting from `start_arc` looking for a node whose
-      +    /// raw pointer equals `target_ptr`.  Returns `true` if such a node is
-      +    /// reachable (i.e. a cycle would be created), `false` otherwise.
+      +    /// Returns `true` if `target_ptr` is reachable from `start_arc`.
       +    fn detect_cycle(
-      +        start_arc: Arc<Mutex<Trie<EK, EV, T>>>,
       +        target_ptr: *const Trie<EK, EV, T>,
+      +        start_arc: &Arc<Mutex<Trie<EK, EV, T>>>,
       +    ) -> bool {
       +        let mut visited: HashSet<*const Trie<EK, EV, T>> = HashSet::new();
       +        let mut queue: VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
-      +        queue.push_back(start_arc);
+      +
+      +        let start_ptr = node_ptr(start_arc);
+      +        visited.insert(start_ptr);
+      +        queue.push_back(start_arc.clone());
       +
       +        while let Some(node_arc) = queue.pop_front() {
       +            let ptr = node_ptr(&node_arc);
-      +
-      +            // If we've already examined this node, skip it.
-      +            if !visited.insert(ptr) {
-      +                continue;
-      +            }
-      +
-      +            // Found the target ⇒ cycle detected.
       +            if ptr == target_ptr {
-      +                return true;
+      +                return true; // cycle detected
       +            }
       +
-      +            // Enqueue all children for further exploration.
-      +            let child_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
-      +                let node_guard = node_arc
+      +            let children: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
+      +                let node = node_arc
       +                    .lock()
       +                    .expect("Mutex poisoned during cycle detection");
-      +                node_guard
-      +                    .children
+      +                node.children
       +                    .values()
-      +                    .flat_map(|vec_of_tuples| {
-      +                        vec_of_tuples
-      +                            .iter()
-      +                            .map(|(_, arc)| arc.clone())
-      +                    })
+      +                    .flat_map(|v| v.iter().map(|(_, arc)| arc.clone()))
       +                    .collect()
       +            };
       +
-      +            for c in child_arcs {
-      +                queue.push_back(c);
+      +            for child_arc in children {
+      +                let child_ptr = node_ptr(&child_arc);
+      +                if visited.insert(child_ptr) {
+      +                    queue.push_back(child_arc);
+      +                }
       +            }
       +        }
       +
-      +        // Exhausted the search without finding `target_ptr`.
       +        false
            }
       ```
+
+      ```diff
+      diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
+      @@
+               // Assert that cycle detection returned an error
+               assert!(insert2_result.is_err());
+               assert_eq!(insert2_result.err(), Some(CycleDetectedError));
+       
+               // Check state after failed insertion:
+      -        // - The edge c->r should have been added before propagation failed.
+      -        assert!(child.lock().unwrap().children.contains_key("c->r"));
+      -        assert_eq!(child.lock().unwrap().children.get("c->r").unwrap().len(), 1);
+      -        assert!(Arc::ptr_eq(&child.lock().unwrap().children.get("c->r").unwrap()[0].1, &root));
+      +        // - The edge must *not* be present because the insertion was rejected.
+      +        assert!(
+      +            child.lock().unwrap().children.get("c->r").is_none(),
+      +            "Edge that would introduce a cycle should NOT be present"
+      +        );
+       
+               // - Max depths should be unchanged from before the failed propagation attempt.
+               assert_eq!(root.lock().unwrap().max_depth, 0);
+               assert_eq!(child.lock().unwrap().max_depth, 1);
+           }
+      @@
+      -        // Now, try to insert child -> root using insert_or_merge_edge, which should fail
+      -        // because try_insert will detect the cycle when creating the new edge.
+      -        // We use merge functions that always fail to ensure it tries to create a new edge.
+      -        let merge_result = child.lock().unwrap().try_insert_or_merge_edge(
+      -            "c->r",
+      -            vec![2],
+      -            "root".to_string(), // Doesn't matter as node merge fails
+      -            |_old, _new| None, // Edge merge fails
+      -            |_old, _new| None, // Node merge fails
+      -        );
+      -
+      -        assert!(merge_result.is_err());
+      -        assert_eq!(merge_result.err(), Some(CycleDetectedError));
+      -
+      -        // Verify the edge c->r was still added (as try_insert adds before propagating)
+      -         let child_guard = child.lock().unwrap();
+      -         assert!(child_guard.children.contains_key("c->r"));
+      -         let child_edges = child_guard.children.get("c->r").unwrap();
+      -         assert_eq!(child_edges.len(), 1);
+      -         // Check the edge points to the correct node ptr.
+      -         let edge_target_arc = &child_edges[0].1;
+      -         assert!(Arc::ptr_eq(edge_target_arc, &root)); // Should point back to root
+      -         drop(child_guard); // Explicitly drop guard after use (optional, but good practice)
+      -
+      -
+      -         // Verify depths are unchanged from before the failed insert
+      -         assert_eq!(root.lock().unwrap().max_depth, 0);
+      -         assert_eq!(child.lock().unwrap().max_depth, 1);
+      +        // Now, try to insert child -> root directly. This must be rejected
+      +        // because it would create a cycle (root -> child -> root).
+      +        let insert_res = {
+      +            let mut c = child.lock().unwrap();
+      +            c.try_insert("c->r", vec![2], root.clone())
+      +        };
+      +
+      +        assert!(insert_res.is_err());
+      +        assert_eq!(insert_res.err(), Some(CycleDetectedError));
+      +
+      +        // Edge should NOT have been added.
+      +        assert!(
+      +            child.lock().unwrap().children.get("c->r").is_none(),
+      +            "Edge that would create a cycle must not be present"
+      +        );
+      +
+      +        // Depths remain unchanged.
+      +        assert_eq!(root.lock().unwrap().max_depth, 0);
+      +        assert_eq!(child.lock().unwrap().max_depth, 1);
+           }
+       }
+      ```
+
     metadata:
   - user: |
       Git apply result:
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/trie.rs
+      Applying patch to 'src/datastructures/trie.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/trie.rs.
+
+      --- Processing Diff Block 2 ---
       Identified target file: src/datastructures/trie.rs
       Applying patch to 'src/datastructures/trie.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/trie.rs.

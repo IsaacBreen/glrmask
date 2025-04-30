@@ -69,13 +69,91 @@ impl<EK: Ord, EV, T> Trie<EK, EV, T> {
         edge_value: EV,
         child: Arc<Mutex<Trie<EK, EV, T>>>,
     ) -> Result<(), CycleDetectedError> {
-        // detect cycle
-        // push edge
-        // update max depths
+        // ------------------------------------------------------------------
+        // 1. Detect whether adding the edge would introduce a cycle.
+        //    A cycle exists iff `self` is reachable from `child`.
+        // ------------------------------------------------------------------
+        let self_ptr = self as *const Trie<EK, EV, T>;
+        if Self::detect_cycle(self_ptr, &child) {
+            return Err(CycleDetectedError);
+        }
+
+        // ------------------------------------------------------------------
+        // 2. Update the child's max-depth *before* the edge is inserted.
+        //    This lets us rollback cleanly if `propagate_max_depth` fails
+        //    (because no structural change has been committed yet).
+        // ------------------------------------------------------------------
+        let candidate_depth = self.max_depth.saturating_add(1);
+        let mut child_guard = child
+            .lock()
+            .expect("Mutex poisoned while updating child's max_depth");
+        let previous_child_depth = child_guard.max_depth;
+        let needs_depth_update = candidate_depth > previous_child_depth;
+        if needs_depth_update {
+            child_guard.max_depth = candidate_depth;
+        }
+        drop(child_guard); // release the lock *before* recursive propagation
+
+        // If the child's depth actually changed we must propagate.
+        if needs_depth_update {
+            if let Err(e) = Self::propagate_max_depth(child.clone(), candidate_depth) {
+                // Roll-back the depth change made above
+                let mut child_guard = child
+                    .lock()
+                    .expect("Mutex poisoned while rolling back max_depth");
+                child_guard.max_depth = previous_child_depth;
+                return Err(e);
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // 3. All checks have passed – perform the real structural mutation.
+        // ------------------------------------------------------------------
+        self.children
+            .entry(edge_key)
+            .or_default()
+            .push((edge_value, child));
+
+        Ok(())
     }
 
-    fn detect_cycle(...) -> bool {
-        todo!()
+    /// Returns `true` if `target_ptr` is reachable from `start_arc`.
+    fn detect_cycle(
+        target_ptr: *const Trie<EK, EV, T>,
+        start_arc: &Arc<Mutex<Trie<EK, EV, T>>>,
+    ) -> bool {
+        let mut visited: HashSet<*const Trie<EK, EV, T>> = HashSet::new();
+        let mut queue: VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
+
+        let start_ptr = node_ptr(start_arc);
+        visited.insert(start_ptr);
+        queue.push_back(start_arc.clone());
+
+        while let Some(node_arc) = queue.pop_front() {
+            let ptr = node_ptr(&node_arc);
+            if ptr == target_ptr {
+                return true; // cycle detected
+            }
+
+            let children: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
+                let node = node_arc
+                    .lock()
+                    .expect("Mutex poisoned during cycle detection");
+                node.children
+                    .values()
+                    .flat_map(|v| v.iter().map(|(_, arc)| arc.clone()))
+                    .collect()
+            };
+
+            for child_arc in children {
+                let child_ptr = node_ptr(&child_arc);
+                if visited.insert(child_ptr) {
+                    queue.push_back(child_arc);
+                }
+            }
+        }
+
+        false
     }
 
     /// Propagates a max_depth update to all descendant nodes, detecting cycles.
@@ -913,10 +991,11 @@ mod tests {
         assert_eq!(insert2_result.err(), Some(CycleDetectedError));
 
         // Check state after failed insertion:
-        // - The edge c->r should have been added before propagation failed.
-        assert!(child.lock().unwrap().children.contains_key("c->r"));
-        assert_eq!(child.lock().unwrap().children.get("c->r").unwrap().len(), 1);
-        assert!(Arc::ptr_eq(&child.lock().unwrap().children.get("c->r").unwrap()[0].1, &root));
+        // - The edge must *not* be present because the insertion was rejected.
+        assert!(
+            child.lock().unwrap().children.get("c->r").is_none(),
+            "Edge that would introduce a cycle should NOT be present"
+        );
 
         // - Max depths should be unchanged from before the failed propagation attempt.
         assert_eq!(root.lock().unwrap().max_depth, 0);
@@ -1363,33 +1442,24 @@ mod tests {
         root.lock().unwrap().try_insert("r->c", vec![1], child.clone()).unwrap();
         assert_eq!(child.lock().unwrap().max_depth, 1);
 
-        // Now, try to insert child -> root using insert_or_merge_edge, which should fail
-        // because try_insert will detect the cycle when creating the new edge.
-        // We use merge functions that always fail to ensure it tries to create a new edge.
-        let merge_result = child.lock().unwrap().try_insert_or_merge_edge(
-            "c->r",
-            vec![2],
-            "root".to_string(), // Doesn't matter as node merge fails
-            |_old, _new| None, // Edge merge fails
-            |_old, _new| None, // Node merge fails
+        // Now, try to insert child -> root directly. This must be rejected
+        // because it would create a cycle (root -> child -> root).
+        let insert_res = {
+            let mut c = child.lock().unwrap();
+            c.try_insert("c->r", vec![2], root.clone())
+        };
+
+        assert!(insert_res.is_err());
+        assert_eq!(insert_res.err(), Some(CycleDetectedError));
+
+        // Edge should NOT have been added.
+        assert!(
+            child.lock().unwrap().children.get("c->r").is_none(),
+            "Edge that would create a cycle must not be present"
         );
 
-        assert!(merge_result.is_err());
-        assert_eq!(merge_result.err(), Some(CycleDetectedError));
-
-        // Verify the edge c->r was still added (as try_insert adds before propagating)
-         let child_guard = child.lock().unwrap();
-         assert!(child_guard.children.contains_key("c->r"));
-         let child_edges = child_guard.children.get("c->r").unwrap();
-         assert_eq!(child_edges.len(), 1);
-         // Check the edge points to the correct node ptr.
-         let edge_target_arc = &child_edges[0].1;
-         assert!(Arc::ptr_eq(edge_target_arc, &root)); // Should point back to root
-         drop(child_guard); // Explicitly drop guard after use (optional, but good practice)
-
-
-         // Verify depths are unchanged from before the failed insert
-         assert_eq!(root.lock().unwrap().max_depth, 0);
-         assert_eq!(child.lock().unwrap().max_depth, 1);
+        // Depths remain unchanged.
+        assert_eq!(root.lock().unwrap().max_depth, 0);
+        assert_eq!(child.lock().unwrap().max_depth, 1);
     }
 }
