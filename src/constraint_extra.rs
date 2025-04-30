@@ -173,7 +173,7 @@ mod tests {
         grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(2)); // "$" from tokenizer
 
         // Generate parser
-        let parser: GLRParser<LLMTokenInfo> = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
+        let parser: GLRParser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
 
         // Create constraint (this runs precomputation)
         GrammarConstraint::new(tokenizer, parser, llm_token_map, max_llm_token_id)

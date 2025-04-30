@@ -312,13 +312,13 @@ impl<'a> GrammarConstraintState<'a> {
         // - If token present:
         //   - Reset 't' to 'all_true_token_info'.
         //   - Stop recursion if token is present in 'intersection' (optimization).
-        let closure = |info: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
-            if info.active[llm_token_id.0] {
+        let closure = |content: &ParseStateNodeContent<LLMTokenInfo>| -> Option<(ParseStateNodeContent<LLMTokenInfo>, bool)> {
+            if content.t.active[llm_token_id.0] {
                 // If the intersection already guarantees this token, we can stop early.
-                if info.intersection[llm_token_id.0] {
-                     Some((all_true_token_info.clone(), false)) // Stop recursion
+                if content.t.intersection[llm_token_id.0] {
+                     Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, false)) // Stop recursion
                 } else {
-                     Some((all_true_token_info.clone(), true)) // Continue recursion
+                     Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, true)) // Continue recursion
                 }
             } else {
                 None // Prune this path
@@ -344,7 +344,7 @@ impl<'a> GrammarConstraintState<'a> {
                      action_not_found_states: Vec::new(), // Reset not found states
                  };
                  new_glr_state.merge_active_states(); // Merge based on top node state_id
-                 next_state.insert(*tokenizer_state_id, new_glr_state); // Insert (no need to merge here as we process each tokenizer_state_id once)
+                 next_state.insert(tokenizer_state_id, new_glr_state); // Insert (no need to merge here as we process each tokenizer_state_id once)
             }
         }
         self.state = next_state;
@@ -407,7 +407,7 @@ impl<'a> GrammarConstraintState<'a> {
                 glr_parse_state.active_states.retain_mut(|parse_state| {
                     // Intersect the *active* tokens with the edge tokens. Intersection remains.
                     Arc::make_mut(&mut parse_state.stack).value_mut().t.active &= edge_llm_tokens;
-                    !parse_state.stack.value().t.active.is_empty() // Check if any active paths remain
+                    !parse_state.stack.value.t.active.is_empty() // Check if any active paths remain
                 });
                 glr_parse_state.step(*grammar_token_id);
                 if glr_parse_state.active_states.is_empty() {
