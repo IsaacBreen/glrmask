@@ -84,10 +84,10 @@ impl MergeAndIntersect for LLMTokenInfo {
         }
     }
     fn intersect(&self, other: &Self) -> Self {
-        // Intersect: Active tokens are intersected, Intersection retained as-is.
+        // Intersect: Active tokens are intersected, Intersection is also intersected.
         Self {
             active: self.active.clone() & other.active.clone(),
-            intersection: self.intersection.clone(),
+            intersection: self.intersection.clone() & other.intersection.clone(),
         }
     }
 }
@@ -396,7 +396,9 @@ impl<'a> GrammarConstraintState<'a> {
             |glr_parse_state, grammar_token_id, edge_llm_tokens, child_node| {
                 let mut glr_parse_state = glr_parse_state.clone();
                 glr_parse_state.active_states.retain_mut(|parse_state| {
-                    // Intersect the *active* tokens with the edge tokens. Intersection remains.
+                    // Intersect the *active* tokens with the edge tokens. Intersection inherits current active tokens.
+                    let current_active_tokens = parse_state.stack.value.t.active.clone();
+                    Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens;
                     Arc::make_mut(&mut parse_state.stack).value.t.active &= edge_llm_tokens;
                     !parse_state.stack.value.t.active.is_empty() // Check if any active paths remain
                 });
@@ -422,7 +424,9 @@ impl<'a> GrammarConstraintState<'a> {
                 if let Some(clean_end) = &node.value.clean_end {
                     let mut final_glr_parse_state = glr_parse_state.clone();
                     final_glr_parse_state.active_states.retain_mut(|parse_state| {
-                        // Intersect the *active* tokens with the clean_end tokens.
+                        // Intersect the *active* tokens with the clean_end tokens. Intersection retains current active tokens.
+                        let current_active_tokens = parse_state.stack.value.t.active.clone();
+                        Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens;
                         Arc::make_mut(&mut parse_state.stack).value.t.active &= clean_end;
                         // Check if any active paths remain
                         !parse_state.stack.value.t.active.is_empty()
@@ -446,6 +450,9 @@ impl<'a> GrammarConstraintState<'a> {
                             // Intersect *active* tokens with the finalizer's allowed tokens.
                             let mut semi_final_glr_parse_state = semi_final_glr_parse_state.clone();
                             semi_final_glr_parse_state.active_states.retain_mut(|parse_state| {
+                                // Intersect the *active* tokens with the finalizer's allowed tokens. Intersection retains current active tokens.
+                                let current_active_tokens = parse_state.stack.value.t.active.clone();
+                                Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens;
                                 Arc::make_mut(&mut parse_state.stack).value.t.active &= llm_tokens;
                                 // Check if any active paths remain
                                 !parse_state.stack.value.t.active.is_empty()
