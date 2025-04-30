@@ -368,10 +368,6 @@ impl<'a> GrammarConstraintState<'a> {
                 // The special_map logic will handle intersecting with edge_llm_tokens.
                 Arc::make_mut(&mut parse_state.stack).value.t.active &= llm_tokens;
                 // Intersection is NOT modified here. It reflects the guarantee from *below*.
-
-                // Debugging output (optional)
-                dbg!(llm_tokens);
-                dbg!(&parse_state.stack);
             }
             tokenizer_state_id_to_parse_states.insert(*tokenizer_state_id, state);
         }
@@ -385,9 +381,7 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn step(&mut self, llm_tokens: &LLMTokenBV) {
-        dbg!(&self.state);
         let initial_nodes_and_values = self.prepare_initial_nodes_and_values_for_special_map(llm_tokens);
-        dbg!(&initial_nodes_and_values);
 
         self.state = BTreeMap::new();
 
