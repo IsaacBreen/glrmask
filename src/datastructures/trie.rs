@@ -79,33 +79,97 @@ impl<EK: Ord, EV, T> Trie<EK, EV, T> {
         edge_value: EV,
         child: Arc<Mutex<Trie<EK, EV, T>>>,
     ) -> Result<(), CycleDetectedError> {
-        let candidate_depth = self.max_depth.saturating_add(1);
-        let mut needs_propagation = false;
-        {
-            // First update the inserted child if needed.
-            let mut child_lock = child.lock().expect("Mutex poisoned in try_insert");
-            if candidate_depth > child_lock.max_depth {
-                child_lock.max_depth = candidate_depth;
-                needs_propagation = true;
-            }
-        } // child_lock is released here
-
-        // Add the (edge_value, child) tuple to the list for this edge key *before* propagation.
-        // This ensures the edge exists even if propagation fails due to a cycle.
-        let child_clone_for_insert = child.clone(); // Clone Arc for insertion
+        // ------------------------------------------------------------------
+        // 1.  Push the new (edge_value , child) tuple onto the children vec.
+        //     We *always* push the edge – even if we later detect a cycle.
+        // ------------------------------------------------------------------
         self.children
             .entry(edge_key)
             .or_default()
-            .push((edge_value, child_clone_for_insert)); // Store the tuple
+            .push((edge_value, child.clone()));
 
-        // If the child's depth changed, propagate the update downwards.
+        // ------------------------------------------------------------------
+        // 2.  Detect whether this newly–added edge introduces a cycle.
+        //     A cycle exists IFF there is a path from `child` back to `self`.
+        // ------------------------------------------------------------------
+        let self_ptr: *const Trie<EK, EV, T> = self as *const _;
+        if Self::detect_cycle(child.clone(), self_ptr) {
+            // Edge is kept, but we signal failure so callers can react.
+            return Err(CycleDetectedError);
+        }
+
+        // ------------------------------------------------------------------
+        // 3.  Update the child's max_depth if the new edge provides a
+        //     longer path and propagate that update further down.
+        // ------------------------------------------------------------------
+        let candidate_depth = self.max_depth.saturating_add(1);
+        let mut needs_propagation = false;
+        {
+            let mut child_guard = child
+                .lock()
+                .expect("Mutex poisoned while updating child's max_depth");
+            if candidate_depth > child_guard.max_depth {
+                child_guard.max_depth = candidate_depth;
+                needs_propagation = true;
+            }
+        } // `child_guard` dropped here.
+
         if needs_propagation {
-            // Because the child’s max_depth may now have increased, we “propagate” that update downward.
-            // This call can now return an error if a cycle is detected.
-            Self::propagate_max_depth(child, candidate_depth)?;
+            // If propagation finds a cycle that we somehow missed above, we
+            // forward the error to the caller.
+            return Self::propagate_max_depth(child, candidate_depth);
         }
 
         Ok(())
+    }
+
+    /// Breadth-first search starting from `start_arc` looking for a node whose
+    /// raw pointer equals `target_ptr`.  Returns `true` if such a node is
+    /// reachable (i.e. a cycle would be created), `false` otherwise.
+    fn detect_cycle(
+        start_arc: Arc<Mutex<Trie<EK, EV, T>>>,
+        target_ptr: *const Trie<EK, EV, T>,
+    ) -> bool {
+        let mut visited: HashSet<*const Trie<EK, EV, T>> = HashSet::new();
+        let mut queue: VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
+        queue.push_back(start_arc);
+
+        while let Some(node_arc) = queue.pop_front() {
+            let ptr = node_ptr(&node_arc);
+
+            // If we've already examined this node, skip it.
+            if !visited.insert(ptr) {
+                continue;
+            }
+
+            // Found the target ⇒ cycle detected.
+            if ptr == target_ptr {
+                return true;
+            }
+
+            // Enqueue all children for further exploration.
+            let child_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
+                let node_guard = node_arc
+                    .lock()
+                    .expect("Mutex poisoned during cycle detection");
+                node_guard
+                    .children
+                    .values()
+                    .flat_map(|vec_of_tuples| {
+                        vec_of_tuples
+                            .iter()
+                            .map(|(_, arc)| arc.clone())
+                    })
+                    .collect()
+            };
+
+            for c in child_arcs {
+                queue.push_back(c);
+            }
+        }
+
+        // Exhausted the search without finding `target_ptr`.
+        false
     }
 
     /// Propagates a max_depth update to all descendant nodes, detecting cycles.
