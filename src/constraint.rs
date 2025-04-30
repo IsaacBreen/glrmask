@@ -236,6 +236,7 @@ impl GrammarConstraint {
                     let new_precomputed_node = precompute_node.force_insert(matched_token_id, llm_tokens.clone(), PrecomputedNodeContents::default());
                     next_precomputed_nodes.push(new_precomputed_node.clone());
                 }
+                crate::debug!(3, "Done for this match. Next precomputed nodes: {}", next_precomputed_nodes.len());
                 if new_offset == bytes.len() {
                     // Reached the end of the input, so this is a clean match.
                     for new_precomputed_node in &next_precomputed_nodes {
