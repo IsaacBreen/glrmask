@@ -199,6 +199,7 @@ impl GrammarConstraint {
                     let llm_tokens = dst.reachable_token_ids().clone();
                     if let Some(existing_precompute_nodes) = queue.get(&new_queue_key) {
                         // Try to push to an existing precompute node in the queue if it's possible to do so without creating a cycle.
+                        crate::debug!(3, "Trying to push to existing precompute node");
                         for existing_precompute_node in existing_precompute_nodes {
                             if let Some(existing_edge_value) = precompute_node.get_edge_value_mut(matched_token_id, existing_precompute_node) {
                                 // Merge into the edge value.
@@ -208,6 +209,7 @@ impl GrammarConstraint {
                         }
 
                         // Try to insert a new edge to any existing node.
+                        crate::debug!(3, "Trying to insert to existing precompute node");
                         for existing_precompute_node in existing_precompute_nodes {
                             if let Ok(dst_precomputed_node) = precompute_node.try_insert(matched_token_id, llm_tokens.clone(), existing_precompute_node.clone()) {
                                 continue 'outer;
@@ -216,8 +218,10 @@ impl GrammarConstraint {
                     }
 
                     // Use any existing edge on the src node.
+                    crate::debug!(3, "Trying to find existing edge value");
                     if let Some(existing_edges) = precompute_node.get_mut(&matched_token_id) {
                         if let Some((existing_edge_value, exising_dst)) = existing_edges.iter_mut().next() {
+                            crate::debug!(3, "Found existing edge value");
                             // Merge into the edge value.
                             *existing_edge_value = existing_edge_value.clone() | llm_tokens.clone();
                             next_precomputed_nodes.push(exising_dst.clone());
@@ -226,6 +230,7 @@ impl GrammarConstraint {
                     }
 
                     // Create a new node.
+                    crate::debug!(3, "Creating new precompute node");
                     let new_precomputed_node = precompute_node.force_insert(matched_token_id, llm_tokens.clone(), PrecomputedNodeContents::default());
                     next_precomputed_nodes.push(new_precomputed_node.clone());
                 }
