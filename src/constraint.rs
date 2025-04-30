@@ -133,7 +133,7 @@ impl GrammarConstraint {
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         max_llm_token_id: usize,
     ) -> Precomputed {
-        #[derive(Debug, Eq, PartialEq)]
+        #[derive(Debug, Copy, Clone, Eq, PartialEq)]
         struct DottedVocabNode<'a> {
             src: &'a VocabPrefixTreeNode,
             dst: &'a VocabPrefixTreeNode,
@@ -193,7 +193,6 @@ impl GrammarConstraint {
                 // There's still more input to process. Insert trie edge(s) and update the queue.
                 let new_dotted_node = DottedVocabNode { src, dst, offset: new_offset, bytes };
                 let new_queue_key = (new_dotted_node, TokenizerStateID(0));
-                let mut next_precomputed_nodes = Vec::new();
                 'outer: for precompute_node in &precomputed_nodes {
                     let mut precompute_node = precompute_node.lock().unwrap();
                     let llm_tokens = dst.reachable_token_ids().clone();
@@ -222,11 +221,22 @@ impl GrammarConstraint {
                     // Use any existing edge on the src node.
                     crate::debug!(3, "Trying to find existing edge value");
                     if let Some(existing_edges) = precompute_node.get_mut(&matched_token_id) {
-                        if let Some((existing_edge_value, exising_dst)) = existing_edges.iter_mut().next() {
+                        if let Some((existing_edge_value, existing_dst)) = existing_edges.iter_mut().next() {
                             // Merge into the edge value.
                             crate::debug!(3, "Success! Found existing edge value");
                             *existing_edge_value = existing_edge_value.clone() | llm_tokens.clone();
-                            next_precomputed_nodes.push(exising_dst.clone());
+                            if new_offset == bytes.len() {
+                                // Reached the end of the input, so this is a clean match.
+                                existing_dst.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
+                                let next_src = dst;
+                                for (next_bytes, next_dst) in next_src.children() {
+                                    let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
+                                    let new_queue_key = (new_dotted_node, TokenizerStateID(0));
+                                    queue.entry(new_queue_key).or_default().push(existing_dst.clone())
+                                }
+                            } else if new_offset < bytes.len() {
+                                queue.entry(new_queue_key).or_default().push(existing_dst.clone());
+                            } else { unreachable!(); }
                             continue 'outer;
                         }
                     }
@@ -234,23 +244,19 @@ impl GrammarConstraint {
                     // Create a new node.
                     crate::debug!(3, "Creating new precompute node");
                     let new_precomputed_node = precompute_node.force_insert(matched_token_id, llm_tokens.clone(), PrecomputedNodeContents::default());
-                    next_precomputed_nodes.push(new_precomputed_node.clone());
-                }
-                crate::debug!(3, "Done for this match. Next precomputed nodes: {}", next_precomputed_nodes.len());
-                if new_offset == bytes.len() {
-                    // Reached the end of the input, so this is a clean match.
-                    for new_precomputed_node in &next_precomputed_nodes {
+                    if new_offset == bytes.len() {
+                        // Reached the end of the input, so this is a clean match.
                         new_precomputed_node.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
-                    }
-                    let next_src = dst;
-                    for (next_bytes, next_dst) in next_src.children() {
-                        let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
-                        let new_queue_key = (new_dotted_node, TokenizerStateID(0));
-                        queue.entry(new_queue_key).or_default().extend(next_precomputed_nodes.iter().cloned());
-                    }
-                } else if new_offset < bytes.len() {
-                    queue.entry(new_queue_key).or_default().extend(next_precomputed_nodes);
-                } else { unreachable!(); }
+                        let next_src = dst;
+                        for (next_bytes, next_dst) in next_src.children() {
+                            let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
+                            let new_queue_key = (new_dotted_node, TokenizerStateID(0));
+                            queue.entry(new_queue_key).or_default().push(new_precomputed_node.clone());
+                        }
+                    } else if new_offset < bytes.len() {
+                        queue.entry(new_queue_key).or_default().push(new_precomputed_node.clone());
+                    } else { unreachable!(); }
+                }
             }
             // Handle partial matches (end state reached before end of vocab node bytes)
             if let Some(end_state) = results.end_state {
