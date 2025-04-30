@@ -17,19 +17,19 @@ macro_rules! choice_fast {
 #[macro_export]
 macro_rules! debug {
     ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {{
-        const MACRO_DEBUG_LEVEL: usize = 2; // Replace with crate::DEBUG_LEVEL or similar
+        const MACRO_DEBUG_LEVEL: usize = 2;
 
         if $level <= MACRO_DEBUG_LEVEL {
-            // #[cfg(feature = "debug")] // Enable this line if using a feature flag
+            // #[cfg(feature = "debug")]
             println!(concat!("[DEBUG {}] ", $fmt), $level $(, $($arg)*)?);
         }
     }};
 
     ($level:expr, $msg:expr) => {{
-        const MACRO_DEBUG_LEVEL: usize = 2; // Replace with crate::DEBUG_LEVEL or similar
+        const MACRO_DEBUG_LEVEL: usize = 2;
 
         if $level <= MACRO_DEBUG_LEVEL {
-            // #[cfg(feature = "debug")] // Enable this line if using a feature flag
+            // #[cfg(feature = "debug")]
             println!("[DEBUG {}] {:?}", $level, $msg);
         }
     }};
