@@ -1,4 +1,4 @@
-use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode, PrecomputedNodeContents, PrecomputedFinalizer};
+use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode, PrecomputedNodeContents, PrecomputedFinalizer, LLMTokenInfo};
 use crate::datastructures::trie::{Trie, node_ptr};
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
 use crate::types::TerminalID as GrammarTokenID; // Corrected import path
@@ -173,7 +173,7 @@ mod tests {
         grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(2)); // "$" from tokenizer
 
         // Generate parser
-        let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
+        let parser: GLRParser<LLMTokenInfo> = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
 
         // Create constraint (this runs precomputation)
         GrammarConstraint::new(tokenizer, parser, llm_token_map, max_llm_token_id)
