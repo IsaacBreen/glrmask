@@ -17,7 +17,7 @@ impl<T> GSSNode<T> {
     pub fn new_with_predecessors(value: T, predecessors: Vec<Arc<GSSNode<T>>>) -> Self {
         Self {
             value,
-            predecessors: Vec::new(),
+            predecessors: predecessors.into_iter().collect(),
         }
     }
 
