@@ -58,7 +58,7 @@ def llm_tokens_to_ids(tokens):
 # Initial mask check
 mask = grammar_constraint_state.get_mask()
 # expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
-print(f"Initial Mask: {mask}")
+print(f"Initial Mask: {set(int(x) for x in np.where(mask)[0])}")
 # assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
 
 
