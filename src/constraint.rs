@@ -271,6 +271,9 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) {
+        // TODO: Need to be selective wrt internal values, ie check internal nodes' t values for the llm_token_id, and prune if not compatible.
+        //  To keep this efficient, we probably need to have a way of traversing the trie but stopping early when all nested llm token bvs are compatible.
+        //  Perhaps maintain a llm token bv that's the intersection of all its children's
         // Keep only the active states for which this LLM token is set
         for (_, state) in &mut self.state {
             state.active_states.retain(|active_state| active_state.stack.peek().t[llm_token_id.0]);
@@ -299,7 +302,10 @@ impl<'a> GrammarConstraintState<'a> {
         for (tokenizer_state_id, state) in &self.state {
             let mut state = state.clone();
             for parse_state in state.active_states.iter_mut() {
+                // TODO: need to do a deep clean here and reset all internal values to llm_tokens.
                 Arc::make_mut(&mut parse_state.stack).value.t = llm_tokens.clone();
+                dbg!(llm_tokens);
+                dbg!(&parse_state.stack);
             }
             tokenizer_state_id_to_parse_states.insert(*tokenizer_state_id, state);
         }
@@ -314,6 +320,7 @@ impl<'a> GrammarConstraintState<'a> {
 
     pub fn step(&mut self, llm_tokens: &LLMTokenBV) {
         let initial_nodes_and_values = self.prepare_initial_nodes_and_values_for_special_map(llm_tokens);
+        dbg!(&initial_nodes_and_values);
 
         self.state = BTreeMap::new();
 
