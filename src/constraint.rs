@@ -170,13 +170,13 @@ impl GrammarConstraint {
         }
 
         // Queue keyed by vocab node and tokenizer state ID.
-        let mut queue: BTreeMap<(DottedVocabNode, TokenizerStateID), Vec<Arc<Mutex<PrecomputeNode>>>> = BTreeMap::new();
+        let mut queue: BTreeMap<(DottedVocabNode, TokenizerStateID), BTreeSet<Arc<Mutex<PrecomputeNode>>>> = BTreeMap::new();
 
         // Initialize the queue with the roots.
         for (tokenizer_state_id, precompute_node) in &precomputed_roots {
             for (bytes, new_vocab_node) in vocab_prefix_tree.root.children() {
                 let dotted_new_vocab_node = DottedVocabNode { src: &vocab_prefix_tree.root, dst: new_vocab_node, bytes, offset: 0 };
-                queue.insert((dotted_new_vocab_node, *tokenizer_state_id), vec![precompute_node.clone()]);
+                queue.insert((dotted_new_vocab_node, *tokenizer_state_id), BTreeSet::from([precompute_node.clone()]));
             }
         }
 
@@ -231,10 +231,10 @@ impl GrammarConstraint {
                                 for (next_bytes, next_dst) in next_src.children() {
                                     let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
                                     let new_queue_key = (new_dotted_node, TokenizerStateID(0));
-                                    queue.entry(new_queue_key).or_default().push(existing_dst.clone())
+                                    queue.entry(new_queue_key).or_default().insert(existing_dst.clone());
                                 }
                             } else if new_offset < bytes.len() {
-                                queue.entry(new_queue_key).or_default().push(existing_dst.clone());
+                                queue.entry(new_queue_key).or_default().insert(existing_dst.clone());
                             } else { unreachable!(); }
                             continue 'outer;
                         }
@@ -250,10 +250,10 @@ impl GrammarConstraint {
                         for (next_bytes, next_dst) in next_src.children() {
                             let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
                             let new_queue_key = (new_dotted_node, TokenizerStateID(0));
-                            queue.entry(new_queue_key).or_default().push(new_precomputed_node.clone());
+                            queue.entry(new_queue_key).or_default().insert(new_precomputed_node.clone());
                         }
                     } else if new_offset < bytes.len() {
-                        queue.entry(new_queue_key).or_default().push(new_precomputed_node.clone());
+                        queue.entry(new_queue_key).or_default().insert(new_precomputed_node.clone());
                     } else { unreachable!(); }
                 }
             }
@@ -269,7 +269,7 @@ impl GrammarConstraint {
                 for (next_bytes, next_dst) in next_src.children() {
                     let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
                     let new_queue_key = (new_dotted_node, TokenizerStateID(0));
-                    queue.entry(new_queue_key).or_default().extend(precomputed_nodes.iter().cloned());
+                    queue.entry(new_queue_key).or_default().extend(precomputed_nodes.clone());
                 }
             }
         }
