@@ -79,101 +79,9 @@ impl<T> GSSNode<T> {
             } else {
                 for predecessor in &node.predecessors {
                     stack.push((predecessor, path.clone()));
-        }
-    }
-}
-
-// Helper function for prune_and_transform_roots
-fn prune_and_transform_recursive<T: Clone>(
-    node_arc: &Arc<GSSNode<T>>,
-    closure: &impl Fn(&T) -> Option<(T, bool)>, // Returns Option<(NewValue, ContinueRecursion)>
-    memo: &mut HashMap<*const GSSNode<T>, Option<Arc<GSSNode<T>>>>,
-) -> Option<Arc<GSSNode<T>>> {
-    let node_ptr = Arc::as_ptr(node_arc);
-    if let Some(cached_result) = memo.get(&node_ptr) {
-        return cached_result.clone();
-    }
-
-    match closure(&node_arc.value) {
-        None => {
-            // Prune this node
-            memo.insert(node_ptr, None);
-            None
-        }
-        Some((new_value, continue_recursion)) => {
-            let new_node_arc = if !continue_recursion {
-                // Stop recursion, create new node with original predecessors but new value
-                // Need to ensure predecessors are also potentially transformed if they were visited via another path.
-                let mut transformed_predecessors = Vec::new();
-                for pred_arc in &node_arc.predecessors {
-                     // Check memo for already transformed predecessor
-                    if let Some(existing_transformed) = memo.get(&Arc::as_ptr(pred_arc)) {
-                        if let Some(transformed_pred) = existing_transformed {
-                            transformed_predecessors.push(transformed_pred.clone());
-                        }
-                        // If existing_transformed is None, the predecessor was pruned, so skip.
-                    } else {
-                        // This case *shouldn't* happen if traversal order is correct (parents processed after children),
-                        // but as a fallback, keep the original if not found in memo. Or perhaps panic?
-                        // Let's assume the caller manages the order or this closure handles cycles/shared nodes correctly.
-                        // For simplicity now, let's just clone original predecessors if we stop early.
-                        // A more robust solution might involve ensuring all nodes are visited before finalizing.
-                        // Revisit required: This might lead to incorrect sharing if predecessors weren't processed.
-                        // A better approach for early stop might be needed, maybe marking nodes instead.
-                        // For now, let's stick to the logic: if we stop, we keep original pointers below.
-                         transformed_predecessors = node_arc.predecessors.clone(); // Keep original predecessors - CAUTION
-                         break; // Exit loop once we decide to keep originals
-                    }
                 }
-
-                Arc::new(GSSNode::new_with_predecessors(new_value, transformed_predecessors))
-            } else {
-                // Continue recursion for predecessors
-                let mut new_predecessors = Vec::new();
-                for pred_arc in &node_arc.predecessors {
-                    if let Some(new_pred) = prune_and_transform_recursive(pred_arc, closure, memo) {
-                        new_predecessors.push(new_pred);
-                    }
-                }
-
-                // Only create a node if it has predecessors OR it's an original root (how to check?).
-                // If new_predecessors is empty AND the original node had predecessors, it means all paths were pruned.
-                if new_predecessors.is_empty() && !node_arc.predecessors.is_empty() {
-                     memo.insert(node_ptr, None); // Mark as pruned
-                     return None; // Return None, pruning this node
-                } else {
-                     Arc::new(GSSNode::new_with_predecessors(new_value, new_predecessors))
-                }
-            };
-            memo.insert(node_ptr, Some(new_node_arc.clone()));
-            Some(new_node_arc)
+            }
         }
-    }
-}
-
-/// Traverses the GSS forest defined by `roots`, applying `closure` to each node's value.
-/// Handles shared nodes using memoization. Prunes branches where `closure` returns `None`.
-/// Stops recursion down a path if `closure` returns `(_, false)`.
-/// Returns a Vec of `Option<Arc<GSSNode<T>>>` corresponding to the input `roots`.
-pub fn prune_and_transform_roots<T: Clone>(
-    roots: &[Arc<GSSNode<T>>],
-    closure: &impl Fn(&T) -> Option<(T, bool)>, // Returns Option<(NewValue, ContinueRecursion)>
-) -> Vec<Option<Arc<GSSNode<T>>>> {
-    // We need a processing order that ensures children are processed before parents
-    // if we want the early-stop optimization (`continue_recursion = false`) to work reliably
-    // with shared nodes. A simple recursive approach might process shared children multiple times
-    // or incorrectly reuse non-transformed predecessors.
-    // For now, let's proceed with the simple recursive approach + memoization, acknowledging the
-    // potential issue with the early-stop logic accuracy for shared nodes below the stop point.
-    // A full topological sort or iterative approach might be needed for perfect early-stop.
-
-    let mut memo = HashMap::new();
-    roots
-        .iter()
-        .map(|root| prune_and_transform_recursive(root, closure, &mut memo))
-        .collect()
-}
-
         result
     }
 
@@ -360,4 +268,96 @@ impl<T: Clone + Ord> BulkMerge<T> for Vec<Arc<GSSNode<T>>> {
             }
         }
     }
+}
+
+
+// Helper function for prune_and_transform_roots
+fn prune_and_transform_recursive<T: Clone>(
+    node_arc: &Arc<GSSNode<T>>,
+    closure: &impl Fn(&T) -> Option<(T, bool)>, // Returns Option<(NewValue, ContinueRecursion)>
+    memo: &mut HashMap<*const GSSNode<T>, Option<Arc<GSSNode<T>>>>,
+) -> Option<Arc<GSSNode<T>>> {
+    let node_ptr = Arc::as_ptr(node_arc);
+    if let Some(cached_result) = memo.get(&node_ptr) {
+        return cached_result.clone();
+    }
+
+    match closure(&node_arc.value) {
+        None => {
+            // Prune this node
+            memo.insert(node_ptr, None);
+            None
+        }
+        Some((new_value, continue_recursion)) => {
+            let new_node_arc = if !continue_recursion {
+                // Stop recursion, create new node with original predecessors but new value
+                // Need to ensure predecessors are also potentially transformed if they were visited via another path.
+                let mut transformed_predecessors = Vec::new();
+                for pred_arc in &node_arc.predecessors {
+                     // Check memo for already transformed predecessor
+                    if let Some(existing_transformed) = memo.get(&Arc::as_ptr(pred_arc)) {
+                        if let Some(transformed_pred) = existing_transformed {
+                            transformed_predecessors.push(transformed_pred.clone());
+                        }
+                        // If existing_transformed is None, the predecessor was pruned, so skip.
+                    } else {
+                        // This case *shouldn't* happen if traversal order is correct (parents processed after children),
+                        // but as a fallback, keep the original if not found in memo. Or perhaps panic?
+                        // Let's assume the caller manages the order or this closure handles cycles/shared nodes correctly.
+                        // For simplicity now, let's just clone original predecessors if we stop early.
+                        // A more robust solution might involve ensuring all nodes are visited before finalizing.
+                        // Revisit required: This might lead to incorrect sharing if predecessors weren't processed.
+                        // A better approach for early stop might be needed, maybe marking nodes instead.
+                        // For now, let's stick to the logic: if we stop, we keep original pointers below.
+                         transformed_predecessors = node_arc.predecessors.clone(); // Keep original predecessors - CAUTION
+                         break; // Exit loop once we decide to keep originals
+                    }
+                }
+
+                Arc::new(GSSNode::new_with_predecessors(new_value, transformed_predecessors))
+            } else {
+                // Continue recursion for predecessors
+                let mut new_predecessors = Vec::new();
+                for pred_arc in &node_arc.predecessors {
+                    if let Some(new_pred) = prune_and_transform_recursive(pred_arc, closure, memo) {
+                        new_predecessors.push(new_pred);
+                    }
+                }
+
+                // Only create a node if it has predecessors OR it's an original root (how to check?).
+                // If new_predecessors is empty AND the original node had predecessors, it means all paths were pruned.
+                if new_predecessors.is_empty() && !node_arc.predecessors.is_empty() {
+                     memo.insert(node_ptr, None); // Mark as pruned
+                     return None; // Return None, pruning this node
+                } else {
+                     Arc::new(GSSNode::new_with_predecessors(new_value, new_predecessors))
+                }
+            };
+            memo.insert(node_ptr, Some(new_node_arc.clone()));
+            Some(new_node_arc)
+        }
+    }
+}
+
+/// Traverses the GSS forest defined by `roots`, applying `closure` to each node's value.
+/// Handles shared nodes using memoization. Prunes branches where `closure` returns `None`.
+/// Stops recursion down a path if `closure` returns `(_, false)`.
+/// Returns a Vec of `Option<Arc<GSSNode<T>>>` corresponding to the input `roots`.
+pub fn prune_and_transform_roots<T: Clone>(
+    roots: &[Arc<GSSNode<T>>],
+    closure: &impl Fn(&T) -> Option<(T, bool)>, // Returns Option<(NewValue, ContinueRecursion)>
+) -> Vec<Option<Arc<GSSNode<T>>>> {
+    // We need a processing order that ensures children are processed before parents
+    // if we want the early-stop optimization (`continue_recursion = false`) to work reliably
+    // with shared nodes. A simple recursive approach might process shared children multiple times
+    // or incorrectly reuse non-transformed predecessors.
+    // For now, let's proceed with the simple recursive approach + memoization, acknowledging the
+    // potential issue with the early-stop logic accuracy for shared nodes below the stop point.
+    // A full topological sort or iterative approach might be needed for perfect early-stop.
+
+    let mut memo = HashMap::new();
+    roots
+        .iter()
+        .map(|root| prune_and_transform_recursive(root, closure, &mut memo))
+        .collect()
 }
