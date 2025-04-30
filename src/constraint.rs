@@ -197,7 +197,7 @@ impl GrammarConstraint {
                     let mut precompute_node = precompute_node.lock().unwrap();
                     let llm_tokens = dst.reachable_token_ids().clone();
                     if let Some(existing_precompute_nodes) = queue.get(&new_queue_key) {
-                        // Try to push to an existing precompute node in the queue if it's possible to do so without creating a cycle.
+                        // Check whether there's already an edge from this node to a node in the queue.
                         crate::debug!(3, "Trying to push to existing precompute node");
                         for existing_precompute_node in existing_precompute_nodes {
                             if let Some(existing_edge_value) = precompute_node.get_edge_value_mut(matched_token_id, existing_precompute_node) {
@@ -208,7 +208,7 @@ impl GrammarConstraint {
                             }
                         }
 
-                        // Try to insert a new edge to any existing node.
+                        // Try to push to an existing precompute node in the queue if it's possible to do so without creating a cycle.
                         crate::debug!(3, "Trying to insert to existing precompute node");
                         for existing_precompute_node in existing_precompute_nodes {
                             if let Ok(dst_precomputed_node) = precompute_node.try_insert(matched_token_id, llm_tokens.clone(), existing_precompute_node.clone()) {
