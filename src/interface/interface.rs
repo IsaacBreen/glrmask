@@ -409,7 +409,7 @@ mod tests {
                 debug!(3, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
                 // print edge values and destination addresses
                 for (edge, dest) in node.try_lock().unwrap().children() {
-                    debug!(3, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
+                    // debug!(3, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(dest));
                 }
             }
         }
@@ -480,7 +480,7 @@ mod tests {
                 debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
                 // print edge values and destination addresses
                 for (edge, dest) in node.try_lock().unwrap().children() {
-                    debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
+                    // debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
                 }
             }
         }
@@ -540,7 +540,7 @@ mod tests {
                 debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
                 // print edge values and destination addresses
                 for (edge, dest) in node.try_lock().unwrap().children() {
-                    debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
+                    // debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
                 }
             }
         }

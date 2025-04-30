@@ -16,11 +16,21 @@ macro_rules! choice_fast {
 
 #[macro_export]
 macro_rules! debug {
-    ($level:expr, $($arg:tt)*) => {{
-        pub const DEBUG_LEVEL: usize = 2;
-        if $level <= DEBUG_LEVEL {
-            #[cfg(feature = "debug")]
-            println!("[DEBUG {}] {}", $level, format!($($arg)*));
+    ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {{
+        const MACRO_DEBUG_LEVEL: usize = 2; // Replace with crate::DEBUG_LEVEL or similar
+
+        if $level <= MACRO_DEBUG_LEVEL {
+            // #[cfg(feature = "debug")] // Enable this line if using a feature flag
+            println!(concat!("[DEBUG {}] ", $fmt), $level $(, $($arg)*)?);
+        }
+    }};
+
+    ($level:expr, $msg:expr) => {{
+        const MACRO_DEBUG_LEVEL: usize = 2; // Replace with crate::DEBUG_LEVEL or similar
+
+        if $level <= MACRO_DEBUG_LEVEL {
+            // #[cfg(feature = "debug")] // Enable this line if using a feature flag
+            println!("[DEBUG {}] {:?}", $level, $msg);
         }
     }};
 }
