@@ -168,7 +168,7 @@ impl GrammarConstraint {
         }
         impl PartialEq for NodeHandle {
             fn eq(&self, other: &Self) -> bool {
-                Arc::as_ptr(&self.0) == Arc::as_ptr(&other.0)
+                Arc::ptr_eq(&self.0, &other.0)
             }
         }
         impl Eq for NodeHandle {}
