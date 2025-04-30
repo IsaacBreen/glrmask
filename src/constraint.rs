@@ -402,10 +402,10 @@ impl<'a> GrammarConstraintState<'a> {
                 });
                 glr_parse_state.step(*grammar_token_id);
                 if glr_parse_state.active_states.is_empty() {
-                    println!("No active states after processing grammar token {}", grammar_token_id.0);
+                    crate::debug!(3, "No active states after processing grammar token {}", grammar_token_id.0);
                     return None;
                 } else {
-                    println!("Processed grammar token {}, {} active states.", grammar_token_id.0, glr_parse_state.active_states.len());
+                    crate::debug!(3, "Processed grammar token {}, {} active states.", grammar_token_id.0, glr_parse_state.active_states.len());
                     Some(glr_parse_state)
                 }
             },
