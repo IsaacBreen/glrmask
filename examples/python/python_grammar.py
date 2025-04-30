@@ -202,7 +202,7 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
 
 def initialize_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id):
     print("Initializing PyGrammarConstraint...")
-    grammar_constraint = PyGrammarConstraint(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id)
+    grammar_constraint = PyGrammarConstraint(grammar, llm_token_to_id, max_llm_token_id)
 #     grammar_constraint.print()
     print("Initializing Grammar Constraint State...")
     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
