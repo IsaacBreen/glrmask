@@ -1,207 +1,15 @@
 local_system:
   attached_files:
-    - src/constraint_extra.rs
     - src/constraint.rs
     - src/glr/parser.rs
-    - src/datastructures/gss.rs
   conversation_file:
   compile_command:
   initial_file_contents:
-    src/constraint_extra.rs: |
-      use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode, PrecomputedNodeContents, PrecomputedFinalizer};
-      use crate::datastructures::trie::{Trie, node_ptr};
-      use crate::tokenizer::{TokenizerStateID, LLMTokenID};
-      use crate::types::TerminalID as GrammarTokenID; // Corrected import path
-      use crate::constraint::LLMTokenBV;
-      use std::collections::{HashSet, VecDeque};
-      use std::sync::{Arc, Mutex};
-      use bitvec::prelude::BitVec;
-
-      /// Helper function to print the indices of set bits in a BitVec.
-      fn format_bv_indices(bv: &LLMTokenBV) -> String {
-          let indices: Vec<String> = bv.iter_ones().map(|i| i.to_string()).collect();
-          if indices.len() > 10 {
-              format!("[{} indices starting with {}...]", indices.len(), indices[0..5].join(", "))
-          } else if indices.is_empty() {
-              "[]".to_string()
-          }
-           else {
-              format!("[{}]", indices.join(", "))
-          }
-      }
-
-      /// Helper function to print PrecomputedFinalizer details.
-      pub(crate) fn print_finalizer(grammar_token_id: GrammarTokenID, finalizer: &PrecomputedFinalizer, indent: &str) {
-          println!("{}  - Finalizer for GrammarTokenID({}):", indent, grammar_token_id.0);
-          for (tokenizer_state_id, llm_tokens) in &finalizer.content {
-              println!("{}    Tokenizer State {}:", indent, tokenizer_state_id.0);
-              println!("{}      LLM Tokens: {}", indent, format_bv_indices(llm_tokens));
-          }
-      }
-
-      /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
-      fn dump_precompute_trie_recursive(
-          node_arc: &Arc<Mutex<PrecomputeNode>>,
-          indent: String,
-          visited: &mut HashSet<*const PrecomputeNode>,
-      ) {
-          let node_ptr_val = node_ptr(node_arc);
-          if !visited.insert(node_ptr_val) {
-              println!("{}-> Ref {:?} (already printed)", indent, node_ptr_val);
-              return;
-          }
-
-          let node = node_arc.lock().expect("Mutex poisoned during dump");
-
-          println!("{}-> Node {:?} (MaxDepth: {})", indent, node_ptr_val, node.max_depth);
-
-          // Print Node Value (Finalizers)
-          if !node.value.finalizers().is_empty() {
-              println!("{}  Finalizers:", indent);
-              for (grammar_token_id, finalizer) in node.value.finalizers() {
-                  print_finalizer(*grammar_token_id, finalizer, &indent);
-              }
-          }
-          if let Some(clean_end) = &node.value.clean_end {
-              println!("{}  Clean End LLM Tokens: {}", indent, format_bv_indices(clean_end));
-          }
-
-          // Print Children (Edges)
-          if node.children().is_empty() {
-              println!("{}  (Leaf Node)", indent);
-          } else {
-              println!("{}  Children:", indent);
-              let new_indent = format!("{}    ", indent);
-              for (edge_key, children_vec) in node.children() {
-                  for (edge_val_bv, child_arc) in children_vec {
-                      println!(
-                          "{}Edge GrammarTokenID({}): LLM Tokens: {} -> Child Ptr: {:?}",
-                          indent,
-                          edge_key.0,
-                          format_bv_indices(edge_val_bv),
-                          node_ptr(child_arc)
-                      );
-                      // Recurse
-                      dump_precompute_trie_recursive(child_arc, new_indent.clone(), visited);
-                  }
-              }
-          }
-      }
-
-      impl GrammarConstraint {
-          /// Dumps the structure of the precomputed Trie map for visualization.
-          pub fn dump_precomputed(&self) {
-              println!("Dumping Precomputed Trie Structure:");
-              println!("===================================");
-
-              for (tokenizer_state_id, root_node_trie) in &self.precomputed {
-                  println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
-
-                  // Need to wrap the root_node_trie (which is a Trie, not an Arc<Mutex<Trie>>)
-                  // in an Arc<Mutex<>> to match the recursive function's expectation.
-                  // This is slightly awkward but necessary for the shared recursive logic.
-                  let root_node_arc = Arc::new(Mutex::new(root_node_trie.clone()));
-
-                  let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
-                  dump_precompute_trie_recursive(&root_node_arc, "".to_string(), &mut visited);
-              }
-              println!("\n===================================");
-              println!("Dump Complete.");
-          }
-      }
-
-      #[cfg(test)]
-      mod tests {
-          use crate::finite_automata::{eat_u8, Regex};
-          use crate::glr::grammar::{prod, t, Terminal};
-          use crate::glr::parser::GLRParser;
-          use crate::glr::table::generate_glr_parser_with_terminal_map;
-          use crate::tokenizer::{LLMTokenID, LLMTokenMap};
-          use crate::types::TerminalID;
-          use bimap::BiBTreeMap;
-          use super::*;
-          use bitvec::prelude::*;
-          use crate::seq;
-
-          #[test]
-          fn test_format_bv_indices_empty() {
-              let bv = bitvec![usize, Lsb0;];
-              assert_eq!(format_bv_indices(&bv), "[]");
-
-              let bv = bitvec![usize, Lsb0; 0, 0, 0];
-              assert_eq!(format_bv_indices(&bv), "[]");
-          }
-
-          #[test]
-          fn test_format_bv_indices_single() {
-              let mut bv = bitvec![usize, Lsb0; 0; 5];
-              bv.set(3, true);
-              assert_eq!(format_bv_indices(&bv), "[3]");
-          }
-
-          #[test]
-          fn test_format_bv_indices_multiple_few() {
-              let mut bv = bitvec![usize, Lsb0; 0; 10];
-              bv.set(1, true);
-              bv.set(5, true);
-              bv.set(8, true);
-              assert_eq!(format_bv_indices(&bv), "[1, 5, 8]");
-          }
-
-          #[test]
-          fn test_format_bv_indices_multiple_many() {
-              let mut bv = bitvec![usize, Lsb0; 0; 20];
-              for i in 0..15 { bv.set(i, true); }
-              assert_eq!(format_bv_indices(&bv), "[15 indices starting with 0, 1, 2, 3, 4...]");
-          }
-
-          // Helper function to create a minimal constraint for testing dump
-          fn create_minimal_constraint() -> GrammarConstraint {
-              // Tokenizer: Matches "a" (token 0) or "$" (token 1)
-              let expr = crate::groups![
-                  eat_u8(b'a'), // Grammar Token 0
-                  seq![eat_u8(b'a'), eat_u8(b'a')], // Grammar Token 1
-                  eat_u8(b'$')  // Grammar Token 2 (EOF)
-              ];
-              let tokenizer = expr.build();
-
-              // LLM Token Map: "aaaa" -> 0, "$" -> 1
-              let mut llm_token_map = LLMTokenMap::new();
-              llm_token_map.insert(b"aaaa".to_vec(), LLMTokenID(0));
-              llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));
-              let max_llm_token_id = 1;
-
-              // Grammar: S -> A $
-              let productions = vec![
-                  prod("S", vec![t("A"), t("AA"), t("EOF")]),
-              ];
-
-              // Map grammar terminals to the tokenizer's token IDs
-              let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-              grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0)); // "a" from tokenizer
-              grammar_token_map.insert(Terminal("AA".to_string()), TerminalID(1)); // "a" from tokenizer
-              grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(2)); // "$" from tokenizer
-
-              // Generate parser
-              let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
-
-              // Create constraint (this runs precomputation)
-              GrammarConstraint::new(tokenizer, parser, llm_token_map, max_llm_token_id)
-          }
-
-          #[test]
-          fn test_dump_precomputed_runs() {
-              let constraint = create_minimal_constraint();
-              println!("--- Starting dump_precomputed test output ---");
-              constraint.dump_precomputed(); // Just ensure it runs without panic
-              println!("--- Finished dump_precomputed test output ---");
-          }
-      }
     src/constraint.rs: |
       use std::cmp::Ordering;
       use crate::datastructures::trie::Trie;
       use crate::finite_automata::Regex;
-      use crate::glr::parser::{MergeAndIntersect, GLRParser, GLRParserState, ParseState, ParseStateKey};
+      use crate::glr::parser::{AndAndOr, GLRParser, GLRParserState, ParseState, ParseStateKey};
       use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
       use bimap::BiBTreeMap;
       use bitvec::prelude::BitVec;
@@ -255,13 +63,13 @@ local_system:
           pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, LLMTokenBV>>,
       }
 
-      impl MergeAndIntersect for LLMTokenBV {
-          fn merge(&self, other: &Self) -> Self {
-              self.clone() | other.clone()
-          }
-          
-          fn intersect(&self, other: &Self) -> Self {
+      impl AndAndOr for LLMTokenBV {
+          fn and(&self, other: &Self) -> Self {
               self.clone() & other.clone()
+          }
+
+          fn or(&self, other: &Self) -> Self {
+              self.clone() | other.clone()
           }
       }
 
@@ -736,25 +544,23 @@ local_system:
       use std::sync::Arc;
       use crate::debug;
 
-      pub trait MergeAndIntersect: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
-          /// Merges the information represented by `self` and `other`.
-          fn merge(&self, other: &Self) -> Self;
-          /// Intersects the information represented by `self` and `other`.
-          fn intersect(&self, other: &Self) -> Self;
+      pub trait AndAndOr: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
+          fn and(&self, other: &Self) -> Self;
+          fn or(&self, other: &Self) -> Self;
       }
 
-      impl MergeAndIntersect for () {
-          fn merge(&self, _: &Self) -> Self { () }
-          fn intersect(&self, _: &Self) -> Self { () }
+      impl AndAndOr for () {
+          fn and(&self, _: &Self) -> Self { () }
+          fn or(&self, _: &Self) -> Self { () }
       }
 
       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct ParseStateNodeContent<T: MergeAndIntersect> {
+      pub struct ParseStateNodeContent<T: AndAndOr> {
           pub state_id: StateID,
           pub t: T,
       }
       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct ParseState<T: MergeAndIntersect> {
+      pub struct ParseState<T: AndAndOr> {
           pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
               // self.merge_active_states();
           }
@@ -796,18 +602,19 @@ local_system:
               }
           }
 
-          pub fn init_glr_parser<T: MergeAndIntersect + Default>(&self) -> GLRParserState<T> {
+          pub fn init_glr_parser<T: AndAndOr + Default>(&self) -> GLRParserState<T> {
               self.init_glr_parser_with_t(T::default())
           }
 
-          pub fn init_glr_parser_with_t<T: MergeAndIntersect>(&self, t: T) -> GLRParserState<T> {
+          pub fn init_glr_parser_with_t<T: AndAndOr>(&self, t: T) -> GLRParserState<T> {
               GLRParserState {
                   parser: self,
                   active_states: vec![self.init_parse_state_with_t(t)],
                   action_not_found_states: Vec::new(),
               }
           }
-          pub fn init_glr_parser_from_parse_state<T: MergeAndIntersect>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
+
+          pub fn init_glr_parser_from_parse_state<T: AndAndOr>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
               GLRParserState {
                   parser: self,
                   active_states: vec![parse_state],
@@ -815,7 +622,7 @@ local_system:
               }
           }
 
-          pub fn init_glr_parser_from_parse_states<T: MergeAndIntersect>(
+          pub fn init_glr_parser_from_parse_states<T: AndAndOr>(
               &self,
               parse_states: Vec<ParseState<T>>,
           ) -> GLRParserState<T> {
@@ -826,11 +633,11 @@ local_system:
               }
           }
 
-          pub fn init_parse_state<T: MergeAndIntersect + Default>(&self) -> ParseState<T> {
+          pub fn init_parse_state<T: AndAndOr + Default>(&self) -> ParseState<T> {
               self.init_parse_state_with_t(T::default())
           }
 
-          pub fn init_parse_state_with_t<T: MergeAndIntersect>(&self, t: T) -> ParseState<T> {
+          pub fn init_parse_state_with_t<T: AndAndOr>(&self, t: T) -> ParseState<T> {
               let initial_content = ParseStateNodeContent {
                   state_id: self.start_state_id,
                   t,
@@ -840,7 +647,7 @@ local_system:
               }
           }
 
-          pub fn parse<T: MergeAndIntersect + Default>(&self, input: &[TerminalID]) -> GLRParserState<T> {
+          pub fn parse<T: AndAndOr + Default>(&self, input: &[TerminalID]) -> GLRParserState<T> {
               let mut state = self.init_glr_parser();
               state.parse(input);
               state
@@ -937,13 +744,13 @@ local_system:
       }
 
       #[derive(Debug, Clone)]
-      pub struct GLRParserState<'a, T: MergeAndIntersect> {
+      pub struct GLRParserState<'a, T: AndAndOr> {
           pub parser: &'a GLRParser,
           pub active_states: Vec<ParseState<T>>,
           pub action_not_found_states: Vec<ParseState<T>>,
       }
 
-      impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
+      impl<'a, T: AndAndOr> GLRParserState<'a, T> {
           pub fn parse(&mut self, input: &[TerminalID]) {
               self.parse_part(input);
           }
@@ -1000,7 +807,7 @@ local_system:
                                   let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nonterminal];
 
                                   debug!(3, "Going to state {:?}", goto_state);
-                                  let combined_t = revealed_t.intersect(current_t);
+                                  let combined_t = revealed_t.and(current_t);
                                   let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                                   let new_stack = stack_node.push(new_content);
                                   self.active_states.push(ParseState {
@@ -1030,7 +837,7 @@ local_system:
                                           let revealed_t = &revealed_content.t;
                                           let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id];
 
-                                          let combined_t = revealed_t.intersect(current_t);
+                                          let combined_t = revealed_t.and(current_t);
                                           let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                                           let new_stack = stack_node.push(new_content);
                                           self.active_states.push(ParseState {
@@ -1085,7 +892,7 @@ local_system:
           // Removed action_stack
       }
 
-      impl<T: MergeAndIntersect> ParseState<T> {
+      impl<T: AndAndOr> ParseState<T> {
           pub fn key(&self) -> ParseStateKey {
               ParseStateKey {
                   stack_state_id: self.stack.peek().state_id,
@@ -1093,14 +900,14 @@ local_system:
           }
 
           /// Merges `other` into `self`. Assumes `self.key() == other.key()`.
-          /// Merges the GSS structures and combines the `t` value at the top node using `MergeAndIntersect::merge`.
+          /// Merges the GSS structures and combines the `t` value at the top node using `AndAndOr::or`.
           pub fn merge(&mut self, other: ParseState<T>) {
               assert_eq!(self.key(), other.key());
 
               // Combine 't' values at the top node using 'or'
               let self_content = self.stack.peek();
               let other_content = other.stack.peek();
-              let combined_t = self_content.t.merge(&other_content.t);
+              let combined_t = self_content.t.or(&other_content.t);
 
               // Get mutable access to self.stack, potentially cloning if shared (Arc > 1)
               let mut mutable_stack = Arc::make_mut(&mut self.stack);
@@ -1126,468 +933,16 @@ local_system:
                   }
                   std::collections::btree_map::Entry::Vacant(vacant) => {
                       vacant.insert(v);
-                  }
-              }
-          }
-      }
-    src/datastructures/gss.rs: |-
-      use std::collections::{BTreeMap, HashMap};
-      use std::sync::Arc;
-
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct GSSNode<T> {
-          pub value: T,
-          predecessors: Vec<Arc<GSSNode<T>>>,
-      }
-
-      impl<T> GSSNode<T> {
-          pub fn new(value: T) -> Self {
-              Self {
-                  value,
-                  predecessors: Vec::new(),
-              }
-          }
-
-          pub fn from_iter<I>(iter: I) -> Self
-          where
-              I: IntoIterator<Item = T>,
-          {
-              let mut iter = iter.into_iter();
-              let mut root = Self::new(iter.next().unwrap());
-              for value in iter {
-                  root = root.push(value);
-              }
-              root
-          }
-
-          pub fn push(self, value: T) -> Self {
-              let mut new_node = Self::new(value);
-              new_node.predecessors.push(Arc::new(self));
-              new_node
-          }
-
-          pub fn pop(&self) -> Vec<Arc<Self>> {
-              self.predecessors.clone()
-          }
-
-          pub fn popn(&self, n: usize) -> Vec<Arc<Self>>
-          where
-              T: Clone,
-          {
-              if n == 0 {
-                  return vec![Arc::new(self.clone())];
-              }
-              let mut nodes = Vec::new();
-              for popped in self.pop() {
-                  nodes.extend(popped.popn(n - 1));
-              }
-              nodes
-          }
-
-          pub fn peek(&self) -> &T {
-              &self.value
-          }
-
-          pub fn flatten(&self) -> Vec<Vec<T>>
-          where
-              T: Clone,
-          {
-              let mut result = Vec::new();
-              let mut stack = Vec::new();
-              stack.push((self, Vec::new()));
-              while let Some((node, mut path)) = stack.pop() {
-                  path.push(node.value.clone());
-                  if node.predecessors.is_empty() {
-                      result.push(path);
-                  } else {
-                      for predecessor in &node.predecessors {
-                          stack.push((predecessor, path.clone()));
-                      }
-                  }
-              }
-              result
-          }
-
-          pub fn flatten_bulk(nodes: &[Self]) -> Vec<Vec<T>>
-          where
-              T: Clone,
-          {
-              nodes.iter().flat_map(|node| node.flatten()).collect()
-          }
-
-          pub fn merge(&mut self, mut other: Self)
-          where
-              T: PartialEq,
-          {
-              assert!(self.value == other.value);
-              self.predecessors.append(&mut other.predecessors);
-          }
-
-          pub fn merge_unchecked(&mut self, mut other: Self)
-          where
-              T: PartialEq,
-          {
-              self.predecessors.append(&mut other.predecessors);
-          }
-
-          pub fn map<F, U>(&self, f: F) -> GSSNode<U>
-          where
-              F: Copy + Fn(&T) -> U,
-          {
-              GSSNode {
-                  value: f(&self.value),
-                  predecessors: self.predecessors.clone().into_iter()
-                      .map(|node| Arc::new(node.map(f)))
-                      .collect(),
-              }
-          }
-      }
-
-      impl<T> Drop for GSSNode<T> {
-          fn drop(&mut self) {
-              let mut cur_nodes = std::mem::take(&mut self.predecessors);
-              while let Some(node) = cur_nodes.pop() {
-                  if let Ok(mut inner_node) = Arc::try_unwrap(node) {
-                      cur_nodes.append(&mut inner_node.predecessors);
-                  }
-              }
-          }
-      }
-
-      pub trait GSSTrait<T: Clone> {
-          type Peek<'a> where T: 'a, Self: 'a;
-          fn peek(&self) -> Self::Peek<'_>;
-          fn push(&self, value: T) -> GSSNode<T>;
-          fn pop(&self) -> Vec<Arc<GSSNode<T>>>;
-          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>>;
-      }
-
-      impl<T: Clone> GSSTrait<T> for GSSNode<T> {
-          type Peek<'a> = &'a T where T: 'a;
-
-          fn peek(&self) -> Self::Peek<'_> {
-              &self.value
-          }
-
-          fn push(&self, value: T) -> GSSNode<T> {
-              let mut new_node = GSSNode::new(value);
-              new_node.predecessors.push(Arc::new(self.clone()));
-              new_node
-          }
-
-          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
-              self.predecessors.clone()
-          }
-
-          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
-              if n == 0 {
-                  return vec![Arc::new(self.clone())];
-              }
-              let mut nodes = Vec::new();
-              for popped in self.pop() {
-                  nodes.extend(popped.popn(n - 1));
-              }
-              nodes
-          }
-      }
-
-      impl<T: Clone> GSSTrait<T> for Arc<GSSNode<T>> {
-          type Peek<'a> = &'a T where T: 'a;
-
-          fn peek(&self) -> Self::Peek<'_> {
-              &self.value
-          }
-
-          fn push(&self, value: T) -> GSSNode<T> {
-              let mut new_node = GSSNode::new(value);
-              new_node.predecessors.push(self.clone());
-              new_node
-          }
-
-          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
-              self.predecessors.clone()
-          }
-
-          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
-              if n == 0 {
-                  return vec![self.clone()];
-              }
-              let mut nodes = Vec::new();
-              for popped in self.pop() {
-                  nodes.extend(popped.popn(n - 1));
-              }
-              nodes
-          }
-      }
-
-      impl<T: Clone> GSSTrait<T> for Option<Arc<GSSNode<T>>> {
-          type Peek<'a> = Option<&'a T> where T: 'a;
-
-          fn peek(&self) -> Self::Peek<'_> {
-              self.as_ref().map(|node| node.peek())
-          }
-
-          fn push(&self, value: T) -> GSSNode<T> {
-              self.clone().map(|node| node.push(value.clone())).unwrap_or_else(|| GSSNode::new(value))
-          }
-
-          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
-              self.as_ref().map(|node| node.pop()).unwrap_or_default()
-          }
-
-          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
-              self.as_ref().map(|node| node.popn(n)).unwrap_or_default()
-          }
-      }
-
-      impl<T: Clone> GSSTrait<T> for Option<GSSNode<T>> {
-          type Peek<'a> = Option<&'a T> where T: 'a;
-
-          fn peek(&self) -> Self::Peek<'_> {
-              self.as_ref().map(|node| node.peek())
-          }
-
-          fn push(&self, value: T) -> GSSNode<T> {
-              self.clone().map(|node| node.push(value.clone())).unwrap_or_else(|| GSSNode::new(value))
-          }
-
-          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
-              self.as_ref().map(|node| node.pop()).unwrap_or_default()
-          }
-
-          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
-              self.as_ref().map(|node| node.popn(n)).unwrap_or_default()
-          }
-      }
-
-      pub trait BulkMerge<T> {
-          fn bulk_merge(&mut self);
-      }
-
-      impl<T: Clone + Ord> BulkMerge<T> for Vec<Arc<GSSNode<T>>> {
-          fn bulk_merge(&mut self) {
-              // todo: should be possible to avoid cloning T in some cases by using &T in this map,
-              //  but we need to be careful about lifetimes. If we use `node.as_ref().value`, then node
-              //  will go out of bounds while the reference to its value is still inside `groups`.
-              let mut groups: BTreeMap<T, HashMap<_, Arc<GSSNode<T>>>> = BTreeMap::new();
-              for node in self.drain(..) {
-                  groups.entry(node.value.clone()).or_default().entry(Arc::as_ptr(&node)).or_insert(node);
-              }
-              for mut group in groups.into_values() {
-                  let mut group = group.into_values().collect::<Vec<_>>();
-                  let mut first = group.pop().unwrap();
-                  if group.is_empty() {
-                      self.push(first);
-                  } else {
-                      let mut predecessors_set: BTreeMap<_, _> = BTreeMap::new();
-                      for sibling in group {
-                          for predecessor in &sibling.predecessors {
-                              predecessors_set.insert(Arc::as_ptr(predecessor), predecessor.clone());
-                          }
-                      }
-                      let first_mut_ref = Arc::make_mut(&mut first);
-                      first_mut_ref.predecessors = predecessors_set.into_values().collect();
-                      self.push(first);
                   }
               }
           }
       }
   prev_file_contents:
-    src/constraint_extra.rs: |
-      use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode, PrecomputedNodeContents, PrecomputedFinalizer};
-      use crate::datastructures::trie::{Trie, node_ptr};
-      use crate::tokenizer::{TokenizerStateID, LLMTokenID};
-      use crate::types::TerminalID as GrammarTokenID; // Corrected import path
-      use crate::constraint::LLMTokenBV;
-      use std::collections::{HashSet, VecDeque};
-      use std::sync::{Arc, Mutex};
-      use bitvec::prelude::BitVec;
-
-      /// Helper function to print the indices of set bits in a BitVec.
-      fn format_bv_indices(bv: &LLMTokenBV) -> String {
-          let indices: Vec<String> = bv.iter_ones().map(|i| i.to_string()).collect();
-          if indices.len() > 10 {
-              format!("[{} indices starting with {}...]", indices.len(), indices[0..5].join(", "))
-          } else if indices.is_empty() {
-              "[]".to_string()
-          }
-           else {
-              format!("[{}]", indices.join(", "))
-          }
-      }
-
-      /// Helper function to print PrecomputedFinalizer details.
-      pub(crate) fn print_finalizer(grammar_token_id: GrammarTokenID, finalizer: &PrecomputedFinalizer, indent: &str) {
-          println!("{}  - Finalizer for GrammarTokenID({}):", indent, grammar_token_id.0);
-          for (tokenizer_state_id, llm_tokens) in &finalizer.content {
-              println!("{}    Tokenizer State {}:", indent, tokenizer_state_id.0);
-              println!("{}      LLM Tokens: {}", indent, format_bv_indices(llm_tokens));
-          }
-      }
-
-      /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
-      fn dump_precompute_trie_recursive(
-          node_arc: &Arc<Mutex<PrecomputeNode>>,
-          indent: String,
-          visited: &mut HashSet<*const PrecomputeNode>,
-      ) {
-          let node_ptr_val = node_ptr(node_arc);
-          if !visited.insert(node_ptr_val) {
-              println!("{}-> Ref {:?} (already printed)", indent, node_ptr_val);
-              return;
-          }
-
-          let node = node_arc.lock().expect("Mutex poisoned during dump");
-
-          println!("{}-> Node {:?} (MaxDepth: {})", indent, node_ptr_val, node.max_depth);
-
-          // Print Node Value (Finalizers)
-          if !node.value.finalizers().is_empty() {
-              println!("{}  Finalizers:", indent);
-              for (grammar_token_id, finalizer) in node.value.finalizers() {
-                  print_finalizer(*grammar_token_id, finalizer, &indent);
-              }
-          }
-          if let Some(clean_end) = &node.value.clean_end {
-              println!("{}  Clean End LLM Tokens: {}", indent, format_bv_indices(clean_end));
-          }
-
-          // Print Children (Edges)
-          if node.children().is_empty() {
-              println!("{}  (Leaf Node)", indent);
-          } else {
-              println!("{}  Children:", indent);
-              let new_indent = format!("{}    ", indent);
-              for (edge_key, children_vec) in node.children() {
-                  for (edge_val_bv, child_arc) in children_vec {
-                      println!(
-                          "{}Edge GrammarTokenID({}): LLM Tokens: {} -> Child Ptr: {:?}",
-                          indent,
-                          edge_key.0,
-                          format_bv_indices(edge_val_bv),
-                          node_ptr(child_arc)
-                      );
-                      // Recurse
-                      dump_precompute_trie_recursive(child_arc, new_indent.clone(), visited);
-                  }
-              }
-          }
-      }
-
-      impl GrammarConstraint {
-          /// Dumps the structure of the precomputed Trie map for visualization.
-          pub fn dump_precomputed(&self) {
-              println!("Dumping Precomputed Trie Structure:");
-              println!("===================================");
-
-              for (tokenizer_state_id, root_node_trie) in &self.precomputed {
-                  println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
-
-                  // Need to wrap the root_node_trie (which is a Trie, not an Arc<Mutex<Trie>>)
-                  // in an Arc<Mutex<>> to match the recursive function's expectation.
-                  // This is slightly awkward but necessary for the shared recursive logic.
-                  let root_node_arc = Arc::new(Mutex::new(root_node_trie.clone()));
-
-                  let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
-                  dump_precompute_trie_recursive(&root_node_arc, "".to_string(), &mut visited);
-              }
-              println!("\n===================================");
-              println!("Dump Complete.");
-          }
-      }
-
-      #[cfg(test)]
-      mod tests {
-          use crate::finite_automata::{eat_u8, Regex};
-          use crate::glr::grammar::{prod, t, Terminal};
-          use crate::glr::parser::GLRParser;
-          use crate::glr::table::generate_glr_parser_with_terminal_map;
-          use crate::tokenizer::{LLMTokenID, LLMTokenMap};
-          use crate::types::TerminalID;
-          use bimap::BiBTreeMap;
-          use super::*;
-          use bitvec::prelude::*;
-          use crate::seq;
-
-          #[test]
-          fn test_format_bv_indices_empty() {
-              let bv = bitvec![usize, Lsb0;];
-              assert_eq!(format_bv_indices(&bv), "[]");
-
-              let bv = bitvec![usize, Lsb0; 0, 0, 0];
-              assert_eq!(format_bv_indices(&bv), "[]");
-          }
-
-          #[test]
-          fn test_format_bv_indices_single() {
-              let mut bv = bitvec![usize, Lsb0; 0; 5];
-              bv.set(3, true);
-              assert_eq!(format_bv_indices(&bv), "[3]");
-          }
-
-          #[test]
-          fn test_format_bv_indices_multiple_few() {
-              let mut bv = bitvec![usize, Lsb0; 0; 10];
-              bv.set(1, true);
-              bv.set(5, true);
-              bv.set(8, true);
-              assert_eq!(format_bv_indices(&bv), "[1, 5, 8]");
-          }
-
-          #[test]
-          fn test_format_bv_indices_multiple_many() {
-              let mut bv = bitvec![usize, Lsb0; 0; 20];
-              for i in 0..15 { bv.set(i, true); }
-              assert_eq!(format_bv_indices(&bv), "[15 indices starting with 0, 1, 2, 3, 4...]");
-          }
-
-          // Helper function to create a minimal constraint for testing dump
-          fn create_minimal_constraint() -> GrammarConstraint {
-              // Tokenizer: Matches "a" (token 0) or "$" (token 1)
-              let expr = crate::groups![
-                  eat_u8(b'a'), // Grammar Token 0
-                  seq![eat_u8(b'a'), eat_u8(b'a')], // Grammar Token 1
-                  eat_u8(b'$')  // Grammar Token 2 (EOF)
-              ];
-              let tokenizer = expr.build();
-
-              // LLM Token Map: "aaaa" -> 0, "$" -> 1
-              let mut llm_token_map = LLMTokenMap::new();
-              llm_token_map.insert(b"aaaa".to_vec(), LLMTokenID(0));
-              llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));
-              let max_llm_token_id = 1;
-
-              // Grammar: S -> A $
-              let productions = vec![
-                  prod("S", vec![t("A"), t("AA"), t("EOF")]),
-              ];
-
-              // Map grammar terminals to the tokenizer's token IDs
-              let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-              grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0)); // "a" from tokenizer
-              grammar_token_map.insert(Terminal("AA".to_string()), TerminalID(1)); // "a" from tokenizer
-              grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(2)); // "$" from tokenizer
-
-              // Generate parser
-              let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
-
-              // Create constraint (this runs precomputation)
-              GrammarConstraint::new(tokenizer, parser, llm_token_map, max_llm_token_id)
-          }
-
-          #[test]
-          fn test_dump_precomputed_runs() {
-              let constraint = create_minimal_constraint();
-              println!("--- Starting dump_precomputed test output ---");
-              constraint.dump_precomputed(); // Just ensure it runs without panic
-              println!("--- Finished dump_precomputed test output ---");
-          }
-      }
     src/constraint.rs: |
       use std::cmp::Ordering;
       use crate::datastructures::trie::Trie;
       use crate::finite_automata::Regex;
-      use crate::glr::parser::{MergeAndIntersect, GLRParser, GLRParserState, ParseState, ParseStateKey};
+      use crate::glr::parser::{AndAndOr, GLRParser, GLRParserState, ParseState, ParseStateKey};
       use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
       use bimap::BiBTreeMap;
       use bitvec::prelude::BitVec;
@@ -1641,13 +996,13 @@ local_system:
           pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, LLMTokenBV>>,
       }
 
-      impl MergeAndIntersect for LLMTokenBV {
-          fn merge(&self, other: &Self) -> Self {
-              self.clone() | other.clone()
-          }
-          
-          fn intersect(&self, other: &Self) -> Self {
+      impl AndAndOr for LLMTokenBV {
+          fn and(&self, other: &Self) -> Self {
               self.clone() & other.clone()
+          }
+
+          fn or(&self, other: &Self) -> Self {
+              self.clone() | other.clone()
           }
       }
 
@@ -2122,25 +1477,23 @@ local_system:
       use std::sync::Arc;
       use crate::debug;
 
-      pub trait MergeAndIntersect: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
-          /// Merges the information represented by `self` and `other`.
-          fn merge(&self, other: &Self) -> Self;
-          /// Intersects the information represented by `self` and `other`.
-          fn intersect(&self, other: &Self) -> Self;
+      pub trait AndAndOr: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
+          fn and(&self, other: &Self) -> Self;
+          fn or(&self, other: &Self) -> Self;
       }
 
-      impl MergeAndIntersect for () {
-          fn merge(&self, _: &Self) -> Self { () }
-          fn intersect(&self, _: &Self) -> Self { () }
+      impl AndAndOr for () {
+          fn and(&self, _: &Self) -> Self { () }
+          fn or(&self, _: &Self) -> Self { () }
       }
 
       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct ParseStateNodeContent<T: MergeAndIntersect> {
+      pub struct ParseStateNodeContent<T: AndAndOr> {
           pub state_id: StateID,
           pub t: T,
       }
       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct ParseState<T: MergeAndIntersect> {
+      pub struct ParseState<T: AndAndOr> {
           pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
               // self.merge_active_states();
           }
@@ -2182,18 +1535,19 @@ local_system:
               }
           }
 
-          pub fn init_glr_parser<T: MergeAndIntersect + Default>(&self) -> GLRParserState<T> {
+          pub fn init_glr_parser<T: AndAndOr + Default>(&self) -> GLRParserState<T> {
               self.init_glr_parser_with_t(T::default())
           }
 
-          pub fn init_glr_parser_with_t<T: MergeAndIntersect>(&self, t: T) -> GLRParserState<T> {
+          pub fn init_glr_parser_with_t<T: AndAndOr>(&self, t: T) -> GLRParserState<T> {
               GLRParserState {
                   parser: self,
                   active_states: vec![self.init_parse_state_with_t(t)],
                   action_not_found_states: Vec::new(),
               }
           }
-          pub fn init_glr_parser_from_parse_state<T: MergeAndIntersect>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
+
+          pub fn init_glr_parser_from_parse_state<T: AndAndOr>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
               GLRParserState {
                   parser: self,
                   active_states: vec![parse_state],
@@ -2201,7 +1555,7 @@ local_system:
               }
           }
 
-          pub fn init_glr_parser_from_parse_states<T: MergeAndIntersect>(
+          pub fn init_glr_parser_from_parse_states<T: AndAndOr>(
               &self,
               parse_states: Vec<ParseState<T>>,
           ) -> GLRParserState<T> {
@@ -2212,11 +1566,11 @@ local_system:
               }
           }
 
-          pub fn init_parse_state<T: MergeAndIntersect + Default>(&self) -> ParseState<T> {
+          pub fn init_parse_state<T: AndAndOr + Default>(&self) -> ParseState<T> {
               self.init_parse_state_with_t(T::default())
           }
 
-          pub fn init_parse_state_with_t<T: MergeAndIntersect>(&self, t: T) -> ParseState<T> {
+          pub fn init_parse_state_with_t<T: AndAndOr>(&self, t: T) -> ParseState<T> {
               let initial_content = ParseStateNodeContent {
                   state_id: self.start_state_id,
                   t,
@@ -2226,7 +1580,7 @@ local_system:
               }
           }
 
-          pub fn parse<T: MergeAndIntersect + Default>(&self, input: &[TerminalID]) -> GLRParserState<T> {
+          pub fn parse<T: AndAndOr + Default>(&self, input: &[TerminalID]) -> GLRParserState<T> {
               let mut state = self.init_glr_parser();
               state.parse(input);
               state
@@ -2323,13 +1677,13 @@ local_system:
       }
 
       #[derive(Debug, Clone)]
-      pub struct GLRParserState<'a, T: MergeAndIntersect> {
+      pub struct GLRParserState<'a, T: AndAndOr> {
           pub parser: &'a GLRParser,
           pub active_states: Vec<ParseState<T>>,
           pub action_not_found_states: Vec<ParseState<T>>,
       }
 
-      impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
+      impl<'a, T: AndAndOr> GLRParserState<'a, T> {
           pub fn parse(&mut self, input: &[TerminalID]) {
               self.parse_part(input);
           }
@@ -2386,7 +1740,7 @@ local_system:
                                   let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nonterminal];
 
                                   debug!(3, "Going to state {:?}", goto_state);
-                                  let combined_t = revealed_t.intersect(current_t);
+                                  let combined_t = revealed_t.and(current_t);
                                   let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                                   let new_stack = stack_node.push(new_content);
                                   self.active_states.push(ParseState {
@@ -2416,7 +1770,7 @@ local_system:
                                           let revealed_t = &revealed_content.t;
                                           let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id];
 
-                                          let combined_t = revealed_t.intersect(current_t);
+                                          let combined_t = revealed_t.and(current_t);
                                           let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                                           let new_stack = stack_node.push(new_content);
                                           self.active_states.push(ParseState {
@@ -2471,7 +1825,7 @@ local_system:
           // Removed action_stack
       }
 
-      impl<T: MergeAndIntersect> ParseState<T> {
+      impl<T: AndAndOr> ParseState<T> {
           pub fn key(&self) -> ParseStateKey {
               ParseStateKey {
                   stack_state_id: self.stack.peek().state_id,
@@ -2479,14 +1833,14 @@ local_system:
           }
 
           /// Merges `other` into `self`. Assumes `self.key() == other.key()`.
-          /// Merges the GSS structures and combines the `t` value at the top node using `MergeAndIntersect::merge`.
+          /// Merges the GSS structures and combines the `t` value at the top node using `AndAndOr::or`.
           pub fn merge(&mut self, other: ParseState<T>) {
               assert_eq!(self.key(), other.key());
 
               // Combine 't' values at the top node using 'or'
               let self_content = self.stack.peek();
               let other_content = other.stack.peek();
-              let combined_t = self_content.t.merge(&other_content.t);
+              let combined_t = self_content.t.or(&other_content.t);
 
               // Get mutable access to self.stack, potentially cloning if shared (Arc > 1)
               let mut mutable_stack = Arc::make_mut(&mut self.stack);
@@ -2512,268 +1866,6 @@ local_system:
                   }
                   std::collections::btree_map::Entry::Vacant(vacant) => {
                       vacant.insert(v);
-                  }
-              }
-          }
-      }
-    src/datastructures/gss.rs: |-
-      use std::collections::{BTreeMap, HashMap};
-      use std::sync::Arc;
-
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct GSSNode<T> {
-          pub value: T,
-          predecessors: Vec<Arc<GSSNode<T>>>,
-      }
-
-      impl<T> GSSNode<T> {
-          pub fn new(value: T) -> Self {
-              Self {
-                  value,
-                  predecessors: Vec::new(),
-              }
-          }
-
-          pub fn from_iter<I>(iter: I) -> Self
-          where
-              I: IntoIterator<Item = T>,
-          {
-              let mut iter = iter.into_iter();
-              let mut root = Self::new(iter.next().unwrap());
-              for value in iter {
-                  root = root.push(value);
-              }
-              root
-          }
-
-          pub fn push(self, value: T) -> Self {
-              let mut new_node = Self::new(value);
-              new_node.predecessors.push(Arc::new(self));
-              new_node
-          }
-
-          pub fn pop(&self) -> Vec<Arc<Self>> {
-              self.predecessors.clone()
-          }
-
-          pub fn popn(&self, n: usize) -> Vec<Arc<Self>>
-          where
-              T: Clone,
-          {
-              if n == 0 {
-                  return vec![Arc::new(self.clone())];
-              }
-              let mut nodes = Vec::new();
-              for popped in self.pop() {
-                  nodes.extend(popped.popn(n - 1));
-              }
-              nodes
-          }
-
-          pub fn peek(&self) -> &T {
-              &self.value
-          }
-
-          pub fn flatten(&self) -> Vec<Vec<T>>
-          where
-              T: Clone,
-          {
-              let mut result = Vec::new();
-              let mut stack = Vec::new();
-              stack.push((self, Vec::new()));
-              while let Some((node, mut path)) = stack.pop() {
-                  path.push(node.value.clone());
-                  if node.predecessors.is_empty() {
-                      result.push(path);
-                  } else {
-                      for predecessor in &node.predecessors {
-                          stack.push((predecessor, path.clone()));
-                      }
-                  }
-              }
-              result
-          }
-
-          pub fn flatten_bulk(nodes: &[Self]) -> Vec<Vec<T>>
-          where
-              T: Clone,
-          {
-              nodes.iter().flat_map(|node| node.flatten()).collect()
-          }
-
-          pub fn merge(&mut self, mut other: Self)
-          where
-              T: PartialEq,
-          {
-              assert!(self.value == other.value);
-              self.predecessors.append(&mut other.predecessors);
-          }
-
-          pub fn merge_unchecked(&mut self, mut other: Self)
-          where
-              T: PartialEq,
-          {
-              self.predecessors.append(&mut other.predecessors);
-          }
-
-          pub fn map<F, U>(&self, f: F) -> GSSNode<U>
-          where
-              F: Copy + Fn(&T) -> U,
-          {
-              GSSNode {
-                  value: f(&self.value),
-                  predecessors: self.predecessors.clone().into_iter()
-                      .map(|node| Arc::new(node.map(f)))
-                      .collect(),
-              }
-          }
-      }
-
-      impl<T> Drop for GSSNode<T> {
-          fn drop(&mut self) {
-              let mut cur_nodes = std::mem::take(&mut self.predecessors);
-              while let Some(node) = cur_nodes.pop() {
-                  if let Ok(mut inner_node) = Arc::try_unwrap(node) {
-                      cur_nodes.append(&mut inner_node.predecessors);
-                  }
-              }
-          }
-      }
-
-      pub trait GSSTrait<T: Clone> {
-          type Peek<'a> where T: 'a, Self: 'a;
-          fn peek(&self) -> Self::Peek<'_>;
-          fn push(&self, value: T) -> GSSNode<T>;
-          fn pop(&self) -> Vec<Arc<GSSNode<T>>>;
-          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>>;
-      }
-
-      impl<T: Clone> GSSTrait<T> for GSSNode<T> {
-          type Peek<'a> = &'a T where T: 'a;
-
-          fn peek(&self) -> Self::Peek<'_> {
-              &self.value
-          }
-
-          fn push(&self, value: T) -> GSSNode<T> {
-              let mut new_node = GSSNode::new(value);
-              new_node.predecessors.push(Arc::new(self.clone()));
-              new_node
-          }
-
-          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
-              self.predecessors.clone()
-          }
-
-          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
-              if n == 0 {
-                  return vec![Arc::new(self.clone())];
-              }
-              let mut nodes = Vec::new();
-              for popped in self.pop() {
-                  nodes.extend(popped.popn(n - 1));
-              }
-              nodes
-          }
-      }
-
-      impl<T: Clone> GSSTrait<T> for Arc<GSSNode<T>> {
-          type Peek<'a> = &'a T where T: 'a;
-
-          fn peek(&self) -> Self::Peek<'_> {
-              &self.value
-          }
-
-          fn push(&self, value: T) -> GSSNode<T> {
-              let mut new_node = GSSNode::new(value);
-              new_node.predecessors.push(self.clone());
-              new_node
-          }
-
-          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
-              self.predecessors.clone()
-          }
-
-          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
-              if n == 0 {
-                  return vec![self.clone()];
-              }
-              let mut nodes = Vec::new();
-              for popped in self.pop() {
-                  nodes.extend(popped.popn(n - 1));
-              }
-              nodes
-          }
-      }
-
-      impl<T: Clone> GSSTrait<T> for Option<Arc<GSSNode<T>>> {
-          type Peek<'a> = Option<&'a T> where T: 'a;
-
-          fn peek(&self) -> Self::Peek<'_> {
-              self.as_ref().map(|node| node.peek())
-          }
-
-          fn push(&self, value: T) -> GSSNode<T> {
-              self.clone().map(|node| node.push(value.clone())).unwrap_or_else(|| GSSNode::new(value))
-          }
-
-          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
-              self.as_ref().map(|node| node.pop()).unwrap_or_default()
-          }
-
-          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
-              self.as_ref().map(|node| node.popn(n)).unwrap_or_default()
-          }
-      }
-
-      impl<T: Clone> GSSTrait<T> for Option<GSSNode<T>> {
-          type Peek<'a> = Option<&'a T> where T: 'a;
-
-          fn peek(&self) -> Self::Peek<'_> {
-              self.as_ref().map(|node| node.peek())
-          }
-
-          fn push(&self, value: T) -> GSSNode<T> {
-              self.clone().map(|node| node.push(value.clone())).unwrap_or_else(|| GSSNode::new(value))
-          }
-
-          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
-              self.as_ref().map(|node| node.pop()).unwrap_or_default()
-          }
-
-          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
-              self.as_ref().map(|node| node.popn(n)).unwrap_or_default()
-          }
-      }
-
-      pub trait BulkMerge<T> {
-          fn bulk_merge(&mut self);
-      }
-
-      impl<T: Clone + Ord> BulkMerge<T> for Vec<Arc<GSSNode<T>>> {
-          fn bulk_merge(&mut self) {
-              // todo: should be possible to avoid cloning T in some cases by using &T in this map,
-              //  but we need to be careful about lifetimes. If we use `node.as_ref().value`, then node
-              //  will go out of bounds while the reference to its value is still inside `groups`.
-              let mut groups: BTreeMap<T, HashMap<_, Arc<GSSNode<T>>>> = BTreeMap::new();
-              for node in self.drain(..) {
-                  groups.entry(node.value.clone()).or_default().entry(Arc::as_ptr(&node)).or_insert(node);
-              }
-              for mut group in groups.into_values() {
-                  let mut group = group.into_values().collect::<Vec<_>>();
-                  let mut first = group.pop().unwrap();
-                  if group.is_empty() {
-                      self.push(first);
-                  } else {
-                      let mut predecessors_set: BTreeMap<_, _> = BTreeMap::new();
-                      for sibling in group {
-                          for predecessor in &sibling.predecessors {
-                              predecessors_set.insert(Arc::as_ptr(predecessor), predecessor.clone());
-                          }
-                      }
-                      let first_mut_ref = Arc::make_mut(&mut first);
-                      first_mut_ref.predecessors = predecessors_set.into_values().collect();
-                      self.push(first);
                   }
               }
           }
@@ -2801,206 +1893,11 @@ system:
   apply_mode: git
 messages:
   - user: |-
-      ```rust 'src/constraint_extra.rs'
-      use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode, PrecomputedNodeContents, PrecomputedFinalizer};
-      use crate::datastructures::trie::{Trie, node_ptr};
-      use crate::tokenizer::{TokenizerStateID, LLMTokenID};
-      use crate::types::TerminalID as GrammarTokenID; // Corrected import path
-      use crate::constraint::LLMTokenBV;
-      use std::collections::{HashSet, VecDeque};
-      use std::sync::{Arc, Mutex};
-      use bitvec::prelude::BitVec;
-
-      /// Helper function to print the indices of set bits in a BitVec.
-      fn format_bv_indices(bv: &LLMTokenBV) -> String {
-          let indices: Vec<String> = bv.iter_ones().map(|i| i.to_string()).collect();
-          if indices.len() > 10 {
-              format!("[{} indices starting with {}...]", indices.len(), indices[0..5].join(", "))
-          } else if indices.is_empty() {
-              "[]".to_string()
-          }
-           else {
-              format!("[{}]", indices.join(", "))
-          }
-      }
-
-      /// Helper function to print PrecomputedFinalizer details.
-      pub(crate) fn print_finalizer(grammar_token_id: GrammarTokenID, finalizer: &PrecomputedFinalizer, indent: &str) {
-          println!("{}  - Finalizer for GrammarTokenID({}):", indent, grammar_token_id.0);
-          for (tokenizer_state_id, llm_tokens) in &finalizer.content {
-              println!("{}    Tokenizer State {}:", indent, tokenizer_state_id.0);
-              println!("{}      LLM Tokens: {}", indent, format_bv_indices(llm_tokens));
-          }
-      }
-
-      /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
-      fn dump_precompute_trie_recursive(
-          node_arc: &Arc<Mutex<PrecomputeNode>>,
-          indent: String,
-          visited: &mut HashSet<*const PrecomputeNode>,
-      ) {
-          let node_ptr_val = node_ptr(node_arc);
-          if !visited.insert(node_ptr_val) {
-              println!("{}-> Ref {:?} (already printed)", indent, node_ptr_val);
-              return;
-          }
-
-          let node = node_arc.lock().expect("Mutex poisoned during dump");
-
-          println!("{}-> Node {:?} (MaxDepth: {})", indent, node_ptr_val, node.max_depth);
-
-          // Print Node Value (Finalizers)
-          if !node.value.finalizers().is_empty() {
-              println!("{}  Finalizers:", indent);
-              for (grammar_token_id, finalizer) in node.value.finalizers() {
-                  print_finalizer(*grammar_token_id, finalizer, &indent);
-              }
-          }
-          if let Some(clean_end) = &node.value.clean_end {
-              println!("{}  Clean End LLM Tokens: {}", indent, format_bv_indices(clean_end));
-          }
-
-          // Print Children (Edges)
-          if node.children().is_empty() {
-              println!("{}  (Leaf Node)", indent);
-          } else {
-              println!("{}  Children:", indent);
-              let new_indent = format!("{}    ", indent);
-              for (edge_key, children_vec) in node.children() {
-                  for (edge_val_bv, child_arc) in children_vec {
-                      println!(
-                          "{}Edge GrammarTokenID({}): LLM Tokens: {} -> Child Ptr: {:?}",
-                          indent,
-                          edge_key.0,
-                          format_bv_indices(edge_val_bv),
-                          node_ptr(child_arc)
-                      );
-                      // Recurse
-                      dump_precompute_trie_recursive(child_arc, new_indent.clone(), visited);
-                  }
-              }
-          }
-      }
-
-      impl GrammarConstraint {
-          /// Dumps the structure of the precomputed Trie map for visualization.
-          pub fn dump_precomputed(&self) {
-              println!("Dumping Precomputed Trie Structure:");
-              println!("===================================");
-
-              for (tokenizer_state_id, root_node_trie) in &self.precomputed {
-                  println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
-
-                  // Need to wrap the root_node_trie (which is a Trie, not an Arc<Mutex<Trie>>)
-                  // in an Arc<Mutex<>> to match the recursive function's expectation.
-                  // This is slightly awkward but necessary for the shared recursive logic.
-                  let root_node_arc = Arc::new(Mutex::new(root_node_trie.clone()));
-
-                  let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
-                  dump_precompute_trie_recursive(&root_node_arc, "".to_string(), &mut visited);
-              }
-              println!("\n===================================");
-              println!("Dump Complete.");
-          }
-      }
-
-      #[cfg(test)]
-      mod tests {
-          use crate::finite_automata::{eat_u8, Regex};
-          use crate::glr::grammar::{prod, t, Terminal};
-          use crate::glr::parser::GLRParser;
-          use crate::glr::table::generate_glr_parser_with_terminal_map;
-          use crate::tokenizer::{LLMTokenID, LLMTokenMap};
-          use crate::types::TerminalID;
-          use bimap::BiBTreeMap;
-          use super::*;
-          use bitvec::prelude::*;
-          use crate::seq;
-
-          #[test]
-          fn test_format_bv_indices_empty() {
-              let bv = bitvec![usize, Lsb0;];
-              assert_eq!(format_bv_indices(&bv), "[]");
-
-              let bv = bitvec![usize, Lsb0; 0, 0, 0];
-              assert_eq!(format_bv_indices(&bv), "[]");
-          }
-
-          #[test]
-          fn test_format_bv_indices_single() {
-              let mut bv = bitvec![usize, Lsb0; 0; 5];
-              bv.set(3, true);
-              assert_eq!(format_bv_indices(&bv), "[3]");
-          }
-
-          #[test]
-          fn test_format_bv_indices_multiple_few() {
-              let mut bv = bitvec![usize, Lsb0; 0; 10];
-              bv.set(1, true);
-              bv.set(5, true);
-              bv.set(8, true);
-              assert_eq!(format_bv_indices(&bv), "[1, 5, 8]");
-          }
-
-          #[test]
-          fn test_format_bv_indices_multiple_many() {
-              let mut bv = bitvec![usize, Lsb0; 0; 20];
-              for i in 0..15 { bv.set(i, true); }
-              assert_eq!(format_bv_indices(&bv), "[15 indices starting with 0, 1, 2, 3, 4...]");
-          }
-
-          // Helper function to create a minimal constraint for testing dump
-          fn create_minimal_constraint() -> GrammarConstraint {
-              // Tokenizer: Matches "a" (token 0) or "$" (token 1)
-              let expr = crate::groups![
-                  eat_u8(b'a'), // Grammar Token 0
-                  seq![eat_u8(b'a'), eat_u8(b'a')], // Grammar Token 1
-                  eat_u8(b'$')  // Grammar Token 2 (EOF)
-              ];
-              let tokenizer = expr.build();
-
-              // LLM Token Map: "aaaa" -> 0, "$" -> 1
-              let mut llm_token_map = LLMTokenMap::new();
-              llm_token_map.insert(b"aaaa".to_vec(), LLMTokenID(0));
-              llm_token_map.insert(b"$".to_vec(), LLMTokenID(1));
-              let max_llm_token_id = 1;
-
-              // Grammar: S -> A $
-              let productions = vec![
-                  prod("S", vec![t("A"), t("AA"), t("EOF")]),
-              ];
-
-              // Map grammar terminals to the tokenizer's token IDs
-              let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-              grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0)); // "a" from tokenizer
-              grammar_token_map.insert(Terminal("AA".to_string()), TerminalID(1)); // "a" from tokenizer
-              grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(2)); // "$" from tokenizer
-
-              // Generate parser
-              let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
-
-              // Create constraint (this runs precomputation)
-              GrammarConstraint::new(tokenizer, parser, llm_token_map, max_llm_token_id)
-          }
-
-          #[test]
-          fn test_dump_precomputed_runs() {
-              let constraint = create_minimal_constraint();
-              println!("--- Starting dump_precomputed test output ---");
-              constraint.dump_precomputed(); // Just ensure it runs without panic
-              println!("--- Finished dump_precomputed test output ---");
-          }
-      }
-
-      ```
-    metadata:
-      filename: src/constraint_extra.rs
-  - user: |-
       ```rust 'src/constraint.rs'
       use std::cmp::Ordering;
       use crate::datastructures::trie::Trie;
       use crate::finite_automata::Regex;
-      use crate::glr::parser::{MergeAndIntersect, GLRParser, GLRParserState, ParseState, ParseStateKey};
+      use crate::glr::parser::{AndAndOr, GLRParser, GLRParserState, ParseState, ParseStateKey};
       use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
       use bimap::BiBTreeMap;
       use bitvec::prelude::BitVec;
@@ -3054,13 +1951,13 @@ messages:
           pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, LLMTokenBV>>,
       }
 
-      impl MergeAndIntersect for LLMTokenBV {
-          fn merge(&self, other: &Self) -> Self {
-              self.clone() | other.clone()
-          }
-          
-          fn intersect(&self, other: &Self) -> Self {
+      impl AndAndOr for LLMTokenBV {
+          fn and(&self, other: &Self) -> Self {
               self.clone() & other.clone()
+          }
+
+          fn or(&self, other: &Self) -> Self {
+              self.clone() | other.clone()
           }
       }
 
@@ -3540,25 +2437,23 @@ messages:
       use std::sync::Arc;
       use crate::debug;
 
-      pub trait MergeAndIntersect: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
-          /// Merges the information represented by `self` and `other`.
-          fn merge(&self, other: &Self) -> Self;
-          /// Intersects the information represented by `self` and `other`.
-          fn intersect(&self, other: &Self) -> Self;
+      pub trait AndAndOr: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
+          fn and(&self, other: &Self) -> Self;
+          fn or(&self, other: &Self) -> Self;
       }
 
-      impl MergeAndIntersect for () {
-          fn merge(&self, _: &Self) -> Self { () }
-          fn intersect(&self, _: &Self) -> Self { () }
+      impl AndAndOr for () {
+          fn and(&self, _: &Self) -> Self { () }
+          fn or(&self, _: &Self) -> Self { () }
       }
 
       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct ParseStateNodeContent<T: MergeAndIntersect> {
+      pub struct ParseStateNodeContent<T: AndAndOr> {
           pub state_id: StateID,
           pub t: T,
       }
       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct ParseState<T: MergeAndIntersect> {
+      pub struct ParseState<T: AndAndOr> {
           pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
               // self.merge_active_states();
           }
@@ -3600,18 +2495,19 @@ messages:
               }
           }
 
-          pub fn init_glr_parser<T: MergeAndIntersect + Default>(&self) -> GLRParserState<T> {
+          pub fn init_glr_parser<T: AndAndOr + Default>(&self) -> GLRParserState<T> {
               self.init_glr_parser_with_t(T::default())
           }
 
-          pub fn init_glr_parser_with_t<T: MergeAndIntersect>(&self, t: T) -> GLRParserState<T> {
+          pub fn init_glr_parser_with_t<T: AndAndOr>(&self, t: T) -> GLRParserState<T> {
               GLRParserState {
                   parser: self,
                   active_states: vec![self.init_parse_state_with_t(t)],
                   action_not_found_states: Vec::new(),
               }
           }
-          pub fn init_glr_parser_from_parse_state<T: MergeAndIntersect>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
+
+          pub fn init_glr_parser_from_parse_state<T: AndAndOr>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
               GLRParserState {
                   parser: self,
                   active_states: vec![parse_state],
@@ -3619,7 +2515,7 @@ messages:
               }
           }
 
-          pub fn init_glr_parser_from_parse_states<T: MergeAndIntersect>(
+          pub fn init_glr_parser_from_parse_states<T: AndAndOr>(
               &self,
               parse_states: Vec<ParseState<T>>,
           ) -> GLRParserState<T> {
@@ -3630,11 +2526,11 @@ messages:
               }
           }
 
-          pub fn init_parse_state<T: MergeAndIntersect + Default>(&self) -> ParseState<T> {
+          pub fn init_parse_state<T: AndAndOr + Default>(&self) -> ParseState<T> {
               self.init_parse_state_with_t(T::default())
           }
 
-          pub fn init_parse_state_with_t<T: MergeAndIntersect>(&self, t: T) -> ParseState<T> {
+          pub fn init_parse_state_with_t<T: AndAndOr>(&self, t: T) -> ParseState<T> {
               let initial_content = ParseStateNodeContent {
                   state_id: self.start_state_id,
                   t,
@@ -3644,7 +2540,7 @@ messages:
               }
           }
 
-          pub fn parse<T: MergeAndIntersect + Default>(&self, input: &[TerminalID]) -> GLRParserState<T> {
+          pub fn parse<T: AndAndOr + Default>(&self, input: &[TerminalID]) -> GLRParserState<T> {
               let mut state = self.init_glr_parser();
               state.parse(input);
               state
@@ -3741,13 +2637,13 @@ messages:
       }
 
       #[derive(Debug, Clone)]
-      pub struct GLRParserState<'a, T: MergeAndIntersect> {
+      pub struct GLRParserState<'a, T: AndAndOr> {
           pub parser: &'a GLRParser,
           pub active_states: Vec<ParseState<T>>,
           pub action_not_found_states: Vec<ParseState<T>>,
       }
 
-      impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
+      impl<'a, T: AndAndOr> GLRParserState<'a, T> {
           pub fn parse(&mut self, input: &[TerminalID]) {
               self.parse_part(input);
           }
@@ -3804,7 +2700,7 @@ messages:
                                   let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nonterminal];
 
                                   debug!(3, "Going to state {:?}", goto_state);
-                                  let combined_t = revealed_t.intersect(current_t);
+                                  let combined_t = revealed_t.and(current_t);
                                   let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                                   let new_stack = stack_node.push(new_content);
                                   self.active_states.push(ParseState {
@@ -3834,7 +2730,7 @@ messages:
                                           let revealed_t = &revealed_content.t;
                                           let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id];
 
-                                          let combined_t = revealed_t.intersect(current_t);
+                                          let combined_t = revealed_t.and(current_t);
                                           let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                                           let new_stack = stack_node.push(new_content);
                                           self.active_states.push(ParseState {
@@ -3889,7 +2785,7 @@ messages:
           // Removed action_stack
       }
 
-      impl<T: MergeAndIntersect> ParseState<T> {
+      impl<T: AndAndOr> ParseState<T> {
           pub fn key(&self) -> ParseStateKey {
               ParseStateKey {
                   stack_state_id: self.stack.peek().state_id,
@@ -3897,14 +2793,14 @@ messages:
           }
 
           /// Merges `other` into `self`. Assumes `self.key() == other.key()`.
-          /// Merges the GSS structures and combines the `t` value at the top node using `MergeAndIntersect::merge`.
+          /// Merges the GSS structures and combines the `t` value at the top node using `AndAndOr::or`.
           pub fn merge(&mut self, other: ParseState<T>) {
               assert_eq!(self.key(), other.key());
 
               // Combine 't' values at the top node using 'or'
               let self_content = self.stack.peek();
               let other_content = other.stack.peek();
-              let combined_t = self_content.t.merge(&other_content.t);
+              let combined_t = self_content.t.or(&other_content.t);
 
               // Get mutable access to self.stack, potentially cloning if shared (Arc > 1)
               let mut mutable_stack = Arc::make_mut(&mut self.stack);
@@ -3938,921 +2834,208 @@ messages:
     metadata:
       filename: src/glr/parser.rs
   - user: |-
-      ```rust 'src/datastructures/gss.rs'
-      use std::collections::{BTreeMap, HashMap};
-      use std::sync::Arc;
-
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct GSSNode<T> {
-          pub value: T,
-          predecessors: Vec<Arc<GSSNode<T>>>,
-      }
-
-      impl<T> GSSNode<T> {
-          pub fn new(value: T) -> Self {
-              Self {
-                  value,
-                  predecessors: Vec::new(),
-              }
-          }
-
-          pub fn from_iter<I>(iter: I) -> Self
-          where
-              I: IntoIterator<Item = T>,
-          {
-              let mut iter = iter.into_iter();
-              let mut root = Self::new(iter.next().unwrap());
-              for value in iter {
-                  root = root.push(value);
-              }
-              root
-          }
-
-          pub fn push(self, value: T) -> Self {
-              let mut new_node = Self::new(value);
-              new_node.predecessors.push(Arc::new(self));
-              new_node
-          }
-
-          pub fn pop(&self) -> Vec<Arc<Self>> {
-              self.predecessors.clone()
-          }
-
-          pub fn popn(&self, n: usize) -> Vec<Arc<Self>>
-          where
-              T: Clone,
-          {
-              if n == 0 {
-                  return vec![Arc::new(self.clone())];
-              }
-              let mut nodes = Vec::new();
-              for popped in self.pop() {
-                  nodes.extend(popped.popn(n - 1));
-              }
-              nodes
-          }
-
-          pub fn peek(&self) -> &T {
-              &self.value
-          }
-
-          pub fn flatten(&self) -> Vec<Vec<T>>
-          where
-              T: Clone,
-          {
-              let mut result = Vec::new();
-              let mut stack = Vec::new();
-              stack.push((self, Vec::new()));
-              while let Some((node, mut path)) = stack.pop() {
-                  path.push(node.value.clone());
-                  if node.predecessors.is_empty() {
-                      result.push(path);
-                  } else {
-                      for predecessor in &node.predecessors {
-                          stack.push((predecessor, path.clone()));
-                      }
-                  }
-              }
-              result
-          }
-
-          pub fn flatten_bulk(nodes: &[Self]) -> Vec<Vec<T>>
-          where
-              T: Clone,
-          {
-              nodes.iter().flat_map(|node| node.flatten()).collect()
-          }
-
-          pub fn merge(&mut self, mut other: Self)
-          where
-              T: PartialEq,
-          {
-              assert!(self.value == other.value);
-              self.predecessors.append(&mut other.predecessors);
-          }
-
-          pub fn merge_unchecked(&mut self, mut other: Self)
-          where
-              T: PartialEq,
-          {
-              self.predecessors.append(&mut other.predecessors);
-          }
-
-          pub fn map<F, U>(&self, f: F) -> GSSNode<U>
-          where
-              F: Copy + Fn(&T) -> U,
-          {
-              GSSNode {
-                  value: f(&self.value),
-                  predecessors: self.predecessors.clone().into_iter()
-                      .map(|node| Arc::new(node.map(f)))
-                      .collect(),
-              }
-          }
-      }
-
-      impl<T> Drop for GSSNode<T> {
-          fn drop(&mut self) {
-              let mut cur_nodes = std::mem::take(&mut self.predecessors);
-              while let Some(node) = cur_nodes.pop() {
-                  if let Ok(mut inner_node) = Arc::try_unwrap(node) {
-                      cur_nodes.append(&mut inner_node.predecessors);
-                  }
-              }
-          }
-      }
-
-      pub trait GSSTrait<T: Clone> {
-          type Peek<'a> where T: 'a, Self: 'a;
-          fn peek(&self) -> Self::Peek<'_>;
-          fn push(&self, value: T) -> GSSNode<T>;
-          fn pop(&self) -> Vec<Arc<GSSNode<T>>>;
-          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>>;
-      }
-
-      impl<T: Clone> GSSTrait<T> for GSSNode<T> {
-          type Peek<'a> = &'a T where T: 'a;
-
-          fn peek(&self) -> Self::Peek<'_> {
-              &self.value
-          }
-
-          fn push(&self, value: T) -> GSSNode<T> {
-              let mut new_node = GSSNode::new(value);
-              new_node.predecessors.push(Arc::new(self.clone()));
-              new_node
-          }
-
-          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
-              self.predecessors.clone()
-          }
-
-          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
-              if n == 0 {
-                  return vec![Arc::new(self.clone())];
-              }
-              let mut nodes = Vec::new();
-              for popped in self.pop() {
-                  nodes.extend(popped.popn(n - 1));
-              }
-              nodes
-          }
-      }
-
-      impl<T: Clone> GSSTrait<T> for Arc<GSSNode<T>> {
-          type Peek<'a> = &'a T where T: 'a;
-
-          fn peek(&self) -> Self::Peek<'_> {
-              &self.value
-          }
-
-          fn push(&self, value: T) -> GSSNode<T> {
-              let mut new_node = GSSNode::new(value);
-              new_node.predecessors.push(self.clone());
-              new_node
-          }
-
-          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
-              self.predecessors.clone()
-          }
-
-          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
-              if n == 0 {
-                  return vec![self.clone()];
-              }
-              let mut nodes = Vec::new();
-              for popped in self.pop() {
-                  nodes.extend(popped.popn(n - 1));
-              }
-              nodes
-          }
-      }
-
-      impl<T: Clone> GSSTrait<T> for Option<Arc<GSSNode<T>>> {
-          type Peek<'a> = Option<&'a T> where T: 'a;
-
-          fn peek(&self) -> Self::Peek<'_> {
-              self.as_ref().map(|node| node.peek())
-          }
-
-          fn push(&self, value: T) -> GSSNode<T> {
-              self.clone().map(|node| node.push(value.clone())).unwrap_or_else(|| GSSNode::new(value))
-          }
-
-          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
-              self.as_ref().map(|node| node.pop()).unwrap_or_default()
-          }
-
-          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
-              self.as_ref().map(|node| node.popn(n)).unwrap_or_default()
-          }
-      }
-
-      impl<T: Clone> GSSTrait<T> for Option<GSSNode<T>> {
-          type Peek<'a> = Option<&'a T> where T: 'a;
-
-          fn peek(&self) -> Self::Peek<'_> {
-              self.as_ref().map(|node| node.peek())
-          }
-
-          fn push(&self, value: T) -> GSSNode<T> {
-              self.clone().map(|node| node.push(value.clone())).unwrap_or_else(|| GSSNode::new(value))
-          }
-
-          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
-              self.as_ref().map(|node| node.pop()).unwrap_or_default()
-          }
-
-          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
-              self.as_ref().map(|node| node.popn(n)).unwrap_or_default()
-          }
-      }
-
-      pub trait BulkMerge<T> {
-          fn bulk_merge(&mut self);
-      }
-
-      impl<T: Clone + Ord> BulkMerge<T> for Vec<Arc<GSSNode<T>>> {
-          fn bulk_merge(&mut self) {
-              // todo: should be possible to avoid cloning T in some cases by using &T in this map,
-              //  but we need to be careful about lifetimes. If we use `node.as_ref().value`, then node
-              //  will go out of bounds while the reference to its value is still inside `groups`.
-              let mut groups: BTreeMap<T, HashMap<_, Arc<GSSNode<T>>>> = BTreeMap::new();
-              for node in self.drain(..) {
-                  groups.entry(node.value.clone()).or_default().entry(Arc::as_ptr(&node)).or_insert(node);
-              }
-              for mut group in groups.into_values() {
-                  let mut group = group.into_values().collect::<Vec<_>>();
-                  let mut first = group.pop().unwrap();
-                  if group.is_empty() {
-                      self.push(first);
-                  } else {
-                      let mut predecessors_set: BTreeMap<_, _> = BTreeMap::new();
-                      for sibling in group {
-                          for predecessor in &sibling.predecessors {
-                              predecessors_set.insert(Arc::as_ptr(predecessor), predecessor.clone());
-                          }
-                      }
-                      let first_mut_ref = Arc::make_mut(&mut first);
-                      first_mut_ref.predecessors = predecessors_set.into_values().collect();
-                      self.push(first);
-                  }
-              }
-          }
-      }
-      ```
-    metadata:
-      filename: src/datastructures/gss.rs
-  - user: |-
-      For commit, need to be selective wrt internal values, ie check internal nodes' t values for the llm_token_id, and prune if not compatible.  
-      To keep this efficient, we probably need to have a way of traversing the gss but stopping early when all nested llm token bvs are compatible.  
-      Perhaps maintain a llm token bv that's the intersection of all its children's?
-      Yes, store both the LLM token union and the LLM token intersection in each node.
-      Create a struct to store both, and put it in ParseStateNodeContent as t.
-      And should we add a method to the GSSNode that lets us easily traverse and prune nodes? Or can we do it using existing tools provided by gss?
-
-      How should we implement MergeAndIntersect for the new struct containing both union and intersection?
-      Union works as before, merge does OR and intersect does AND.
-      For intersection, merge does AND, but intersect does NOT do OR - intersect just returns the original value. This means it's NOT symmetrical.
-      Why? Intersection represents the intersection of all LLM token bitsets of all children of this node. That doesn't change unless the children's LLM token bitsets change (which they don't).
-
-      Let's give them better names. The 'union' llm bitset can be the 'active' llm tokens, and the intersection can be something else appropriate.
-
-      Now, let's say we're doing a commit and the active parse state we're considering does indeed have the llm token we're committing.
-      Right now, that's enough for us and we move on. But this is wrong.
-      We need to go through the subtree of GSS nodes and prune any that don't have this LLM token in their active llm token bitset.
-      We could check a node's intersection. If the llm token bit is set in the intersection, then it must be set in all childrens' active LLM bitsets. Thus, we don't need to look at its children, we can stop early here.
-      That's the purpose of maintaining an intersection.
-
-      Now, commit will prune nodes that don't have the given llm token, but it'll also replace active llm tokens of all nodes (and do any necessary update for the intersections) with a full bitset of 'true' values.
-
-      How are we gonna prune a GSS? Tricky esp given we have multiple roots (each parse state effectively contains a root) and subtrees can be shared.
-      We can't mutate a GSS node - it doesn't have a mutex and we don't want to add a mutex.
-      We can easily create a queue of nodes, but we don't want to process a node until all of its parents have been processed.
-      We can probs do it by adding a field max depth or something to GSSNode and popping in that order. A parent's max depth will always be at least 1 greater than its childrens'.
-      Yes, good.
-      So, we have a method on GSSNode that takes a vector of nodes and a function that takes a node and returns an optional node (None if we want to delete this node), and returns a vec of optional nodes of the same length, where entries are None if that root node has itself been removed.
-      But, crucially, it processes them in such a way that if two parents share the same child, then they'll still share that same child in the new tree.
-      And actually let's have that closure passed to the function return an enum that can either contain the new node, or be a flag that indicates to delete this node, or contain a new node *and* be a flag that indicates to not process this node's children (early stop).
-      Or simpler: return an optional (node, flag) tuple where the flag indicates to not process this node's children (unless ofc those children happen to be reachable via another node that *does* want them processed) and if the option is None then we delete this node (don't include it in its parent's children) (and obv don't process this node's children either).
-
-      Anyway, so we get our vec of optional nodes in commit. What'd we pass? We gather all nodes in all glr parser states for all tokenizer states in the grammar constraint state. We get a vec of optional nodes, and where the option is None we omit those nodes. But we put all of them back into GrammarConstraintState::state under the TokenizerStateID for its corresponding node passed into the function.
-
-
-      ...
-
-      All that prepare_initial_nodes_and_values_for_special_map needs to do is update the very top-most active llm tokens with the llm tokens it is passed. Since its children will be intersected with this anyway, it doesn't matter whether its children 'true' or are equal to the llm token bitset.
-      In fact, being all 'true' is preferable, since it means on the next commit we can stop early. This helps us avoid computational cost per step being proportional to the complexity of the state stack! We can rules that induce deep nesting and computational cost remains proportional to only the top of the stack tree, the part that changes from step to step.
-
-      ...
-
-      Code:
-      ```rust
-      pub(crate) fn prune_and_transform_roots<T: Clone>(
-          roots: &[Arc<GSSNode<ParseStateNodeContent<T>>>],
-          closure: &impl Fn(&T) -> Option<(T, bool)>,
-      ) -> Vec<Arc<GSSNode<ParseStateNodeContent<T>>>> {
-          todo!()
-      }
-      ```
-
-      roughly:
-      ```rust
-          pub fn commit(&mut self, llm_token_id: LLMTokenID) {
-              let max_token_id = self.parent.max_llm_token_id;
-              let all_true_bv = LLMTokenBV::repeat(true, max_token_id + 1);
-
-              // Closure for GSS transformation: prune if token not present, otherwise reset t to all true.
-              let closure = |t: &LLMTokenBV| -> Option<LLMTokenBV> {
-                  if t[llm_token_id.0] {
-                      Some(all_true_bv.clone()) // Reset t to allow any token next
-                  } else {
-                      None // Prune this path
-                  }
-              };
-
-              // idk if this is quite right, but it gives you an idea
-              let mut next_state: BTreeMap<TokenizerStateID, GLRParserState<'a, LLMTokenBV>> = BTreeMap::new();
-              let mut all_roots = Vec::new();
-              for (tokenizer_state_id, glr_state) in self.state.iter() {
-                  for active_state in &glr_state.active_states {
-                      all_roots.push(active_state.stack)
-                  }
-              }
-              let new_roots: Vec<Option<_>> = prune_and_transform_roots(all_roots, closure);
-
-              // Line up with all_roots and redistribute to self.state...
-          }
-
-      ```
+      Rename AndAndOr to something more suitable. Look at what it means.
+      - The `or` method is used to merge `t` values together when parse states with a common head state - but potentially different `t` values - are merged into eachother.
+      - The merged `t` value represents a union of the information in its constituents.
+      - The common head represents a 'join' from many nodes to one.
+      - When the common head is popped, it goes the other way, 'splitting' the common head up, and revealing the original `t` values underneath.
+      - Merging allows us to compute stuff (such as updates for `t`) for the one common head rather than the multiple constituent heads, saving compute. But when we pop the common head, we need to 'split-up' the merged parse state into individual ones, and somehow we need 'split up' parts of the current  `t` value - which has undergone various updates since it was originally created - as well.
+      - To split it up, we apply the `and` method with the original `t` for the parse state prior to merge, and the current `t` for the node we're popping from.
     metadata:
   - assistant: |-
-      Okay, let's implement the `commit` logic using the GSS transformation approach.
-
-      We'll introduce a new struct `LLMTokenInfo` to hold both the active and intersection token sets within the GSS nodes. We'll then implement `MergeAndIntersect` for it and update the relevant parts of the constraint and parser logic. Finally, we'll add the GSS transformation function and use it in `commit`.
-
-      **1. Define `LLMTokenInfo` and Implement `MergeAndIntersect` (`src/constraint.rs`)**
+      Okay, let's rename `AndAndOr` to `MergeAndIntersect` and update the method names to `merge` and `intersect` respectively, as that better reflects their purpose.
 
       ```diff
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -13,6 +13,7 @@
-       use crate::datastructures::charmap::TrieMap;
-       use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
-       use crate::types::{TerminalID as GrammarTokenID, TerminalID};
-      +use crate::datastructures::gss::{transform_gss_roots, GSSNode};
-       
-       pub type LLMTokenBV = BitVec;
-       pub type GrammarTokenBV = BitVec;
-      @@ -34,10 +35,38 @@
-           pub(crate) clean_end: Option<LLMTokenBV>,
+      @@ -1,6 +1,6 @@
+       use std::cmp::Ordering;
+       use crate::datastructures::trie::Trie;
+       use crate::finite_automata::Regex;
+      -use crate::glr::parser::{AndAndOr, GLRParser, GLRParserState, ParseState, ParseStateKey};
+      +use crate::glr::parser::{MergeAndIntersect, GLRParser, GLRParserState, ParseState, ParseStateKey};
+       use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
+       use bimap::BiBTreeMap;
+       use bitvec::prelude::BitVec;
+      @@ -48,11 +48,11 @@
+           pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, LLMTokenBV>>,
        }
        
-      +/// Holds the set of active LLM tokens and the intersection of tokens
-      +/// guaranteed to be possible in all future paths from this GSS node.
-      +#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      +pub struct LLMTokenInfo {
-      +    /// Union of possible LLM tokens allowed by paths reaching this node.
-      +    pub active: LLMTokenBV,
-      +    /// Intersection of LLM tokens guaranteed by *all* paths descending from this node.
-      +    /// Used for optimization during commit.
-      +    pub intersection: LLMTokenBV,
-      +}
-      +
-      +impl LLMTokenInfo {
-      +    /// Creates a new instance where both active and intersection are set to the given BitVec.
-      +    pub fn new(tokens: LLMTokenBV) -> Self {
-      +        Self {
-      +            active: tokens.clone(),
-      +            intersection: tokens,
-      +        }
-      +    }
-      +
-      +    /// Creates a new instance where both active and intersection are all true.
-      +    pub fn all_true(max_llm_token_id: usize) -> Self {
-      +        let bv = LLMTokenBV::repeat(true, max_llm_token_id + 1);
-      +        Self { active: bv.clone(), intersection: bv }
-      +    }
-      +}
-      +
-       pub(crate) type PrecomputeNode = Trie<GrammarTokenID, LLMTokenBV, PrecomputedNodeContents>;
-       pub(crate) type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode>;
+      -impl AndAndOr for LLMTokenBV {
+      -    fn and(&self, other: &Self) -> Self {
+      +impl MergeAndIntersect for LLMTokenBV {
+      +    fn intersect(&self, other: &Self) -> Self {
+               self.clone() & other.clone()
+           }
        
-       #[derive(Debug, Clone)] // Removed pub(crate) as it's likely used externally
-      +// Note: GLRParserState now uses LLMTokenInfo instead of LLMTokenBV directly
-       pub struct GrammarConstraint {
-           pub(crate) tokenizer: Regex,
-           pub(crate) parser: GLRParser,
-      @@ -49,16 +78,20 @@
-       #[derive(Debug, Clone)]
-       pub struct GrammarConstraintState<'a> {
-           pub(crate) parent: &'a GrammarConstraint,
-      -    pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, LLMTokenBV>>,
-      -}
-      -
-      -impl MergeAndIntersect for LLMTokenBV {
-      +    // State maps Tokenizer state to GLR parser state, which now uses LLMTokenInfo
-      +    pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, LLMTokenInfo>>,
-      +}
-      +
-      +impl MergeAndIntersect for LLMTokenInfo {
-      +    /// Merge used for combining GSS nodes (paths converge).
-           fn merge(&self, other: &Self) -> Self {
-      -        self.clone() | other.clone()
-      -    }
-      -    
-      +        Self {
-      +            active: self.active.clone() | other.active.clone(),
-      +            intersection: self.intersection.clone() | other.intersection.clone(), // Union of intersections
-      +        }
-      +    }
-      +    /// Intersect used for reductions (combining constraints).
-           fn intersect(&self, other: &Self) -> Self {
-      -        self.clone() & other.clone()
-      +        Self {
-      +            active: self.active.clone() & other.active.clone(),
-      +            intersection: self.intersection.clone() & other.intersection.clone(), // Intersection of intersections
-      +        }
+      -    fn or(&self, other: &Self) -> Self {
+      +    fn merge(&self, other: &Self) -> Self {
+               self.clone() | other.clone()
            }
        }
-       
-      @@ -230,8 +263,8 @@
-       
-           pub fn init(&self) -> GrammarConstraintState<'_> {
-               let llm_tokens = LLMTokenBV::repeat(true, self.max_llm_token_id + 1);
-      -        let initial_glr_parser_state: GLRParserState<'_, LLMTokenBV> = self.parser.init_glr_parser_with_t(llm_tokens);
-      -        let mut state = BTreeMap::new();
-      +        let initial_token_info = LLMTokenInfo::new(llm_tokens);
-      +        let initial_glr_parser_state: GLRParserState<'_, LLMTokenInfo> = self.parser.init_glr_parser_with_t(initial_token_info);        let mut state = BTreeMap::new();
-               state.insert(self.tokenizer.initial_state_id(), initial_glr_parser_state);
-       
-               GrammarConstraintState {
-      @@ -245,7 +278,7 @@
-               let mut mask = LLMTokenBV::repeat(false, self.parent.max_llm_token_id + 1);
-               for (_, state) in &self.state {
-                   for active_state in &state.active_states {
-      -                mask |= active_state.stack.peek().t.clone();
-      +                mask |= active_state.stack.peek().t.active.clone();
-                   }
-               }
-               mask
-      @@ -253,44 +286,66 @@
-       
-           pub fn step_with_all_llm_tokens(&mut self) {
-               let all_llm_tokens = LLMTokenBV::repeat(true, self.parent.max_llm_token_id + 1);
-      -        self.step(&all_llm_tokens);
-      +        let initial_token_info = LLMTokenInfo::new(all_llm_tokens);
-      +        self.step(&initial_token_info);
-           }
-       
-           pub fn step_with_llm_token(&mut self, llm_token_id: LLMTokenID) {
-               let mut llm_tokens = LLMTokenBV::repeat(false, self.parent.max_llm_token_id + 1);
-               llm_tokens.set(llm_token_id.0, true);
-      -        self.step(&llm_tokens);
-      +        let initial_token_info = LLMTokenInfo::new(llm_tokens);
-      +        self.step(&initial_token_info);
-           }
-       
-           pub fn commit(&mut self, llm_token_id: LLMTokenID) {
-      -        // TODO: Need to be selective wrt internal values, ie check internal nodes' t values for the llm_token_id, and prune if not compatible.
-      -        //  To keep this efficient, we probably need to have a way of traversing the trie but stopping early when all nested llm token bvs are compatible.
-      -        //  Perhaps maintain a llm token bv that's the intersection of all its children's
-      -        // Keep only the active states for which this LLM token is set
-      -        for (_, state) in &mut self.state {
-      -            state.active_states.retain(|active_state| active_state.stack.peek().t[llm_token_id.0]);
-      -        }
-      +        let max_token_id = self.parent.max_llm_token_id;
-      +        let all_true_info = LLMTokenInfo::all_true(max_token_id);
-      +
-      +        // Closure for GSS transformation: prune if token not present in active set,
-      +        // otherwise reset t to all true.
-      +        let closure = |content: &crate::glr::parser::ParseStateNodeContent<LLMTokenInfo>|
-      +            -> Option<crate::glr::parser::ParseStateNodeContent<LLMTokenInfo>> {
-      +            if content.t.active[llm_token_id.0] {
-      +                // Keep node, reset its token info
-      +                Some(crate::glr::parser::ParseStateNodeContent {
-      +                    state_id: content.state_id,
-      +                    t: all_true_info.clone(),
-      +                })
-      +            } else {
-      +                // Prune this node and paths leading only to it
-      +                None
-      +            }
-      +        };
-      +
-      +        let mut next_state: BTreeMap<TokenizerStateID, GLRParserState<'a, LLMTokenInfo>> = BTreeMap::new();
-      +        let mut original_roots: Vec<(TokenizerStateID, Arc<GSSNode<crate::glr::parser::ParseStateNodeContent<LLMTokenInfo>>>)> = Vec::new();
-      +
-      +        // Collect all roots with their tokenizer state ID
-      +        for (tokenizer_state_id, glr_state) in self.state.iter() {
-      +            for active_state in &glr_state.active_states {
-      +                original_roots.push((*tokenizer_state_id, active_state.stack.clone()));
-      +            }
-      +        }
-      +
-      +        // Extract just the roots for the transformation function
-      +        let roots_to_transform: Vec<_> = original_roots.iter().map(|(_, stack)| stack.clone()).collect();
-      +
-      +        // Perform the transformation
-      +        let transformed_roots = transform_gss_roots(&roots_to_transform, &closure);
-      +
-      +        // Rebuild the state map with the transformed roots
-      +        for ((tokenizer_state_id, _), transformed_root_opt) in original_roots.into_iter().zip(transformed_roots) {
-      +            if let Some(transformed_root) = transformed_root_opt {
-      +                let new_parse_state = crate::glr::parser::ParseState { stack: transformed_root };
-      +                next_state.entry(tokenizer_state_id)
-      +                    .or_insert_with(|| self.parent.init_glr_parser_from_parse_states(Vec::new())) // Create empty GLR state if needed
-      +                    .active_states.push(new_parse_state);
-      +            }
-      +        }
-      +
-      +        // Merge states within each tokenizer ID (optional, but good practice)
-      +        for glr_state in next_state.values_mut() {
-      +            glr_state.merge_active_states();
-      +        }
-      +
-      +        self.state = next_state;
-           }
-       
-           pub fn step_and_commit(&mut self, llm_token_id: LLMTokenID) {
-      @@ -304,25 +359,26 @@
-               }
-           }
-       
-      -    fn prepare_initial_nodes_and_values_for_special_map(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(Arc<Mutex<Trie<TerminalID, LLMTokenBV, PrecomputedNodeContents>>>, GLRParserState<'a, LLMTokenBV>)> {
-      +    // Takes LLMTokenInfo now
-      +    fn prepare_initial_nodes_and_values_for_special_map(&mut self, initial_token_info: &LLMTokenInfo) -> Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a, LLMTokenInfo>)> {
-               // The BTreeSet<TokenizerStateID> in each Trie node here is the set of terminal states at this node.
-               // Each terminal state indicates that the path through the trie can terminate here.
-               // (todo: explain this better)
-      -        let mut initial_nodes_and_values: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'_, LLMTokenBV>)> = Vec::new();
-      -
-      -        let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, GLRParserState<'_, LLMTokenBV>> = BTreeMap::new();
-      +        let mut initial_nodes_and_values: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'_, LLMTokenInfo>)> = Vec::new();
-      +
-      +        let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, GLRParserState<'_, LLMTokenInfo>> = BTreeMap::new();
-               // for managed_parse_state in self.state.active_states.iter() {
-               for (tokenizer_state_id, state) in &self.state {
-                   let mut state = state.clone();
-                   for parse_state in state.active_states.iter_mut() {
-      -                // TODO: need to do a deep clean here and reset all internal values to llm_tokens.
-      -                Arc::make_mut(&mut parse_state.stack).value.t = llm_tokens.clone();
-      -                dbg!(llm_tokens);
-      -                dbg!(&parse_state.stack);
-      +                // Update the top node's token info. The GSS transformation in commit
-      +                // should have reset deeper nodes, but we ensure the top reflects the input constraint.
-      +                let top_node = Arc::make_mut(&mut parse_state.stack);
-      +                top_node.value.t = initial_token_info.clone();
-                   }
-                   tokenizer_state_id_to_parse_states.insert(*tokenizer_state_id, state);
-               }
-      +
-       
-               for (tokenizer_state_id, state) in tokenizer_state_id_to_parse_states {
-                   let token_trie = self.parent.precomputed[&tokenizer_state_id].clone();
-      @@ -332,8 +388,9 @@
-               initial_nodes_and_values
-           }
-       
-      -    pub fn step(&mut self, llm_tokens: &LLMTokenBV) {
-      -        let initial_nodes_and_values = self.prepare_initial_nodes_and_values_for_special_map(llm_tokens);
-      +    // Takes LLMTokenInfo now
-      +    pub fn step(&mut self, initial_token_info: &LLMTokenInfo) {
-      +        let initial_nodes_and_values = self.prepare_initial_nodes_and_values_for_special_map(initial_token_info);
-               dbg!(&initial_nodes_and_values);
-       
-               self.state = BTreeMap::new();
-      @@ -344,13 +401,17 @@
-                   // step
-                   |glr_parse_state, grammar_token_id, edge_llm_tokens, child_node| {
-                       let mut glr_parse_state = glr_parse_state.clone();
-      +                // Create LLMTokenInfo from the edge's LLMTokenBV for intersection
-      +                let edge_token_info = LLMTokenInfo::new(edge_llm_tokens.clone());
-      +
-                       glr_parse_state.active_states.retain_mut(|parse_state| {
-      -                    Arc::make_mut(&mut parse_state.stack).value.t &= edge_llm_tokens.clone();
-      -                    !parse_state.stack.value.t.is_empty()
-      +                    // Intersect the current node's info with the edge info
-      +                    let top_node = Arc::make_mut(&mut parse_state.stack);
-      +                    top_node.value.t = top_node.value.t.intersect(&edge_token_info);
-      +                    !top_node.value.t.active.is_empty() // Prune if no active tokens remain
-                       });
-                       glr_parse_state.step(*grammar_token_id);
-                       if glr_parse_state.active_states.is_empty() {
-      -                    println!("No active states after processing grammar token {}", grammar_token_id.0);
-                           return None;
-                       } else {
-                           println!("Processed grammar token {}, {} active states.", grammar_token_id.0, glr_parse_state.active_states.len());
-      @@ -365,10 +426,13 @@
-                   |node, glr_parse_state| {
-                       // Handle clean end
-                       if let Some(clean_end) = &node.value.clean_end {
-      +                    let clean_end_info = LLMTokenInfo::new(clean_end.clone());
-                           let mut final_glr_parse_state = glr_parse_state.clone();
-      +
-                           final_glr_parse_state.active_states.retain_mut(|parse_state| {
-      -                        Arc::make_mut(&mut parse_state.stack).value.t &= clean_end.clone();
-      -                        !parse_state.stack.value.t.is_empty()
-      +                        let top_node = Arc::make_mut(&mut parse_state.stack);
-      +                        top_node.value.t = top_node.value.t.intersect(&clean_end_info);
-      +                        !top_node.value.t.active.is_empty()
-                           });
-                           if final_glr_parse_state.is_ok() {
-                               if let Some(existing) = self.state.get_mut(&TokenizerStateID(0)) {
-      @@ -386,11 +450,13 @@
-                           semi_final_glr_parse_state.step(*possible_final_grammar_token);
-                           if semi_final_glr_parse_state.is_ok() {
-                               for (tokenizer_state_id, llm_tokens) in &precomputed_finalizer.content {
-      +                            let finalizer_token_info = LLMTokenInfo::new(llm_tokens.clone());
-                                   // Merge LLM tokens
-                                   let mut semi_final_glr_parse_state = semi_final_glr_parse_state.clone();
-                                   semi_final_glr_parse_state.active_states.retain_mut(|parse_state| {
-      -                                Arc::make_mut(&mut parse_state.stack).value.t &= llm_tokens.clone();
-      -                                !parse_state.stack.value.t.is_empty()
-      +                                let top_node = Arc::make_mut(&mut parse_state.stack);
-      +                                top_node.value.t = top_node.value.t.intersect(&finalizer_token_info);
-      +                                !top_node.value.t.active.is_empty()
-                                   });
-                                   if semi_final_glr_parse_state.is_ok() {
-                                       if let Some(existing) = self.state.get_mut(tokenizer_state_id) {
-      @@ -403,7 +469,7 @@
-                               }
-                           }
-                       }
-      -                glr_parse_state.active_states.retain(|parse_state| !parse_state.stack.value.t.is_empty());
-      +                glr_parse_state.active_states.retain(|parse_state| !parse_state.stack.value.t.active.is_empty());
-                       !glr_parse_state.active_states.is_empty()
-                   },
-               );
-      @@ -450,12 +516,12 @@
-               constraint_state.step_with_all_llm_tokens();
-       
-               let mask = constraint_state.get_mask();
-      -        assert_eq!(mask, LLMTokenBV::from_iter([true, true, false]));
-      +        assert_eq!(mask, bitvec![1, 1, 0]);
-       
-               constraint_state.commit(LLMTokenID(0));
-               constraint_state.step_with_all_llm_tokens();
-       
-               let mask = constraint_state.get_mask();
-      -        assert_eq!(mask, LLMTokenBV::from_iter([false, false, true]));
-      +        assert_eq!(mask, bitvec![0, 0, 1]);
-           }
-       
-           #[test]
-      @@ -503,13 +569,13 @@
-               state.step_with_all_llm_tokens();
-               let mask = state.get_mask();
-               // Expect LLM tokens that can start an expression: i (0), '(' (3), "(i" (5)
-      -        assert_eq!(mask, LLMTokenBV::from_iter([true, false, false, true, false, true, false]));
-      +        assert_eq!(mask, bitvec![1, 0, 0, 1, 0, 1, 0]);
-       
-               // Commit "(i"
-               state.commit(LLMTokenID(5));
-               state.step_with_all_llm_tokens();
-               let mask = state.get_mask();
-               // Now expect '+', '*', ')', '+i' => IDs 1,2,4,6
-      -        assert_eq!(mask, LLMTokenBV::from_iter([false, true, true, false, true, false, true]));
-      +        assert_eq!(mask, bitvec![0, 1, 1, 0, 1, 0, 1]);
-       
-               // // Commit "(i"
-               // state.commit(LLMTokenID(5));
 
       ```
-
-      **2. Update `GLRParser` (`src/glr/parser.rs`)**
 
       ```diff
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@ -23,7 +23,7 @@
+      @@ -11,22 +11,22 @@
+       use std::sync::Arc;
+       use crate::debug;
+       
+      -pub trait AndAndOr: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
+      -    fn and(&self, other: &Self) -> Self;
+      -    fn or(&self, other: &Self) -> Self;
+      -}
+      -
+      -impl AndAndOr for () {
+      -    fn and(&self, _: &Self) -> Self { () }
+      -    fn or(&self, _: &Self) -> Self { () }
+      +pub trait MergeAndIntersect: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
+      +    /// Intersects the information represented by `self` and `other`.
+      +    fn intersect(&self, other: &Self) -> Self;
+      +    /// Merges the information represented by `self` and `other`.
+      +    fn merge(&self, other: &Self) -> Self;
+      +}
+      +
+      +impl MergeAndIntersect for () {
+      +    fn intersect(&self, _: &Self) -> Self { () }
+      +    fn merge(&self, _: &Self) -> Self { () }
+       }
+       
        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-       pub struct ParseStateNodeContent<T: MergeAndIntersect> {
+      -pub struct ParseStateNodeContent<T: AndAndOr> {
+      +pub struct ParseStateNodeContent<T: MergeAndIntersect> {
            pub state_id: StateID,
-      -    pub t: T,
-      +    pub t: T, // This T will now be LLMTokenInfo in GrammarConstraint
+           pub t: T,
        }
        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-       pub struct ParseState<T: MergeAndIntersect> {
-      @@ -70,7 +70,7 @@
+      -pub struct ParseState<T: AndAndOr> {
+      +pub struct ParseState<T: MergeAndIntersect> {
+           pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
+               // self.merge_active_states();
+           }
+      @@ -70,17 +70,17 @@
                }
            }
        
-      -    pub fn init_glr_parser<T: MergeAndIntersect + Default>(&self) -> GLRParserState<T> {
-      +    pub fn init_glr_parser<T: MergeAndIntersect + Default + Debug>(&self) -> GLRParserState<T> {
+      -    pub fn init_glr_parser<T: AndAndOr + Default>(&self) -> GLRParserState<T> {
+      +    pub fn init_glr_parser<T: MergeAndIntersect + Default>(&self) -> GLRParserState<T> {
                self.init_glr_parser_with_t(T::default())
            }
        
-      @@ -82,7 +82,7 @@
+      -    pub fn init_glr_parser_with_t<T: AndAndOr>(&self, t: T) -> GLRParserState<T> {
+      +    pub fn init_glr_parser_with_t<T: MergeAndIntersect>(&self, t: T) -> GLRParserState<T> {
+               GLRParserState {
+                   parser: self,
+                   active_states: vec![self.init_parse_state_with_t(t)],
                    action_not_found_states: Vec::new(),
                }
            }
-      -    pub fn init_glr_parser_from_parse_state<T: MergeAndIntersect>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
-      +    pub fn init_glr_parser_from_parse_state<T: MergeAndIntersect + Debug>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
+      -
+      -    pub fn init_glr_parser_from_parse_state<T: AndAndOr>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
+      +    pub fn init_glr_parser_from_parse_state<T: MergeAndIntersect>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
                GLRParserState {
                    parser: self,
                    active_states: vec![parse_state],
-      @@ -90,7 +90,7 @@
+      @@ -88,7 +88,7 @@
                }
            }
        
-      -    pub fn init_glr_parser_from_parse_states<T: MergeAndIntersect>(
-      +    pub fn init_glr_parser_from_parse_states<T: MergeAndIntersect + Debug>(
+      -    pub fn init_glr_parser_from_parse_states<T: AndAndOr>(
+      +    pub fn init_glr_parser_from_parse_states<T: MergeAndIntersect>(
                &self,
                parse_states: Vec<ParseState<T>>,
            ) -> GLRParserState<T> {
-      @@ -101,7 +101,7 @@
+      @@ -99,11 +99,11 @@
                }
            }
        
-      -    pub fn init_parse_state<T: MergeAndIntersect + Default>(&self) -> ParseState<T> {
-      +    pub fn init_parse_state<T: MergeAndIntersect + Default + Debug>(&self) -> ParseState<T> {
+      -    pub fn init_parse_state<T: AndAndOr + Default>(&self) -> ParseState<T> {
+      +    pub fn init_parse_state<T: MergeAndIntersect + Default>(&self) -> ParseState<T> {
                self.init_parse_state_with_t(T::default())
            }
        
-      @@ -196,13 +196,13 @@
+      -    pub fn init_parse_state_with_t<T: AndAndOr>(&self, t: T) -> ParseState<T> {
+      +    pub fn init_parse_state_with_t<T: MergeAndIntersect>(&self, t: T) -> ParseState<T> {
+               let initial_content = ParseStateNodeContent {
+                   state_id: self.start_state_id,
+                   t,
+      @@ -113,7 +113,7 @@
+               }
+           }
+       
+      -    pub fn parse<T: AndAndOr + Default>(&self, input: &[TerminalID]) -> GLRParserState<T> {
+      +    pub fn parse<T: MergeAndIntersect + Default>(&self, input: &[TerminalID]) -> GLRParserState<T> {
+               let mut state = self.init_glr_parser();
+               state.parse(input);
+               state
+      @@ -205,13 +205,13 @@
        }
        
        #[derive(Debug, Clone)]
-      -pub struct GLRParserState<'a, T: MergeAndIntersect> {
-      +pub struct GLRParserState<'a, T: MergeAndIntersect + Debug> {
+      -pub struct GLRParserState<'a, T: AndAndOr> {
+      +pub struct GLRParserState<'a, T: MergeAndIntersect> {
            pub parser: &'a GLRParser,
            pub active_states: Vec<ParseState<T>>,
            pub action_not_found_states: Vec<ParseState<T>>,
        }
        
-      -impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
-      +impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
+      -impl<'a, T: AndAndOr> GLRParserState<'a, T> {
+      +impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
            pub fn parse(&mut self, input: &[TerminalID]) {
                self.parse_part(input);
            }
-      @@ -241,7 +241,10 @@
-                           Stage7ShiftsAndReduces::Shift(next_state_id) => {
-                               debug!(3, "Shifting");
-                               let new_content = ParseStateNodeContent { state_id: *next_state_id, t: current_t.clone() };
-      -                        let new_stack = stack.push(new_content);
-      +                        // When shifting, the intersection property depends only on the new state
-      +                        // and subsequent tokens. We can't know the intersection yet, so initialize
-      +                        // it broadly (e.g., copy from current_t or set to all true). Let's copy.
-      +                        let new_stack = stack.push(new_content); // GSSNode::push creates Arc internally now
-                               next_active_states.push(ParseState {
-                                   // stack: Arc::new(new_stack), // GSSNode::push now returns Arc
-                                   stack: Arc::new(new_stack),
-      @@ -258,7 +261,9 @@
+      @@ -271,7 +271,7 @@
                                    let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nonterminal];
        
                                    debug!(3, "Going to state {:?}", goto_state);
-      +                            // Combine constraints using intersect
-                                   let combined_t = revealed_t.intersect(current_t);
-      +
+      -                            let combined_t = revealed_t.and(current_t);
+      +                            let combined_t = revealed_t.intersect(current_t);
                                    let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                                    let new_stack = stack_node.push(new_content);
                                    self.active_states.push(ParseState {
-      @@ -270,7 +275,7 @@
-                               debug!(3, "Split");
-                               if let Some(shift_state) = shift {
-                                   // Shift part (same as above)
-      -                            let new_content = ParseStateNodeContent { state_id: *shift_state, t: current_t.clone() };
-      +                            let new_content = ParseStateNodeContent { state_id: *shift_state, t: current_t.clone() }; // Copy t for shift
-                                   let new_stack = stack.push(new_content);
-                                   next_active_states.push(ParseState {
-                                       stack: Arc::new(new_stack),
-      @@ -287,7 +292,9 @@
+      @@ -299,7 +299,7 @@
                                            let revealed_t = &revealed_content.t;
                                            let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id];
        
-      +                                    // Combine constraints using intersect
-                                           let combined_t = revealed_t.intersect(current_t);
-      +
+      -                                    let combined_t = revealed_t.and(current_t);
+      +                                    let combined_t = revealed_t.intersect(current_t);
                                            let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                                            let new_stack = stack_node.push(new_content);
                                            self.active_states.push(ParseState {
-      @@ -310,7 +317,7 @@
-       
-           // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
-           pub fn merge_active_states(&mut self) {
-      -        let mut active_state_map: BTreeMap<ParseStateKey, ParseState<T>> = BTreeMap::new();
-      +        let mut active_state_map: BTreeMap<ParseStateKey, ParseState<T>> = BTreeMap::new(); // Key doesn't include T
-       
-               for state in std::mem::take(&mut self.active_states) {
-                   let key = state.key();
-      @@ -337,7 +344,7 @@
+      @@ -347,7 +347,7 @@
            // Removed action_stack
        }
        
-      -impl<T: MergeAndIntersect> ParseState<T> {
-      +impl<T: MergeAndIntersect + Debug> ParseState<T> {
+      -impl<T: AndAndOr> ParseState<T> {
+      +impl<T: MergeAndIntersect> ParseState<T> {
            pub fn key(&self) -> ParseStateKey {
                ParseStateKey {
                    stack_state_id: self.stack.peek().state_id,
-      @@ -351,7 +358,7 @@
+      @@ -355,14 +355,14 @@
+           }
+       
+           /// Merges `other` into `self`. Assumes `self.key() == other.key()`.
+      -    /// Merges the GSS structures and combines the `t` value at the top node using `AndAndOr::or`.
+      +    /// Merges the GSS structures and combines the `t` value at the top node using `MergeAndIntersect::merge`.
+           pub fn merge(&mut self, other: ParseState<T>) {
+               assert_eq!(self.key(), other.key());
+       
                // Combine 't' values at the top node using 'or'
                let self_content = self.stack.peek();
                let other_content = other.stack.peek();
-      -        let combined_t = self_content.t.merge(&other_content.t);
-      +        let combined_t = self_content.t.merge(&other_content.t); // Use MergeAndIntersect::merge for T
+      -        let combined_t = self_content.t.or(&other_content.t);
+      +        let combined_t = self_content.t.merge(&other_content.t);
        
                // Get mutable access to self.stack, potentially cloning if shared (Arc > 1)
                let mut mutable_stack = Arc::make_mut(&mut self.stack);
 
       ```
-
-      **3. Add GSS Transformation Function (`src/datastructures/gss.rs`)**
-
-      ```diff
-      --- a/src/datastructures/gss.rs
-      +++ b/src/datastructures/gss.rs
-      @@ -1,4 +1,4 @@
-      -use std::collections::{BTreeMap, HashMap};
-      +use std::collections::{BTreeMap, HashMap, VecDeque};
-       use std::sync::Arc;
-       
-       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      @@ -211,3 +211,61 @@
-               }
-           }
-       }
-      +
-      +// --- GSS Transformation ---
-      +
-      +/// Recursively transforms a GSS starting from a single node, using memoization.
-      +///
-      +/// Args:
-      +/// * `node_arc`: The current node `Arc` to process.
-      +/// * `closure`: A function that takes the current node's value (`&T`) and returns:
-      +///   - `Some(new_value)`: To keep the node and replace its value with `new_value`.
-      +///   - `None`: To prune this node (it will not be included in the predecessors of its parents).
-      +/// * `cache`: A mutable HashMap used for memoization (`Ptr -> Result`).
-      +///
-      +/// Returns:
-      +/// * `Some(Arc<GSSNode<T>>)`: If the node (or a transformed version) should be kept.
-      +/// * `None`: If the node was pruned by the closure.
-      +fn transform_recursive<T: Clone>(
-      +    node_arc: &Arc<GSSNode<T>>,
-      +    closure: &impl Fn(&T) -> Option<T>,
-      +    cache: &mut HashMap<*const GSSNode<T>, Option<Arc<GSSNode<T>>>>,
-      +) -> Option<Arc<GSSNode<T>>> {
-      +    let node_ptr = Arc::as_ptr(node_arc);
-      +    if let Some(cached_result) = cache.get(&node_ptr) {
-      +        return cached_result.clone();
-      +    }
-      +
-      +    match closure(&node_arc.value) {
-      +        None => {
-      +            // Prune this node
-      +            cache.insert(node_ptr, None);
-      +            None
-      +        }
-      +        Some(new_value) => {
-      +            let mut new_predecessors = Vec::new();
-      +            // Always recurse on predecessors
-      +            for predecessor_arc in &node_arc.predecessors {
-      +                if let Some(new_predecessor) =
-      +                    transform_recursive(predecessor_arc, closure, cache)
-      +                {
-      +                    new_predecessors.push(new_predecessor);
-      +                }
-      +                // If transform_recursive returns None, the predecessor is pruned and not added.
-      +            }
-      +
-      +            // Create the new node with the transformed value and filtered/transformed predecessors
-      +            let new_node = Arc::new(GSSNode {
-      +                value: new_value,
-      +                predecessors: new_predecessors,
-      +            });
-      +            cache.insert(node_ptr, Some(new_node.clone()));
-      +            Some(new_node)
-      +        }
-      +    }
-      +}
-      +
-      +/// Transforms a forest of GSSs (represented by their roots) using a closure.
-      +/// Handles shared nodes correctly via memoization.
-      +pub fn transform_gss_roots<T: Clone>(
-      +    roots: &[Arc<GSSNode<T>>],
-      +    closure: &impl Fn(&T) -> Option<T>,
-      +) -> Vec<Option<Arc<GSSNode<T>>>> {
-      +    let mut cache: HashMap<*const GSSNode<T>, Option<Arc<GSSNode<T>>>> = HashMap::new();
-      +    let mut results = Vec::with_capacity(roots.len());
-      +
-      +    for root in roots {
-      +        // Each call to transform_recursive populates the shared cache
-      +        results.push(transform_recursive(root, closure, &mut cache));
-      +    }
-      +
-      +    results
-      +}
-      ```
-
-      **4. Update `constraint_extra.rs` (No changes needed)**
-
-      The `dump_precomputed` function operates on the `Precomputed` Trie, not the runtime `GLRParserState` GSS. The `Debug` derive on `LLMTokenInfo` should be sufficient if you were to print the GSS directly.
-
-      These changes introduce the `LLMTokenInfo` struct, update the parser and constraint logic to use it, and provide the `transform_gss_roots` function necessary for the `commit` operation. The `commit` function now correctly prunes the GSS based on the committed token and resets the token information in the remaining nodes.
     metadata:
   - user: |
       Git apply result:
-      Found 3 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/constraint.rs
@@ -4863,10 +3046,5 @@ messages:
       Identified target file: src/glr/parser.rs
       Applying patch to 'src/glr/parser.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/parser.rs.
-
-      --- Processing Diff Block 3 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
     metadata:
 ...
