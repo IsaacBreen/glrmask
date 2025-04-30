@@ -60,7 +60,7 @@ def llm_tokens_to_ids(tokens):
 mask = grammar_constraint_state.get_mask()
 # expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
 # print(f"Initial Mask: {set(int(x) for x in np.where(mask)[0])}")
-print(f"Initial Mask (strings): {[llm_id_to_token.get(token).decode("utf-8") for token in set(int(x) for x in np.where(mask)[0])]}")
+print(f"Initial Mask: {[llm_id_to_token.get(token).decode("utf-8") for token in set(int(x) for x in np.where(mask)[0])]}")
 # assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
 
 
@@ -74,7 +74,7 @@ mask = grammar_constraint_state.get_mask()
 # expected_mask = set(llm_tokens_to_ids([b"+", b"*", b"+i"]))
 string_so_far = "i"
 # print(f"Mask after committing prefill: {set(int(x) for x in np.where(mask)[0])}")
-print(f"Mask after committing prefill {string_so_far!r} (strings): {[llm_id_to_token.get(token).decode("utf-8") for token in set(int(x) for x in np.where(mask)[0])]}")
+print(f"Mask after committing prefill {string_so_far!r}: {[llm_id_to_token.get(token).decode("utf-8") for token in set(int(x) for x in np.where(mask)[0])]}")
 # assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
 
 
@@ -89,7 +89,7 @@ mask = grammar_constraint_state.get_mask()
 # expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
 string_so_far = "i+"
 # print(f"Mask after committing prefill: {set(int(x) for x in np.where(mask)[0])}")
-print(f"Mask after committing prefill {string_so_far!r} (strings): {[llm_id_to_token.get(token).decode("utf-8") for token in set(int(x) for x in np.where(mask)[0])]}")
+print(f"Mask after committing prefill {string_so_far!r}: {[llm_id_to_token.get(token).decode("utf-8") for token in set(int(x) for x in np.where(mask)[0])]}")
 # assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
 
 
@@ -104,5 +104,5 @@ mask = grammar_constraint_state.get_mask()
 # expected_mask = set(llm_tokens_to_ids([b"+", b"*", b")", b"+i"]))
 string_so_far = "i+(i+i*i"
 # print(f"Mask after committing prefill: {set(int(x) for x in np.where(mask)[0])}")
-print(f"Mask after committing prefill {string_so_far!r} (strings): {[llm_id_to_token.get(token).decode("utf-8") for token in set(int(x) for x in np.where(mask)[0])]}")
+print(f"Mask after committing prefill {string_so_far!r}: {[llm_id_to_token.get(token).decode("utf-8") for token in set(int(x) for x in np.where(mask)[0])]}")
 # assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
