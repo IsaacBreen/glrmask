@@ -31,7 +31,7 @@ pub struct ParseStateNodeContent<T: MergeAndIntersect> {
     pub t: T,
 }
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ParseState<T: MergeAndIntersect + 'static> { // Add 'static bound
+pub struct ParseState<T: MergeAndIntersect> {
     pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
         // self.merge_active_states();
     }
@@ -44,7 +44,7 @@ pub enum StopReason {
 
 
 // TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
-#[derive(Clone)] // Clone is needed for GrammarConstraintState cloning
+#[derive(Clone)]
 pub struct GLRParser {
     pub stage_7_table: Stage7Table,
     pub productions: Vec<Production>,
@@ -54,7 +54,7 @@ pub struct GLRParser {
     pub start_state_id: StateID,
 }
 
-impl<T: MergeAndIntersect + Default + 'static> GLRParser { // Add type param T
+impl GLRParser {
     pub fn new(
         stage_7_table: Stage7Table,
         productions: Vec<Production>,
@@ -73,11 +73,11 @@ impl<T: MergeAndIntersect + Default + 'static> GLRParser { // Add type param T
         }
     }
 
-    pub fn init_glr_parser(&self) -> GLRParserState<T> {
+    pub fn init_glr_parser<T: MergeAndIntersect + Default>(&self) -> GLRParserState<T> {
         self.init_glr_parser_with_t(T::default())
     }
 
-    pub fn init_glr_parser_with_t(&self, t: T) -> GLRParserState<T> {
+    pub fn init_glr_parser_with_t<T: MergeAndIntersect>(&self, t: T) -> GLRParserState<T> {
         GLRParserState {
             parser: self,
             active_states: vec![self.init_parse_state_with_t(t)],
@@ -85,7 +85,7 @@ impl<T: MergeAndIntersect + Default + 'static> GLRParser { // Add type param T
         }
     }
     pub fn init_glr_parser_from_parse_state<T: MergeAndIntersect>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
-        GLRParserState { // No type param T needed here, inferred
+        GLRParserState {
             parser: self,
             active_states: vec![parse_state],
             action_not_found_states: Vec::new(),
@@ -96,18 +96,18 @@ impl<T: MergeAndIntersect + Default + 'static> GLRParser { // Add type param T
         &self,
         parse_states: Vec<ParseState<T>>,
     ) -> GLRParserState<T> {
-        GLRParserState { // No type param T needed here, inferred
+        GLRParserState {
             parser: self,
             active_states: parse_states,
             action_not_found_states: Vec::new(),
         }
     }
 
-    pub fn init_parse_state(&self) -> ParseState<T> {
+    pub fn init_parse_state<T: MergeAndIntersect + Default>(&self) -> ParseState<T> {
         self.init_parse_state_with_t(T::default())
     }
 
-    pub fn init_parse_state_with_t(&self, t: T) -> ParseState<T> {
+    pub fn init_parse_state_with_t<T: MergeAndIntersect>(&self, t: T) -> ParseState<T> {
         let initial_content = ParseStateNodeContent {
             state_id: self.start_state_id,
             t,
@@ -117,13 +117,13 @@ impl<T: MergeAndIntersect + Default + 'static> GLRParser { // Add type param T
         }
     }
 
-    pub fn parse(&self, input: &[TerminalID]) -> GLRParserState<T> {
+    pub fn parse<T: MergeAndIntersect + Default>(&self, input: &[TerminalID]) -> GLRParserState<T> {
         let mut state = self.init_glr_parser();
         state.parse(input);
         state
     }
 }
-// Remove Debug derive for GLRParser<T> as T might not implement Debug
+
 impl Debug for GLRParser {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self)
@@ -214,12 +214,12 @@ impl Display for GLRParser {
 }
 
 #[derive(Debug, Clone)]
-pub struct GLRParserState<'a, T: MergeAndIntersect + 'static> { // Add 'static bound
-    pub parser: &'a GLRParser<T>, // Add type param T
+pub struct GLRParserState<'a, T: MergeAndIntersect> {
+    pub parser: &'a GLRParser,
     pub active_states: Vec<ParseState<T>>,
     pub action_not_found_states: Vec<ParseState<T>>,
 }
-// Add 'static bound to T where GLRParserState is used
+
 impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
     pub fn parse(&mut self, input: &[TerminalID]) {
         self.parse_part(input);
@@ -261,7 +261,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                         let new_content = ParseStateNodeContent { state_id: *next_state_id, t: current_t.clone() };
                         let new_stack = stack.push(new_content);
                         next_active_states.push(ParseState {
-                            // GSSNode::push now returns the new node itself, wrap in Arc here
+                            // stack: Arc::new(new_stack), // GSSNode::push now returns Arc
                             stack: Arc::new(new_stack),
                         });
                     }
@@ -275,10 +275,9 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                             let revealed_state_id = revealed_content.state_id;
                             let revealed_t = &revealed_content.t;
                             let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nonterminal];
-                            debug!(3, "Going to state {:?}", goto_state);
-                            // Combine 't' using intersect for reduction
-                            let combined_t = revealed_t.intersect(current_t);
 
+                            debug!(3, "Going to state {:?}", goto_state);
+                            let combined_t = revealed_t.intersect(current_t);
                             let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                             let new_stack = stack_node.push(new_content);
                             self.active_states.push(ParseState {
@@ -308,7 +307,6 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                                     let revealed_t = &revealed_content.t;
                                     let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id];
 
-                                    // Combine 't' using intersect for reduction
                                     let combined_t = revealed_t.intersect(current_t);
                                     let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                                     let new_stack = stack_node.push(new_content);
@@ -364,7 +362,7 @@ pub struct ParseStateKey {
     // Removed action_stack
 }
 
-impl<T: MergeAndIntersect + 'static> ParseState<T> { // Add 'static bound
+impl<T: MergeAndIntersect> ParseState<T> {
     pub fn key(&self) -> ParseStateKey {
         ParseStateKey {
             stack_state_id: self.stack.peek().state_id,
@@ -385,7 +383,7 @@ impl<T: MergeAndIntersect + 'static> ParseState<T> { // Add 'static bound
         let mut mutable_stack = Arc::make_mut(&mut self.stack);
 
         // Update the 't' value in the mutable top node's content
-        mutable_stack.value_mut().t = combined_t; // Use value_mut()
+        mutable_stack.value.t = combined_t;
 
         // Merge the parent structures using GSSNode's merge
         mutable_stack.merge_unchecked(Arc::unwrap_or_clone(other.stack));
