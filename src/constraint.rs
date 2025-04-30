@@ -316,7 +316,7 @@ impl<'a> GrammarConstraintState<'a> {
         let closure = |content: &ParseStateNodeContent<LLMTokenInfo>| -> Option<(ParseStateNodeContent<LLMTokenInfo>, bool)> {
             if content.t.active[llm_token_id.0] {
                 // If the intersection already guarantees this token, we can stop early.
-                if content.t.intersection[llm_token_id.0] {
+                if content.t.intersection.all() {
                      Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, false)) // Stop recursion
                 } else {
                      Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, true)) // Continue recursion
@@ -381,6 +381,7 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn step(&mut self, llm_tokens: &LLMTokenBV) {
+        dbg!(&self.state);
         let initial_nodes_and_values = self.prepare_initial_nodes_and_values_for_special_map(llm_tokens);
         dbg!(&initial_nodes_and_values);
 

@@ -291,7 +291,6 @@ pub fn prune_and_transform_recursive<T: Clone>(
         Some((new_value, continue_recursion)) => {
             let new_node_arc = if !continue_recursion {
                 // Stop recursion, create new node with original predecessors but new value
-                // Need to ensure predecessors are also potentially transformed if they were visited via another path.
                 let mut transformed_predecessors = Vec::new();
                 for pred_arc in &node_arc.predecessors {
                      // Check memo for already transformed predecessor
@@ -300,6 +299,7 @@ pub fn prune_and_transform_recursive<T: Clone>(
                             transformed_predecessors.push(transformed_pred.clone());
                         }
                         // If existing_transformed is None, the predecessor was pruned, so skip.
+                        println!("Skipping pruned predecessor");
                     } else {
                         // This case *shouldn't* happen if traversal order is correct (parents processed after children),
                         // but as a fallback, keep the original if not found in memo. Or perhaps panic?
@@ -310,6 +310,7 @@ pub fn prune_and_transform_recursive<T: Clone>(
                         // A better approach for early stop might be needed, maybe marking nodes instead.
                         // For now, let's stick to the logic: if we stop, we keep original pointers below.
                          transformed_predecessors = node_arc.predecessors.clone(); // Keep original predecessors - CAUTION
+                         println!("Keeping {} original predecessors", transformed_predecessors.len());
                          break; // Exit loop once we decide to keep originals
                     }
                 }
