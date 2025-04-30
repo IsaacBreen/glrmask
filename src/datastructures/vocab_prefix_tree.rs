@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 
 use bitvec::prelude::*;
-use std::collections::btree_map;
 
 // Represents a node in the VocabPrefixTree
 #[derive(PartialEq)] // Keep derived PartialEq for structural comparison in tests
@@ -46,7 +46,7 @@ impl VocabPrefixTreeNode {
 
     /// Returns an iterator over the children of this node.
     /// The iterator yields pairs of `(&Vec<u8>, &VocabPrefixTreeNode)`, representing the edge label and the child node.
-    pub fn children(&self) -> btree_map::Iter<'_, Vec<u8>, VocabPrefixTreeNode> {
+    pub fn children(&self) -> std::collections::btree_map::Iter<'_, Vec<u8>, VocabPrefixTreeNode> {
         self.children.iter()
     }
 
@@ -239,24 +239,33 @@ impl VocabPrefixTree {
 
     /// Recursively computes the `reachable_token_ids` for each node.
     /// This should be called after the tree structure is finalized by `merge_nodes`.
-    fn compute_reachable_ids_recursive(node: &mut VocabPrefixTreeNode, max_token_id: usize) {
-        // Initialize the BitVec for the current node.
-        let mut current_node_ids = bitvec![0; max_token_id + 1];
+    /// Uses HashSet internally for efficient merging and converts to BitVec at the end.
+    fn compute_reachable_ids_recursive(node: &mut VocabPrefixTreeNode, max_token_id: usize) -> HashSet<usize> {
+        // Initialize a HashSet to store reachable IDs for the current node.
+        let mut current_node_ids_set = HashSet::new();
 
-        // Set the bit for the node's own token ID, if valid.
+        // Add the node's own token ID to the set.
         if node.token_id <= max_token_id {
-            current_node_ids.set(node.token_id, true);
+            current_node_ids_set.insert(node.token_id);
         }
 
         // Recursively call on children and merge their results.
         for child_node in node.children.values_mut() {
-            Self::compute_reachable_ids_recursive(child_node, max_token_id);
-            // OR the child's computed reachable IDs into the current node's set.
-            current_node_ids |= &child_node.reachable_token_ids;
+            // Get the HashSet of reachable IDs from the child.
+            let child_ids_set = Self::compute_reachable_ids_recursive(child_node, max_token_id);
+            // Union the child's reachable IDs into the current node's set.
+            current_node_ids_set.extend(child_ids_set);
         }
 
-        // Assign the final computed set to the node.
-        node.reachable_token_ids = current_node_ids;
+        // Convert the final HashSet to a BitVec and store it in the node.
+        let mut final_bitvec = bitvec![0; max_token_id + 1];
+        for token_id in &current_node_ids_set {
+            final_bitvec.set(*token_id, true);
+        }
+        node.reachable_token_ids = final_bitvec;
+
+        // Return the HashSet for the parent call to use.
+        current_node_ids_set
     }
 
      /// Finds the token ID corresponding to the exact byte sequence.
@@ -313,7 +322,7 @@ impl VocabPrefixTree {
 
     /// Returns an iterator over the direct children of the root node.
     /// The iterator yields pairs of `(&Vec<u8>, &VocabPrefixTreeNode)`, representing the edge label and the child node.
-    pub fn root_children(&self) -> btree_map::Iter<'_, Vec<u8>, VocabPrefixTreeNode> {
+    pub fn root_children(&self) -> std::collections::btree_map::Iter<'_, Vec<u8>, VocabPrefixTreeNode> {
         self.root.children()
     }
 
