@@ -13,23 +13,29 @@ use std::hash::Hash;
 use std::sync::Arc;
 use crate::debug;
 
-pub trait AndAndOr: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
-    fn and(&self, other: &Self) -> Self;
-    fn or(&self, other: &Self) -> Self;
+/// A lattice-like helper trait for the payload (`T`) that is stored on every
+/// node of the graph-structured stack (GSS).
+pub trait Lattice: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
+    /// `meet`  is used whenever several parse stacks are joined because they end up in the same LR state.
+    fn meet(&self, other: &Self) -> Self;
+    /// `join` is used when such a merged head is popped again and its information has to be distributed back to the individual branches.
+    fn join(&self, other: &Self) -> Self;
 }
 
-impl AndAndOr for () {
-    fn and(&self, _: &Self) -> Self { () }
-    fn or(&self, _: &Self) -> Self { () }
+/// The default implementation for `()` is trivial and allows the parser to be
+/// used without any extra per-node data.
+impl Lattice for () {
+    fn meet(&self, _: &Self) -> Self { () }
+    fn join(&self, _: &Self) -> Self { () }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ParseStateNodeContent<T: AndAndOr> {
+pub struct ParseStateNodeContent<T: Lattice> {
     pub state_id: StateID,
     pub t: T,
 }
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ParseState<T: AndAndOr> {
+pub struct ParseState<T: Lattice> {
     pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
         // self.merge_active_states();
     }
@@ -71,11 +77,11 @@ impl GLRParser {
         }
     }
 
-    pub fn init_glr_parser<T: AndAndOr + Default>(&self) -> GLRParserState<T> {
+    pub fn init_glr_parser<T: Lattice + Default>(&self) -> GLRParserState<T> {
         self.init_glr_parser_with_t(T::default())
     }
 
-    pub fn init_glr_parser_with_t<T: AndAndOr>(&self, t: T) -> GLRParserState<T> {
+    pub fn init_glr_parser_with_t<T: Lattice>(&self, t: T) -> GLRParserState<T> {
         GLRParserState {
             parser: self,
             active_states: vec![self.init_parse_state_with_t(t)],
@@ -83,7 +89,7 @@ impl GLRParser {
         }
     }
 
-    pub fn init_glr_parser_from_parse_state<T: AndAndOr>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
+    pub fn init_glr_parser_from_parse_state<T: Lattice>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
         GLRParserState {
             parser: self,
             active_states: vec![parse_state],
@@ -91,7 +97,7 @@ impl GLRParser {
         }
     }
 
-    pub fn init_glr_parser_from_parse_states<T: AndAndOr>(
+    pub fn init_glr_parser_from_parse_states<T: Lattice>(
         &self,
         parse_states: Vec<ParseState<T>>,
     ) -> GLRParserState<T> {
@@ -102,11 +108,11 @@ impl GLRParser {
         }
     }
 
-    pub fn init_parse_state<T: AndAndOr + Default>(&self) -> ParseState<T> {
+    pub fn init_parse_state<T: Lattice + Default>(&self) -> ParseState<T> {
         self.init_parse_state_with_t(T::default())
     }
 
-    pub fn init_parse_state_with_t<T: AndAndOr>(&self, t: T) -> ParseState<T> {
+    pub fn init_parse_state_with_t<T: Lattice>(&self, t: T) -> ParseState<T> {
         let initial_content = ParseStateNodeContent {
             state_id: self.start_state_id,
             t,
@@ -116,7 +122,7 @@ impl GLRParser {
         }
     }
 
-    pub fn parse<T: AndAndOr + Default>(&self, input: &[TerminalID]) -> GLRParserState<T> {
+    pub fn parse<T: Lattice + Default>(&self, input: &[TerminalID]) -> GLRParserState<T> {
         let mut state = self.init_glr_parser();
         state.parse(input);
         state
@@ -213,13 +219,13 @@ impl Display for GLRParser {
 }
 
 #[derive(Debug, Clone)]
-pub struct GLRParserState<'a, T: AndAndOr> {
+pub struct GLRParserState<'a, T: Lattice> {
     pub parser: &'a GLRParser,
     pub active_states: Vec<ParseState<T>>,
     pub action_not_found_states: Vec<ParseState<T>>,
 }
 
-impl<'a, T: AndAndOr> GLRParserState<'a, T> {
+impl<'a, T: Lattice> GLRParserState<'a, T> {
     pub fn parse(&mut self, input: &[TerminalID]) {
         self.parse_part(input);
     }
@@ -276,7 +282,7 @@ impl<'a, T: AndAndOr> GLRParserState<'a, T> {
                             let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nonterminal];
 
                             debug!(3, "Going to state {:?}", goto_state);
-                            let combined_t = revealed_t.and(current_t);
+                            let combined_t = revealed_t.meet(current_t);
                             let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                             let new_stack = stack_node.push(new_content);
                             self.active_states.push(ParseState {
@@ -306,7 +312,7 @@ impl<'a, T: AndAndOr> GLRParserState<'a, T> {
                                     let revealed_t = &revealed_content.t;
                                     let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id];
 
-                                    let combined_t = revealed_t.and(current_t);
+                                    let combined_t = revealed_t.meet(current_t);
                                     let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                                     let new_stack = stack_node.push(new_content);
                                     self.active_states.push(ParseState {
@@ -361,7 +367,7 @@ pub struct ParseStateKey {
     // Removed action_stack
 }
 
-impl<T: AndAndOr> ParseState<T> {
+impl<T: Lattice> ParseState<T> {
     pub fn key(&self) -> ParseStateKey {
         ParseStateKey {
             stack_state_id: self.stack.peek().state_id,
@@ -376,7 +382,7 @@ impl<T: AndAndOr> ParseState<T> {
         // Combine 't' values at the top node using 'or'
         let self_content = self.stack.peek();
         let other_content = other.stack.peek();
-        let combined_t = self_content.t.or(&other_content.t);
+        let combined_t = self_content.t.join(&other_content.t);
 
         // Get mutable access to self.stack, potentially cloning if shared (Arc > 1)
         let mut mutable_stack = Arc::make_mut(&mut self.stack);
