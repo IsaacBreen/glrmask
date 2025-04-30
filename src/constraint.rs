@@ -158,7 +158,9 @@ impl GrammarConstraint {
         for (content, id) in llm_token_map {
             tokens_for_vocab_prefix_tree_builder.push((id.0, content.clone()));
         }
+        crate::debug!(2, "Building vocab prefix tree");
         let vocab_prefix_tree = VocabPrefixTree::build(&tokens_for_vocab_prefix_tree_builder);
+        crate::debug!(2, "Done building vocab prefix tree");
 
         // Create the roots.
         let mut precomputed_roots: BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
@@ -178,7 +180,9 @@ impl GrammarConstraint {
             }
         }
 
+        crate::debug!(2, "precompute main loop");
         while let Some((((dotted_vocab_node, initial_tokenizer_state_id)), precomputed_nodes)) = queue.pop_first() {
+            crate::debug!(3, "Popped from queue");
             let DottedVocabNode { src, dst, offset, bytes } = dotted_vocab_node;
 
             let results = tokenizer.execute_from_state(&bytes[offset..], initial_tokenizer_state_id);

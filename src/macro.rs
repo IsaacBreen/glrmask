@@ -17,7 +17,7 @@ macro_rules! choice_fast {
 #[macro_export]
 macro_rules! debug {
     ($level:expr, $($arg:tt)*) => {{
-        pub const DEBUG_LEVEL: usize = 1;
+        pub const DEBUG_LEVEL: usize = 2;
         if $level <= DEBUG_LEVEL {
             #[cfg(feature = "debug")]
             println!("[DEBUG {}] {}", $level, format!($($arg)*));
