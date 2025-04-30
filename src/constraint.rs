@@ -301,6 +301,7 @@ impl GrammarConstraint {
             }
             // Handle partial matches (end state reached before end of vocab node bytes)
             if let Some(end_state) = results.end_state {
+                crate::debug!(3, "Reached end state");
                 let possible_final_grammar_tokens: BTreeSet<_> = tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state)).into_iter().map(|token_id| GrammarTokenID(token_id.0)).collect();
                 for possible_final_grammar_token in possible_final_grammar_tokens {
                     for precompute_node in &precomputed_nodes {
