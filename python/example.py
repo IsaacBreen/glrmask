@@ -87,7 +87,7 @@ for token_id in prefill:
     grammar_constraint_state.commit(token_id)
 
 # Mask check after prefill
-# So far, we've seen "i+(i+i*i", so the allowed next tokens are ")", "+i", "+", "*"
+# So far, we've seen "i+(i+i*i", so the allowed next tokens are "+", "*", ")", "+i"
 mask = grammar_constraint_state.get_mask()
 expected_mask = set(llm_tokens_to_ids([b"+", b"*", b")", b"+i"]))
 print(f"Mask after committing prefill: {mask}")
