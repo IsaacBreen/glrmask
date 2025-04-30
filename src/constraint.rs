@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use crate::datastructures::trie::Trie;
 use crate::finite_automata::Regex;
-use crate::glr::parser::{AndAndOr, GLRParser, GLRParserState, ParseState, ParseStateKey};
+use crate::glr::parser::{MergeAndIntersect, GLRParser, GLRParserState, ParseState, ParseStateKey};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use bimap::BiBTreeMap;
 use bitvec::prelude::BitVec;
@@ -55,12 +55,12 @@ pub struct GrammarConstraintState<'a> {
     pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, LLMTokenBV>>,
 }
 
-impl AndAndOr for LLMTokenBV {
-    fn and(&self, other: &Self) -> Self {
+impl MergeAndIntersect for LLMTokenBV {
+    fn intersect(&self, other: &Self) -> Self {
         self.clone() & other.clone()
     }
 
-    fn or(&self, other: &Self) -> Self {
+    fn merge(&self, other: &Self) -> Self {
         self.clone() | other.clone()
     }
 }
