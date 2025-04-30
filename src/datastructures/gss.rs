@@ -311,7 +311,7 @@ pub fn prune_and_transform_recursive<T: Clone>(
                         // A better approach for early stop might be needed, maybe marking nodes instead.
                         // For now, let's stick to the logic: if we stop, we keep original pointers below.
                          transformed_predecessors = node_arc.predecessors.clone(); // Keep original predecessors - CAUTION
-                         println!("Keeping {} original predecessors", transformed_predecessors.len());
+                         crate::debug!(3, "Keeping {} original predecessors", transformed_predecessors.len());
                          break; // Exit loop once we decide to keep originals
                     }
                 }
