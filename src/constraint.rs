@@ -6,13 +6,14 @@ use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use bimap::BiBTreeMap;
 use bitvec::prelude::BitVec;
 use bitvec::prelude::*;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::BitOr;
 use std::sync::{Arc, Mutex};
 use bitvec::macros::internal::funty::Fundamental;
 use keyed_priority_queue::KeyedPriorityQueue;
 use crate::constraint_extra::print_finalizer;
 use crate::datastructures::charmap::TrieMap;
+use crate::datastructures::gss::prune_and_transform_recursive;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::glr::parser::ParseStateNodeContent;
@@ -325,29 +326,18 @@ impl<'a> GrammarConstraintState<'a> {
             }
         };
 
-        let mut next_state: BTreeMap<TokenizerStateID, GLRParserState<'a, LLMTokenInfo>> = BTreeMap::new();
-
-        for (tokenizer_state_id, glr_state) in std::mem::take(&mut self.state) {
-            let original_roots: Vec<_> = glr_state.active_states.into_iter().map(|ps| ps.stack).collect();
-            // prune_and_transform_roots is defined in gss.rs (added later)
-            let transformed_roots = crate::datastructures::gss::prune_and_transform_roots(&original_roots, &closure);
-
-            let new_active_states: Vec<crate::glr::parser::ParseState<LLMTokenInfo>> = transformed_roots
-                .into_iter()
-                .filter_map(|opt_root| opt_root.map(|root| crate::glr::parser::ParseState { stack: root }))
-                .collect();
-
-            if !new_active_states.is_empty() {
-                 let mut new_glr_state = GLRParserState {
-                     parser: glr_state.parser,
-                     active_states: new_active_states,
-                     action_not_found_states: Vec::new(), // Reset not found states
-                 };
-                 new_glr_state.merge_active_states(); // Merge based on top node state_id
-                 next_state.insert(tokenizer_state_id, new_glr_state); // Insert (no need to merge here as we process each tokenizer_state_id once)
-            }
+        let mut memo = HashMap::new();
+        for (tokenizer_state_id, glr_state) in &mut self.state {
+            glr_state.active_states.retain_mut(|parse_state| {
+                let maybe_new_node = prune_and_transform_recursive(&parse_state.stack, &closure, &mut memo);
+                if let Some(new_node) = maybe_new_node {
+                    parse_state.stack = new_node;
+                    true
+                } else {
+                    false
+                }
+            });
         }
-        self.state = next_state;
     }
 
     pub fn step_and_commit(&mut self, llm_token_id: LLMTokenID) {

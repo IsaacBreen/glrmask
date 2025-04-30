@@ -272,7 +272,7 @@ impl<T: Clone + Ord> BulkMerge<T> for Vec<Arc<GSSNode<T>>> {
 
 
 // Helper function for prune_and_transform_roots
-fn prune_and_transform_recursive<T: Clone>(
+pub fn prune_and_transform_recursive<T: Clone>(
     node_arc: &Arc<GSSNode<T>>,
     closure: &impl Fn(&T) -> Option<(T, bool)>, // Returns Option<(NewValue, ContinueRecursion)>
     memo: &mut HashMap<*const GSSNode<T>, Option<Arc<GSSNode<T>>>>,
