@@ -327,7 +327,7 @@ impl<'a> GrammarConstraintState<'a> {
         };
 
         let mut memo = HashMap::new();
-        for (tokenizer_state_id, glr_state) in &mut self.state {
+        self.state.retain(|tokenizer_state_id, glr_state| {
             glr_state.active_states.retain_mut(|parse_state| {
                 let maybe_new_node = prune_and_transform_recursive(&parse_state.stack, &closure, &mut memo);
                 if let Some(new_node) = maybe_new_node {
@@ -337,7 +337,8 @@ impl<'a> GrammarConstraintState<'a> {
                     false
                 }
             });
-        }
+            !glr_state.active_states.is_empty()
+        });
     }
 
     pub fn step_and_commit(&mut self, llm_token_id: LLMTokenID) {
