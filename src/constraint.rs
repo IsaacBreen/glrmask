@@ -203,7 +203,6 @@ impl GrammarConstraint {
                             if let Some(existing_edge_value) = precompute_node.get_edge_value_mut(matched_token_id, existing_precompute_node) {
                                 // Merge into the edge value.
                                 crate::debug!(3, "Success! Merging into existing edge value");
-                                *existing_edge_value = existing_edge_value.clone() | llm_tokens.clone();
                                 continue 'outer;
                             }
                         }
