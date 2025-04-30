@@ -153,6 +153,37 @@ impl GrammarConstraint {
             }
         }
 
+        // ----  Ord-capable handle for `Arc<Mutex<PrecomputeNode>>` --------------------------
+        // `Arc<Mutex<PrecomputeNode>>` cannot live in a `BTreeSet` because `Mutex<T>` lacks
+        // an `Ord` implementation.  We wrap it and order by the (stable) pointer address.
+        #[derive(Clone)]
+        struct NodeHandle(Arc<Mutex<PrecomputeNode>>);
+
+        use std::ops::Deref;
+        impl Deref for NodeHandle {
+            type Target = Arc<Mutex<PrecomputeNode>>;
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+        impl PartialEq for NodeHandle {
+            fn eq(&self, other: &Self) -> bool {
+                Arc::as_ptr(&self.0) == Arc::as_ptr(&other.0)
+            }
+        }
+        impl Eq for NodeHandle {}
+        impl PartialOrd for NodeHandle {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl Ord for NodeHandle {
+            fn cmp(&self, other: &Self) -> Ordering {
+                (Arc::as_ptr(&self.0) as usize).cmp(&(Arc::as_ptr(&other.0) as usize))
+            }
+        }
+        // ------------------------------------------------------------------------------------
+
         // Create the vocab prefix tree.
         let mut tokens_for_vocab_prefix_tree_builder: Vec<(usize, Vec<u8>)> = vec![];
         for (content, id) in llm_token_map {
@@ -170,13 +201,16 @@ impl GrammarConstraint {
         }
 
         // Queue keyed by vocab node and tokenizer state ID.
-        let mut queue: BTreeMap<(DottedVocabNode, TokenizerStateID), BTreeSet<Arc<Mutex<PrecomputeNode>>>> = BTreeMap::new();
+        let mut queue: BTreeMap<(DottedVocabNode, TokenizerStateID), BTreeSet<NodeHandle>> = BTreeMap::new();
 
         // Initialize the queue with the roots.
         for (tokenizer_state_id, precompute_node) in &precomputed_roots {
             for (bytes, new_vocab_node) in vocab_prefix_tree.root.children() {
                 let dotted_new_vocab_node = DottedVocabNode { src: &vocab_prefix_tree.root, dst: new_vocab_node, bytes, offset: 0 };
-                queue.insert((dotted_new_vocab_node, *tokenizer_state_id), BTreeSet::from([precompute_node.clone()]));
+                queue.insert(
+                    (dotted_new_vocab_node, *tokenizer_state_id),
+                    BTreeSet::from([NodeHandle(precompute_node.clone())]),
+                );
             }
         }
 
@@ -210,7 +244,11 @@ impl GrammarConstraint {
                         // Try to push to an existing precompute node in the queue if it's possible to do so without creating a cycle.
                         crate::debug!(3, "Trying to insert to existing precompute node");
                         for existing_precompute_node in existing_precompute_nodes {
-                            if let Ok(dst_precomputed_node) = precompute_node.try_insert(matched_token_id, llm_tokens.clone(), existing_precompute_node.clone()) {
+                            if let Ok(dst_precomputed_node) = precompute_node.try_insert(
+                                matched_token_id,
+                                llm_tokens.clone(),
+                                Arc::clone(&*existing_precompute_node),
+                            ) {
                                 crate::debug!(3, "Success! Inserting into existing precompute node");
                                 continue 'outer;
                             }
@@ -231,10 +269,10 @@ impl GrammarConstraint {
                                 for (next_bytes, next_dst) in next_src.children() {
                                     let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
                                     let new_queue_key = (new_dotted_node, TokenizerStateID(0));
-                                    queue.entry(new_queue_key).or_default().insert(existing_dst.clone());
+                                    queue.entry(new_queue_key).or_default().insert(NodeHandle(existing_dst.clone()));
                                 }
                             } else if new_offset < bytes.len() {
-                                queue.entry(new_queue_key).or_default().insert(existing_dst.clone());
+                                queue.entry(new_queue_key).or_default().insert(NodeHandle(existing_dst.clone()));
                             } else { unreachable!(); }
                             continue 'outer;
                         }
@@ -250,10 +288,10 @@ impl GrammarConstraint {
                         for (next_bytes, next_dst) in next_src.children() {
                             let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
                             let new_queue_key = (new_dotted_node, TokenizerStateID(0));
-                            queue.entry(new_queue_key).or_default().insert(new_precomputed_node.clone());
+                            queue.entry(new_queue_key).or_default().insert(NodeHandle(new_precomputed_node.clone()));
                         }
                     } else if new_offset < bytes.len() {
-                        queue.entry(new_queue_key).or_default().insert(new_precomputed_node.clone());
+                        queue.entry(new_queue_key).or_default().insert(NodeHandle(new_precomputed_node.clone()));
                     } else { unreachable!(); }
                 }
             }
