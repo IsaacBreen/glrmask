@@ -250,7 +250,6 @@ impl VocabPrefixTree {
 
         // Recursively call on children and merge their results.
         for child_node in node.children.values_mut() {
-            crate::debug!(3, "Computing reachable IDs for child node");
             Self::compute_reachable_ids_recursive(child_node, max_token_id);
             // OR the child's computed reachable IDs into the current node's set.
             current_node_ids |= &child_node.reachable_token_ids;

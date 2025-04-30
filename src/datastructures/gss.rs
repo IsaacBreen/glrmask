@@ -277,6 +277,7 @@ pub fn prune_and_transform_recursive<T: Clone>(
     closure: &impl Fn(&T) -> Option<(T, bool)>, // Returns Option<(NewValue, ContinueRecursion)>
     memo: &mut HashMap<*const GSSNode<T>, Option<Arc<GSSNode<T>>>>,
 ) -> Option<Arc<GSSNode<T>>> {
+    // TODO: clean up
     let node_ptr = Arc::as_ptr(node_arc);
     if let Some(cached_result) = memo.get(&node_ptr) {
         return cached_result.clone();
