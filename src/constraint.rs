@@ -350,7 +350,7 @@ impl<'a> GrammarConstraintState<'a> {
             if let Some(transformed_root) = transformed_root_opt {
                 let new_parse_state = crate::glr::parser::ParseState { stack: transformed_root };
                 next_state.entry(tokenizer_state_id)
-                    .or_insert_with(|| self.parent.init_glr_parser_from_parse_states(Vec::new())) // Create empty GLR state if needed
+                    .or_insert_with(|| self.parent.parser.init_glr_parser_from_parse_states(Vec::new())) // Create empty GLR state if needed
                     .active_states.push(new_parse_state);
             }
         }
