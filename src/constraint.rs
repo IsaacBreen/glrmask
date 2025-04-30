@@ -62,7 +62,7 @@ impl Default for LLMTokenInfo {
 #[derive(Debug, Clone)] // Removed pub(crate) as it's likely used externally
 pub struct GrammarConstraint {
     pub(crate) tokenizer: Regex,
-    pub(crate) parser: GLRParser<LLMTokenInfo>,
+    pub(crate) parser: GLRParser,
     pub(crate) precomputed: Precomputed,
     pub(crate) llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
     pub(crate) max_llm_token_id: usize,
@@ -83,8 +83,11 @@ impl MergeAndIntersect for LLMTokenInfo {
         }
     }
     fn intersect(&self, other: &Self) -> Self {
-        // Intersect: Active tokens are intersected, Intersection is also intersected.
-        self.clone() & other.clone()
+        // Intersect: Active tokens are intersected, Intersection retained as-is.
+        Self {
+            active: self.active.clone() & other.active.clone(),
+            intersection: self.intersection.clone(),
+        }
     }
 }
 
@@ -110,7 +113,7 @@ impl PrecomputedNodeContents {
 impl GrammarConstraint {
     pub fn new(
         tokenizer: Regex,
-        parser: GLRParser<LLMTokenInfo>,
+        parser: GLRParser,
         llm_token_map: LLMTokenMap,
         max_llm_token_id: usize
     ) -> Self {
