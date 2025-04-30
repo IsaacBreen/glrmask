@@ -60,7 +60,7 @@ def llm_tokens_to_ids(tokens):
 mask = grammar_constraint_state.get_mask()
 # expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
 print(f"Initial Mask: {set(int(x) for x in np.where(mask)[0])}")
-print(f"Initial Mask (strings): {[llm_id_to_token.get(token) for token in set(int(x) for x in np.where(mask)[0])]}")
+print(f"Initial Mask (strings): {[llm_id_to_token.get(token).decode("utf-8") for token in set(int(x) for x in np.where(mask)[0])]}")
 # assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
 
 
@@ -73,7 +73,7 @@ for token_id in prefill:
 mask = grammar_constraint_state.get_mask()
 # expected_mask = set(llm_tokens_to_ids([b"+", b"*", b"+i"]))
 print(f"Mask after committing prefill: {set(int(x) for x in np.where(mask)[0])}")
-print(f"Mask after committing prefill (strings): {[llm_id_to_token.get(token) for token in set(int(x) for x in np.where(mask)[0])]}")
+print(f"Mask after committing prefill (strings): {[llm_id_to_token.get(token).decode("utf-8") for token in set(int(x) for x in np.where(mask)[0])]}")
 # assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
 
 
@@ -87,7 +87,7 @@ for token_id in prefill:
 mask = grammar_constraint_state.get_mask()
 # expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
 print(f"Mask after committing prefill: {set(int(x) for x in np.where(mask)[0])}")
-print(f"Mask after committing prefill (strings): {[llm_id_to_token.get(token) for token in set(int(x) for x in np.where(mask)[0])]}")
+print(f"Mask after committing prefill (strings): {[llm_id_to_token.get(token).decode("utf-8") for token in set(int(x) for x in np.where(mask)[0])]}")
 # assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
 
 
@@ -101,5 +101,5 @@ for token_id in prefill:
 mask = grammar_constraint_state.get_mask()
 # expected_mask = set(llm_tokens_to_ids([b"+", b"*", b")", b"+i"]))
 print(f"Mask after committing prefill: {set(int(x) for x in np.where(mask)[0])}")
-print(f"Mask after committing prefill (strings): {[llm_id_to_token.get(token) for token in set(int(x) for x in np.where(mask)[0])]}")
+print(f"Mask after committing prefill (strings): {[llm_id_to_token.get(token).decode("utf-8") for token in set(int(x) for x in np.where(mask)[0])]}")
 # assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
