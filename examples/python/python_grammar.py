@@ -212,7 +212,7 @@ def create_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_ll
     return grammar_constraint
 
 def initialize_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id):
-    grammar_constraint = timeit(lambda: create_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id))
+    grammar_constraint = timeit(create_grammar_constraint)(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id)
 #     grammar_constraint.print()
     return grammar_constraint
 
