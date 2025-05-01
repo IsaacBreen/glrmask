@@ -212,7 +212,8 @@ def create_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_ll
     return grammar_constraint
 
 def initialize_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id):
-    grammar_constraint = create_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id)
+    grammar_constraint = create_grammar_constraint
+    (grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id)
 #     grammar_constraint.print()
     print("Initializing Grammar Constraint State...")
     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
