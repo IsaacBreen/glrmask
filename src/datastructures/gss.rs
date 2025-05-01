@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -50,11 +50,21 @@ impl<T> GSSNode<T> {
         if n == 0 {
             return vec![Arc::new(self.clone())];
         }
-        let mut nodes = Vec::new();
-        for popped in self.pop() {
-            nodes.extend(popped.popn(n - 1));
+
+        let mut result = Vec::new();
+        let mut seen: HashSet<*const GSSNode<T>> = HashSet::new();
+
+        // recurse on predecessors and collect, skipping duplicates
+        for predecessor in &self.predecessors {
+            for node in predecessor.popn(n - 1) {
+                let ptr = Arc::as_ptr(&node);
+                if seen.insert(ptr) {
+                    result.push(node);
+                }
+            }
         }
-        nodes
+
+        result
     }
 
     pub fn peek(&self) -> &T {
@@ -157,14 +167,8 @@ impl<T: Clone> GSSTrait<T> for GSSNode<T> {
     }
 
     fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
-        if n == 0 {
-            return vec![Arc::new(self.clone())];
-        }
-        let mut nodes = Vec::new();
-        for popped in self.pop() {
-            nodes.extend(popped.popn(n - 1));
-        }
-        nodes
+        // Delegate to the inherent, de-duplicating implementation above
+        GSSNode::popn(self, n)
     }
 }
 
@@ -186,14 +190,8 @@ impl<T: Clone> GSSTrait<T> for Arc<GSSNode<T>> {
     }
 
     fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
-        if n == 0 {
-            return vec![self.clone()];
-        }
-        let mut nodes = Vec::new();
-        for popped in self.pop() {
-            nodes.extend(popped.popn(n - 1));
-        }
-        nodes
+        // Re-use the implementation on the underlying node, which already de-duplicates.
+        self.as_ref().popn(n)
     }
 }
 
