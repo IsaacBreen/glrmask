@@ -332,6 +332,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
     // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
     pub fn merge_active_states(&mut self) {
         let mut active_state_map: BTreeMap<ParseStateKey, ParseState<T>> = BTreeMap::new();
+        let num_active_states = self.active_states.len();
 
         for state in std::mem::take(&mut self.active_states) {
             let key = state.key();
@@ -340,6 +341,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
             });
         }
 
+        crate::debug!(3, "Merged {} active states into {} active states", num_active_states, active_state_map.len());
         self.active_states = active_state_map.into_values().collect();
     }
 
