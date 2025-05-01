@@ -258,7 +258,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
             if let Some(action) = row.shifts_and_reduces.get(&token_id) {
                 match action {
                     Stage7ShiftsAndReduces::Shift(next_state_id) => {
-                        debug!(4, "Shifting");
+                        debug!(5, "Shifting");
                         let new_content = ParseStateNodeContent { state_id: *next_state_id, t: current_t.clone() };
                         let new_stack = stack.push(new_content);
                         next_active_states.push(ParseState {
@@ -267,7 +267,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                         });
                     }
                     Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
-                        debug!(4, "Reducing by production {:?} with len {}", production_id, len);
+                        debug!(5, "Reducing by production {:?} with len {}", production_id, len);
                         let mut popped_stack_nodes = stack.popn(*len);
                         popped_stack_nodes.bulk_merge();
                         for stack_node in popped_stack_nodes {
@@ -277,7 +277,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                             let revealed_t = &revealed_content.t;
                             let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nonterminal];
 
-                            debug!(4, "Going to state {:?}", goto_state);
+                            debug!(5, "Going to state {:?}", goto_state);
                             let combined_t = revealed_t.intersect(current_t);
                             let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                             let new_stack = stack_node.push(new_content);
