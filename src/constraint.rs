@@ -544,7 +544,6 @@ impl<'a> GrammarConstraintState<'a> {
                         }
                     }
                 }
-                glr_parse_state.active_states.retain(|parse_state| !parse_state.stack.value.t.active.is_empty());
                 // Check if the current GLR state still has valid paths before continuing traversal
                 // (This check might be redundant if the retain calls above handle it)
                 !glr_parse_state.active_states.is_empty()
