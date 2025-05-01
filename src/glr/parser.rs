@@ -242,7 +242,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
     }
 
     pub fn step(&mut self, token_id: TerminalID) {
-        crate::debug!(3, "Stepping with token {:?}", token_id.map(|token_id| token_id.0));
+        crate::debug!(3, "Stepping with token {:?}", token_id);
         let mut next_active_states = Vec::new();
         // This will store states where the current token_id leads to no action.
         let mut current_action_not_found_states = Vec::new();
