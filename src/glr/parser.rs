@@ -329,6 +329,9 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
         self.active_states = next_active_states;
         self.action_not_found_states = current_action_not_found_states; // Replace previous not-found states
         crate::debug!(3, "After stepping, there are {} active states and {} action not found states", self.active_states.len(), self.action_not_found_states.len());
+        
+        // TODO: decide whether to keep action_not_found_states or not
+        self.action_not_found_states.clear();
     }
 
     // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
