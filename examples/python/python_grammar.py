@@ -17,8 +17,9 @@ from tqdm import tqdm
 
 
 def eat_string(s: bytes) -> Regex:
-#     return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
-    return Regex.eat_u8(ord("0"))
+    return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
+    # TODO: delete this
+#     return Regex.eat_u8(ord("0"))
 
 def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Regex:
     if isinstance(item, pegen.grammar.NameLeaf):
@@ -89,13 +90,13 @@ def define_tokens() -> list[tuple[str, Any]]:
         return ge.regex(seq([ignore, expr]))
 
     # TODO: uncomment this
-#     digit = choice([eat_u8(c) for c in range(ord("0"), ord("9") + 1)])
-#     alph_lower = choice([eat_u8(c) for c in range(ord("a"), ord("z") + 1)])
-#     alph_upper = choice([eat_u8(c) for c in range(ord("A"), ord("Z") + 1)])
-    # TODO: delete this
-    digit = eat_u8(ord("1"))
-    alph_lower = eat_u8(ord("a"))
-    alph_upper = eat_u8(ord("a"))
+    digit = choice([eat_u8(c) for c in range(ord("0"), ord("9") + 1)])
+    alph_lower = choice([eat_u8(c) for c in range(ord("a"), ord("z") + 1)])
+    alph_upper = choice([eat_u8(c) for c in range(ord("A"), ord("Z") + 1)])
+#     TODO: delete this
+#     digit = eat_u8(ord("1"))
+#     alph_lower = eat_u8(ord("a"))
+#     alph_upper = eat_u8(ord("a"))
 
     name_start = choice([
         alph_lower,
