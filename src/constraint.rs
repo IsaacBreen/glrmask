@@ -280,10 +280,10 @@ impl GrammarConstraint {
                 let matched_token_id = GrammarTokenID(result.id);
                 let new_offset = offset + result.width;
                 // There's still more input to process. Insert trie edge(s) and update the queue.
-                let new_dotted_node = DottedVocabNode { src, dst, offset: new_offset, bytes };
                 for precompute_node in &precomputed_nodes {
                     let mut precompute_node = precompute_node.lock().unwrap();
                     if new_offset == bytes.len() {
+                        let new_dotted_node = DottedVocabNode { src, dst, offset: new_offset, bytes };
                         let new_queue_key = (new_dotted_node, TokenizerStateID(0));
                         if let Some(mut next_precompute_node) = link_next_precompute_node(&queue, new_queue_key, &mut precompute_node, matched_token_id) {
                             next_precompute_node.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
@@ -298,6 +298,7 @@ impl GrammarConstraint {
                             }
                         }
                     } else if new_offset < bytes.len() {
+                        let new_dotted_node = DottedVocabNode { src, dst, offset: new_offset, bytes };
                         let new_queue_key = (new_dotted_node, TokenizerStateID(0));
                         if let Some(mut next_precompute_node) = link_next_precompute_node(&queue, new_queue_key, &mut precompute_node, matched_token_id) {
                             crate::debug!(4, "Didn't reach end of input, so this is not a clean match");
