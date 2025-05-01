@@ -8,7 +8,7 @@ use bitvec::prelude::BitVec;
 use bitvec::prelude::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::BitOr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use bitvec::macros::internal::funty::Fundamental;
 use keyed_priority_queue::KeyedPriorityQueue;
 use crate::constraint_extra::print_finalizer;
@@ -183,7 +183,7 @@ impl GrammarConstraint {
             }
         }
         // ------------------------------------------------------------------------------------
-        
+
         fn process<'a>(queue: &mut BTreeMap<(DottedVocabNode<'a>, TokenizerStateID), BTreeSet<NodeHandle>>, dst_precomputed_node: &mut Arc<Mutex<Trie<TerminalID, LLMTokenBV, PrecomputedNodeContents>>>, dst: &'a VocabPrefixTreeNode, new_offset: usize, bytes: &[u8], new_queue_key: (DottedVocabNode<'a>, TokenizerStateID), max_llm_token_id: usize) {
             if new_offset == bytes.len() {
                 // Reached the end of the input, so this is a clean match.
@@ -256,48 +256,51 @@ impl GrammarConstraint {
                 'outer: for precompute_node in &precomputed_nodes {
                     let mut precompute_node = precompute_node.lock().unwrap();
                     let llm_tokens = dst.reachable_token_ids().clone();
-                    if let Some(existing_precompute_nodes) = queue.get(&new_queue_key) {
-                        // Check whether there's already an edge from this node to a node in the queue.
-                        crate::debug!(4, "Trying to push to existing precompute node");
-                        for existing_precompute_node in existing_precompute_nodes {
-                            if let Some(existing_edge_llm_tokens) = precompute_node.get_edge_value_mut(matched_token_id, existing_precompute_node) {
+                    fn get_next_precompute_node<'a>(queue: &BTreeMap<(DottedVocabNode<'a>, TokenizerStateID), BTreeSet<NodeHandle>>, new_queue_key: (DottedVocabNode<'a>, TokenizerStateID), precompute_node: &mut MutexGuard<PrecomputeNode>, llm_tokens: &LLMTokenBV, matched_token_id: TerminalID) -> Option<Arc<Mutex<Trie<TerminalID, LLMTokenBV, PrecomputedNodeContents>>>> {
+                        if let Some(existing_precompute_nodes) = queue.get(&new_queue_key) {
+                            // Check whether there's already an edge from this node to a node in the queue.
+                            crate::debug!(4, "Trying to push to existing precompute node");
+                            for existing_precompute_node in existing_precompute_nodes {
+                                if let Some(existing_edge_llm_tokens) = precompute_node.get_edge_value_mut(matched_token_id, existing_precompute_node) {
+                                    // Merge into the edge value.
+                                    crate::debug!(4, "Success! Merging into existing edge value");
+                                    *existing_edge_llm_tokens |= llm_tokens;
+                                    return None;
+                                }
+                            }
+
+                            // Try to push to an existing precompute node in the queue if it's possible to do so without creating a cycle.
+                            crate::debug!(4, "Trying to insert to existing precompute node");
+                            for existing_precompute_node in existing_precompute_nodes {
+                                if let Ok(_) = precompute_node.try_insert(
+                                    matched_token_id,
+                                    llm_tokens.clone(),
+                                    Arc::clone(&*existing_precompute_node),
+                                ) {
+                                    crate::debug!(4, "Success! Inserting into existing precompute node");
+                                    return None;
+                                }
+                            }
+                        }
+
+                        // Use any existing edge on the src node.
+                        crate::debug!(4, "Trying to find existing edge value");
+                        if let Some(existing_edges) = precompute_node.get_mut(&matched_token_id) {
+                            if let Some((existing_edge_llm_tokens, existing_precomputed_node)) = existing_edges.iter_mut().next() {
                                 // Merge into the edge value.
-                                crate::debug!(4, "Success! Merging into existing edge value");
-                                *existing_edge_llm_tokens |= llm_tokens;
-                                continue 'outer;
+                                crate::debug!(4, "Success! Found existing edge value");
+                                *existing_edge_llm_tokens |= llm_tokens.clone();
+                                return Some(existing_precomputed_node.clone());
                             }
                         }
 
-                        // Try to push to an existing precompute node in the queue if it's possible to do so without creating a cycle.
-                        crate::debug!(4, "Trying to insert to existing precompute node");
-                        for existing_precompute_node in existing_precompute_nodes {
-                            if let Ok(_) = precompute_node.try_insert(
-                                matched_token_id,
-                                llm_tokens.clone(),
-                                Arc::clone(&*existing_precompute_node),
-                            ) {
-                                crate::debug!(4, "Success! Inserting into existing precompute node");
-                                continue 'outer;
-                            }
-                        }
+                        // Create a new node.
+                        crate::debug!(4, "Creating new precompute node");
+                        let mut new_precomputed_node = precompute_node.force_insert(matched_token_id, llm_tokens.clone(), PrecomputedNodeContents::default());
+                        return Some(new_precomputed_node.clone());
                     }
 
-                    // Use any existing edge on the src node.
-                    crate::debug!(4, "Trying to find existing edge value");
-                    if let Some(existing_edges) = precompute_node.get_mut(&matched_token_id) {
-                        if let Some((existing_edge_llm_tokens, existing_precomputed_node)) = existing_edges.iter_mut().next() {
-                            // Merge into the edge value.
-                            crate::debug!(4, "Success! Found existing edge value");
-                            *existing_edge_llm_tokens |= llm_tokens.clone();
-                            process(&mut queue, existing_precomputed_node, dst, new_offset, bytes, new_queue_key, max_llm_token_id);
-                            continue 'outer;
-                        }
-                    }
-
-                    // Create a new node.
-                    crate::debug!(4, "Creating new precompute node");
-                    let mut new_precomputed_node = precompute_node.force_insert(matched_token_id, llm_tokens.clone(), PrecomputedNodeContents::default());
-                    process(&mut queue, &mut new_precomputed_node, dst, new_offset, bytes, new_queue_key, max_llm_token_id);
+                    get_next_precompute_node(&queue, new_queue_key, &mut precompute_node, &llm_tokens, matched_token_id);
                 }
             }
             // Handle partial matches (end state reached before end of vocab node bytes)
