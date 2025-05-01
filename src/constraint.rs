@@ -241,40 +241,40 @@ impl GrammarConstraint {
                     let llm_tokens = dst.reachable_token_ids().clone();
                     if let Some(existing_precompute_nodes) = queue.get(&new_queue_key) {
                         // Check whether there's already an edge from this node to a node in the queue.
-                        crate::debug!(3, "Trying to push to existing precompute node");
+                        crate::debug!(4, "Trying to push to existing precompute node");
                         for existing_precompute_node in existing_precompute_nodes {
                             if let Some(existing_edge_llm_tokens) = precompute_node.get_edge_value_mut(matched_token_id, existing_precompute_node) {
                                 // Merge into the edge value.
-                                crate::debug!(3, "Success! Merging into existing edge value");
+                                crate::debug!(4, "Success! Merging into existing edge value");
                                 *existing_edge_llm_tokens |= llm_tokens;
                                 continue 'outer;
                             }
                         }
 
                         // Try to push to an existing precompute node in the queue if it's possible to do so without creating a cycle.
-                        crate::debug!(3, "Trying to insert to existing precompute node");
+                        crate::debug!(4, "Trying to insert to existing precompute node");
                         for existing_precompute_node in existing_precompute_nodes {
                             if let Ok(_) = precompute_node.try_insert(
                                 matched_token_id,
                                 llm_tokens.clone(),
                                 Arc::clone(&*existing_precompute_node),
                             ) {
-                                crate::debug!(3, "Success! Inserting into existing precompute node");
+                                crate::debug!(4, "Success! Inserting into existing precompute node");
                                 continue 'outer;
                             }
                         }
                     }
 
                     // Use any existing edge on the src node.
-                    // crate::debug!(3, "Trying to find existing edge value");
+                    // crate::debug!(4, "Trying to find existing edge value");
                     if let Some(existing_edges) = precompute_node.get_mut(&matched_token_id) {
                         if let Some((existing_edge_llm_tokens, existing_dst)) = existing_edges.iter_mut().next() {
                             // Merge into the edge value.
-                            crate::debug!(3, "Success! Found existing edge value");
+                            crate::debug!(4, "Success! Found existing edge value");
                             *existing_edge_llm_tokens |= llm_tokens.clone();
                             if new_offset == bytes.len() {
                                 // Reached the end of the input, so this is a clean match.
-                                crate::debug!(3, "Reached the end of the input, so this is a clean match.");
+                                crate::debug!(4, "Reached the end of the input, so this is a clean match.");
                                 existing_dst.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
                                 let next_src = dst;
                                 for (next_bytes, next_dst) in next_src.children() {
@@ -283,7 +283,7 @@ impl GrammarConstraint {
                                     queue.entry(new_queue_key).or_default().insert(NodeHandle(existing_dst.clone()));
                                 }
                             } else if new_offset < bytes.len() {
-                                crate::debug!(3, "Didn't reach end of input, so this is not a clean match");
+                                crate::debug!(4, "Didn't reach end of input, so this is not a clean match");
                                 queue.entry(new_queue_key).or_default().insert(NodeHandle(existing_dst.clone()));
                             } else { unreachable!(); }
                             continue 'outer;
@@ -291,11 +291,11 @@ impl GrammarConstraint {
                     }
 
                     // Create a new node.
-                    // crate::debug!(3, "Creating new precompute node");
+                    crate::debug!(4, "Creating new precompute node");
                     let new_precomputed_node = precompute_node.force_insert(matched_token_id, llm_tokens.clone(), PrecomputedNodeContents::default());
                     if new_offset == bytes.len() {
                         // Reached the end of the input, so this is a clean match.
-                        // crate::debug!(3, "Reached the end of the input, so this is a clean match.");
+                        crate::debug!(4, "Reached the end of the input, so this is a clean match.");
                         new_precomputed_node.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
                         let next_src = dst;
                         for (next_bytes, next_dst) in next_src.children() {
@@ -304,14 +304,14 @@ impl GrammarConstraint {
                             queue.entry(new_queue_key).or_default().insert(NodeHandle(new_precomputed_node.clone()));
                         }
                     } else if new_offset < bytes.len() {
-                        crate::debug!(3, "Didn't reach end of input, so this is not a clean match");
+                        crate::debug!(4, "Didn't reach end of input, so this is not a clean match");
                         queue.entry(new_queue_key).or_default().insert(NodeHandle(new_precomputed_node.clone()));
                     } else { unreachable!(); }
                 }
             }
             // Handle partial matches (end state reached before end of vocab node bytes)
             if let Some(end_state) = results.end_state {
-                crate::debug!(3, "Reached end state");
+                crate::debug!(4, "Reached end state");
                 let possible_final_grammar_tokens: BTreeSet<_> = tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state)).into_iter().map(|token_id| GrammarTokenID(token_id.0)).collect();
                 for possible_final_grammar_token in possible_final_grammar_tokens {
                     for precompute_node in &precomputed_nodes {
