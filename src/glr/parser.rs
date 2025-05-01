@@ -266,8 +266,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
 
         // Process the work-list until no more states remain for the current token.
         while let Some((_key, state)) = worklist.pop_first() {
-            let stack = state.stack; // Arc<GSSNode<ParseStateNodeContent<T>>>
-            let current_content = stack.peek(); // &ParseStateNodeContent<T>
+            let current_content = state.stack.peek(); // &ParseStateNodeContent<T>
             let current_state_id = current_content.state_id;
             let current_t = &current_content.t;
 
@@ -278,7 +277,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                     debug!(5, "Shifting");
                     let new_content =
                         ParseStateNodeContent { state_id: *next_state_id, t: current_t.clone() };
-                    let new_stack = stack.push(new_content);
+                    let new_stack = state.stack.push(new_content);
                     let new_state = ParseState { stack: Arc::new(new_stack) };
                     let key = new_state.key();
                     next_active_state_map.insert_with(key, new_state, |existing, s| {
@@ -291,7 +290,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                     len,
                 }) => {
                     debug!(5, "Reducing by production {:?} with len {}", production_id, len);
-                    let mut popped_stack_nodes = stack.popn(*len);
+                    let mut popped_stack_nodes = state.stack.popn(*len);
                     let gt = popped_stack_nodes.len() > 1;
                     if gt {
                         crate::debug!(
@@ -336,7 +335,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                     if let Some(shift_state) = shift {
                         let new_content =
                             ParseStateNodeContent { state_id: *shift_state, t: current_t.clone() };
-                        let new_stack = stack.push(new_content);
+                        let new_stack = state.stack.push(new_content);
                         let new_state = ParseState { stack: Arc::new(new_stack) };
                         let key = new_state.key();
                         next_active_state_map.insert_with(key, new_state, |existing, s| {
@@ -346,7 +345,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
 
                     crate::debug!(4, "Reduces: {}", reduces.len());
                     for (len, nt_ids) in reduces {
-                        let mut popped_stack_nodes = stack.popn(*len);
+                        let mut popped_stack_nodes = state.stack.popn(*len);
                         popped_stack_nodes.bulk_merge();
                         crate::debug!(4, "Popped {} stack nodes", popped_stack_nodes.len());
                         for nt_id in nt_ids.keys() {
