@@ -283,13 +283,13 @@ impl GrammarConstraint {
                 for precompute_node in &precomputed_nodes {
                     let mut precompute_node = precompute_node.lock().unwrap();
                     if new_offset == bytes.len() {
-                        let llm_tokens = dst.reachable_token_ids().clone();
-                        if let Some(mut next_precompute_node) = get_next_precompute_node(&queue, new_queue_key, &mut precompute_node, &llm_tokens, matched_token_id) {
-                            // Reached the end of the input, so this is a clean match.
-                            crate::debug!(4, "Reached the end of the input, so this is a clean match.");
-                            next_precompute_node.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
-                            let next_src = dst;
-                            for (next_bytes, next_dst) in next_src.children() {
+                        // Reached the end of the input, so this is a clean match.
+                        crate::debug!(4, "Reached the end of the input, so this is a clean match.");
+                        let next_src = dst;
+                        for (next_bytes, next_dst) in next_src.children() {
+                            let llm_tokens = dst.reachable_token_ids().clone();
+                            if let Some(mut next_precompute_node) = get_next_precompute_node(&queue, new_queue_key, &mut precompute_node, &llm_tokens, matched_token_id) {
+                                next_precompute_node.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
                                 let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
                                 let new_queue_key = (new_dotted_node, TokenizerStateID(0));
                                 queue.entry(new_queue_key).or_default().insert(NodeHandle(next_precompute_node.clone()));
