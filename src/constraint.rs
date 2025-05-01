@@ -321,7 +321,7 @@ impl GrammarConstraint {
                 let next_src = dst;
                 for (next_bytes, next_dst) in next_src.iter_children() {
                     let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
-                    let new_queue_key = (new_dotted_node, TokenizerStateID(0));
+                    let new_queue_key = (new_dotted_node, TokenizerStateID(end_state));
                     queue.entry(new_queue_key).or_default().extend(precomputed_nodes.clone());
                 }
             }
