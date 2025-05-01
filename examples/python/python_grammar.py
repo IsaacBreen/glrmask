@@ -92,7 +92,7 @@ def define_tokens() -> list[tuple[str, Any]]:
 #     alph_lower = choice([eat_u8(c) for c in range(ord("a"), ord("z") + 1)])
 #     alph_upper = choice([eat_u8(c) for c in range(ord("A"), ord("Z") + 1)])
     # TODO: delete this
-    digit = eat_u8(ord("a"))
+    digit = eat_u8(ord("1"))
     alph_lower = eat_u8(ord("a"))
     alph_upper = eat_u8(ord("a"))
 
