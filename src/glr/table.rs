@@ -371,25 +371,25 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
 
     crate::debug!(2, "Stage 1");
     let stage_1_table = stage_1(productions, start_production_id);
-    crate::debug!(2, &stage_1_table);
+    crate::debug!(3, &stage_1_table);
     crate::debug!(2, "Stage 2");
     let stage_2_table = stage_2(stage_1_table, productions);
-    crate::debug!(2, &stage_2_table);
+    crate::debug!(3, &stage_2_table);
     crate::debug!(2, "Stage 3");
     let stage_3_table = stage_3(stage_2_table, productions);
-    crate::debug!(2, &stage_3_table);
+    crate::debug!(3, &stage_3_table);
     crate::debug!(2, "Stage 4");
     let stage_4_table = stage_4(stage_3_table, productions);
-    crate::debug!(2, &stage_4_table);
+    crate::debug!(3, &stage_4_table);
     crate::debug!(2, "Stage 5");
     let stage_5_table = stage_5(stage_4_table, productions);
-    crate::debug!(2, &stage_5_table);
+    crate::debug!(3, &stage_5_table);
     crate::debug!(2, "Stage 6");
     let stage_6_table = stage_6(stage_5_table);
-    crate::debug!(2, &stage_6_table);
+    crate::debug!(3, &stage_6_table);
     crate::debug!(2, "Stage 7");
     let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, productions, start_production_id, &terminal_map, &non_terminal_map);
-    crate::debug!(2, &stage_7_table);
+    crate::debug!(3, &stage_7_table);
     crate::debug!(2, "Done generating GLR parser");
 
     GLRParser::new(stage_7_table, productions.to_vec(), terminal_map, non_terminal_map, item_set_map, start_state_id)

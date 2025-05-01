@@ -214,7 +214,7 @@ def create_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_ll
 def initialize_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id):
     grammar_constraint = create_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id)
 #     grammar_constraint.print()
-    return grammar_constraint_state
+    return grammar_constraint   
 
 def generate_text(model, tokenizer, grammar_processor, input_text, max_new_tokens=50):
     input_ids = tokenizer.encode(input_text, return_tensors="pt")
