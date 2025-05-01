@@ -268,24 +268,27 @@ impl GrammarConstraint {
                     // Use any existing edge on the src node.
                     // crate::debug!(4, "Trying to find existing edge value");
                     if let Some(existing_edges) = precompute_node.get_mut(&matched_token_id) {
-                        if let Some((existing_edge_llm_tokens, existing_dst)) = existing_edges.iter_mut().next() {
+                        if let Some((existing_edge_llm_tokens, existing_precomputed_node)) = existing_edges.iter_mut().next() {
                             // Merge into the edge value.
                             crate::debug!(4, "Success! Found existing edge value");
                             *existing_edge_llm_tokens |= llm_tokens.clone();
-                            if new_offset == bytes.len() {
-                                // Reached the end of the input, so this is a clean match.
-                                crate::debug!(4, "Reached the end of the input, so this is a clean match.");
-                                existing_dst.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
-                                let next_src = dst;
-                                for (next_bytes, next_dst) in next_src.children() {
-                                    let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
-                                    let new_queue_key = (new_dotted_node, TokenizerStateID(0));
-                                    queue.entry(new_queue_key).or_default().insert(NodeHandle(existing_dst.clone()));
-                                }
-                            } else if new_offset < bytes.len() {
-                                crate::debug!(4, "Didn't reach end of input, so this is not a clean match");
-                                queue.entry(new_queue_key).or_default().insert(NodeHandle(existing_dst.clone()));
-                            } else { unreachable!(); }
+                            fn process<'a>(queue: &mut BTreeMap<(DottedVocabNode<'a>, TokenizerStateID), BTreeSet<NodeHandle>>, existing_precomputed_node: &mut Arc<Mutex<Trie<TerminalID, LLMTokenBV, PrecomputedNodeContents>>>, dst: &'a VocabPrefixTreeNode, new_offset: usize, bytes: &[u8], new_queue_key: (DottedVocabNode<'a>, TokenizerStateID), max_llm_token_id: usize) {
+                                if new_offset == bytes.len() {
+                                    // Reached the end of the input, so this is a clean match.
+                                    crate::debug!(4, "Reached the end of the input, so this is a clean match.");
+                                    existing_precomputed_node.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
+                                    let next_src = dst;
+                                    for (next_bytes, next_dst) in next_src.children() {
+                                        let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
+                                        let new_queue_key = (new_dotted_node, TokenizerStateID(0));
+                                        queue.entry(new_queue_key).or_default().insert(NodeHandle(existing_precomputed_node.clone()));
+                                    }
+                                } else if new_offset < bytes.len() {
+                                    crate::debug!(4, "Didn't reach end of input, so this is not a clean match");
+                                    queue.entry(new_queue_key).or_default().insert(NodeHandle(existing_precomputed_node.clone()));
+                                } else { unreachable!(); }
+                            }
+                            process(&mut queue, existing_precomputed_node, dst, new_offset, bytes, new_queue_key, max_llm_token_id);
                             continue 'outer;
                         }
                     }
