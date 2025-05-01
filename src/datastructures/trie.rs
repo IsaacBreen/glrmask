@@ -704,7 +704,7 @@ mod tests {
         // Structure:
         //      root (0) --"edge", "val1"--> child1 (1)
         //           |
-        //           --"edge", "val2"--> child2 (2)
+        //            -----"edge", "val2"--> child2 (2)
         let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
         let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
         let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
