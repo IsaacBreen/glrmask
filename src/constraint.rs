@@ -497,6 +497,11 @@ impl<'a> GrammarConstraintState<'a> {
             // Output: bool (continue?)
             |node, glr_parse_state| {
                 glr_parse_state.merge_active_states();
+                let mut active_llm_tokens = LLMTokenBV::repeat(false, self.parent.max_llm_token_id + 1);
+                for parse_state in &glr_parse_state.active_states {
+                    active_llm_tokens |= parse_state.stack.value.t.active.clone();
+                }
+                crate::debug!(3, "Processing node with {} active states, {} LLM tokens, {} finalizers", glr_parse_state.active_states.len(), active_llm_tokens.count_ones(), node.value.finalizers.len());
                 // Handle clean end
                 if let Some(clean_end) = &node.value.clean_end {
                     let mut final_glr_parse_state = glr_parse_state.clone();
