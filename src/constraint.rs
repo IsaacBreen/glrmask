@@ -233,9 +233,10 @@ impl GrammarConstraint {
             if precomputed_nodes.len() > 3 {
                 // Merge the nodes
                 if let Some(existing) = merge_map.get(&precomputed_nodes) {
+                    crate::debug!(3, "Merging {} nodes. Found existing merge", precomputed_nodes.len());
                     precomputed_nodes = BTreeSet::from([NodeHandle(existing.clone())]);
                 } else {
-                    crate::debug!(3, "Merging {} nodes", precomputed_nodes.len());
+                    crate::debug!(3, "Merging {} nodes. No existing merge", precomputed_nodes.len());
                     let mut new_precomputed_node = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
                     let all_llm_tokens = LLMTokenBV::repeat(true, max_llm_token_id + 1);
                     for precomputed_node in precomputed_nodes.iter() {
