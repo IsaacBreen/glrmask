@@ -329,6 +329,7 @@ impl GrammarConstraint {
 
         // Pull the roots out of their Arc<Mutex<_>>
         let precomputed_roots = precomputed_roots.into_iter().map(|(tokenizer_state_id, node)| (tokenizer_state_id, node.lock().unwrap().clone())).collect();
+        crate::debug!(2, "Done precomputing");
         precomputed_roots
     }
 
