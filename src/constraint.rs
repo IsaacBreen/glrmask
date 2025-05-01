@@ -290,12 +290,12 @@ impl GrammarConstraint {
                             next_precompute_node.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
                         }
                         // Reached the end of the input, so this is a clean match.
-                        crate::debug!(3, "Reached the end of the input, so this is a clean match.");
+                        crate::debug!(4, "Reached the end of the input, so this is a clean match.");
                         for (next_bytes, next_dst) in next_src.iter_children() {
+                            let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
+                            let new_queue_key = (new_dotted_node, TokenizerStateID(0));
                             if let Some(mut next_precompute_node) = link_next_precompute_node(&mut queue, new_queue_key, &mut precompute_node, matched_token_id) {
                                 next_precompute_node.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
-                                let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
-                                let new_queue_key = (new_dotted_node, TokenizerStateID(0));
                                 queue.entry(new_queue_key).or_default().insert(NodeHandle(next_precompute_node.clone()));
                             }
                         }
