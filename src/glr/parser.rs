@@ -297,9 +297,12 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                             });
                         }
 
+                        crate::debug!(4, "Reduces: {}", reduces.len());
                         for (len, nt_ids) in reduces {
                             let mut popped_stack_nodes = stack.popn(*len);
                             popped_stack_nodes.bulk_merge();
+                            crate::debug!(4, "Popped {} stack nodes", popped_stack_nodes.len());
+                            crate::debug!(4, "nt_ids.len(): {}", nt_ids.len());
                             for nt_id in nt_ids.keys() {
                                 for stack_node in &popped_stack_nodes {
                                     // Reduce part (same as above)
@@ -329,7 +332,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
         self.active_states = next_active_states;
         self.action_not_found_states = current_action_not_found_states; // Replace previous not-found states
         crate::debug!(3, "After stepping, there are {} active states and {} action not found states", self.active_states.len(), self.action_not_found_states.len());
-        
+
         // TODO: decide whether to keep action_not_found_states or not
         self.action_not_found_states.clear();
     }
