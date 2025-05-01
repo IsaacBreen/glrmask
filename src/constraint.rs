@@ -496,6 +496,7 @@ impl<'a> GrammarConstraintState<'a> {
             // Input: &PrecomputeNode, &GLRParserState<'_, LLMTokenInfo>
             // Output: bool (continue?)
             |node, glr_parse_state| {
+                glr_parse_state.merge_active_states();
                 // Handle clean end
                 if let Some(clean_end) = &node.value.clean_end {
                     let mut final_glr_parse_state = glr_parse_state.clone();
