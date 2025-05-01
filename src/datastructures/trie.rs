@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt::{self, Debug};
-use std::sync::{Arc, LockResult, Mutex};
+use std::sync::{Arc, Mutex};
 
 /// Error type indicating that a cycle was detected during an operation
 /// that updates graph structure or properties like max_depth.
@@ -292,28 +292,12 @@ impl<EK: Ord, EV, T> Trie<EK, EV, T> {
 }
 
 /// Helper to get the raw pointer from an Arc<Mutex<Trie>>. Panics if the mutex is poisoned.
-pub(crate) fn node_ptr<EK: Ord, EV, T>(
-    node_arc: &Arc<Mutex<Trie<EK, EV, T>>>,
-) -> *const Trie<EK, EV, T> {
-    let guard_result: LockResult<_> = node_arc.lock(); // Blocks
-
-    let guard = match guard_result {
-        Ok(g) => g, // Lock acquired successfully
-        Err(poison_error) => {
-            // Lock acquired despite poisoning
-            eprintln!(
-                "Warning: Mutex was poisoned when getting node pointer. \
-                 Data might be inconsistent."
-            );
-            poison_error.into_inner() // Recover the guard
-        }
-    };
-
-    let ptr = &*guard as *const _;
-    // Guard is dropped here, lock is released.
-    ptr
+pub(crate) fn node_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK, EV, T>>>) -> *const Trie<EK, EV, T> {
+    // Use try_lock().expect() for simplicity in this context, assuming poisoning is fatal.
+    // A production system might handle the poison error more gracefully.
+    let guard = node_arc.try_lock().expect("Mutex poisoned when getting node pointer");
+    &*guard as *const _
 }
-
 
 
 // Implementation block for special_map and related functionality
