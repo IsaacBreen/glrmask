@@ -183,6 +183,23 @@ impl GrammarConstraint {
             }
         }
         // ------------------------------------------------------------------------------------
+        
+        fn process<'a>(queue: &mut BTreeMap<(DottedVocabNode<'a>, TokenizerStateID), BTreeSet<NodeHandle>>, dst_precomputed_node: &mut Arc<Mutex<Trie<TerminalID, LLMTokenBV, PrecomputedNodeContents>>>, dst: &'a VocabPrefixTreeNode, new_offset: usize, bytes: &[u8], new_queue_key: (DottedVocabNode<'a>, TokenizerStateID), max_llm_token_id: usize) {
+            if new_offset == bytes.len() {
+                // Reached the end of the input, so this is a clean match.
+                crate::debug!(4, "Reached the end of the input, so this is a clean match.");
+                dst_precomputed_node.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
+                let next_src = dst;
+                for (next_bytes, next_dst) in next_src.children() {
+                    let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
+                    let new_queue_key = (new_dotted_node, TokenizerStateID(0));
+                    queue.entry(new_queue_key).or_default().insert(NodeHandle(dst_precomputed_node.clone()));
+                }
+            } else if new_offset < bytes.len() {
+                crate::debug!(4, "Didn't reach end of input, so this is not a clean match");
+                queue.entry(new_queue_key).or_default().insert(NodeHandle(dst_precomputed_node.clone()));
+            } else { unreachable!(); }
+        }
 
         // Create the vocab prefix tree.
         let mut tokens_for_vocab_prefix_tree_builder: Vec<(usize, Vec<u8>)> = vec![];
@@ -272,22 +289,6 @@ impl GrammarConstraint {
                             // Merge into the edge value.
                             crate::debug!(4, "Success! Found existing edge value");
                             *existing_edge_llm_tokens |= llm_tokens.clone();
-                            fn process<'a>(queue: &mut BTreeMap<(DottedVocabNode<'a>, TokenizerStateID), BTreeSet<NodeHandle>>, existing_precomputed_node: &mut Arc<Mutex<Trie<TerminalID, LLMTokenBV, PrecomputedNodeContents>>>, dst: &'a VocabPrefixTreeNode, new_offset: usize, bytes: &[u8], new_queue_key: (DottedVocabNode<'a>, TokenizerStateID), max_llm_token_id: usize) {
-                                if new_offset == bytes.len() {
-                                    // Reached the end of the input, so this is a clean match.
-                                    crate::debug!(4, "Reached the end of the input, so this is a clean match.");
-                                    existing_precomputed_node.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
-                                    let next_src = dst;
-                                    for (next_bytes, next_dst) in next_src.children() {
-                                        let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
-                                        let new_queue_key = (new_dotted_node, TokenizerStateID(0));
-                                        queue.entry(new_queue_key).or_default().insert(NodeHandle(existing_precomputed_node.clone()));
-                                    }
-                                } else if new_offset < bytes.len() {
-                                    crate::debug!(4, "Didn't reach end of input, so this is not a clean match");
-                                    queue.entry(new_queue_key).or_default().insert(NodeHandle(existing_precomputed_node.clone()));
-                                } else { unreachable!(); }
-                            }
                             process(&mut queue, existing_precomputed_node, dst, new_offset, bytes, new_queue_key, max_llm_token_id);
                             continue 'outer;
                         }
@@ -295,21 +296,8 @@ impl GrammarConstraint {
 
                     // Create a new node.
                     crate::debug!(4, "Creating new precompute node");
-                    let new_precomputed_node = precompute_node.force_insert(matched_token_id, llm_tokens.clone(), PrecomputedNodeContents::default());
-                    if new_offset == bytes.len() {
-                        // Reached the end of the input, so this is a clean match.
-                        crate::debug!(4, "Reached the end of the input, so this is a clean match.");
-                        new_precomputed_node.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
-                        let next_src = dst;
-                        for (next_bytes, next_dst) in next_src.children() {
-                            let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
-                            let new_queue_key = (new_dotted_node, TokenizerStateID(0));
-                            queue.entry(new_queue_key).or_default().insert(NodeHandle(new_precomputed_node.clone()));
-                        }
-                    } else if new_offset < bytes.len() {
-                        crate::debug!(4, "Didn't reach end of input, so this is not a clean match");
-                        queue.entry(new_queue_key).or_default().insert(NodeHandle(new_precomputed_node.clone()));
-                    } else { unreachable!(); }
+                    let mut new_precomputed_node = precompute_node.force_insert(matched_token_id, llm_tokens.clone(), PrecomputedNodeContents::default());
+                    process(&mut queue, &mut new_precomputed_node, dst, new_offset, bytes, new_queue_key, max_llm_token_id);
                 }
             }
             // Handle partial matches (end state reached before end of vocab node bytes)
