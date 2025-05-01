@@ -283,7 +283,7 @@ impl GrammarConstraint {
                     }
 
                     // Use any existing edge on the src node.
-                    // crate::debug!(4, "Trying to find existing edge value");
+                    crate::debug!(4, "Trying to find existing edge value");
                     if let Some(existing_edges) = precompute_node.get_mut(&matched_token_id) {
                         if let Some((existing_edge_llm_tokens, existing_precomputed_node)) = existing_edges.iter_mut().next() {
                             // Merge into the edge value.
