@@ -242,6 +242,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
     }
 
     pub fn step(&mut self, token_id: TerminalID) {
+        crate::debug!(3, "Stepping with token {:?}", token_id.map(|token_id| token_id.0));
         let mut next_active_states = Vec::new();
         // This will store states where the current token_id leads to no action.
         let mut current_action_not_found_states = Vec::new();
@@ -327,6 +328,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
         }
         self.active_states = next_active_states;
         self.action_not_found_states = current_action_not_found_states; // Replace previous not-found states
+        crate::debug!(3, "After stepping, there are {} active states and {} action not found states", self.active_states.len(), self.action_not_found_states.len());
     }
 
     // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
