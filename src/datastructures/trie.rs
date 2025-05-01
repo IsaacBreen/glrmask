@@ -80,8 +80,6 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         // 1. Detect whether adding the edge would introduce a cycle.
         //    A cycle exists iff `self` is reachable from `child`.
         // ------------------------------------------------------------------
-        // Get the pointer to the data inside the Mutex for `self`.
-        // This is safe because we have `&mut self`.
         let self_ptr = self as *const Trie<EK, EV, T>;
         if Self::detect_cycle(self_ptr, &child) {
             return Err(CycleDetectedError);
@@ -188,22 +186,12 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
                 }
                 Err(TryLockError::WouldBlock) => {
                     // Failed to lock because it's held elsewhere (potentially by the thread calling try_insert).
-                    // Check if the Arc pointer itself matches the target's Arc pointer
-                    // (this requires passing the target Arc, not just its data pointer).
-                    // However, the current signature uses target_ptr.
-                    // A simpler check: if the data pointer of the *locked* node (target_ptr)
-                    // is the same as the data pointer we *would* get if we could lock node_arc,
-                    // then we've found the cycle. This requires getting the pointer without locking,
-                    // which is unsafe.
-                    // The original assumption: If we WouldBlock, and we are called from try_insert,
-                    // the blocked node *must* be the `self` node from try_insert, whose data pointer
-                    // is target_ptr. Let's stick with this assumption for now.
-                    // If this function were called in other contexts, this assumption might break.
+                    // Assume this means we've reached the target node in the context of try_insert.
+                    // If detect_cycle were used elsewhere, this assumption might need revisiting.
                     return true;
                 }
                 Err(TryLockError::Poisoned(p)) => {
-                    // A mutex was poisoned. This indicates a panic occurred previously while a lock was held.
-                    // Propagate the panic, as the data structure state might be inconsistent.
+                    // A mutex was poisoned. Propagate the panic.
                     panic!("Mutex poisoned during cycle detection: {:?}", p);
                 }
             }
@@ -272,7 +260,6 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
 
             if should_propagate {
                 // Recurse. Propagate the error up if recursion detects a cycle.
-                // No need to re-check rec_stack here, the recursive call will do it.
                 Self::_propagate_max_depth(child_arc, candidate_depth, rec_stack)?;
             }
         }
@@ -287,7 +274,6 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         &self,
         edge_key: &EK,
     ) -> Option<&Vec<(EV, Arc<Mutex<Trie<EK, EV, T>>>)>>
-    // where EV: Clone // Removed unnecessary Clone bound here
     {
         self.children.get(edge_key)
     }
@@ -297,7 +283,6 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         &mut self,
         edge_key: &EK,
     ) -> Option<&mut Vec<(EV, Arc<Mutex<Trie<EK, EV, T>>>)>>
-    // where EV: Clone // Removed unnecessary Clone bound here
     {
         self.children.get_mut(edge_key)
     }
@@ -348,6 +333,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
 /// Panics if the mutex is poisoned. Returns None if lock fails (WouldBlock).
 /// **Use with caution:** Only use when you know a failed lock means the current thread holds it.
 /// Consider using `Arc::as_ptr` for identity checks instead if possible.
+#[allow(dead_code)] // Keep available, but node_ptr is preferred generally
 pub(crate) fn try_get_node_data_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK, EV, T>>>) -> Option<*const Trie<EK, EV, T>> {
     match node_arc.try_lock() {
         Ok(guard) => {
@@ -368,6 +354,7 @@ pub(crate) fn try_get_node_data_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK
 /// Helper to get the raw pointer to the Trie data from an Arc<Mutex<Trie>>.
 /// Panics if the mutex is poisoned or if locking fails (blocking lock).
 /// **Use when you need the pointer and expect the lock to succeed.**
+#[allow(dead_code)] // Keep available, but Arc::as_ptr is often better for identity
 pub(crate) fn node_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK, EV, T>>>) -> *const Trie<EK, EV, T> {
     let guard = node_arc.lock().expect("Mutex poisoned or lock failed when getting node pointer");
     &*guard as *const _
@@ -567,10 +554,10 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     pub fn try_insert_or_merge_edge<FMergeEV, FMergeNV>(
         &mut self,
         edge_key: EK,
-        edge_value: EV,
-        new_node_value: T,
-        mut merge_edge_value: FMergeEV,
-        mut merge_node_value: FMergeNV,
+        edge_value: EV, // The NEW edge value to potentially merge/insert
+        new_node_value: T, // The NEW node value if creating node
+        mut merge_edge_value: FMergeEV, // FnMut(&EV, EV) -> Option<EV> (existing, new)
+        mut merge_node_value: FMergeNV, // FnMut(&T, T) -> Option<T> (existing, new)
     ) -> Result<Arc<Mutex<Trie<EK, EV, T>>>, CycleDetectedError>
     where
         FMergeEV: FnMut(&EV, EV) -> Option<EV>,
@@ -579,65 +566,65 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         T: Clone,
     {
         // --- Check Phase (Immutable Borrow) ---
-        let mut node_merge_target: Option<(usize, T, Arc<Mutex<Trie<EK, EV, T>>>)> = None;
-        let mut edge_merge_target: Option<(usize, EV, Arc<Mutex<Trie<EK, EV, T>>>)> = None;
+        // Find the first index `i` and the corresponding Arc `node_arc` where node merge succeeds.
+        let node_merge_candidate: Option<(usize, T, Arc<Mutex<Trie<EK, EV, T>>>)> =
+            if let Some(children_vec) = self.children.get(&edge_key) {
+                children_vec.iter().enumerate().find_map(|(i, (_ev, node_arc))| {
+                    let merged_val_opt = {
+                        let node_guard = node_arc.lock().expect("Lock failed during node merge check");
+                        merge_node_value(&node_guard.value, new_node_value.clone())
+                    };
+                    merged_val_opt.map(|merged_val| (i, merged_val, node_arc.clone()))
+                })
+            } else {
+                None
+            };
 
-        if let Some(children_vec) = self.children.get(&edge_key) { // Immutable borrow
-            // Pass 1 Check: Find first node merge candidate
-            for i in 0..children_vec.len() {
-                let (_existing_ev, existing_node_arc) = &children_vec[i];
-                let merged_node_val_opt = {
-                    let existing_node_guard = existing_node_arc.lock().expect("Lock failed during node merge check");
-                    merge_node_value(&existing_node_guard.value, new_node_value.clone())
-                };
-                if let Some(merged_val) = merged_node_val_opt {
-                    node_merge_target = Some((i, merged_val, existing_node_arc.clone()));
-                    break; // Prioritize node merge, stop checking
-                }
-            }
-
-            // Pass 2 Check: If no node merge, find first edge merge candidate
-            if node_merge_target.is_none() {
-                for i in 0..children_vec.len() {
-                    let (existing_ev, existing_node_arc) = &children_vec[i];
-                    if let Some(merged_val) = merge_edge_value(existing_ev, edge_value.clone()) {
-                        edge_merge_target = Some((i, merged_val, existing_node_arc.clone()));
-                        break; // Found first edge merge, stop checking
-                    }
-                }
-            }
-        } // End immutable borrow
-
-        // --- Apply Phase (Mutable Borrows) ---
-
-        // Case 1: Node Merge Found
-        if let Some((idx, merged_node_val, node_arc)) = node_merge_target {
+        // --- Apply Phase 1: Node Merge ---
+        if let Some((idx, merged_node_val, node_arc)) = node_merge_candidate {
             // Update node value
             {
                 let mut node_guard = node_arc.lock().expect("Lock failed for node update");
                 node_guard.value = merged_node_val;
             }
-            // Try update edge value (use original edge_value passed to function)
-            // Need mutable access to the children vec now
+            // Try update edge value for the found index `idx`
             let children_vec_mut = self.children.get_mut(&edge_key)
-                .expect("Children vec disappeared between check and apply"); // Should exist
+                .expect("Children vec disappeared between check and apply");
+            // Pass the NEW edge value (edge_value) for merging
             if let Some(merged_ev) = merge_edge_value(&children_vec_mut[idx].0, edge_value) {
                  children_vec_mut[idx].0 = merged_ev;
             }
+            // Return the Arc corresponding to the merged node
             return Ok(node_arc);
         }
 
-        // Case 2: Only Edge Merge Found
-        if let Some((idx, merged_edge_val, node_arc)) = edge_merge_target {
+        // --- Check Phase 2: Edge Merge (Only if Node Merge failed) ---
+        // Find the first index `i` and the corresponding Arc `node_arc` where edge merge succeeds.
+        let edge_merge_candidate: Option<(usize, EV, Arc<Mutex<Trie<EK, EV, T>>>)> =
+            if let Some(children_vec) = self.children.get(&edge_key) {
+                 children_vec.iter().enumerate().find_map(|(i, (ev, node_arc))| {
+                    // Pass the NEW edge value (edge_value) for merging check
+                    merge_edge_value(ev, edge_value.clone())
+                        .map(|merged_ev| (i, merged_ev, node_arc.clone()))
+                 })
+            } else {
+                None
+            };
+
+        // --- Apply Phase 2: Edge Merge ---
+        if let Some((idx, merged_edge_val, node_arc)) = edge_merge_candidate {
             let children_vec_mut = self.children.get_mut(&edge_key)
-                .expect("Children vec disappeared between check and apply"); // Should exist
-            children_vec_mut[idx].0 = merged_edge_val;
+                .expect("Children vec disappeared between check and apply");
+            children_vec_mut[idx].0 = merged_edge_val; // Update edge value with the merged value
+            // Return the Arc corresponding to the existing node with the merged edge
             return Ok(node_arc);
         }
 
-        // Case 3: No Merge Found - Create New Node and Edge
+        // --- Apply Phase 3: Create New Node and Edge ---
+        // No suitable node/edge found for merging.
         let new_node = Arc::new(Mutex::new(Trie::new(new_node_value)));
         // Use try_insert which handles adding to children vec (creating if needed) and cycle checks/depth updates
+        // Pass the original NEW edge_value
         self.try_insert(edge_key, edge_value, new_node.clone())?;
         Ok(new_node)
     }
@@ -1498,26 +1485,26 @@ mod tests {
         }
 
         let edge_key = "key";
-        let edge_val = vec![1];
-        let node_val = "data".to_string();
+        let edge_val = vec![1]; // New EV
+        let node_val = "data".to_string(); // New T
 
         // Since node merge is checked first (Pass 1), node2 (at index 1) should be selected.
         let returned_node_res = { // Scope for mutable borrow
             let mut root = root_node.lock().unwrap();
             root.try_insert_or_merge_edge(
                 edge_key,
-                edge_val.clone(),
-                node_val.clone(),
-                merge_ev_append, // Fails for node2's edge (empty), succeeds for node1's edge ([10])
-                merge_nv_append_if_flag, // Succeeds for node2 ("mergeable"), fails for node1
+                edge_val.clone(), // Pass vec![1] as new EV
+                node_val.clone(), // Pass "data" as new T
+                merge_ev_append, // Fn(&Vec<i32>, Vec<i32>) -> Option<Vec<i32>>
+                merge_nv_append_if_flag, // Fn(&String, String) -> Option<String>
             )
         };
         assert!(returned_node_res.is_ok());
         let returned_node = returned_node_res.unwrap();
 
         // Check node2 was returned and updated (Pass 1 succeeded for index 1)
-        assert!(Arc::ptr_eq(&returned_node, &node2));
-        assert_eq!(returned_node.lock().unwrap().value, "node2_mergeable|data");
+        assert!(Arc::ptr_eq(&returned_node, &node2), "Returned node should be node2"); // Check pointer equality
+        assert_eq!(returned_node.lock().unwrap().value, "node2_mergeable|data", "Node2 value should be merged");
 
         // Check root's children: node1 unchanged, node2's edge unchanged (because edge merge failed for node2)
         let root = root_node.lock().unwrap(); // Re-lock read-only
@@ -1537,11 +1524,8 @@ mod tests {
         // Node value was updated (checked above).
     }
 
-    // Removed test_insert_or_merge_edge_detects_cycle because try_insert_or_merge_edge
-    // is not designed to re-insert an existing node in Pass 3, thus it cannot detect
-    // cycles in the way the test expected. Cycle detection is handled by the direct
-    // call to try_insert in Pass 3 (if a new node is created) or by the underlying
-    // try_insert used in the test setup, which is covered by
-    // test_cycle_detection_on_try_insert.
-
+    // test_insert_or_merge_edge_detects_cycle removed as try_insert_or_merge_edge
+    // doesn't attempt to re-insert an existing node in a way that would trigger
+    // cycle detection based on the node itself being passed again. Cycle detection
+    // relies on the try_insert call in Pass 3 when creating a *new* edge/node.
 }
