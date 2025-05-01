@@ -52,9 +52,13 @@ impl VocabPrefixTreeNode {
         &self.prefix
     }
 
+    pub fn children(&self) -> &BTreeMap<Vec<u8>, VocabPrefixTreeNode> {
+        &self.children
+    }
+
     /// Returns an iterator over the children of this node.
     /// The iterator yields pairs of `(&Vec<u8>, &VocabPrefixTreeNode)`, representing the edge label and the child node.
-    pub fn children(&self) -> std::collections::btree_map::Iter<'_, Vec<u8>, VocabPrefixTreeNode> {
+    pub fn iter_children(&self) -> std::collections::btree_map::Iter<'_, Vec<u8>, VocabPrefixTreeNode> {
         self.children.iter()
     }
 
@@ -92,7 +96,7 @@ impl fmt::Debug for VocabPrefixTreeNode {
 
         // Format children concisely using the helper.
         let children_summary: BTreeMap<String, &VocabPrefixTreeNode> = self
-            .children()            .map(|(k, v)| (format_bytes(k), v))
+            .iter_children()            .map(|(k, v)| (format_bytes(k), v))
             .collect();
         debug_struct.field("children", &children_summary);
 
@@ -331,7 +335,7 @@ impl VocabPrefixTree {
     /// Returns an iterator over the direct children of the root node.
     /// The iterator yields pairs of `(&Vec<u8>, &VocabPrefixTreeNode)`, representing the edge label and the child node.
     pub fn root_children(&self) -> std::collections::btree_map::Iter<'_, Vec<u8>, VocabPrefixTreeNode> {
-        self.root.children()
+        self.root.iter_children()
     }
 
     /// Returns the maximum token ID used to build this tree.
@@ -823,7 +827,7 @@ mod tests {
         assert!(root_children_iter.next().is_none()); // Only 'a' and 'b' are direct children of root
 
         // Iterate children of node 'a'
-        let mut node_a_children_iter = node_a_ref.children();
+        let mut node_a_children_iter = node_a_ref.iter_children();
         let (edge_pe, node_ape_ref) = node_a_children_iter.next().unwrap();
         assert_eq!(edge_pe, &b("pe"));
         assert_eq!(node_ape_ref.token_id, 10);
@@ -831,7 +835,7 @@ mod tests {
         assert!(node_a_children_iter.next().is_none());
 
         // Iterate children of node 'b'
-        let mut node_b_children_iter = node_b_ref.children();
+        let mut node_b_children_iter = node_b_ref.iter_children();
         let (edge_anana, node_banana_ref) = node_b_children_iter.next().unwrap();
         assert_eq!(edge_anana, &b("anana"));
         assert_eq!(node_banana_ref.token_id, 20);
