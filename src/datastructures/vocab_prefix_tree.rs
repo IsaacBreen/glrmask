@@ -10,8 +10,9 @@ use bitvec::prelude::*;
 pub struct VocabPrefixTreeNode {
     /// The token ID corresponding to the path from the root to this node.
     /// Every node represents a valid token endpoint.
-    /// The root node has ID 0 by convention, unless overwritten by an empty string token.
     token_id: usize,
+    /// The byte sequence from the root to this node (full prefix).
+    prefix: Vec<u8>,
     /// The length of the byte sequence from the root to this node.
     prefix_length: usize,
     /// Children nodes, keyed by the byte vector representing the edge label.
@@ -24,9 +25,11 @@ pub struct VocabPrefixTreeNode {
 
 impl VocabPrefixTreeNode {
     /// Creates a new node representing a token endpoint.
-    fn new(token_id: usize, prefix_length: usize) -> Self {
+    fn new(token_id: usize, prefix: Vec<u8>) -> Self {
+        let prefix_length = prefix.len();
         VocabPrefixTreeNode {
             token_id,
+            prefix,
             prefix_length,
             children: BTreeMap::new(),
             // Initialize empty; will be computed after tree structure is built.
@@ -53,6 +56,11 @@ impl VocabPrefixTreeNode {
     /// Returns a bitvec representing the set of token IDs reachable from this node.
     pub fn reachable_token_ids(&self) -> &BitVec {
         &self.reachable_token_ids
+    }
+
+    /// Returns the byte sequence (full prefix) from the root to this node.
+    pub fn prefix(&self) -> &[u8] {
+        &self.prefix
     }
 }
 
@@ -112,7 +120,7 @@ impl VocabPrefixTree {
     pub fn new() -> Self {
         VocabPrefixTree {
             // Root node represents the empty prefix (length 0), ID 0 by convention.
-            root: VocabPrefixTreeNode::new(0, 0),
+            root: VocabPrefixTreeNode::new(0, Vec::new()),
             // Initially, assume no empty string token is present.
             // Max ID is 0 initially, will be updated during build.
             max_token_id: 0,
@@ -150,7 +158,7 @@ impl VocabPrefixTree {
             }
             // Insert node. If duplicate byte vecs exist, the last ID wins due to BTreeMap semantics.
             // The prefix_length is the length of the full token bytes.
-            let node = VocabPrefixTreeNode::new(*id, bytes.len());
+            let node = VocabPrefixTreeNode::new(*id, bytes.clone());
             tree.root.children.insert(bytes.clone(), node);
         }
 
