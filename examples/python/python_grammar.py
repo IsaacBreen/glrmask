@@ -260,8 +260,8 @@ if __name__ == "__main__":
     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
     tokens = tokenizer.encode(input_text, return_tensors="pt")
     tokens: list[int] = tokens.tolist()[0]
-    for token_id in tokens:
-        grammar_constraint_state.commit(token_id)
+#     for token_id in tokens:
+#         grammar_constraint_state.commit(token_id)
     mask = grammar_constraint_state.get_mask()
     print(f"Mask: {mask}")
     mask_ids = np.where(mask)[0].tolist()
