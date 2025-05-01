@@ -269,7 +269,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                     Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
                         debug!(5, "Reducing by production {:?} with len {}", production_id, len);
                         let mut popped_stack_nodes = stack.popn(*len);
-                        if popped_stack_nodes.len() > 1 { crate::debug!(5, "Popped {} stack nodes", popped_stack_nodes.len()); }
+                        if popped_stack_nodes.len() > 1 { crate::debug!(4, "Popped {} stack nodes", popped_stack_nodes.len()); }
                         popped_stack_nodes.bulk_merge();
                         for stack_node in popped_stack_nodes {
                             // stack_node is Arc<GSSNode<ParseStateNodeContent<T>>>
