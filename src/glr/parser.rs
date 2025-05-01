@@ -269,9 +269,11 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                     Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
                         debug!(5, "Reducing by production {:?} with len {}", production_id, len);
                         let mut popped_stack_nodes = stack.popn(*len);
-                        crate::debug!(4, "Popped {} stack nodes (1)", popped_stack_nodes.len());
+                        let gt = popped_stack_nodes.len() > 1;
+                        if gt { crate::debug!(4, "Popped {} stack nodes (1)", popped_stack_nodes.len()); }
                         popped_stack_nodes.bulk_merge();
-                        crate::debug!(4, "Merged into {} stack nodes (1)", popped_stack_nodes.len());
+                        if gt { crate::debug!(4, "Merged into {} stack nodes (1)", popped_stack_nodes.len()); }
+                        let mut new_stacks = Vec::new();
                         for stack_node in popped_stack_nodes {
                             // stack_node is Arc<GSSNode<ParseStateNodeContent<T>>>
                             let revealed_content = stack_node.peek(); // &ParseStateNodeContent<T>
@@ -283,20 +285,23 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                             let combined_t = revealed_t.intersect(current_t);
                             let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                             let new_stack = stack_node.push(new_content);
+                            new_stacks.push(Arc::new(new_stack));
+                        }
+                        new_stacks.bulk_merge();
+                        for stack in new_stacks {
                             self.active_states.push(ParseState {
-                                stack: Arc::new(new_stack),
+                                stack,
                             });
                         }
                     }
                     Stage7ShiftsAndReduces::Split { shift, reduces } => {
                         debug!(4, "Split");
+                        let mut new_stacks = Vec::new();
                         if let Some(shift_state) = shift {
                             // Shift part (same as above)
                             let new_content = ParseStateNodeContent { state_id: *shift_state, t: current_t.clone() };
                             let new_stack = stack.push(new_content);
-                            next_active_states.push(ParseState {
-                                stack: Arc::new(new_stack),
-                            });
+                            new_stacks.push(Arc::new(new_stack));
                         }
 
                         crate::debug!(4, "Reduces: {}", reduces.len());
@@ -316,11 +321,15 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                                     let combined_t = revealed_t.intersect(current_t);
                                     let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                                     let new_stack = stack_node.push(new_content);
-                                    self.active_states.push(ParseState {
-                                        stack: Arc::new(new_stack),
-                                    });
+                                    new_stacks.push(Arc::new(new_stack));
                                 }
                             }
+                        }
+                        new_stacks.bulk_merge();
+                        for stack in new_stacks {
+                            self.active_states.push(ParseState {
+                                stack,
+                            });
                         }
                     }
                 }
