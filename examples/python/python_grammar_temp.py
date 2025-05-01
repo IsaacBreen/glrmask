@@ -13,6 +13,7 @@ import pegen.tokenizer
 import torch
 from _sep1 import PyRegexExpr as Regex, PyGrammar, PyGrammarExpr as ge, PyGrammarConstraint, PyGrammarConstraintState
 from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
+from tqdm import tqdm
 
 
 def eat_string(s: bytes) -> Regex:
@@ -85,7 +86,6 @@ def define_tokens() -> list[tuple[str, Any]]:
 
     def regex(expr):
         return ge.regex(seq([ignore, expr]))
-#         return ge.regex(expr)
 
     digit = choice([eat_u8(c) for c in range(ord("0"), ord("9") + 1)])
     alph_lower = choice([eat_u8(c) for c in range(ord("a"), ord("z") + 1)])
@@ -134,27 +134,14 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
     exprs: list[tuple[str, Any]] = []
 
     # Make sure the start production is first
-    # exprs.append(("start", ))
-    # TODO: remove this
-    temp = "NUMBER"
-    # exprs.append(( "start'", ge.ref(temp)))
+    exprs.append(("start'''", ge.ref("file")))
 
-    # for rule in grammar.rules.values():
-    #     memo[rule.name] = ge.ref(rule.name)
-    #     exprs.append((rule.name, pegen_to_sep1_regex(rule.rhs, memo)))
+    for rule in grammar.rules.values():
+        memo[rule.name] = ge.ref(rule.name)
+        exprs.append((rule.name, pegen_to_sep1_regex(rule.rhs, memo)))
 
     tokens = define_tokens()
     exprs.extend(tokens)
-#     # TODO: remove this
-#     for (name, expr) in tokens:
-#         if name in [temp]:
-#             exprs.append((name, expr))
-#         else:
-#             exprs.append((name, ge.regex(Regex.eps())))
-
-    # todo: remove this
-#     exprs = [("start", ge.regex(Regex.eat_u8(ord("a"))))]
-    exprs = [("start", dict(tokens)["NAME"])]
 
     return PyGrammar(exprs)
 
@@ -182,17 +169,18 @@ def timeit(func):
     return wrapper
 
 class GrammarConstrainedLogitsProcessor(LogitsProcessor):
-    def __init__(self, grammar_constraint_state, llm_tokens):
+    def __init__(self, grammar_constraint_state, llm_token_to_id):
         self.grammar_constraint_state = grammar_constraint_state
         self.seen_input_ids = []
-        self.llm_tokens = llm_tokens
+        self.llm_token_to_id = llm_token_to_id
+        self.llm_token_id_to_token = {id: token for token, id in llm_token_to_id.items()}
 
     def __call__(self, input_ids, scores):
         current_input_ids = input_ids.view(-1).tolist()
         new_token_ids = current_input_ids[len(self.seen_input_ids):]
 
         for token_id in new_token_ids:
-            debug_print(f"Committing token: {self.llm_tokens[token_id]} (ID: {token_id})")
+            debug_print(f"Committing token: {self.llm_token_id_to_token.get(token_id)} (ID: {token_id})")
             timeit(self.grammar_constraint_state.commit)(token_id)
 
         self.seen_input_ids = current_input_ids
@@ -205,25 +193,26 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
             mask = mask[:scores.shape[-1]]
 
         mask_ids = np.where(mask)[0]
-        mask_id_map = {id: self.llm_tokens[id] for id in mask_ids}
-        debug_print(f"Mask IDs: {mask_id_map}")
+        mask_id_map = {id: self.llm_token_id_to_token.get(id) for id in mask_ids}
+#         debug_print(f"Mask IDs: {mask_id_map}")
         print("")
 
         scores = np.where(mask, scores, -np.inf)
         return torch.tensor(scores)
 
-def initialize_grammar_constraint(grammar, llm_tokens):
+def initialize_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id):
     print("Initializing PyGrammarConstraint...")
-    grammar_constraint = PyGrammarConstraint(grammar, llm_tokens)
-    grammar_constraint.print()
+    grammar_constraint = PyGrammarConstraint(grammar, llm_token_to_id, max_llm_token_id)
+#     grammar_constraint.print()
     print("Initializing Grammar Constraint State...")
     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
     print("Getting Initial Mask...")
     initial_mask = grammar_constraint_state.get_mask()
     initial_mask_ids = np.where(initial_mask)[0]
-    initial_mask_id_map = {id: llm_tokens[id] for id in initial_mask_ids}
+    llm_token_id_to_token = {id: token for token, id in llm_token_to_id.items()}
+    initial_mask_id_map = {id: llm_token_id_to_token.get(id) for id in initial_mask_ids}
     print(f"Initial Mask IDs: {initial_mask_id_map}")
-    assert len(initial_mask_id_map) > 0
+    assert len(initial_mask_id_map) > 0, f"Initial mask is empty: {initial_mask}"
     return grammar_constraint_state
 
 def generate_text(model, tokenizer, grammar_processor, input_text, max_new_tokens=50):
@@ -237,27 +226,30 @@ def generate_text(model, tokenizer, grammar_processor, input_text, max_new_token
     return tokenizer.decode(output[0], skip_special_tokens=True)
 
 if __name__ == "__main__":
-#     model_name = "Qwen/Qwen2.5-Coder-0.5B"
-    model_name = "gpt2"
+    model_name = "Qwen/Qwen2.5-Coder-0.5B"
+#     model_name = "gpt2"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-#     llm_tokens = [tokenizer.convert_ids_to_tokens(i).replace("Ġ", " ").encode() for i in range(tokenizer.vocab_size)]
-    llm_tokens = [x.encode() for x in ['a', ' b']]
-    llm_token_to_id = {token: i for i, token in enumerate(llm_tokens)}
+    llm_token_to_id = {token.replace("Ġ", " ").encode(): i for token, i in tokenizer.vocab.items()}
+    llm_tokens = list(tokenizer.vocab.keys())
+    print("vocab size:", len(llm_tokens))
+
+#     ts = ['Paris', 'London']
+#     llm_tokens = [x.encode() for x in ts]
+#     llm_token_to_id = {token.encode(): tokenizer.convert_tokens_to_ids(token) for token in ts}
 
     print("Defining grammar...")
     grammar = define_python_grammar()
-    # print(grammar)
     grammar.print()
     print("Initializing Grammar Constraint...")
-    grammar_constraint_state = initialize_grammar_constraint(grammar, llm_tokens)
+    grammar_constraint_state = initialize_grammar_constraint(grammar, llm_token_to_id, tokenizer.eos_token_id, max(llm_token_to_id.values()))
     print("Initializing grammar processor...")
-    grammar_processor = GrammarConstrainedLogitsProcessor(grammar_constraint_state, llm_tokens)
+    grammar_processor = GrammarConstrainedLogitsProcessor(grammar_constraint_state, llm_token_to_id)
 
     model = AutoModelForCausalLM.from_pretrained(model_name)
 
     print("Generating text...")
 #     input_text = "i^10=i*"
-    input_text = "(i)+((i))+(((i)))+"
+    input_text = "5*6 + 7*2 = 5+5+5+"
     output_text = generate_text(model, tokenizer, grammar_processor, input_text)
     print(output_text)
