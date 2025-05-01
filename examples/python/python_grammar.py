@@ -212,18 +212,8 @@ def create_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_ll
     return grammar_constraint
 
 def initialize_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id):
-    grammar_constraint = create_grammar_constraint
-    (grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id)
+    grammar_constraint = create_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id)
 #     grammar_constraint.print()
-    print("Initializing Grammar Constraint State...")
-    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
-    print("Getting Initial Mask...")
-    initial_mask = grammar_constraint_state.get_mask()
-    initial_mask_ids = np.where(initial_mask)[0]
-    llm_token_id_to_token = {id: token for token, id in llm_token_to_id.items()}
-    initial_mask_id_map = {id: llm_token_id_to_token.get(id) for id in initial_mask_ids}
-    print(f"Initial Mask IDs: {initial_mask_id_map}")
-    assert len(initial_mask_id_map) > 0, f"Initial mask is empty: {initial_mask}"
     return grammar_constraint_state
 
 def generate_text(model, tokenizer, grammar_processor, input_text, max_new_tokens=50):
