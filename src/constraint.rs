@@ -297,7 +297,6 @@ impl GrammarConstraint {
                             }
                         }
                     } else if new_offset < bytes.len() {
-                        let llm_tokens = dst.reachable_token_ids().clone();
                         if let Some(mut next_precompute_node) = link_next_precompute_node(&queue, new_queue_key, &mut precompute_node, matched_token_id) {
                             crate::debug!(4, "Didn't reach end of input, so this is not a clean match");
                             queue.entry(new_queue_key).or_default().insert(NodeHandle(next_precompute_node.clone()));
