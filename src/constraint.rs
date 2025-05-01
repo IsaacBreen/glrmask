@@ -300,7 +300,9 @@ impl GrammarConstraint {
                         return Some(new_precomputed_node.clone());
                     }
 
-                    get_next_precompute_node(&queue, new_queue_key, &mut precompute_node, &llm_tokens, matched_token_id);
+                    if let Some(mut next_precompute_node) = get_next_precompute_node(&queue, new_queue_key, &mut precompute_node, &llm_tokens, matched_token_id) {
+                        process(&mut queue, &mut next_precompute_node, dst, new_offset, bytes, new_queue_key, max_llm_token_id);
+                    }
                 }
             }
             // Handle partial matches (end state reached before end of vocab node bytes)
