@@ -17,7 +17,7 @@ macro_rules! choice_fast {
 #[macro_export]
 macro_rules! debug {
     ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {{
-        const MACRO_DEBUG_LEVEL: usize = 3;
+        const MACRO_DEBUG_LEVEL: usize = 2;
 
         if $level <= MACRO_DEBUG_LEVEL {
             // #[cfg(feature = "debug")]
@@ -26,7 +26,7 @@ macro_rules! debug {
     }};
 
     ($level:expr, $msg:expr) => {{
-        const MACRO_DEBUG_LEVEL: usize = 3;
+        const MACRO_DEBUG_LEVEL: usize = 2;
 
         if $level <= MACRO_DEBUG_LEVEL {
             // #[cfg(feature = "debug")]

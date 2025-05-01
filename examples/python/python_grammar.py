@@ -206,9 +206,13 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
         scores = np.where(mask, scores, -np.inf)
         return torch.tensor(scores)
 
-def initialize_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id):
+def create grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id):
     print("Initializing PyGrammarConstraint...")
     grammar_constraint = PyGrammarConstraint(grammar, llm_token_to_id, max_llm_token_id)
+    return grammar_constraint
+
+def initialize_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id):
+    grammar_constraint = create grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id)
 #     grammar_constraint.print()
     print("Initializing Grammar Constraint State...")
     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
@@ -248,7 +252,9 @@ if __name__ == "__main__":
     grammar = define_python_grammar()
     grammar.print()
     print("Initializing Grammar Constraint...")
-    grammar_constraint_state = initialize_grammar_constraint(grammar, llm_token_to_id, tokenizer.eos_token_id, max(llm_token_to_id.values()))
+    grammar_constraint = initialize_grammar_constraint(grammar, llm_token_to_id, tokenizer.eos_token_id, max(llm_token_to_id.values()))
+    print("Initializing grammar constraint state...")
+    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
     print("Initializing grammar processor...")
     grammar_processor = GrammarConstrainedLogitsProcessor(grammar_constraint_state, llm_token_to_id)
 
@@ -257,5 +263,20 @@ if __name__ == "__main__":
     print("Generating text...")
 #     input_text = "i^10=i*"
     input_text = "5*6 + 7*2 = 5+5+5+"
-    output_text = generate_text(model, tokenizer, grammar_processor, input_text)
-    print(output_text)
+
+    # DEMO: Get the mask
+    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
+    tokens = tokenizer.encode(input_text, return_tensors="pt")
+    tokens: list[int] = tokens.tolist()[0]
+    for token_id in tokens:
+        grammar_constraint_state.commit(token_id)
+    mask = grammar_constraint_state.get_mask()
+    print(f"Mask: {mask}")
+    mask_ids = np.where(mask)[0].tolist()
+    mask_token_ids = [tokenizer.convert_ids_to_tokens(id) for id in mask_ids]
+    print(f"Mask Tokens: {mask_token_ids}")
+
+    # DEMO: Generate text.
+    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
+#     output_text = generate_text(model, tokenizer, grammar_processor, input_text)
+#     print(output_text)
