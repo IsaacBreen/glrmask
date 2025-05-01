@@ -266,7 +266,7 @@ impl GrammarConstraint {
                     }
 
                     // Use any existing edge on the src node.
-                    crate::debug!(3, "Trying to find existing edge value");
+                    // crate::debug!(3, "Trying to find existing edge value");
                     if let Some(existing_edges) = precompute_node.get_mut(&matched_token_id) {
                         if let Some((existing_edge_llm_tokens, existing_dst)) = existing_edges.iter_mut().next() {
                             // Merge into the edge value.
@@ -291,11 +291,11 @@ impl GrammarConstraint {
                     }
 
                     // Create a new node.
-                    crate::debug!(3, "Creating new precompute node");
+                    // crate::debug!(3, "Creating new precompute node");
                     let new_precomputed_node = precompute_node.force_insert(matched_token_id, llm_tokens.clone(), PrecomputedNodeContents::default());
                     if new_offset == bytes.len() {
                         // Reached the end of the input, so this is a clean match.
-                        crate::debug!(3, "Reached the end of the input, so this is a clean match.");
+                        // crate::debug!(3, "Reached the end of the input, so this is a clean match.");
                         new_precomputed_node.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
                         let next_src = dst;
                         for (next_bytes, next_dst) in next_src.children() {
