@@ -242,9 +242,10 @@ impl GrammarConstraint {
                         // Check whether there's already an edge from this node to a node in the queue.
                         crate::debug!(3, "Trying to push to existing precompute node");
                         for existing_precompute_node in existing_precompute_nodes {
-                            if let Some(existing_edge_value) = precompute_node.get_edge_value_mut(matched_token_id, existing_precompute_node) {
+                            if let Some(existing_edge_llm_tokens) = precompute_node.get_edge_value_mut(matched_token_id, existing_precompute_node) {
                                 // Merge into the edge value.
                                 crate::debug!(3, "Success! Merging into existing edge value");
+                                *existing_edge_llm_tokens |= llm_tokens;
                                 continue 'outer;
                             }
                         }
@@ -252,7 +253,7 @@ impl GrammarConstraint {
                         // Try to push to an existing precompute node in the queue if it's possible to do so without creating a cycle.
                         crate::debug!(3, "Trying to insert to existing precompute node");
                         for existing_precompute_node in existing_precompute_nodes {
-                            if let Ok(dst_precomputed_node) = precompute_node.try_insert(
+                            if let Ok(_) = precompute_node.try_insert(
                                 matched_token_id,
                                 llm_tokens.clone(),
                                 Arc::clone(&*existing_precompute_node),
@@ -266,10 +267,10 @@ impl GrammarConstraint {
                     // Use any existing edge on the src node.
                     crate::debug!(3, "Trying to find existing edge value");
                     if let Some(existing_edges) = precompute_node.get_mut(&matched_token_id) {
-                        if let Some((existing_edge_value, existing_dst)) = existing_edges.iter_mut().next() {
+                        if let Some((existing_edge_llm_tokens, existing_dst)) = existing_edges.iter_mut().next() {
                             // Merge into the edge value.
                             crate::debug!(3, "Success! Found existing edge value");
-                            *existing_edge_value = existing_edge_value.clone() | llm_tokens.clone();
+                            *existing_edge_llm_tokens |= llm_tokens.clone();
                             if new_offset == bytes.len() {
                                 // Reached the end of the input, so this is a clean match.
                                 crate::debug!(3, "Reached the end of the input, so this is a clean match.");
