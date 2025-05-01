@@ -216,7 +216,8 @@ impl GrammarConstraint {
 
         crate::debug!(2, "precompute main loop");
         while let Some((((dotted_vocab_node, initial_tokenizer_state_id)), precomputed_nodes)) = queue.pop_first() {
-            crate::debug!(3, "Popped from queue. Queue size: {}, Precomputed nodes: {}, Prefix length: {}, Offet: {}, Total length (prefix + offset): {}, Prefix: {}, Bytes: {}",
+            crate::debug!(3, "Popped from queue. Tokenizer state: {}, Queue size: {}, Precomputed nodes: {}, Prefix length: {}, Offet: {}, Total length (prefix + offset): {}, Prefix: {}, Bytes: {}",
+                initial_tokenizer_state_id.0,
                 queue.len(),
                 precomputed_nodes.len(),
                 dotted_vocab_node.src.prefix_length(),
