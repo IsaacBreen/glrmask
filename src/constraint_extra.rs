@@ -65,9 +65,9 @@ fn dump_precompute_trie_recursive(
         for (edge_key, children_vec) in node.children() {
             for (edge_val_bv, child_arc) in children_vec {
                 println!(
-                    "{}Edge GrammarTokenID({}): LLM Tokens: {} -> Child Ptr: {:?}",
+                    "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Ptr: {:?}",
                     indent,
-                    edge_key.0,
+                    edge_key.map(|grammar_token_id| grammar_token_id.0),
                     format_bv_indices(edge_val_bv),
                     node_ptr(child_arc)
                 );

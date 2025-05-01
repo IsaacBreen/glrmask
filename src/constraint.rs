@@ -39,7 +39,7 @@ pub(crate) struct PrecomputedNodeContents {
     pub(crate) clean_end: Option<LLMTokenBV>,
 }
 
-pub(crate) type PrecomputeNode = Trie<GrammarTokenID, LLMTokenBV, PrecomputedNodeContents>;
+pub(crate) type PrecomputeNode = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 pub(crate) type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode>;
 
 /// Holds the set of active LLM tokens and the intersection of tokens
@@ -230,14 +230,14 @@ impl GrammarConstraint {
 
             let results = tokenizer.execute_from_state(&bytes[offset..], initial_tokenizer_state_id);
 
-            fn link_next_precompute_node<'a>(queue: &mut BTreeMap<(DottedVocabNode<'a>, TokenizerStateID), BTreeSet<NodeHandle>>, new_queue_key: (DottedVocabNode<'a>, TokenizerStateID), precompute_node: &mut MutexGuard<PrecomputeNode>, matched_token_id: TerminalID) -> Option<Arc<Mutex<Trie<TerminalID, LLMTokenBV, PrecomputedNodeContents>>>> {
+            fn link_next_precompute_node<'a>(queue: &mut BTreeMap<(DottedVocabNode<'a>, TokenizerStateID), BTreeSet<NodeHandle>>, new_queue_key: (DottedVocabNode<'a>, TokenizerStateID), precompute_node: &mut MutexGuard<PrecomputeNode>, matched_token_id: GrammarTokenID) -> Option<Arc<Mutex<Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>>>> {
                 let llm_tokens = new_queue_key.0.dst.reachable_token_ids().clone();
 
                 if let Some(existing_precompute_nodes) = queue.get(&new_queue_key) {
                     // Check whether there's already an edge from this node to a node in the queue.
                     crate::debug!(4, "Trying to push to existing precompute node");
                     for existing_precompute_node in existing_precompute_nodes {
-                        if let Some(existing_edge_llm_tokens) = precompute_node.get_edge_value_mut(matched_token_id, existing_precompute_node) {
+                        if let Some(existing_edge_llm_tokens) = precompute_node.get_edge_value_mut(Some(matched_token_id), existing_precompute_node) {
                             // Merge into the edge value.
                             crate::debug!(4, "Success! Merging into existing edge value");
                             *existing_edge_llm_tokens |= llm_tokens;
@@ -249,7 +249,7 @@ impl GrammarConstraint {
                     crate::debug!(4, "Trying to insert to existing precompute node");
                     for existing_precompute_node in existing_precompute_nodes {
                         if let Ok(_) = precompute_node.try_insert(
-                            matched_token_id,
+                            Some(matched_token_id),
                             llm_tokens.clone(),
                             Arc::clone(&*existing_precompute_node),
                         ) {
@@ -261,7 +261,7 @@ impl GrammarConstraint {
 
                 // Use any existing edge on the src node.
                 crate::debug!(4, "Trying to find existing edge value");
-                if let Some(existing_edges) = precompute_node.get_mut(&matched_token_id) {
+                if let Some(existing_edges) = precompute_node.get_mut(&Some(matched_token_id)) {
                     if let Some((existing_edge_llm_tokens, existing_precomputed_node)) = existing_edges.iter_mut().next() {
                         // Merge into the edge value.
                         crate::debug!(4, "Success! Found existing edge value");
@@ -272,7 +272,7 @@ impl GrammarConstraint {
 
                 // Create a new node.
                 crate::debug!(4, "Creating new precompute node");
-                let mut new_precomputed_node = precompute_node.force_insert(matched_token_id, llm_tokens.clone(), PrecomputedNodeContents::default());
+                let mut new_precomputed_node = precompute_node.force_insert(Some(matched_token_id), llm_tokens.clone(), PrecomputedNodeContents::default());
                 return Some(new_precomputed_node.clone());
             }
 
@@ -467,12 +467,12 @@ impl<'a> GrammarConstraintState<'a> {
                     Arc::make_mut(&mut parse_state.stack).value.t.active &= edge_llm_tokens;
                     !parse_state.stack.value.t.active.is_empty() // Check if any active paths remain
                 });
-                glr_parse_state.step(*grammar_token_id);
+                grammar_token_id.map(|grammar_token_id| glr_parse_state.step(grammar_token_id));
                 if glr_parse_state.active_states.is_empty() {
-                    crate::debug!(3, "No active states after processing grammar token {}", grammar_token_id.0);
+                    crate::debug!(3, "No active states after processing grammar token {:?}", grammar_token_id.map(|grammar_token_id| grammar_token_id.0));
                     return None;
                 } else {
-                    crate::debug!(3, "Processed grammar token {}, {} active states.", grammar_token_id.0, glr_parse_state.active_states.len());
+                    crate::debug!(3, "Processed grammar token {:?}, {} active states.", grammar_token_id.map(|grammar_token_id| grammar_token_id.0), glr_parse_state.active_states.len());
                     Some(glr_parse_state)
                 }
             },
