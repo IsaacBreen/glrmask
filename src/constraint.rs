@@ -214,6 +214,8 @@ impl GrammarConstraint {
             }
         }
 
+        let mut merge_map: BTreeMap<BTreeSet<NodeHandle>, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
+
         crate::debug!(2, "precompute main loop");
         while let Some((((dotted_vocab_node, initial_tokenizer_state_id)), mut precomputed_nodes)) = queue.pop_first() {
             crate::debug!(3, "Popped from queue. Tokenizer state: {}, Queue size: {}, Precomputed nodes: {}, Prefix length: {}, Offset: {}, Total length (prefix + offset): {}, Prefix: {}, Bytes: {}",
@@ -228,15 +230,20 @@ impl GrammarConstraint {
             );
             let DottedVocabNode { src, dst, offset, bytes } = dotted_vocab_node;
 
-            if precomputed_nodes.len() > 1 {
+            if precomputed_nodes.len() > 3 {
                 // Merge the nodes
-                crate::debug!(3, "Merging {} nodes", precomputed_nodes.len());
-                let mut new_precomputed_node = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
-                let all_llm_tokens = LLMTokenBV::repeat(true, max_llm_token_id + 1);
-                for precomputed_node in precomputed_nodes.iter() {
-                    new_precomputed_node.lock().unwrap().force_insert_to_node(None, all_llm_tokens.clone(), precomputed_node);
+                if let Some(existing) = merge_map.get(&precomputed_nodes) {
+                    precomputed_nodes = BTreeSet::from([NodeHandle(existing.clone())]);
+                } else {
+                    crate::debug!(3, "Merging {} nodes", precomputed_nodes.len());
+                    let mut new_precomputed_node = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
+                    let all_llm_tokens = LLMTokenBV::repeat(true, max_llm_token_id + 1);
+                    for precomputed_node in precomputed_nodes.iter() {
+                        new_precomputed_node.lock().unwrap().force_insert_to_node(None, all_llm_tokens.clone(), precomputed_node);
+                    }
+                    merge_map.insert(precomputed_nodes.clone(), new_precomputed_node.clone());
+                    precomputed_nodes = BTreeSet::from([NodeHandle(new_precomputed_node.clone())]);
                 }
-                precomputed_nodes = BTreeSet::from([NodeHandle(new_precomputed_node.clone())]);
             }
 
             let results = tokenizer.execute_from_state(&bytes[offset..], initial_tokenizer_state_id);
