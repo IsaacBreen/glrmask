@@ -48,11 +48,15 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     }
 
     // force_insert remains unchanged
-    pub fn force_insert(&mut self, edge_key: EK, edge_value: EV, value: T) -> Arc<Mutex<Trie<EK, EV, T>>> {
+    pub fn force_insert_to_new_node(&mut self, edge_key: EK, edge_value: EV, value: T) -> Arc<Mutex<Trie<EK, EV, T>>> {
         let new_node = Arc::new(Mutex::new(Trie::new(value)));
         self.children.entry(edge_key).or_insert_with(Vec::new).push((edge_value, new_node.clone()));
         // Note: force_insert does NOT update max_depth or check for cycles. Use with caution.
         new_node.clone()
+    }
+
+    pub fn force_insert_to_node(&mut self, edge_key: EK, edge_value: EV, dst: &Arc<Mutex<Trie<EK, EV, T>>>) {
+        self.children.entry(edge_key).or_default().push((edge_value, dst.clone()));
     }
 
     // already_has_dst remains unchanged
