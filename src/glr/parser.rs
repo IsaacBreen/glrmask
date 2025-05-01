@@ -242,109 +242,157 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
     }
 
     pub fn step(&mut self, token_id: TerminalID) {
-        crate::debug!(3, "Stepping with token {:?}, {} active states", token_id, self.active_states.len());
-        let mut next_active_states = Vec::new();
-        // This will store states where the current token_id leads to no action.
-        let mut current_action_not_found_states = Vec::new();
+        crate::debug!(
+            3,
+            "Stepping with token {:?}, {} active states",
+            token_id,
+            self.active_states.len()
+        );
 
-        while let Some(state) = self.active_states.pop() {
+        // Worklist holding states that still need to be processed for the *current* token.
+        let mut worklist: BTreeMap<ParseStateKey, ParseState<T>> = BTreeMap::new();
+        // Fill the work-list with the current active states, merging on the fly.
+        for state in self.active_states.drain(..) {
+            let key = state.key();
+            worklist.insert_with(key, state, |existing, new_state| {
+                existing.merge(new_state);
+            });
+        }
+
+        // States that will become active for the *next* input token.
+        let mut next_active_state_map: BTreeMap<ParseStateKey, ParseState<T>> = BTreeMap::new();
+        // States that had no matching action (mostly for diagnostics).
+        let mut action_not_found_map: BTreeMap<ParseStateKey, ParseState<T>> = BTreeMap::new();
+
+        // Process the work-list until no more states remain for the current token.
+        while let Some((_key, state)) = worklist.pop_first() {
             let stack = state.stack; // Arc<GSSNode<ParseStateNodeContent<T>>>
             let current_content = stack.peek(); // &ParseStateNodeContent<T>
             let current_state_id = current_content.state_id;
             let current_t = &current_content.t;
 
-            let row = self.parser.stage_7_table.get(&current_state_id).unwrap();
+            let row = &self.parser.stage_7_table[&current_state_id];
 
-            if let Some(action) = row.shifts_and_reduces.get(&token_id) {
-                match action {
-                    Stage7ShiftsAndReduces::Shift(next_state_id) => {
-                        debug!(5, "Shifting");
-                        let new_content = ParseStateNodeContent { state_id: *next_state_id, t: current_t.clone() };
-                        let new_stack = stack.push(new_content);
-                        next_active_states.push(ParseState {
-                            // stack: Arc::new(new_stack), // GSSNode::push now returns Arc
-                            stack: Arc::new(new_stack),
+            match row.shifts_and_reduces.get(&token_id) {
+                Some(Stage7ShiftsAndReduces::Shift(next_state_id)) => {
+                    debug!(5, "Shifting");
+                    let new_content =
+                        ParseStateNodeContent { state_id: *next_state_id, t: current_t.clone() };
+                    let new_stack = stack.push(new_content);
+                    let new_state = ParseState { stack: Arc::new(new_stack) };
+                    let key = new_state.key();
+                    next_active_state_map.insert_with(key, new_state, |existing, s| {
+                        existing.merge(s);
+                    });
+                }
+                Some(Stage7ShiftsAndReduces::Reduce {
+                    production_id,
+                    nonterminal_id: nonterminal,
+                    len,
+                }) => {
+                    debug!(5, "Reducing by production {:?} with len {}", production_id, len);
+                    let mut popped_stack_nodes = stack.popn(*len);
+                    let gt = popped_stack_nodes.len() > 1;
+                    if gt {
+                        crate::debug!(
+                            4,
+                            "Popped {} stack nodes (1)",
+                            popped_stack_nodes.len()
+                        );
+                    }
+                    popped_stack_nodes.bulk_merge();
+                    if gt {
+                        crate::debug!(
+                            4,
+                            "Merged into {} stack nodes (1)",
+                            popped_stack_nodes.len()
+                        );
+                    }
+
+                    for stack_node in popped_stack_nodes {
+                        let revealed_content = stack_node.peek();
+                        let revealed_state_id = revealed_content.state_id;
+                        let revealed_t = &revealed_content.t;
+                        let goto_state =
+                            self.parser.stage_7_table[&revealed_state_id].gotos[nonterminal];
+
+                        debug!(5, "Going to state {:?}", goto_state);
+                        let combined_t = revealed_t.intersect(current_t);
+                        let new_content =
+                            ParseStateNodeContent { state_id: goto_state, t: combined_t };
+                        let new_stack = stack_node.push(new_content);
+                        let new_state = ParseState { stack: Arc::new(new_stack) };
+
+                        let key = new_state.key();
+                        worklist.insert_with(key, new_state, |existing, s| {
+                            existing.merge(s);
                         });
                     }
-                    Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
-                        debug!(5, "Reducing by production {:?} with len {}", production_id, len);
-                        let mut popped_stack_nodes = stack.popn(*len);
-                        let gt = popped_stack_nodes.len() > 1;
-                        if gt { crate::debug!(4, "Popped {} stack nodes (1)", popped_stack_nodes.len()); }
-                        popped_stack_nodes.bulk_merge();
-                        if gt { crate::debug!(4, "Merged into {} stack nodes (1)", popped_stack_nodes.len()); }
-                        let mut new_stacks = Vec::new();
-                        for stack_node in popped_stack_nodes {
-                            // stack_node is Arc<GSSNode<ParseStateNodeContent<T>>>
-                            let revealed_content = stack_node.peek(); // &ParseStateNodeContent<T>
-                            let revealed_state_id = revealed_content.state_id;
-                            let revealed_t = &revealed_content.t;
-                            let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nonterminal];
+                }
+                Some(Stage7ShiftsAndReduces::Split { shift, reduces }) => {
+                    debug!(4, "Split");
 
-                            debug!(5, "Going to state {:?}", goto_state);
-                            let combined_t = revealed_t.intersect(current_t);
-                            let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
-                            let new_stack = stack_node.push(new_content);
-                            new_stacks.push(Arc::new(new_stack));
-                        }
-                        new_stacks.bulk_merge();
-                        for stack in new_stacks {
-                            self.active_states.push(ParseState {
-                                stack,
-                            });
-                        }
+                    // Handle the shift part of the split first (goes to next token).
+                    if let Some(shift_state) = shift {
+                        let new_content =
+                            ParseStateNodeContent { state_id: *shift_state, t: current_t.clone() };
+                        let new_stack = stack.push(new_content);
+                        let new_state = ParseState { stack: Arc::new(new_stack) };
+                        let key = new_state.key();
+                        next_active_state_map.insert_with(key, new_state, |existing, s| {
+                            existing.merge(s);
+                        });
                     }
-                    Stage7ShiftsAndReduces::Split { shift, reduces } => {
-                        debug!(4, "Split");
-                        let mut new_stacks = Vec::new();
-                        if let Some(shift_state) = shift {
-                            // Shift part (same as above)
-                            let new_content = ParseStateNodeContent { state_id: *shift_state, t: current_t.clone() };
-                            let new_stack = stack.push(new_content);
-                            new_stacks.push(Arc::new(new_stack));
-                        }
 
-                        crate::debug!(4, "Reduces: {}", reduces.len());
-                        for (len, nt_ids) in reduces {
-                            let mut popped_stack_nodes = stack.popn(*len);
-                            popped_stack_nodes.bulk_merge();
-                            crate::debug!(4, "Popped {} stack nodes", popped_stack_nodes.len());
-                            crate::debug!(4, "nt_ids.len(): {}", nt_ids.len());
-                            for nt_id in nt_ids.keys() {
-                                for stack_node in &popped_stack_nodes {
-                                    // Reduce part (same as above)
-                                    let revealed_content = stack_node.peek();
-                                    let revealed_state_id = revealed_content.state_id;
-                                    let revealed_t = &revealed_content.t;
-                                    let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id];
+                    crate::debug!(4, "Reduces: {}", reduces.len());
+                    for (len, nt_ids) in reduces {
+                        let mut popped_stack_nodes = stack.popn(*len);
+                        popped_stack_nodes.bulk_merge();
+                        crate::debug!(4, "Popped {} stack nodes", popped_stack_nodes.len());
+                        for nt_id in nt_ids.keys() {
+                            for stack_node in &popped_stack_nodes {
+                                let revealed_content = stack_node.peek();
+                                let revealed_state_id = revealed_content.state_id;
+                                let revealed_t = &revealed_content.t;
+                                let goto_state =
+                                    self.parser.stage_7_table[&revealed_state_id].gotos[nt_id];
 
-                                    let combined_t = revealed_t.intersect(current_t);
-                                    let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
-                                    let new_stack = stack_node.push(new_content);
-                                    new_stacks.push(Arc::new(new_stack));
-                                }
+                                let combined_t = revealed_t.intersect(current_t);
+                                let new_content =
+                                    ParseStateNodeContent { state_id: goto_state, t: combined_t };
+                                let new_stack = stack_node.push(new_content);
+                                let new_state = ParseState { stack: Arc::new(new_stack) };
+
+                                let key = new_state.key();
+                                worklist.insert_with(key, new_state, |existing, s| {
+                                    existing.merge(s);
+                                });
                             }
-                        }
-                        new_stacks.bulk_merge();
-                        for stack in new_stacks {
-                            self.active_states.push(ParseState {
-                                stack,
-                            });
                         }
                     }
                 }
-            } else {
-                // No action found for this token in this state
-                current_action_not_found_states.push(ParseState {
-                    stack,
-                });
+                None => {
+                    // No action found for this token in this state
+                    let key = state.key();
+                    action_not_found_map.insert_with(key, state, |existing, s| {
+                        existing.merge(s);
+                    });
+                }
             }
         }
-        self.active_states = next_active_states;
-        self.action_not_found_states = current_action_not_found_states; // Replace previous not-found states
-        crate::debug!(3, "After stepping, there are {} active states and {} action not found states", self.active_states.len(), self.action_not_found_states.len());
 
-        // TODO: decide whether to keep action_not_found_states or not
+        // Convert the maps back into vectors for the public fields.
+        self.active_states = next_active_state_map.into_values().collect();
+        self.action_not_found_states = action_not_found_map.into_values().collect();
+
+        crate::debug!(
+            3,
+            "After stepping, there are {} active states and {} action not found states",
+            self.active_states.len(),
+            self.action_not_found_states.len()
+        );
+
+        // Currently we don't keep action_not_found_states. Clear them to preserve previous behaviour.
         self.action_not_found_states.clear();
     }
 
