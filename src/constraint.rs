@@ -216,12 +216,14 @@ impl GrammarConstraint {
 
         crate::debug!(2, "precompute main loop");
         while let Some((((dotted_vocab_node, initial_tokenizer_state_id)), precomputed_nodes)) = queue.pop_first() {
-            crate::debug!(3, "Popped from queue. Queue size: {}, Precomputed nodes: {}, Prefix length: {}, Offet: {}, Total length (prefix + offset): {}",
+            crate::debug!(3, "Popped from queue. Queue size: {}, Precomputed nodes: {}, Prefix length: {}, Offet: {}, Total length (prefix + offset): {}, Prefix: {}, Bytes: {}",
                 queue.len(),
                 precomputed_nodes.len(),
                 dotted_vocab_node.src.prefix_length(),
                 dotted_vocab_node.offset,
                 dotted_vocab_node.src.prefix_length() + dotted_vocab_node.offset,
+                String::from_utf8_lossy(dotted_vocab_node.src.prefix()),
+                String::from_utf8_lossy(dotted_vocab_node.bytes),
             );
             let DottedVocabNode { src, dst, offset, bytes } = dotted_vocab_node;
 

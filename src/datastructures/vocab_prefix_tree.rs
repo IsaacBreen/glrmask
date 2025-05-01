@@ -46,6 +46,11 @@ impl VocabPrefixTreeNode {
     pub fn prefix_length(&self) -> usize {
         self.prefix_length
     }
+    
+    /// Returns the prefix byte sequence for this node.
+    pub fn prefix(&self) -> &[u8] {
+        &self.prefix
+    }
 
     /// Returns an iterator over the children of this node.
     /// The iterator yields pairs of `(&Vec<u8>, &VocabPrefixTreeNode)`, representing the edge label and the child node.
@@ -56,11 +61,6 @@ impl VocabPrefixTreeNode {
     /// Returns a bitvec representing the set of token IDs reachable from this node.
     pub fn reachable_token_ids(&self) -> &BitVec {
         &self.reachable_token_ids
-    }
-
-    /// Returns the byte sequence (full prefix) from the root to this node.
-    pub fn prefix(&self) -> &[u8] {
-        &self.prefix
     }
 }
 
