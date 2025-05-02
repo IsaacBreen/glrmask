@@ -478,7 +478,8 @@ impl<'a> GrammarConstraintState<'a> {
             // Input: &GLRParserState<'_, LLMTokenInfo>, GrammarTokenID, &LLMTokenBV, &Arc<Mutex<PrecomputeNode>>
             // Output: Option<GLRParserState<'_, LLMTokenInfo>>
             |glr_parse_state, grammar_token_id, edge_llm_tokens, child_node| {
-                crate::debug!(3, "Processing node grammar token {:?} with {} active states", grammar_token_id.map(|grammar_token_id| grammar_token_id.0), glr_parse_state.active_states.len());
+                let node_ptr = std::ptr::addr_of!(*child_node) as usize;
+                crate::debug!(3, "Processing grammar node {} token {:?} with {} active states", node_ptr, grammar_token_id.map(|grammar_token_id| grammar_token_id.0), glr_parse_state.active_states.len());
                 let mut glr_parse_state = glr_parse_state.clone();
                 glr_parse_state.active_states.retain_mut(|parse_state| {
                     // Intersect the *active* tokens with the edge tokens. Intersection inherits current active tokens.
