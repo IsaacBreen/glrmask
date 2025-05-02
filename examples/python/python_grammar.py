@@ -17,9 +17,9 @@ from tqdm import tqdm
 
 
 def eat_string(s: bytes) -> Regex:
-    return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
+#     return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
     # TODO: delete this
-#     return Regex.eat_u8(ord("0"))
+    return Regex.eat_u8(ord("0"))
 
 def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Regex:
     if isinstance(item, pegen.grammar.NameLeaf):
