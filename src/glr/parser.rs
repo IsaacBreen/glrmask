@@ -13,12 +13,13 @@ use std::hash::Hash;
 use std::sync::Arc;
 use crate::debug;
 
-pub trait MergeAndIntersect: Sized + Clone + Debug + Display + Eq + PartialEq + Ord + PartialOrd + Hash { // Added Display
+pub trait MergeAndIntersect: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
     /// Merges the information represented by `self` and `other`.
     fn merge(&self, other: &Self) -> Self;
     /// Intersects the information represented by `self` and `other`.
     fn intersect(&self, other: &Self) -> Self;
 }
+
 impl MergeAndIntersect for () {
     fn merge(&self, _: &Self) -> Self { () }
     fn intersect(&self, _: &Self) -> Self { () }
@@ -28,13 +29,6 @@ impl MergeAndIntersect for () {
 pub struct ParseStateNodeContent<T: MergeAndIntersect> {
     pub state_id: StateID,
     pub t: T,
-}
-
-// Implement Display if T implements Display
-impl<T: MergeAndIntersect + Display> Display for ParseStateNodeContent<T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "State: {}, T: {}", self.state_id.0, self.t)
-    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseState<T: MergeAndIntersect> {
@@ -220,7 +214,7 @@ impl Display for GLRParser {
 }
 
 #[derive(Debug, Clone)]
-pub struct GLRParserState<'a, T: MergeAndIntersect + Display> { // Added Display bound
+pub struct GLRParserState<'a, T: MergeAndIntersect> {
     pub parser: &'a GLRParser,
     pub active_states: Vec<ParseState<T>>,
     pub action_not_found_states: Vec<ParseState<T>>,
@@ -246,7 +240,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
         self.parse(input);
         self
     }
-    // TODO: T needs Display bound now
+
     pub fn step(&mut self, token_id: TerminalID) {
         // Gather and log GSS stats before processing the step
         let root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
@@ -361,15 +355,6 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
         let end_stats = gather_gss_stats(&end_root_nodes);
         crate::debug!(3, "Step End (Token {:?}): Active States: {}, Action Not Found: {}, GSS Stats: {:?}", token_id, self.active_states.len(), self.action_not_found_states.len(), end_stats);
 
-        // Conditionally print the GSS structure for debugging
-        // Check if debug level is high enough and the GSS is not excessively large
-        if crate::DEBUG_LEVEL >= 5 && end_stats.unique_nodes < 30 {
-            crate::debug!(5, "--- GSS Structure after step (Token {:?}) ---", token_id);
-            for (i, state) in self.active_states.iter().enumerate() {
-                crate::debug!(5, "Active State {}:\n{}", i, state.stack);
-            }
-            crate::debug!(5, "--- End GSS Structure ---");
-        }
         // TODO: decide whether to keep action_not_found_states or not
         self.action_not_found_states.clear();
     }
