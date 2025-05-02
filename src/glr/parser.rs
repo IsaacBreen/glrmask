@@ -1,4 +1,4 @@
-use crate::datastructures::gss::{BulkMerge, gather_gss_stats};
+use crate::datastructures::gss::{print_gss_forest, BulkMerge, gather_gss_stats};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
 use crate::glr::table::{
@@ -33,8 +33,7 @@ pub struct ParseStateNodeContent<T: MergeAndIntersect> {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseState<T: MergeAndIntersect> {
     pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
-        // self.merge_active_states();
-    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StopReason {
@@ -169,8 +168,8 @@ impl Display for GLRParser {
                         writeln!(f, "      - {:?} -> Shift {}", terminal.0, next_state_id.0)?;
                     }
                     Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
-                        let nt = non_terminal_map.get_by_right(nonterminal).unwrap();
-                        writeln!(f, "      - {:?} -> Reduce {} (len {})", terminal.0, nt.0, len)?;
+                        let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
+                        writeln!(f, "      - {:?} -> Reduce {} (len {})", terminal.0, nt_name.0, len)?;
                     }
                     Stage7ShiftsAndReduces::Split { shift, reduces } => {
                         writeln!(f, "      - {:?} -> Conflict:", terminal.0)?;
@@ -220,7 +219,7 @@ pub struct GLRParserState<'a, T: MergeAndIntersect> {
     pub action_not_found_states: Vec<ParseState<T>>,
 }
 
-impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
+impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
     pub fn parse(&mut self, input: &[TerminalID]) {
         self.parse_part(input);
     }
@@ -357,6 +356,18 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
 
         // TODO: decide whether to keep action_not_found_states or not
         self.action_not_found_states.clear();
+
+        // Log the final GSS structure if it's reasonably small
+        const MAX_NODES_TO_PRINT: usize = 30;
+        debug!(4, || { // Use a closure to avoid potentially expensive calculations if debug level is lower
+            let final_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+            let final_stats = gather_gss_stats(&final_root_nodes);
+            if final_stats.unique_nodes <= MAX_NODES_TO_PRINT {
+                format!("GSS Structure ({} nodes):\n{}", final_stats.unique_nodes, print_gss_forest(&final_root_nodes, MAX_NODES_TO_PRINT))
+            } else {
+                format!("GSS Structure too large to print ({} nodes > {})", final_stats.unique_nodes, MAX_NODES_TO_PRINT)
+            }
+        });
     }
 
     // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge

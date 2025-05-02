@@ -7,7 +7,7 @@ local_system:
   initial_file_contents:
     src/datastructures/gss.rs: |
       use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-      use std::sync::Arc;
+      use std::sync::{Arc};
 
       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
       pub struct GSSNode<T> {
@@ -369,14 +369,82 @@ local_system:
               .map(|root| prune_and_transform_recursive(root, closure, &mut memo))
               .collect()
       }
+
+
+      /// Statistics about the structure of a GSS forest.
+      #[derive(Debug, Clone, Default)]
+      pub struct GSSStats {
+          /// Number of root nodes provided.
+          pub num_roots: usize,
+          /// Total number of unique nodes reachable from the roots.
+          pub unique_nodes: usize,
+          /// Maximum depth encountered (distance from a root node).
+          pub max_depth: usize,
+          /// Average depth of nodes (distance from a root node).
+          pub average_depth: f64,
+          /// Number of nodes with more than one predecessor (merge points).
+          pub merge_points: usize,
+          /// Maximum number of predecessors for any single node.
+          pub max_predecessors: usize,
+          /// Average number of predecessors per node.
+          pub average_predecessors: f64,
+      }
+
+      /// Gathers statistics about the GSS forest defined by the given roots.
+      /// Traverses the graph using BFS to calculate depths from roots.
+      pub fn gather_gss_stats<T: Clone>(roots: &[Arc<GSSNode<T>>]) -> GSSStats {
+          let mut stats = GSSStats::default();
+          stats.num_roots = roots.len();
+
+          let mut visited: HashSet<*const GSSNode<T>> = HashSet::new();
+          let mut queue: VecDeque<(Arc<GSSNode<T>>, usize)> = VecDeque::new(); // (node, depth)
+
+          let mut total_depth_sum: u64 = 0;
+          let mut total_predecessors_sum: u64 = 0;
+
+          for root_arc in roots {
+              let root_ptr = Arc::as_ptr(root_arc);
+              if visited.insert(root_ptr) {
+                  queue.push_back((root_arc.clone(), 0));
+              }
+          }
+
+          while let Some((current_node_arc, current_depth)) = queue.pop_front() {
+              let current_node = current_node_arc.as_ref(); // Borrow the content
+              stats.unique_nodes += 1;
+              stats.max_depth = stats.max_depth.max(current_depth);
+              total_depth_sum += current_depth as u64;
+
+              let num_predecessors = current_node.predecessors.len();
+              stats.max_predecessors = stats.max_predecessors.max(num_predecessors);
+              total_predecessors_sum += num_predecessors as u64;
+              if num_predecessors > 1 {
+                  stats.merge_points += 1;
+              }
+
+              for pred_arc in &current_node.predecessors {
+                  let pred_ptr = Arc::as_ptr(pred_arc);
+                  if visited.insert(pred_ptr) {
+                      queue.push_back((pred_arc.clone(), current_depth + 1));
+                  }
+              }
+          }
+
+          if stats.unique_nodes > 0 {
+              stats.average_depth = total_depth_sum as f64 / stats.unique_nodes as f64;
+              stats.average_predecessors = total_predecessors_sum as f64 / stats.unique_nodes as f64;
+          }
+
+          stats
+      }
     src/glr/parser.rs: |-
-      use crate::datastructures::gss::BulkMerge;
+      use crate::datastructures::gss::{BulkMerge, gather_gss_stats};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::items::Item;
       use crate::glr::table::{
           NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID,
       };
-      use crate::datastructures::gss::{GSSNode, GSSTrait};
+      use crate::datastructures::gss::{GSSNode, GSSTrait, GSSStats};
 
       use bimap::BiBTreeMap;
       use std::collections::{BTreeMap, BTreeSet};
@@ -614,7 +682,10 @@ local_system:
           }
 
           pub fn step(&mut self, token_id: TerminalID) {
-              crate::debug!(3, "Stepping with token {:?}, {} active states", token_id, self.active_states.len());
+              // Gather and log GSS stats before processing the step
+              let root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+              let stats = gather_gss_stats(&root_nodes);
+              crate::debug!(3, "Step Start (Token {:?}): Active States: {}, GSS Stats: {:?}", token_id, self.active_states.len(), stats);
               let mut next_active_states = Vec::new();
               // This will store states where the current token_id leads to no action.
               let mut current_action_not_found_states = Vec::new();
@@ -719,7 +790,10 @@ local_system:
               }
               self.active_states = next_active_states;
               self.action_not_found_states = current_action_not_found_states; // Replace previous not-found states
-              crate::debug!(3, "After step (token {:?}), there are {} active states and {} action not found states", token_id, self.active_states.len(), self.action_not_found_states.len());
+
+              let end_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+              let end_stats = gather_gss_stats(&end_root_nodes);
+              crate::debug!(3, "Step End (Token {:?}): Active States: {}, Action Not Found: {}, GSS Stats: {:?}", token_id, self.active_states.len(), self.action_not_found_states.len(), end_stats);
 
               // TODO: decide whether to keep action_not_found_states or not
               self.action_not_found_states.clear();
@@ -808,7 +882,7 @@ local_system:
   prev_file_contents:
     src/datastructures/gss.rs: |
       use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-      use std::sync::Arc;
+      use std::sync::{Arc};
 
       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
       pub struct GSSNode<T> {
@@ -1170,14 +1244,82 @@ local_system:
               .map(|root| prune_and_transform_recursive(root, closure, &mut memo))
               .collect()
       }
+
+
+      /// Statistics about the structure of a GSS forest.
+      #[derive(Debug, Clone, Default)]
+      pub struct GSSStats {
+          /// Number of root nodes provided.
+          pub num_roots: usize,
+          /// Total number of unique nodes reachable from the roots.
+          pub unique_nodes: usize,
+          /// Maximum depth encountered (distance from a root node).
+          pub max_depth: usize,
+          /// Average depth of nodes (distance from a root node).
+          pub average_depth: f64,
+          /// Number of nodes with more than one predecessor (merge points).
+          pub merge_points: usize,
+          /// Maximum number of predecessors for any single node.
+          pub max_predecessors: usize,
+          /// Average number of predecessors per node.
+          pub average_predecessors: f64,
+      }
+
+      /// Gathers statistics about the GSS forest defined by the given roots.
+      /// Traverses the graph using BFS to calculate depths from roots.
+      pub fn gather_gss_stats<T: Clone>(roots: &[Arc<GSSNode<T>>]) -> GSSStats {
+          let mut stats = GSSStats::default();
+          stats.num_roots = roots.len();
+
+          let mut visited: HashSet<*const GSSNode<T>> = HashSet::new();
+          let mut queue: VecDeque<(Arc<GSSNode<T>>, usize)> = VecDeque::new(); // (node, depth)
+
+          let mut total_depth_sum: u64 = 0;
+          let mut total_predecessors_sum: u64 = 0;
+
+          for root_arc in roots {
+              let root_ptr = Arc::as_ptr(root_arc);
+              if visited.insert(root_ptr) {
+                  queue.push_back((root_arc.clone(), 0));
+              }
+          }
+
+          while let Some((current_node_arc, current_depth)) = queue.pop_front() {
+              let current_node = current_node_arc.as_ref(); // Borrow the content
+              stats.unique_nodes += 1;
+              stats.max_depth = stats.max_depth.max(current_depth);
+              total_depth_sum += current_depth as u64;
+
+              let num_predecessors = current_node.predecessors.len();
+              stats.max_predecessors = stats.max_predecessors.max(num_predecessors);
+              total_predecessors_sum += num_predecessors as u64;
+              if num_predecessors > 1 {
+                  stats.merge_points += 1;
+              }
+
+              for pred_arc in &current_node.predecessors {
+                  let pred_ptr = Arc::as_ptr(pred_arc);
+                  if visited.insert(pred_ptr) {
+                      queue.push_back((pred_arc.clone(), current_depth + 1));
+                  }
+              }
+          }
+
+          if stats.unique_nodes > 0 {
+              stats.average_depth = total_depth_sum as f64 / stats.unique_nodes as f64;
+              stats.average_predecessors = total_predecessors_sum as f64 / stats.unique_nodes as f64;
+          }
+
+          stats
+      }
     src/glr/parser.rs: |-
-      use crate::datastructures::gss::BulkMerge;
+      use crate::datastructures::gss::{BulkMerge, gather_gss_stats};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::items::Item;
       use crate::glr::table::{
           NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID,
       };
-      use crate::datastructures::gss::{GSSNode, GSSTrait};
+      use crate::datastructures::gss::{GSSNode, GSSTrait, GSSStats};
 
       use bimap::BiBTreeMap;
       use std::collections::{BTreeMap, BTreeSet};
@@ -1415,7 +1557,10 @@ local_system:
           }
 
           pub fn step(&mut self, token_id: TerminalID) {
-              crate::debug!(3, "Stepping with token {:?}, {} active states", token_id, self.active_states.len());
+              // Gather and log GSS stats before processing the step
+              let root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+              let stats = gather_gss_stats(&root_nodes);
+              crate::debug!(3, "Step Start (Token {:?}): Active States: {}, GSS Stats: {:?}", token_id, self.active_states.len(), stats);
               let mut next_active_states = Vec::new();
               // This will store states where the current token_id leads to no action.
               let mut current_action_not_found_states = Vec::new();
@@ -1520,7 +1665,10 @@ local_system:
               }
               self.active_states = next_active_states;
               self.action_not_found_states = current_action_not_found_states; // Replace previous not-found states
-              crate::debug!(3, "After step (token {:?}), there are {} active states and {} action not found states", token_id, self.active_states.len(), self.action_not_found_states.len());
+
+              let end_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+              let end_stats = gather_gss_stats(&end_root_nodes);
+              crate::debug!(3, "Step End (Token {:?}): Active States: {}, Action Not Found: {}, GSS Stats: {:?}", token_id, self.active_states.len(), self.action_not_found_states.len(), end_stats);
 
               // TODO: decide whether to keep action_not_found_states or not
               self.action_not_found_states.clear();
@@ -1612,9 +1760,11 @@ system:
 
     You are a helpful assistant.
     Respond in markdown format.
-    Respond with a git diff patch for each modified or added files. Use the ```diff markdown code block.
-    One diff code block per file. Do not attempt to combine multiple all changes into one diff with multiple files.
-    Include filenames in the diff code block, e.g. "diff --git a/file.py b/file.py".
+    If asked for full code, provide it.
+    Otherwise, don't write the full code (it's too long); instead, give detailed, step-by-step instructions for modifying the code. Be very specific.
+    Do NOT write diffs (git-style or otherwise) or patches unless explicitly asked to do so.
+    A git diff uses "+" or "-" at the start lines. Do NOT use "+" or "-" at the start of any line (unless incidental and not part of a git diff).
+    Explain exactly what changes to make, line by line if needed, so the instructions are clear even without conversation context.
     Avoid asking the user to clear their caches or do local configuration related stuff. That's rarely the cause of errors.
     If you ask them, and they reply with a compilation error, assume they've already done everything you suggested and move on.
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
@@ -1627,12 +1777,12 @@ system:
     - gemini/gemini-2.5-flash-preview-04-17
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: git
+  apply_mode: llm
 messages:
   - user: |-
       ```rust 'src/datastructures/gss.rs'
       use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-      use std::sync::Arc;
+      use std::sync::{Arc};
 
       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
       pub struct GSSNode<T> {
@@ -1995,18 +2145,86 @@ messages:
               .collect()
       }
 
+
+      /// Statistics about the structure of a GSS forest.
+      #[derive(Debug, Clone, Default)]
+      pub struct GSSStats {
+          /// Number of root nodes provided.
+          pub num_roots: usize,
+          /// Total number of unique nodes reachable from the roots.
+          pub unique_nodes: usize,
+          /// Maximum depth encountered (distance from a root node).
+          pub max_depth: usize,
+          /// Average depth of nodes (distance from a root node).
+          pub average_depth: f64,
+          /// Number of nodes with more than one predecessor (merge points).
+          pub merge_points: usize,
+          /// Maximum number of predecessors for any single node.
+          pub max_predecessors: usize,
+          /// Average number of predecessors per node.
+          pub average_predecessors: f64,
+      }
+
+      /// Gathers statistics about the GSS forest defined by the given roots.
+      /// Traverses the graph using BFS to calculate depths from roots.
+      pub fn gather_gss_stats<T: Clone>(roots: &[Arc<GSSNode<T>>]) -> GSSStats {
+          let mut stats = GSSStats::default();
+          stats.num_roots = roots.len();
+
+          let mut visited: HashSet<*const GSSNode<T>> = HashSet::new();
+          let mut queue: VecDeque<(Arc<GSSNode<T>>, usize)> = VecDeque::new(); // (node, depth)
+
+          let mut total_depth_sum: u64 = 0;
+          let mut total_predecessors_sum: u64 = 0;
+
+          for root_arc in roots {
+              let root_ptr = Arc::as_ptr(root_arc);
+              if visited.insert(root_ptr) {
+                  queue.push_back((root_arc.clone(), 0));
+              }
+          }
+
+          while let Some((current_node_arc, current_depth)) = queue.pop_front() {
+              let current_node = current_node_arc.as_ref(); // Borrow the content
+              stats.unique_nodes += 1;
+              stats.max_depth = stats.max_depth.max(current_depth);
+              total_depth_sum += current_depth as u64;
+
+              let num_predecessors = current_node.predecessors.len();
+              stats.max_predecessors = stats.max_predecessors.max(num_predecessors);
+              total_predecessors_sum += num_predecessors as u64;
+              if num_predecessors > 1 {
+                  stats.merge_points += 1;
+              }
+
+              for pred_arc in &current_node.predecessors {
+                  let pred_ptr = Arc::as_ptr(pred_arc);
+                  if visited.insert(pred_ptr) {
+                      queue.push_back((pred_arc.clone(), current_depth + 1));
+                  }
+              }
+          }
+
+          if stats.unique_nodes > 0 {
+              stats.average_depth = total_depth_sum as f64 / stats.unique_nodes as f64;
+              stats.average_predecessors = total_predecessors_sum as f64 / stats.unique_nodes as f64;
+          }
+
+          stats
+      }
+
       ```
     metadata:
       filename: src/datastructures/gss.rs
   - user: |-
       ```rust 'src/glr/parser.rs'
-      use crate::datastructures::gss::BulkMerge;
+      use crate::datastructures::gss::{BulkMerge, gather_gss_stats};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::items::Item;
       use crate::glr::table::{
           NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID,
       };
-      use crate::datastructures::gss::{GSSNode, GSSTrait};
+      use crate::datastructures::gss::{GSSNode, GSSTrait, GSSStats};
 
       use bimap::BiBTreeMap;
       use std::collections::{BTreeMap, BTreeSet};
@@ -2244,7 +2462,10 @@ messages:
           }
 
           pub fn step(&mut self, token_id: TerminalID) {
-              crate::debug!(3, "Stepping with token {:?}, {} active states", token_id, self.active_states.len());
+              // Gather and log GSS stats before processing the step
+              let root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+              let stats = gather_gss_stats(&root_nodes);
+              crate::debug!(3, "Step Start (Token {:?}): Active States: {}, GSS Stats: {:?}", token_id, self.active_states.len(), stats);
               let mut next_active_states = Vec::new();
               // This will store states where the current token_id leads to no action.
               let mut current_action_not_found_states = Vec::new();
@@ -2349,7 +2570,10 @@ messages:
               }
               self.active_states = next_active_states;
               self.action_not_found_states = current_action_not_found_states; // Replace previous not-found states
-              crate::debug!(3, "After step (token {:?}), there are {} active states and {} action not found states", token_id, self.active_states.len(), self.action_not_found_states.len());
+
+              let end_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+              let end_stats = gather_gss_stats(&end_root_nodes);
+              crate::debug!(3, "Step End (Token {:?}): Active States: {}, Action Not Found: {}, GSS Stats: {:?}", token_id, self.active_states.len(), self.action_not_found_states.len(), end_stats);
 
               // TODO: decide whether to keep action_not_found_states or not
               self.action_not_found_states.clear();
@@ -2438,152 +2662,157 @@ messages:
       ```
     metadata:
       filename: src/glr/parser.rs
-  - user: Think of as many useful stats about the GSS as you can, particularly related
-      to the size/complexity of the tree. Write a struct that stores these stats and
-      a function that gathers them. Show them at the beginning of `step` in the parser
-      code.
+  - user: Add a function to GSS that prints the entire tree in a nice readable way.
+      Use it in `step` if the tree isn't too complex.
     metadata:
   - assistant: |-
-      Okay, let's add a struct to hold GSS statistics and a function to compute them. We'll then integrate this into the parser's `step` function.
+      Okay, let's add the GSS printing functionality.
 
-      ```diff
-      --- a/src/datastructures/gss.rs
-      +++ b/src/datastructures/gss.rs
-      @@ -1,5 +1,5 @@
-       use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-      -use std::sync::Arc;
-      +use std::sync::{Arc};
-       
-       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-       pub struct GSSNode<T> {
-      @@ -306,3 +306,61 @@
-               .map(|root| prune_and_transform_recursive(root, closure, &mut memo))
-               .collect()
-       }
-      +
-      +
-      +/// Statistics about the structure of a GSS forest.
-      +#[derive(Debug, Clone, Default)]
-      +pub struct GSSStats {
-      +    /// Number of root nodes provided.
-      +    pub num_roots: usize,
-      +    /// Total number of unique nodes reachable from the roots.
-      +    pub unique_nodes: usize,
-      +    /// Maximum depth encountered (distance from a root node).
-      +    pub max_depth: usize,
-      +    /// Average depth of nodes (distance from a root node).
-      +    pub average_depth: f64,
-      +    /// Number of nodes with more than one predecessor (merge points).
-      +    pub merge_points: usize,
-      +    /// Maximum number of predecessors for any single node.
-      +    pub max_predecessors: usize,
-      +    /// Average number of predecessors per node.
-      +    pub average_predecessors: f64,
-      +}
-      +
-      +/// Gathers statistics about the GSS forest defined by the given roots.
-      +/// Traverses the graph using BFS to calculate depths from roots.
-      +pub fn gather_gss_stats<T: Clone>(roots: &[Arc<GSSNode<T>>]) -> GSSStats {
-      +    let mut stats = GSSStats::default();
-      +    stats.num_roots = roots.len();
-      +
-      +    let mut visited: HashSet<*const GSSNode<T>> = HashSet::new();
-      +    let mut queue: VecDeque<(Arc<GSSNode<T>>, usize)> = VecDeque::new(); // (node, depth)
-      +
-      +    let mut total_depth_sum: u64 = 0;
-      +    let mut total_predecessors_sum: u64 = 0;
-      +
-      +    for root_arc in roots {
-      +        let root_ptr = Arc::as_ptr(root_arc);
-      +        if visited.insert(root_ptr) {
-      +            queue.push_back((root_arc.clone(), 0));
-      +        }
-      +    }
-      +
-      +    while let Some((current_node_arc, current_depth)) = queue.pop_front() {
-      +        let current_node = current_node_arc.as_ref(); // Borrow the content
-      +        stats.unique_nodes += 1;
-      +        stats.max_depth = stats.max_depth.max(current_depth);
-      +        total_depth_sum += current_depth as u64;
-      +
-      +        let num_predecessors = current_node.predecessors.len();
-      +        stats.max_predecessors = stats.max_predecessors.max(num_predecessors);
-      +        total_predecessors_sum += num_predecessors as u64;
-      +        if num_predecessors > 1 {
-      +            stats.merge_points += 1;
-      +        }
-      +
-      +        for pred_arc in &current_node.predecessors {
-      +            let pred_ptr = Arc::as_ptr(pred_arc);
-      +            if visited.insert(pred_ptr) {
-      +                queue.push_back((pred_arc.clone(), current_depth + 1));
-      +            }
-      +        }
-      +    }
-      +
-      +    if stats.unique_nodes > 0 {
-      +        stats.average_depth = total_depth_sum as f64 / stats.unique_nodes as f64;
-      +        stats.average_predecessors = total_predecessors_sum as f64 / stats.unique_nodes as f64;
-      +    }
-      +
-      +    stats
-      +}
+      **1. Modify `src/datastructures/gss.rs`**
+
+      First, add the necessary imports at the top of the file:
+
+      ```rust
+      use std::fmt::{Debug, Write}; // Added Write
       ```
 
-      ```diff
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -1,9 +1,9 @@
-      -use crate::datastructures::gss::BulkMerge;
-      +use crate::datastructures::gss::{BulkMerge, gather_gss_stats};
-       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-       use crate::glr::items::Item;
-       use crate::glr::table::{
-           NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID,
-       };
-      -use crate::datastructures::gss::{GSSNode, GSSTrait};
-      +use crate::datastructures::gss::{GSSNode, GSSTrait, GSSStats};
-       
-       use bimap::BiBTreeMap;
-       use std::collections::{BTreeMap, BTreeSet};
-      @@ -208,7 +208,10 @@
-           }
-       
-           pub fn step(&mut self, token_id: TerminalID) {
-      -        crate::debug!(3, "Stepping with token {:?}, {} active states", token_id, self.active_states.len());
-      +        // Gather and log GSS stats before processing the step
-      +        let root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
-      +        let stats = gather_gss_stats(&root_nodes);
-      +        crate::debug!(3, "Step Start (Token {:?}): Active States: {}, GSS Stats: {:?}", token_id, self.active_states.len(), stats);
-               let mut next_active_states = Vec::new();
-               // This will store states where the current token_id leads to no action.
-               let mut current_action_not_found_states = Vec::new();
-      @@ -315,7 +318,10 @@
-               }
-               self.active_states = next_active_states;
-               self.action_not_found_states = current_action_not_found_states; // Replace previous not-found states
-      -        crate::debug!(3, "After step (token {:?}), there are {} active states and {} action not found states", token_id, self.active_states.len(), self.action_not_found_states.len());
-      +
-      +        let end_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
-      +        let end_stats = gather_gss_stats(&end_root_nodes);
-      +        crate::debug!(3, "Step End (Token {:?}): Active States: {}, Action Not Found: {}, GSS Stats: {:?}", token_id, self.active_states.len(), self.action_not_found_states.len(), end_stats);
-       
-               // TODO: decide whether to keep action_not_found_states or not
-               self.action_not_found_states.clear();
+      Next, add the following two functions to the end of the file `src/datastructures/gss.rs`. This includes the recursive helper and the public interface function.
+
+      ```rust
+      /// Recursive helper to build the string representation of the GSS structure.
+      fn print_gss_node_recursive<T: Debug>(
+          node_arc: &Arc<GSSNode<T>>,
+          visited: &mut HashSet<*const GSSNode<T>>,
+          indent: usize,
+          node_count: &mut usize,
+          max_nodes: usize,
+          output: &mut String,
+      ) -> Result<(), std::fmt::Error> {
+          if *node_count >= max_nodes {
+              return Ok(()); // Stop recursion if max_nodes limit is reached
+          }
+
+          let node_ptr = Arc::as_ptr(node_arc);
+          let prefix = format!("{:indent$}", "", indent = indent * 2);
+
+          if visited.contains(&node_ptr) {
+              writeln!(output, "{}- Node {:p} (Visited)", prefix, node_ptr)?;
+              return Ok(());
+          }
+
+          visited.insert(node_ptr);
+          *node_count += 1;
+
+          // Print current node info
+          writeln!(output, "{}- Node {:p}: {:?}", prefix, node_ptr, node_arc.value)?;
+
+          // Print predecessors
+          if !node_arc.predecessors.is_empty() {
+              writeln!(output, "{}  Predecessors:", prefix)?;
+              for pred_arc in &node_arc.predecessors {
+                  // Recursively print predecessors
+                  print_gss_node_recursive(pred_arc, visited, indent + 1, node_count, max_nodes, output)?;
+                  if *node_count >= max_nodes {
+                       // Check again after recursive call in case it hit the limit
+                      return Ok(());
+                  }
+              }
+          }
+
+          Ok(())
+      }
+
+      /// Generates a string representation of the GSS forest structure starting from the given roots.
+      ///
+      /// Traverses the graph, handling cycles and shared nodes. Stops printing if the number
+      /// of unique nodes encountered exceeds `max_nodes`.
+      ///
+      /// # Arguments
+      /// * `roots` - A slice of `Arc<GSSNode<T>>` representing the roots of the forest.
+      /// * `max_nodes` - The maximum number of unique nodes to include in the output string.
+      ///
+      /// # Returns
+      /// A `String` containing the formatted GSS structure, potentially truncated.
+      pub fn print_gss_forest<T: Debug>(roots: &[Arc<GSSNode<T>>], max_nodes: usize) -> String {
+          let mut visited = HashSet::new();
+          let mut node_count = 0;
+          let mut output = String::new();
+
+          if roots.is_empty() {
+              return "GSS Forest: (No roots)".to_string();
+          }
+
+          writeln!(&mut output, "GSS Forest Roots (Max Nodes: {}):", max_nodes).unwrap();
+
+          for (i, root_arc) in roots.iter().enumerate() {
+              writeln!(&mut output, "Root {}:", i).unwrap();
+              match print_gss_node_recursive(root_arc, &mut visited, 1, &mut node_count, max_nodes, &mut output) {
+                  Ok(_) => {
+                      if node_count >= max_nodes {
+                          writeln!(&mut output, "... (Truncated: Reached max nodes {})", max_nodes).unwrap();
+                          break; // Stop processing more roots if limit reached
+                      }
+                  }
+                  Err(e) => {
+                      // Should not happen with String::write_fmt
+                      eprintln!("Error writing GSS structure to string: {}", e);
+                      return format!("Error generating GSS string: {}", e);
+                  }
+              }
+          }
+
+          if node_count < max_nodes && node_count > visited.len() {
+               // This condition indicates some nodes were visited but not printed due to the limit being hit mid-recursion
+               writeln!(&mut output, "... (Truncated: Reached max nodes {})", max_nodes).unwrap();
+          }
+
+
+          output
+      }
       ```
+
+      **2. Modify `src/glr/parser.rs`**
+
+      First, add the `Debug` trait bound for `T` where `GLRParserState` is implemented. Find this line:
+
+      ```rust
+      impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
+      ```
+
+      And change it to:
+
+      ```rust
+      impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
+      ```
+
+      Next, import the new printing function at the top of the file:
+
+      ```rust
+      use crate::datastructures::gss::{print_gss_forest, BulkMerge, gather_gss_stats}; // Added print_gss_forest
+      ```
+
+      Finally, modify the `step` method. Find the end of the method, just before the last closing brace `}`. Add the following code block there:
+
+      ```rust
+              // Log the final GSS structure if it's reasonably small
+              const MAX_NODES_TO_PRINT: usize = 30;
+              debug!(4, || { // Use a closure to avoid potentially expensive calculations if debug level is lower
+                  let final_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+                  let final_stats = gather_gss_stats(&final_root_nodes);
+                  if final_stats.unique_nodes <= MAX_NODES_TO_PRINT {
+                      format!("GSS Structure ({} nodes):\n{}", final_stats.unique_nodes, print_gss_forest(&final_root_nodes, MAX_NODES_TO_PRINT))
+                  } else {
+                      format!("GSS Structure too large to print ({} nodes > {})", final_stats.unique_nodes, MAX_NODES_TO_PRINT)
+                  }
+              });
+          } // This is the closing brace of the step function
+      ```
+
+      Now, when you run your parser with debug level 4 or higher (e.g., using `RUST_LOG=debug` or `RUST_LOG=trace`), the GSS structure will be printed after each step, provided it has 30 or fewer unique nodes.
     metadata:
   - user: |
-      Git apply result:
-      Found 2 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
+      Using model 'gemini/gemini-2.5-flash-preview-04-17' for code completion.
+      Successfully wrote modified content to: src/datastructures/gss.rs
+      Successfully wrote modified content to: src/glr/parser.rs
     metadata:
 ...

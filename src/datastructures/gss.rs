@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc};
+use std::fmt::{Debug, Write};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GSSNode<T> {
@@ -428,4 +429,95 @@ pub fn gather_gss_stats<T: Clone>(roots: &[Arc<GSSNode<T>>]) -> GSSStats {
     }
 
     stats
+}
+
+/// Recursive helper to build the string representation of the GSS structure.
+fn print_gss_node_recursive<T: Debug>(
+    node_arc: &Arc<GSSNode<T>>,
+    visited: &mut HashSet<*const GSSNode<T>>,
+    indent: usize,
+    node_count: &mut usize,
+    max_nodes: usize,
+    output: &mut String,
+) -> Result<(), std::fmt::Error> {
+    if *node_count >= max_nodes {
+        return Ok(()); // Stop recursion if max_nodes limit is reached
+    }
+
+    let node_ptr = Arc::as_ptr(node_arc);
+    let prefix = format!("{:indent$}", "", indent = indent * 2);
+
+    if visited.contains(&node_ptr) {
+        writeln!(output, "{}- Node {:p} (Visited)", prefix, node_ptr)?;
+        return Ok(());
+    }
+
+    visited.insert(node_ptr);
+    *node_count += 1;
+
+    // Print current node info
+    writeln!(output, "{}- Node {:p}: {:?}", prefix, node_ptr, node_arc.value)?;
+
+    // Print predecessors
+    if !node_arc.predecessors.is_empty() {
+        writeln!(output, "{}  Predecessors:", prefix)?;
+        for pred_arc in &node_arc.predecessors {
+            // Recursively print predecessors
+            print_gss_node_recursive(pred_arc, visited, indent + 1, node_count, max_nodes, output)?;
+            if *node_count >= max_nodes {
+                 // Check again after recursive call in case it hit the limit
+                return Ok(());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Generates a string representation of the GSS forest structure starting from the given roots.
+///
+/// Traverses the graph, handling cycles and shared nodes. Stops printing if the number
+/// of unique nodes encountered exceeds `max_nodes`.
+///
+/// # Arguments
+/// * `roots` - A slice of `Arc<GSSNode<T>>` representing the roots of the forest.
+/// * `max_nodes` - The maximum number of unique nodes to include in the output string.
+///
+/// # Returns
+/// A `String` containing the formatted GSS structure, potentially truncated.
+pub fn print_gss_forest<T: Debug>(roots: &[Arc<GSSNode<T>>], max_nodes: usize) -> String {
+    let mut visited = HashSet::new();
+    let mut node_count = 0;
+    let mut output = String::new();
+
+    if roots.is_empty() {
+        return "GSS Forest: (No roots)".to_string();
+    }
+
+    writeln!(&mut output, "GSS Forest Roots (Max Nodes: {}):", max_nodes).unwrap();
+
+    for (i, root_arc) in roots.iter().enumerate() {
+        writeln!(&mut output, "Root {}:", i).unwrap();
+        match print_gss_node_recursive(root_arc, &mut visited, 1, &mut node_count, max_nodes, &mut output) {
+            Ok(_) => {
+                if node_count >= max_nodes {
+                    writeln!(&mut output, "... (Truncated: Reached max nodes {})", max_nodes).unwrap();
+                    break; // Stop processing more roots if limit reached
+                }
+            }
+            Err(e) => {
+                // Should not happen with String::write_fmt
+                eprintln!("Error writing GSS structure to string: {}", e);
+                return format!("Error generating GSS string: {}", e);
+            }
+        }
+    }
+
+    if node_count < max_nodes && node_count > visited.len() {
+         // This condition indicates some nodes were visited but not printed due to the limit being hit mid-recursion
+         writeln!(&mut output, "... (Truncated: Reached max nodes {})", max_nodes).unwrap();
+    }
+
+
+    output
 }
