@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc};
+use std::fmt::{self, Display, Formatter}; // Add fmt imports
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GSSNode<T> {
@@ -140,6 +141,57 @@ impl<T> Drop for GSSNode<T> {
         }
     }
 }
+
+// Add Display implementation for GSSNode
+impl<T: Display> Display for GSSNode<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut visited = HashSet::new();
+        // Start the recursive formatting from the current node with indent 0
+        self.fmt_recursive(f, &mut visited, 0)
+    }
+}
+
+impl<T: Display> GSSNode<T> {
+    // Helper function for Display implementation
+    fn fmt_recursive(
+        &self,
+        f: &mut Formatter<'_>,
+        visited: &mut HashSet<*const GSSNode<T>>,
+        indent: usize,
+    ) -> fmt::Result {
+        let prefix = "  ".repeat(indent);
+        let node_ptr = self as *const _;
+
+        // Print node info: pointer and value
+        write!(f, "{}{:p} [Value: {}]", prefix, node_ptr, self.value)?;
+
+        // Check if we've already visited this node in the current traversal path
+        if !visited.insert(node_ptr) {
+            writeln!(f, " (Seen)")?; // Mark as seen to avoid infinite loops/redundancy
+            return Ok(());
+        } else {
+            writeln!(f)?; // Newline after printing node details before predecessors
+        }
+
+        // Recursively print predecessors
+        for pred in &self.predecessors {
+             // The recursive call handles the next level of indentation
+             pred.as_ref().fmt_recursive(f, visited, indent + 1)?;
+        }
+        Ok(())
+    }
+}
+
+// Add Display implementation for Arc<GSSNode<T>>
+impl<T: Display> Display for Arc<GSSNode<T>> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        // Delegate to the inner GSSNode's recursive helper
+        // We need a fresh visited set for each top-level Arc print
+        let mut visited = HashSet::new();
+        self.as_ref().fmt_recursive(f, &mut visited, 0)
+    }
+}
+
 
 pub trait GSSTrait<T: Clone> {
     type Peek<'a> where T: 'a, Self: 'a;
