@@ -244,6 +244,9 @@ if __name__ == "__main__":
     allowed_chars = set("_")
     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c not in allowed_chars for c in k)}
 
+    # Set the vocabto just "__"
+    tokenizer_vocab = {"__"}
+
     llm_token_to_id = {token.replace("Ġ", " ").encode(): i for token, i in tokenizer_vocab.items()}
     llm_tokens = list(tokenizer_vocab.keys()) # Use all tokens
 
