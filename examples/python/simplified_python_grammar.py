@@ -18,6 +18,7 @@ def eat_string(s: str) -> Regex:
     return Regex.seq([Regex.eat_u8(b) for b in s.encode('utf-8')])
 
 # Function to convert pegen grammar nodes to sep1 grammar expressions
+# (Keep the existing pegen_to_sep1_regex function as it should handle the simpler rules)
 def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Any:
     if item in memo:
         return memo[item]
@@ -31,7 +32,9 @@ def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Any:
         if value[0] == value[-1] and value[0] in ('"', "'"):
             value = value[1:-1]
         else:
-            raise ValueError(f"Invalid string literal in grammar: {item.value}")
+            # Allow operators like '+' directly as StringLeafs
+            pass
+            # raise ValueError(f"Invalid string literal in grammar: {item.value}")
         result = ge.regex(eat_string(value))
     elif isinstance(item, pegen.grammar.Opt):
         result = ge.optional(pegen_to_sep1_regex(item.node, memo))
@@ -71,7 +74,8 @@ def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Any:
     memo[item] = result
     return result
 
-# Define basic tokens required by the simplified grammar
+
+# Define ONLY the tokens required by the MINIMAL grammar
 def define_tokens() -> list[tuple[str, Any]]:
     tokens = {}
     choice = Regex.choice
@@ -81,12 +85,10 @@ def define_tokens() -> list[tuple[str, Any]]:
     rep = Regex.rep
     eps = Regex.eps # Epsilon (empty) regex
 
-    # --- Whitespace and Comments (to be ignored between tokens) ---
-    ws_char = eat_u8_choice(" \t")
-    whitespace = seq([rep(ws_char)])
-    comment = seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n")))])
-    # Define ignore pattern - PyGrammarConstraint might need this separately
-    ignore_pattern = rep(choice([ws_char, comment]))
+    # --- Whitespace (to be ignored between tokens) ---
+    # Sep1 handles whitespace implicitly between regex tokens usually
+    # ws_char = eat_u8_choice(" \t\n") # Include newline if needed
+    # ignore_pattern = rep(ws_char)
 
     # --- Token Definitions ---
     digit = eat_u8_choice("0123456789")
@@ -98,27 +100,28 @@ def define_tokens() -> list[tuple[str, Any]]:
     tokens["NAME"] = seq([name_start, rep(name_middle)])
 
     integer = seq([digit, rep(digit)])
-    float_num = seq([rep(digit), eat_u8(ord(".")), digit, rep(digit)])
-    tokens["NUMBER"] = choice([float_num, integer])
+    # Minimal grammar doesn't need float
+    # float_num = seq([rep(digit), eat_u8(ord(".")), digit, rep(digit)])
+    tokens["NUMBER"] = integer # Only integer for now
 
-    string_dq = seq([eat_u8(ord('"')), rep(eat_u8_negation(ord('"'))), eat_u8(ord('"'))])
-    string_sq = seq([eat_u8(ord("'")), rep(eat_u8_negation(ord("'"))), eat_u8(ord("'"))])
-    tokens["STRING"] = choice([string_dq, string_sq])
-
-    tokens["NEWLINE"] = eat_u8(ord("\n"))
-    tokens["INDENT"] = eps() # Handled by parser logic, not regex alone
-    tokens["DEDENT"] = eps() # Handled by parser logic, not regex alone
+    # Minimal grammar doesn't need STRING, NEWLINE, INDENT, DEDENT
+    # tokens["STRING"] = choice([string_dq, string_sq])
+    # tokens["NEWLINE"] = eat_u8(ord("\n"))
+    # tokens["INDENT"] = eps()
+    # tokens["DEDENT"] = eps()
     tokens["ENDMARKER"] = eps() # Represents end of input
 
     # --- Final List ---
-    # Return list of (token_name, grammar_expression)
     token_exprs = []
     for name, regex_pattern in tokens.items():
-         # Associate the raw Regex pattern using ge.regex()
          token_exprs.append((name, ge.regex(regex_pattern)))
 
-    # Note: The 'ignore_pattern' might need to be passed to PyGrammarConstraint initialization.
-    # This example assumes default handling or internal mechanisms.
+    # Add operators used as literals in the grammar
+    # These don't need ge.regex() wrapper if handled directly by StringLeaf conversion
+    # token_exprs.append(("+", eat_string("+")))
+    # token_exprs.append(("*", eat_string("*")))
+    # token_exprs.append(("(", eat_string("(")))
+    # token_exprs.append((")", eat_string(")")))
 
     return token_exprs
 
@@ -130,11 +133,14 @@ def pegen_to_sep1_grammar(grammar_path: Path) -> PyGrammar:
 
     try:
         grammar_bytes = grammar_text.encode('utf-8')
+        # Use io.StringIO for tokenize compatibility if needed, but BytesIO is preferred
         token_stream = tokenize.tokenize(io.BytesIO(grammar_bytes).readline)
-        # Use pegen's tokenizer wrapper - ENABLE VERBOSE MODE HERE
-        pegen_tokenizer_inst = pegen.tokenizer.Tokenizer(token_stream, verbose=True) # <--- SET verbose=True
+        # Use pegen's tokenizer wrapper - Keep verbose for now
+        pegen_tokenizer_inst = pegen.tokenizer.Tokenizer(token_stream, verbose=True)
         parser = pegen.grammar_parser.GeneratedParser(pegen_tokenizer_inst)
+        print("Attempting parser.start()...")
         grammar = parser.start()
+        print(f"parser.start() returned: {type(grammar)}") # Check what it returns
         if not grammar:
              # If grammar is None or parsing failed before returning, raise error
              raise ValueError("Failed to parse grammar file using pegen (parser.start() returned None or failed).")
@@ -156,13 +162,21 @@ def pegen_to_sep1_grammar(grammar_path: Path) -> PyGrammar:
     if not grammar or not grammar.rules:
          raise ValueError("Pegen parsing resulted in an invalid or empty grammar object.")
 
-    start_rule_name = next(iter(grammar.rules)) # Get the first rule as start
-    print(f"Identified start rule: {start_rule_name}")
-    exprs.append(("start", ge.ref(start_rule_name))) # Define 'start' entry point
+    # Use the actual start rule from the minimal grammar
+    start_rule_name = "start" # Explicitly set for minimal grammar
+    print(f"Using start rule: {start_rule_name}")
+    # Define 'start' entry point if needed by sep1, or use the grammar's start rule directly
+    # Check if sep1 needs a rule named 'start' or if it uses the first rule.
+    # Assuming it uses the first rule defined in the PyGrammar list.
+    # Let's ensure the grammar's start rule is first.
+    start_rule_rhs = pegen_to_sep1_regex(grammar.rules[start_rule_name].rhs, memo)
+    exprs.append((start_rule_name, start_rule_rhs))
 
+    # Add other rules
     for rule_name, rule in grammar.rules.items():
-        sep1_expr = pegen_to_sep1_regex(rule.rhs, memo)
-        exprs.append((rule_name, sep1_expr))
+        if rule_name != start_rule_name: # Avoid duplicating the start rule
+            sep1_expr = pegen_to_sep1_regex(rule.rhs, memo)
+            exprs.append((rule_name, sep1_expr))
 
     print("Defining tokens...")
     tokens = define_tokens()
@@ -187,13 +201,13 @@ def timeit(func):
 @timeit
 def create_grammar_constraint(grammar, llm_token_to_id, max_llm_token_id):
     print("Initializing PyGrammarConstraint...")
-    # Note: May need to pass ignore_pattern regex if required by PyGrammarConstraint constructor
     grammar_constraint = PyGrammarConstraint(grammar, llm_token_to_id, max_llm_token_id)
     return grammar_constraint
 
 if __name__ == "__main__":
     # --- Configuration ---
     tokenizer_name = "gpt2" # Using gpt2 for its common vocab
+    # POINT TO THE MINIMAL GRAMMAR FILE
     grammar_file = Path(__file__).parent / "simplified_python.gram"
 
     # --- Load Tokenizer Vocab ---
@@ -207,31 +221,25 @@ if __name__ == "__main__":
     skipped_tokens = 0
     for token_str, token_id in tokenizer.vocab.items():
         try:
-            # Handle potential special characters or byte representations like GPT-2's 'Ġ' for space
             processed_token_str = token_str.replace("Ġ", " ")
-            # Encode to bytes, assuming UTF-8
             token_bytes = processed_token_str.encode('utf-8')
             llm_token_to_id[token_bytes] = token_id
             processed_tokens += 1
         except Exception as e:
-            # print(f"Warning: Could not process token '{token_str}' (ID: {token_id}): {e}")
             skipped_tokens += 1
-            pass # Skip tokens that cause encoding issues
+            pass
 
     print(f"Processed {processed_tokens} tokens into byte mapping, skipped {skipped_tokens}.")
 
-    # Determine max token ID actually used in the mapping
     if not llm_token_to_id:
         raise ValueError("Failed to create token byte mapping. No tokens processed.")
     max_token_id = max(llm_token_to_id.values())
     print(f"Max token ID in mapping: {max_token_id}")
-    # eos_token_id = tokenizer.eos_token_id # Not needed for initial mask, but good to know
 
     # --- Load and Convert Grammar ---
     grammar = pegen_to_sep1_grammar(grammar_file)
 
     # --- Initialize Grammar Constraint ---
-    # This step compiles the grammar and token regexes
     grammar_constraint = create_grammar_constraint(grammar, llm_token_to_id, max_token_id)
 
     # --- Get Initial Mask ---
@@ -241,15 +249,13 @@ if __name__ == "__main__":
     print("Getting initial mask (allowed tokens at the start)...")
     initial_mask = timeit(grammar_constraint_state.get_mask)()
 
-    # Ensure mask length matches expected size (max_token_id + 1)
     expected_mask_len = max_token_id + 1
     print(f"Initial mask received (length: {len(initial_mask)}, expected: {expected_mask_len})")
+    # Adjust mask length if necessary (same logic as before)
     if len(initial_mask) < expected_mask_len:
-        print("Warning: Mask length is less than expected. Padding...")
         padding = np.zeros(expected_mask_len - len(initial_mask), dtype=bool)
         initial_mask = np.concatenate((initial_mask, padding))
     elif len(initial_mask) > expected_mask_len:
-        print("Warning: Mask length is greater than expected. Truncating...")
         initial_mask = initial_mask[:expected_mask_len]
 
 
@@ -258,26 +264,23 @@ if __name__ == "__main__":
     print(f"Number of allowed tokens initially: {len(allowed_token_ids)}")
 
     allowed_tokens = []
-    id_to_token_str = {v: k for k, v in tokenizer.vocab.items()} # For display
+    id_to_token_str = {v: k for k, v in tokenizer.vocab.items()}
 
     for token_id in allowed_token_ids:
-        # Get the original token string representation from the tokenizer's vocab
         token_str = id_to_token_str.get(token_id, f"[Unknown ID: {token_id}]")
-        # Attempt to decode the ID using the tokenizer for a cleaner representation
         try:
             decoded_str = tokenizer.decode([token_id], skip_special_tokens=False, clean_up_tokenization_spaces=False)
             display_str = f"'{decoded_str}' (Raw: '{token_str}', ID: {token_id})"
         except Exception:
-            display_str = f"(Raw: '{token_str}', ID: {token_id})" # Fallback if decode fails
-
+            display_str = f"(Raw: '{token_str}', ID: {token_id})"
         allowed_tokens.append(display_str)
 
-    print("\nAllowed tokens at the start:")
+    print("\nAllowed tokens at the start (Minimal Grammar):")
     if not allowed_tokens:
         print("(None)")
     else:
-        max_to_print = 100 # Print more tokens if available
-        allowed_tokens.sort() # Sort for consistent output
+        max_to_print = 100
+        allowed_tokens.sort()
         for i, token_info in enumerate(allowed_tokens):
             if i < max_to_print:
                 print(f"- {token_info}")
