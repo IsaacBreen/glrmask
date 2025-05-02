@@ -1,450 +1,374 @@
 local_system:
   attached_files:
-    - src/glr/table.rs
+    - src/datastructures/gss.rs
     - src/glr/parser.rs
   conversation_file:
   compile_command:
   initial_file_contents:
-    src/glr/table.rs: |+
-      use super::items::{compute_closure, compute_goto, split_on_dot, Item};
-      use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
-      use crate::glr::parser::GLRParser;
-      use bimap::BiBTreeMap;
-      use std::collections::{HashMap, VecDeque};
-      use std::collections::{BTreeMap, BTreeSet};
-      use std::fmt::Display;
-      use crate::glr::analyze::{drop_dead, validate};
-      pub use crate::types::{TerminalID};
+    src/datastructures/gss.rs: |
+      use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+      use std::sync::Arc;
 
-      type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
-      type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
-      type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
-      type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Row>;
-      type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
-      type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
-      pub type Stage7Table = BTreeMap<StateID, Stage7Row>;
-
-
-      type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
-      #[derive(Debug)]
-      struct Stage2Row {
-          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-          reduces: BTreeSet<Item>,
-      }
-      #[derive(Debug)]
-      struct Stage3Row {
-          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-          reduces: BTreeMap<Terminal, BTreeSet<Item>>,
-      }
-      #[derive(Debug)]
-      struct Stage4Row {
-          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-          reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
-      }
-      type Stage5Row = Stage4Row;
-      #[derive(Debug)]
-      struct Stage6Row {
-          shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
-          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct GSSNode<T> {
+          pub value: T,
+          predecessors: Vec<Arc<GSSNode<T>>>,
       }
 
-      #[derive(Debug)]
-      enum Stage6ShiftsAndReduces {
-          Shift(BTreeSet<Item>),
-          Reduce(ProductionID),
-          Split {
-              shift: Option<BTreeSet<Item>>,
-              reduces: BTreeSet<ProductionID>,
-          },
-      }
-
-      #[derive(Debug, Clone)]
-      pub enum Stage7ShiftsAndReduces {
-          Shift(StateID),
-          Reduce { production_id: ProductionID, nonterminal_id: NonTerminalID, len: usize },
-          Split {
-              shift: Option<StateID>,
-              reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>,
-          },
-      }
-
-      #[derive(Debug, Clone)]
-      pub struct Stage7Row {
-          pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
-          pub gotos: BTreeMap<NonTerminalID, StateID>,
-      }
-
-      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct StateID(pub usize);
-      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct ProductionID(pub usize);
-      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct NonTerminalID(pub usize);
-
-      type Stage1Result = Stage1Table;
-      type Stage2Result = Stage2Table;
-      type Stage3Result = Stage3Table;
-      type Stage4Result = Stage4Table;
-      type Stage5Result = Stage5Table;
-      type Stage6Result = Stage6Table;
-      type Stage7Result = (
-          Stage7Table,
-          BiBTreeMap<BTreeSet<Item>, StateID>,
-          StateID,
-      );
-
-      fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
-          let initial_item = Item {
-              production: productions[start_production_id].clone(),
-              dot_position: 0,
-          };
-          let initial_closure = BTreeSet::from([initial_item]);
-          let mut worklist = VecDeque::from([initial_closure.clone()]);
-
-          let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
-
-          while let Some(items) = worklist.pop_front() {
-              if transitions.contains_key(&items) {
-                  continue;
+      impl<T> GSSNode<T> {
+          pub fn new(value: T) -> Self {
+              Self {
+                  value,
+                  predecessors: Vec::new(),
               }
-
-              let closure = compute_closure(&items, productions);
-              let splits = split_on_dot(&closure);
-              let mut row = BTreeMap::new();
-
-              for (symbol, items) in splits {
-                  if symbol.is_none() {
-                      continue;
-                  }
-                  let goto_set = compute_goto(&items);
-                  row.insert(symbol.clone(), goto_set.clone());
-                  worklist.push_back(goto_set);
+          }
+          pub fn new_with_predecessors(value: T, predecessors: Vec<Arc<GSSNode<T>>>) -> Self {
+              Self {
+                  value,
+                  predecessors: predecessors.into_iter().collect(),
               }
-
-              transitions.insert(items.clone(), row);
           }
 
-          transitions
-      }
+          pub fn from_iter<I>(iter: I) -> Self
+          where
+              I: IntoIterator<Item = T>,
+          {
+              let mut iter = iter.into_iter();
+              let mut root = Self::new(iter.next().unwrap());
+              for value in iter {
+                  root = root.push(value);
+              }
+              root
+          }
 
-      fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
-          let mut stage_2_table = BTreeMap::new();
-          for (item_set, transitions) in stage_1_table {
-              let mut shifts = BTreeMap::new();
-              let mut gotos = BTreeMap::new();
-              let mut reduces = BTreeSet::new();
+          pub fn push(self, value: T) -> Self {
+              let mut new_node = Self::new(value);
+              new_node.predecessors.push(Arc::new(self));
+              new_node
+          }
 
-              for item in &item_set {
-                  if item.dot_position >= item.production.rhs.len() {
-                      reduces.insert(item.clone());
-                  }
+          pub fn pop(&self) -> Vec<Arc<Self>> {
+              self.predecessors.clone()
+          }
+
+          pub fn popn(&self, n: usize) -> Vec<Arc<Self>>
+          where
+              T: Clone,
+          {
+              if n == 0 {
+                  return vec![Arc::new(self.clone())];
               }
 
-              for (symbol_opt, next_item_set) in &transitions {
-                  if let Some(symbol) = symbol_opt {
-                      match symbol {
-                          Symbol::Terminal(t) => {
-                              shifts.insert(t.clone(), next_item_set.clone());
-                          }
-                          Symbol::NonTerminal(nt) => {
-                              gotos.insert(nt.clone(), next_item_set.clone());
-                          }
+              let mut result = Vec::new();
+              let mut seen: HashSet<*const GSSNode<T>> = HashSet::new();
+
+              // recurse on predecessors and collect, skipping duplicates
+              for predecessor in &self.predecessors {
+                  for node in predecessor.popn(n - 1) {
+                      let ptr = Arc::as_ptr(&node);
+                      if seen.insert(ptr) {
+                          result.push(node);
                       }
                   }
               }
 
-              stage_2_table.insert(
-                  item_set,
-                  Stage2Row {
-                      shifts,
-                      gotos,
-                      reduces,
-                  },
-              );
-          }
-          stage_2_table
-      }
-
-      fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-          let follow_sets = compute_follow_sets(productions);
-
-          let mut stage_3_table = BTreeMap::new();
-
-          for (item_set, row) in stage_2_table {
-              let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
-
-              for item in &row.reduces {
-                  let lhs = &item.production.lhs;
-                  let lookaheads = follow_sets.get(lhs).unwrap();
-
-                  for terminal in lookaheads {
-                      reduces
-                          .entry(terminal.clone())
-                          .or_default()
-                          .insert(item.clone());
-                  }
-              }
-
-              stage_3_table.insert(
-                  item_set,
-                  Stage3Row {
-                      shifts: row.shifts,
-                      gotos: row.gotos,
-                      reduces,
-                  },
-              );
+              result
           }
 
-          stage_3_table
-      }
-
-      fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
-          let production_ids: BTreeMap<Production, ProductionID> = productions
-              .iter()
-              .enumerate()
-              .map(|(i, p)| (p.clone(), ProductionID(i)))
-              .collect();
-
-          let mut stage_4_table = BTreeMap::new();
-
-          for (item_set, row) in stage_3_table {
-              let mut reduces = BTreeMap::new();
-
-              for (terminal, items) in row.reduces {
-                  let mut prod_ids = BTreeSet::new();
-                  for item in items {
-                      let prod_id = production_ids.get(&item.production).unwrap();
-                      prod_ids.insert(*prod_id);
-                  }
-                  reduces.insert(terminal.clone(), prod_ids);
-              }
-
-              stage_4_table.insert(
-                  item_set,
-                  Stage4Row {
-                      shifts: row.shifts,
-                      gotos: row.gotos,
-                      reduces,
-                  },
-              );
+          pub fn peek(&self) -> &T {
+              &self.value
           }
 
-          stage_4_table
-      }
+          pub fn value_mut(&mut self) -> &mut T {
+              &mut self.value
+          }
 
-      fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
-          // todo: remove this
-          stage_4_table
-      }
-
-      fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
-          let mut stage_6_table = BTreeMap::new();
-
-          for (item_set, row) in stage_5_table {
-              let mut shifts_and_reduces = BTreeMap::new();
-
-              for (terminal, next_item_set) in row.shifts {
-                  shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Shift(next_item_set));
-              }
-
-              for (terminal, mut production_ids) in row.reduces {
-                  if let Some(mut existing) = shifts_and_reduces.remove(&terminal) {
-                      match existing {
-                          Stage6ShiftsAndReduces::Shift(shift_set) => {
-                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
-                                  shift: Some(shift_set.clone()),
-                                  reduces: production_ids.clone(),
-                              });
-                          }
-                          Stage6ShiftsAndReduces::Reduce(existing_production_id) => {
-                              production_ids.insert(existing_production_id);
-                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
-                                  shift: None,
-                                  reduces: production_ids,
-                              });
-                          }
-                          Stage6ShiftsAndReduces::Split { shift, mut reduces } => {
-                              reduces.extend(production_ids.into_iter());
-                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift, reduces });
-                          }
-                      }
+          pub fn flatten(&self) -> Vec<Vec<T>>
+          where
+              T: Clone,
+          {
+              let mut result = Vec::new();
+              let mut stack = Vec::new();
+              stack.push((self, Vec::new()));
+              while let Some((node, mut path)) = stack.pop() {
+                  path.push(node.value.clone());
+                  if node.predecessors.is_empty() {
+                      result.push(path);
                   } else {
-                      // If there's only one production ID, we can optimize by storing it directly
-                      if production_ids.len() == 1 {
-                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Reduce(production_ids.iter().next().unwrap().clone()));
-                      } else {
-                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift: None, reduces: production_ids });
+                      for predecessor in &node.predecessors {
+                          stack.push((predecessor, path.clone()));
                       }
                   }
               }
-
-              stage_6_table.insert(
-                  item_set,
-                  Stage6Row {
-                      shifts_and_reduces,
-                      gotos: row.gotos,
-                  },
-              );
+              result
           }
 
-          stage_6_table
+          pub fn flatten_bulk(nodes: &[Self]) -> Vec<Vec<T>>
+          where
+              T: Clone,
+          {
+              nodes.iter().flat_map(|node| node.flatten()).collect()
+          }
+
+          pub fn merge(&mut self, mut other: Self)
+          where
+              T: PartialEq,
+          {
+              assert!(self.value == other.value);
+              self.predecessors.append(&mut other.predecessors);
+          }
+
+          pub fn merge_unchecked(&mut self, mut other: Self)
+          where
+              T: PartialEq,
+          {
+              self.predecessors.append(&mut other.predecessors);
+          }
+
+          pub fn map<F, U>(&self, f: F) -> GSSNode<U>
+          where
+              F: Copy + Fn(&T) -> U,
+          {
+              GSSNode {
+                  value: f(&self.value),
+                  predecessors: self.predecessors.clone().into_iter()
+                      .map(|node| Arc::new(node.map(f)))
+                      .collect(),
+              }
+          }
       }
 
-      fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
-          let mut item_set_map = BiBTreeMap::new();
-          let mut next_state_id = 0;
-
-          let mut terminals = BTreeSet::new();
-          let mut non_terminals = BTreeSet::new();
-
-          for (item_set, row) in &stage_6_table {
-              item_set_map.insert(item_set.clone(), StateID(next_state_id));
-              next_state_id += 1;
-
-              for t in row.shifts_and_reduces.keys() {
-                  terminals.insert(t.clone());
-              }
-
-              for nt in row.gotos.keys() {
-                  non_terminals.insert(nt.clone());
+      impl<T> Drop for GSSNode<T> {
+          fn drop(&mut self) {
+              let mut cur_nodes = std::mem::take(&mut self.predecessors);
+              while let Some(node) = cur_nodes.pop() {
+                  if let Ok(mut inner_node) = Arc::try_unwrap(node) {
+                      cur_nodes.append(&mut inner_node.predecessors);
+                  }
               }
           }
+      }
 
-          let mut stage_7_table = BTreeMap::new();
+      pub trait GSSTrait<T: Clone> {
+          type Peek<'a> where T: 'a, Self: 'a;
+          fn peek(&self) -> Self::Peek<'_>;
+          fn push(&self, value: T) -> GSSNode<T>;
+          fn pop(&self) -> Vec<Arc<GSSNode<T>>>;
+          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>>;
+      }
 
-          for (item_set, row) in stage_6_table {
-              let state_id = *item_set_map.get_by_left(&item_set).unwrap();
-              let mut shifts_and_reduces = BTreeMap::new();
-              let mut gotos = BTreeMap::new();
+      impl<T: Clone> GSSTrait<T> for GSSNode<T> {
+          type Peek<'a> = &'a T where T: 'a;
 
-              // Determine if this state is an accepting state
-              let is_accepting_state = item_set.iter().any(|item| {
-                  item.production == productions[start_production_id] && item.dot_position == item.production.rhs.len()
-              });
+          fn peek(&self) -> Self::Peek<'_> {
+              &self.value
+          }
 
+          fn push(&self, value: T) -> GSSNode<T> {
+              let mut new_node = GSSNode::new(value);
+              new_node.predecessors.push(Arc::new(self.clone()));
+              new_node
+          }
 
+          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
+              self.predecessors.clone()
+          }
 
-              for (terminal, action) in row.shifts_and_reduces {
-                  let terminal_id = *terminal_map.get_by_left(&terminal).expect(format!("{:?} not found in terminal map {:?}", terminal, terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
-                  let converted_action = match action {
-                      Stage6ShiftsAndReduces::Shift(next_item_set) => {
-                          let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
-                          Stage7ShiftsAndReduces::Shift(next_state_id)
-                      }
-                      Stage6ShiftsAndReduces::Reduce(production_id) => {
-                          let production = productions.get(production_id.0).unwrap();
-                          let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
-                          let len = production.rhs.len();
-                          Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len }
-                      }
-                      Stage6ShiftsAndReduces::Split { shift, reduces } => {
-                          let shift_state_id = shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
-                          let mut len_to_nt_to_production_id: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
-                          for production_id in reduces {
-                              let production = productions.get(production_id.0).unwrap();
-                              let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
-                              let len = production.rhs.len();
-                              len_to_nt_to_production_id.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id);
+          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
+              // Delegate to the inherent, de-duplicating implementation above
+              GSSNode::popn(self, n)
+          }
+      }
+
+      impl<T: Clone> GSSTrait<T> for Arc<GSSNode<T>> {
+          type Peek<'a> = &'a T where T: 'a;
+
+          fn peek(&self) -> Self::Peek<'_> {
+              &self.value
+          }
+
+          fn push(&self, value: T) -> GSSNode<T> {
+              let mut new_node = GSSNode::new(value);
+              new_node.predecessors.push(self.clone());
+              new_node
+          }
+
+          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
+              self.predecessors.clone()
+          }
+
+          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
+              // Re-use the implementation on the underlying node, which already de-duplicates.
+              self.as_ref().popn(n)
+          }
+      }
+
+      impl<T: Clone> GSSTrait<T> for Option<Arc<GSSNode<T>>> {
+          type Peek<'a> = Option<&'a T> where T: 'a;
+
+          fn peek(&self) -> Self::Peek<'_> {
+              self.as_ref().map(|node| node.peek())
+          }
+
+          fn push(&self, value: T) -> GSSNode<T> {
+              self.clone().map(|node| node.push(value.clone())).unwrap_or_else(|| GSSNode::new(value))
+          }
+
+          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
+              self.as_ref().map(|node| node.pop()).unwrap_or_default()
+          }
+
+          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
+              self.as_ref().map(|node| node.popn(n)).unwrap_or_default()
+          }
+      }
+
+      impl<T: Clone> GSSTrait<T> for Option<GSSNode<T>> {
+          type Peek<'a> = Option<&'a T> where T: 'a;
+
+          fn peek(&self) -> Self::Peek<'_> {
+              self.as_ref().map(|node| node.peek())
+          }
+
+          fn push(&self, value: T) -> GSSNode<T> {
+              self.clone().map(|node| node.push(value.clone())).unwrap_or_else(|| GSSNode::new(value))
+          }
+
+          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
+              self.as_ref().map(|node| node.pop()).unwrap_or_default()
+          }
+
+          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
+              self.as_ref().map(|node| node.popn(n)).unwrap_or_default()
+          }
+      }
+
+      pub trait BulkMerge<T> {
+          fn bulk_merge(&mut self);
+      }
+
+      impl<T: Clone + Ord> BulkMerge<T> for Vec<Arc<GSSNode<T>>> {
+          fn bulk_merge(&mut self) {
+              // todo: should be possible to avoid cloning T in some cases by using &T in this map,
+              //  but we need to be careful about lifetimes. If we use `node.as_ref().value`, then node
+              //  will go out of bounds while the reference to its value is still inside `groups`.
+              let mut groups: BTreeMap<T, HashMap<_, Arc<GSSNode<T>>>> = BTreeMap::new();
+              for node in self.drain(..) {
+                  groups.entry(node.value.clone()).or_default().entry(Arc::as_ptr(&node)).or_insert(node);
+              }
+              for mut group in groups.into_values() {
+                  let mut group = group.into_values().collect::<Vec<_>>();
+                  let mut first = group.pop().unwrap();
+                  if group.is_empty() {
+                      self.push(first);
+                  } else {
+                      let mut predecessors_set: BTreeMap<_, _> = BTreeMap::new();
+                      for sibling in group {
+                          for predecessor in &sibling.predecessors {
+                              predecessors_set.insert(Arc::as_ptr(predecessor), predecessor.clone());
                           }
-                          Stage7ShiftsAndReduces::Split { shift: shift_state_id, reduces: len_to_nt_to_production_id }
+                      }
+                      let first_mut_ref = Arc::make_mut(&mut first);
+                      first_mut_ref.predecessors = predecessors_set.into_values().collect();
+                      self.push(first);
+                  }
+              }
+          }
+      }
+
+
+      // Helper function for prune_and_transform_roots
+      pub fn prune_and_transform_recursive<T: Clone>(
+          node_arc: &Arc<GSSNode<T>>,
+          closure: &impl Fn(&T) -> Option<(T, bool)>, // Returns Option<(NewValue, ContinueRecursion)>
+          memo: &mut HashMap<*const GSSNode<T>, Option<Arc<GSSNode<T>>>>,
+      ) -> Option<Arc<GSSNode<T>>> {
+          // TODO: clean up
+          let node_ptr = Arc::as_ptr(node_arc);
+          if let Some(cached_result) = memo.get(&node_ptr) {
+              return cached_result.clone();
+          }
+
+          match closure(&node_arc.value) {
+              None => {
+                  // Prune this node
+                  memo.insert(node_ptr, None);
+                  None
+              }
+              Some((new_value, continue_recursion)) => {
+                  let new_node_arc = if !continue_recursion {
+                      // Stop recursion, create new node with original predecessors but new value
+                      let mut transformed_predecessors = Vec::new();
+                      for pred_arc in &node_arc.predecessors {
+                           // Check memo for already transformed predecessor
+                          if let Some(existing_transformed) = memo.get(&Arc::as_ptr(pred_arc)) {
+                              if let Some(transformed_pred) = existing_transformed {
+                                  transformed_predecessors.push(transformed_pred.clone());
+                              }
+                              // If existing_transformed is None, the predecessor was pruned, so skip.
+                              println!("Skipping pruned predecessor");
+                          } else {
+                              // This case *shouldn't* happen if traversal order is correct (parents processed after children),
+                              // but as a fallback, keep the original if not found in memo. Or perhaps panic?
+                              // Let's assume the caller manages the order or this closure handles cycles/shared nodes correctly.
+                              // For simplicity now, let's just clone original predecessors if we stop early.
+                              // A more robust solution might involve ensuring all nodes are visited before finalizing.
+                              // Revisit required: This might lead to incorrect sharing if predecessors weren't processed.
+                              // A better approach for early stop might be needed, maybe marking nodes instead.
+                              // For now, let's stick to the logic: if we stop, we keep original pointers below.
+                               transformed_predecessors = node_arc.predecessors.clone(); // Keep original predecessors - CAUTION
+                               crate::debug!(3, "Keeping {} original predecessors", transformed_predecessors.len());
+                               break; // Exit loop once we decide to keep originals
+                          }
+                      }
+
+                      Arc::new(GSSNode::new_with_predecessors(new_value, transformed_predecessors))
+                  } else {
+                      // Continue recursion for predecessors
+                      let mut new_predecessors = Vec::new();
+                      for pred_arc in &node_arc.predecessors {
+                          if let Some(new_pred) = prune_and_transform_recursive(pred_arc, closure, memo) {
+                              new_predecessors.push(new_pred);
+                          }
+                      }
+
+                      // Only create a node if it has predecessors OR it's an original root (how to check?).
+                      // If new_predecessors is empty AND the original node had predecessors, it means all paths were pruned.
+                      if new_predecessors.is_empty() && !node_arc.predecessors.is_empty() {
+                           memo.insert(node_ptr, None); // Mark as pruned
+                           return None; // Return None, pruning this node
+                      } else {
+                           Arc::new(GSSNode::new_with_predecessors(new_value, new_predecessors))
                       }
                   };
-                  shifts_and_reduces.insert(terminal_id, converted_action);
-              }
-
-              for (nonterminal, next_item_set) in row.gotos {
-                  let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
-                  let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
-                  gotos.insert(non_terminal_id, next_state_id);
-              }
-
-              stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos });
-          }
-
-          let start_item = Item {
-              production: productions[start_production_id].clone(),
-              dot_position: 0,
-          };
-          let start_state_id = *item_set_map.get_by_left(&BTreeSet::from([start_item])).unwrap();
-
-          (stage_7_table, item_set_map, start_state_id)
-      }
-
-      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
-          crate::debug!(2, "Validating");
-          validate(productions).expect("Validation error");
-
-          crate::debug!(2, "Stage 1");
-          let stage_1_table = stage_1(productions, start_production_id);
-          crate::debug!(3, &stage_1_table);
-          crate::debug!(2, "Stage 2");
-          let stage_2_table = stage_2(stage_1_table, productions);
-          crate::debug!(3, &stage_2_table);
-          crate::debug!(2, "Stage 3");
-          let stage_3_table = stage_3(stage_2_table, productions);
-          crate::debug!(3, &stage_3_table);
-          crate::debug!(2, "Stage 4");
-          let stage_4_table = stage_4(stage_3_table, productions);
-          crate::debug!(3, &stage_4_table);
-          crate::debug!(2, "Stage 5");
-          let stage_5_table = stage_5(stage_4_table, productions);
-          crate::debug!(3, &stage_5_table);
-          crate::debug!(2, "Stage 6");
-          let stage_6_table = stage_6(stage_5_table);
-          crate::debug!(3, &stage_6_table);
-          crate::debug!(2, "Stage 7");
-          let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, productions, start_production_id, &terminal_map, &non_terminal_map);
-          crate::debug!(3, &stage_7_table);
-          crate::debug!(2, "Done generating GLR parser");
-
-          GLRParser::new(stage_7_table, productions.to_vec(), terminal_map, non_terminal_map, item_set_map, start_state_id)
-      }
-
-      pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
-          let terminal_map = assign_terminal_ids(productions);
-          let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
-      }
-
-      pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
-          let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
-      }
-
-      pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
-          let mut terminal_map = BiBTreeMap::new();
-          let mut next_terminal_id = 0;
-
-          for p in productions {
-              for symbol in &p.rhs {
-                  if let Symbol::Terminal(t) = symbol {
-                      if !terminal_map.contains_left(t) {
-                          terminal_map.insert(t.clone(), TerminalID(next_terminal_id));
-                          next_terminal_id += 1;
-                      }
-                  }
+                  memo.insert(node_ptr, Some(new_node_arc.clone()));
+                  Some(new_node_arc)
               }
           }
-
-          terminal_map
       }
 
-      pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerminal, NonTerminalID> {
-          let mut non_terminal_map = BiBTreeMap::new();
-          let mut next_non_terminal_id = 0;
+      /// Traverses the GSS forest defined by `roots`, applying `closure` to each node's value.
+      /// Handles shared nodes using memoization. Prunes branches where `closure` returns `None`.
+      /// Stops recursion down a path if `closure` returns `(_, false)`.
+      /// Returns a Vec of `Option<Arc<GSSNode<T>>>` corresponding to the input `roots`.
+      pub fn prune_and_transform_roots<T: Clone>(
+          roots: &[Arc<GSSNode<T>>],
+          closure: &impl Fn(&T) -> Option<(T, bool)>, // Returns Option<(NewValue, ContinueRecursion)>
+      ) -> Vec<Option<Arc<GSSNode<T>>>> {
+          // We need a processing order that ensures children are processed before parents
+          // if we want the early-stop optimization (`continue_recursion = false`) to work reliably
+          // with shared nodes. A simple recursive approach might process shared children multiple times
+          // or incorrectly reuse non-transformed predecessors.
+          // For now, let's proceed with the simple recursive approach + memoization, acknowledging the
+          // potential issue with the early-stop logic accuracy for shared nodes below the stop point.
+          // A full topological sort or iterative approach might be needed for perfect early-stop.
 
-          for p in productions {
-              if !non_terminal_map.contains_left(&p.lhs) {
-                  non_terminal_map.insert(p.lhs.clone(), NonTerminalID(next_non_terminal_id));
-                  next_non_terminal_id += 1;
-              }
-          }
-          non_terminal_map
+          let mut memo = HashMap::new();
+          roots
+              .iter()
+              .map(|root| prune_and_transform_recursive(root, closure, &mut memo))
+              .collect()
       }
-
     src/glr/parser.rs: |-
       use crate::datastructures::gss::BulkMerge;
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
@@ -715,7 +639,9 @@ local_system:
                               });
                           }
                           Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
-                              debug!(5, "State {}: Reducing by production {} with len {}", current_state_id.0, production_id.0, len);
+                              let nt_name = self.parser.non_terminal_map.get_by_right(nonterminal).unwrap();
+                              let node_ptr = Arc::as_ptr(&stack);
+                              debug!(5, "State {}, Node {:?}: Reducing by production {} ({}) with len {}", current_state_id.0, node_ptr, production_id.0, nt_name.0, len);
                               let mut popped_stack_nodes = stack.popn(*len);
                               let gt = popped_stack_nodes.len() > 1;
                               if gt { crate::debug!(4, "Popped {} times to reveal {} stack nodes (1)", len, popped_stack_nodes.len()); }
@@ -729,7 +655,8 @@ local_system:
                                   let revealed_t = &revealed_content.t;
                                   let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nonterminal];
 
-                                  debug!(5, "Revealed state {}, going to state {}", revealed_state_id.0, goto_state.0);
+                                  let node_ptr = Arc::as_ptr(&stack_node);
+                                  debug!(5, "  Node {:?}: Revealed state {}, going to state {} for NonTerminal {}", node_ptr, revealed_state_id.0, goto_state.0, nt_name.0);
                                   let combined_t = revealed_t.intersect(current_t);
                                   let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                                   let new_stack = stack_node.push(new_content);
@@ -758,13 +685,15 @@ local_system:
                                   popped_stack_nodes.bulk_merge();
                                   crate::debug!(4, "Popped {} times to reveal {} stack nodes", len, popped_stack_nodes.len());
                                   crate::debug!(4, "nt_ids.len(): {}", nt_ids.len());
-                                  for nt_id in nt_ids.keys() {
+                                  for (nt_id, _prod_ids) in nt_ids { // Iterate over NonTerminalIDs in the split reduce
+                                      let nt_name = self.parser.non_terminal_map.get_by_right(nt_id).unwrap();
+                                      debug!(5, "  - Reducing for NonTerminal {} ({})", nt_name.0, nt_id.0);
                                       for stack_node in &popped_stack_nodes {
                                           // Reduce part (same as above)
                                           let revealed_content = stack_node.peek();
                                           let revealed_state_id = revealed_content.state_id;
                                           let revealed_t = &revealed_content.t;
-                                          let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id];
+                                          let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id]; // Use the current nt_id for goto lookup
 
                                           let combined_t = revealed_t.intersect(current_t);
                                           let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
@@ -788,9 +717,10 @@ local_system:
                       });
                   }
               }
+              self.merge_active_states();
               self.active_states = next_active_states;
               self.action_not_found_states = current_action_not_found_states; // Replace previous not-found states
-              crate::debug!(3, "After stepping, there are {} active states and {} action not found states", self.active_states.len(), self.action_not_found_states.len());
+              crate::debug!(3, "After step (token {:?}), there are {} active states and {} action not found states", token_id, self.active_states.len(), self.action_not_found_states.len());
 
               // TODO: decide whether to keep action_not_found_states or not
               self.action_not_found_states.clear();
@@ -877,446 +807,370 @@ local_system:
           }
       }
   prev_file_contents:
-    src/glr/table.rs: |+
-      use super::items::{compute_closure, compute_goto, split_on_dot, Item};
-      use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
-      use crate::glr::parser::GLRParser;
-      use bimap::BiBTreeMap;
-      use std::collections::{HashMap, VecDeque};
-      use std::collections::{BTreeMap, BTreeSet};
-      use std::fmt::Display;
-      use crate::glr::analyze::{drop_dead, validate};
-      pub use crate::types::{TerminalID};
+    src/datastructures/gss.rs: |
+      use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+      use std::sync::Arc;
 
-      type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
-      type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
-      type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
-      type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Row>;
-      type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
-      type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
-      pub type Stage7Table = BTreeMap<StateID, Stage7Row>;
-
-
-      type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
-      #[derive(Debug)]
-      struct Stage2Row {
-          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-          reduces: BTreeSet<Item>,
-      }
-      #[derive(Debug)]
-      struct Stage3Row {
-          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-          reduces: BTreeMap<Terminal, BTreeSet<Item>>,
-      }
-      #[derive(Debug)]
-      struct Stage4Row {
-          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-          reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
-      }
-      type Stage5Row = Stage4Row;
-      #[derive(Debug)]
-      struct Stage6Row {
-          shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
-          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct GSSNode<T> {
+          pub value: T,
+          predecessors: Vec<Arc<GSSNode<T>>>,
       }
 
-      #[derive(Debug)]
-      enum Stage6ShiftsAndReduces {
-          Shift(BTreeSet<Item>),
-          Reduce(ProductionID),
-          Split {
-              shift: Option<BTreeSet<Item>>,
-              reduces: BTreeSet<ProductionID>,
-          },
-      }
-
-      #[derive(Debug, Clone)]
-      pub enum Stage7ShiftsAndReduces {
-          Shift(StateID),
-          Reduce { production_id: ProductionID, nonterminal_id: NonTerminalID, len: usize },
-          Split {
-              shift: Option<StateID>,
-              reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>,
-          },
-      }
-
-      #[derive(Debug, Clone)]
-      pub struct Stage7Row {
-          pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
-          pub gotos: BTreeMap<NonTerminalID, StateID>,
-      }
-
-      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct StateID(pub usize);
-      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct ProductionID(pub usize);
-      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct NonTerminalID(pub usize);
-
-      type Stage1Result = Stage1Table;
-      type Stage2Result = Stage2Table;
-      type Stage3Result = Stage3Table;
-      type Stage4Result = Stage4Table;
-      type Stage5Result = Stage5Table;
-      type Stage6Result = Stage6Table;
-      type Stage7Result = (
-          Stage7Table,
-          BiBTreeMap<BTreeSet<Item>, StateID>,
-          StateID,
-      );
-
-      fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
-          let initial_item = Item {
-              production: productions[start_production_id].clone(),
-              dot_position: 0,
-          };
-          let initial_closure = BTreeSet::from([initial_item]);
-          let mut worklist = VecDeque::from([initial_closure.clone()]);
-
-          let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
-
-          while let Some(items) = worklist.pop_front() {
-              if transitions.contains_key(&items) {
-                  continue;
+      impl<T> GSSNode<T> {
+          pub fn new(value: T) -> Self {
+              Self {
+                  value,
+                  predecessors: Vec::new(),
               }
-
-              let closure = compute_closure(&items, productions);
-              let splits = split_on_dot(&closure);
-              let mut row = BTreeMap::new();
-
-              for (symbol, items) in splits {
-                  if symbol.is_none() {
-                      continue;
-                  }
-                  let goto_set = compute_goto(&items);
-                  row.insert(symbol.clone(), goto_set.clone());
-                  worklist.push_back(goto_set);
+          }
+          pub fn new_with_predecessors(value: T, predecessors: Vec<Arc<GSSNode<T>>>) -> Self {
+              Self {
+                  value,
+                  predecessors: predecessors.into_iter().collect(),
               }
-
-              transitions.insert(items.clone(), row);
           }
 
-          transitions
-      }
+          pub fn from_iter<I>(iter: I) -> Self
+          where
+              I: IntoIterator<Item = T>,
+          {
+              let mut iter = iter.into_iter();
+              let mut root = Self::new(iter.next().unwrap());
+              for value in iter {
+                  root = root.push(value);
+              }
+              root
+          }
 
-      fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
-          let mut stage_2_table = BTreeMap::new();
-          for (item_set, transitions) in stage_1_table {
-              let mut shifts = BTreeMap::new();
-              let mut gotos = BTreeMap::new();
-              let mut reduces = BTreeSet::new();
+          pub fn push(self, value: T) -> Self {
+              let mut new_node = Self::new(value);
+              new_node.predecessors.push(Arc::new(self));
+              new_node
+          }
 
-              for item in &item_set {
-                  if item.dot_position >= item.production.rhs.len() {
-                      reduces.insert(item.clone());
-                  }
+          pub fn pop(&self) -> Vec<Arc<Self>> {
+              self.predecessors.clone()
+          }
+
+          pub fn popn(&self, n: usize) -> Vec<Arc<Self>>
+          where
+              T: Clone,
+          {
+              if n == 0 {
+                  return vec![Arc::new(self.clone())];
               }
 
-              for (symbol_opt, next_item_set) in &transitions {
-                  if let Some(symbol) = symbol_opt {
-                      match symbol {
-                          Symbol::Terminal(t) => {
-                              shifts.insert(t.clone(), next_item_set.clone());
-                          }
-                          Symbol::NonTerminal(nt) => {
-                              gotos.insert(nt.clone(), next_item_set.clone());
-                          }
+              let mut result = Vec::new();
+              let mut seen: HashSet<*const GSSNode<T>> = HashSet::new();
+
+              // recurse on predecessors and collect, skipping duplicates
+              for predecessor in &self.predecessors {
+                  for node in predecessor.popn(n - 1) {
+                      let ptr = Arc::as_ptr(&node);
+                      if seen.insert(ptr) {
+                          result.push(node);
                       }
                   }
               }
 
-              stage_2_table.insert(
-                  item_set,
-                  Stage2Row {
-                      shifts,
-                      gotos,
-                      reduces,
-                  },
-              );
-          }
-          stage_2_table
-      }
-
-      fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-          let follow_sets = compute_follow_sets(productions);
-
-          let mut stage_3_table = BTreeMap::new();
-
-          for (item_set, row) in stage_2_table {
-              let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
-
-              for item in &row.reduces {
-                  let lhs = &item.production.lhs;
-                  let lookaheads = follow_sets.get(lhs).unwrap();
-
-                  for terminal in lookaheads {
-                      reduces
-                          .entry(terminal.clone())
-                          .or_default()
-                          .insert(item.clone());
-                  }
-              }
-
-              stage_3_table.insert(
-                  item_set,
-                  Stage3Row {
-                      shifts: row.shifts,
-                      gotos: row.gotos,
-                      reduces,
-                  },
-              );
+              result
           }
 
-          stage_3_table
-      }
-
-      fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
-          let production_ids: BTreeMap<Production, ProductionID> = productions
-              .iter()
-              .enumerate()
-              .map(|(i, p)| (p.clone(), ProductionID(i)))
-              .collect();
-
-          let mut stage_4_table = BTreeMap::new();
-
-          for (item_set, row) in stage_3_table {
-              let mut reduces = BTreeMap::new();
-
-              for (terminal, items) in row.reduces {
-                  let mut prod_ids = BTreeSet::new();
-                  for item in items {
-                      let prod_id = production_ids.get(&item.production).unwrap();
-                      prod_ids.insert(*prod_id);
-                  }
-                  reduces.insert(terminal.clone(), prod_ids);
-              }
-
-              stage_4_table.insert(
-                  item_set,
-                  Stage4Row {
-                      shifts: row.shifts,
-                      gotos: row.gotos,
-                      reduces,
-                  },
-              );
+          pub fn peek(&self) -> &T {
+              &self.value
           }
 
-          stage_4_table
-      }
+          pub fn value_mut(&mut self) -> &mut T {
+              &mut self.value
+          }
 
-      fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
-          // todo: remove this
-          stage_4_table
-      }
-
-      fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
-          let mut stage_6_table = BTreeMap::new();
-
-          for (item_set, row) in stage_5_table {
-              let mut shifts_and_reduces = BTreeMap::new();
-
-              for (terminal, next_item_set) in row.shifts {
-                  shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Shift(next_item_set));
-              }
-
-              for (terminal, mut production_ids) in row.reduces {
-                  if let Some(mut existing) = shifts_and_reduces.remove(&terminal) {
-                      match existing {
-                          Stage6ShiftsAndReduces::Shift(shift_set) => {
-                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
-                                  shift: Some(shift_set.clone()),
-                                  reduces: production_ids.clone(),
-                              });
-                          }
-                          Stage6ShiftsAndReduces::Reduce(existing_production_id) => {
-                              production_ids.insert(existing_production_id);
-                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
-                                  shift: None,
-                                  reduces: production_ids,
-                              });
-                          }
-                          Stage6ShiftsAndReduces::Split { shift, mut reduces } => {
-                              reduces.extend(production_ids.into_iter());
-                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift, reduces });
-                          }
-                      }
+          pub fn flatten(&self) -> Vec<Vec<T>>
+          where
+              T: Clone,
+          {
+              let mut result = Vec::new();
+              let mut stack = Vec::new();
+              stack.push((self, Vec::new()));
+              while let Some((node, mut path)) = stack.pop() {
+                  path.push(node.value.clone());
+                  if node.predecessors.is_empty() {
+                      result.push(path);
                   } else {
-                      // If there's only one production ID, we can optimize by storing it directly
-                      if production_ids.len() == 1 {
-                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Reduce(production_ids.iter().next().unwrap().clone()));
-                      } else {
-                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift: None, reduces: production_ids });
+                      for predecessor in &node.predecessors {
+                          stack.push((predecessor, path.clone()));
                       }
                   }
               }
-
-              stage_6_table.insert(
-                  item_set,
-                  Stage6Row {
-                      shifts_and_reduces,
-                      gotos: row.gotos,
-                  },
-              );
+              result
           }
 
-          stage_6_table
+          pub fn flatten_bulk(nodes: &[Self]) -> Vec<Vec<T>>
+          where
+              T: Clone,
+          {
+              nodes.iter().flat_map(|node| node.flatten()).collect()
+          }
+
+          pub fn merge(&mut self, mut other: Self)
+          where
+              T: PartialEq,
+          {
+              assert!(self.value == other.value);
+              self.predecessors.append(&mut other.predecessors);
+          }
+
+          pub fn merge_unchecked(&mut self, mut other: Self)
+          where
+              T: PartialEq,
+          {
+              self.predecessors.append(&mut other.predecessors);
+          }
+
+          pub fn map<F, U>(&self, f: F) -> GSSNode<U>
+          where
+              F: Copy + Fn(&T) -> U,
+          {
+              GSSNode {
+                  value: f(&self.value),
+                  predecessors: self.predecessors.clone().into_iter()
+                      .map(|node| Arc::new(node.map(f)))
+                      .collect(),
+              }
+          }
       }
 
-      fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
-          let mut item_set_map = BiBTreeMap::new();
-          let mut next_state_id = 0;
-
-          let mut terminals = BTreeSet::new();
-          let mut non_terminals = BTreeSet::new();
-
-          for (item_set, row) in &stage_6_table {
-              item_set_map.insert(item_set.clone(), StateID(next_state_id));
-              next_state_id += 1;
-
-              for t in row.shifts_and_reduces.keys() {
-                  terminals.insert(t.clone());
-              }
-
-              for nt in row.gotos.keys() {
-                  non_terminals.insert(nt.clone());
+      impl<T> Drop for GSSNode<T> {
+          fn drop(&mut self) {
+              let mut cur_nodes = std::mem::take(&mut self.predecessors);
+              while let Some(node) = cur_nodes.pop() {
+                  if let Ok(mut inner_node) = Arc::try_unwrap(node) {
+                      cur_nodes.append(&mut inner_node.predecessors);
+                  }
               }
           }
+      }
 
-          let mut stage_7_table = BTreeMap::new();
+      pub trait GSSTrait<T: Clone> {
+          type Peek<'a> where T: 'a, Self: 'a;
+          fn peek(&self) -> Self::Peek<'_>;
+          fn push(&self, value: T) -> GSSNode<T>;
+          fn pop(&self) -> Vec<Arc<GSSNode<T>>>;
+          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>>;
+      }
 
-          for (item_set, row) in stage_6_table {
-              let state_id = *item_set_map.get_by_left(&item_set).unwrap();
-              let mut shifts_and_reduces = BTreeMap::new();
-              let mut gotos = BTreeMap::new();
+      impl<T: Clone> GSSTrait<T> for GSSNode<T> {
+          type Peek<'a> = &'a T where T: 'a;
 
-              // Determine if this state is an accepting state
-              let is_accepting_state = item_set.iter().any(|item| {
-                  item.production == productions[start_production_id] && item.dot_position == item.production.rhs.len()
-              });
+          fn peek(&self) -> Self::Peek<'_> {
+              &self.value
+          }
 
+          fn push(&self, value: T) -> GSSNode<T> {
+              let mut new_node = GSSNode::new(value);
+              new_node.predecessors.push(Arc::new(self.clone()));
+              new_node
+          }
 
+          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
+              self.predecessors.clone()
+          }
 
-              for (terminal, action) in row.shifts_and_reduces {
-                  let terminal_id = *terminal_map.get_by_left(&terminal).expect(format!("{:?} not found in terminal map {:?}", terminal, terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
-                  let converted_action = match action {
-                      Stage6ShiftsAndReduces::Shift(next_item_set) => {
-                          let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
-                          Stage7ShiftsAndReduces::Shift(next_state_id)
-                      }
-                      Stage6ShiftsAndReduces::Reduce(production_id) => {
-                          let production = productions.get(production_id.0).unwrap();
-                          let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
-                          let len = production.rhs.len();
-                          Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len }
-                      }
-                      Stage6ShiftsAndReduces::Split { shift, reduces } => {
-                          let shift_state_id = shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
-                          let mut len_to_nt_to_production_id: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
-                          for production_id in reduces {
-                              let production = productions.get(production_id.0).unwrap();
-                              let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
-                              let len = production.rhs.len();
-                              len_to_nt_to_production_id.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id);
+          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
+              // Delegate to the inherent, de-duplicating implementation above
+              GSSNode::popn(self, n)
+          }
+      }
+
+      impl<T: Clone> GSSTrait<T> for Arc<GSSNode<T>> {
+          type Peek<'a> = &'a T where T: 'a;
+
+          fn peek(&self) -> Self::Peek<'_> {
+              &self.value
+          }
+
+          fn push(&self, value: T) -> GSSNode<T> {
+              let mut new_node = GSSNode::new(value);
+              new_node.predecessors.push(self.clone());
+              new_node
+          }
+
+          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
+              self.predecessors.clone()
+          }
+
+          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
+              // Re-use the implementation on the underlying node, which already de-duplicates.
+              self.as_ref().popn(n)
+          }
+      }
+
+      impl<T: Clone> GSSTrait<T> for Option<Arc<GSSNode<T>>> {
+          type Peek<'a> = Option<&'a T> where T: 'a;
+
+          fn peek(&self) -> Self::Peek<'_> {
+              self.as_ref().map(|node| node.peek())
+          }
+
+          fn push(&self, value: T) -> GSSNode<T> {
+              self.clone().map(|node| node.push(value.clone())).unwrap_or_else(|| GSSNode::new(value))
+          }
+
+          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
+              self.as_ref().map(|node| node.pop()).unwrap_or_default()
+          }
+
+          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
+              self.as_ref().map(|node| node.popn(n)).unwrap_or_default()
+          }
+      }
+
+      impl<T: Clone> GSSTrait<T> for Option<GSSNode<T>> {
+          type Peek<'a> = Option<&'a T> where T: 'a;
+
+          fn peek(&self) -> Self::Peek<'_> {
+              self.as_ref().map(|node| node.peek())
+          }
+
+          fn push(&self, value: T) -> GSSNode<T> {
+              self.clone().map(|node| node.push(value.clone())).unwrap_or_else(|| GSSNode::new(value))
+          }
+
+          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
+              self.as_ref().map(|node| node.pop()).unwrap_or_default()
+          }
+
+          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
+              self.as_ref().map(|node| node.popn(n)).unwrap_or_default()
+          }
+      }
+
+      pub trait BulkMerge<T> {
+          fn bulk_merge(&mut self);
+      }
+
+      impl<T: Clone + Ord> BulkMerge<T> for Vec<Arc<GSSNode<T>>> {
+          fn bulk_merge(&mut self) {
+              // todo: should be possible to avoid cloning T in some cases by using &T in this map,
+              //  but we need to be careful about lifetimes. If we use `node.as_ref().value`, then node
+              //  will go out of bounds while the reference to its value is still inside `groups`.
+              let mut groups: BTreeMap<T, HashMap<_, Arc<GSSNode<T>>>> = BTreeMap::new();
+              for node in self.drain(..) {
+                  groups.entry(node.value.clone()).or_default().entry(Arc::as_ptr(&node)).or_insert(node);
+              }
+              for mut group in groups.into_values() {
+                  let mut group = group.into_values().collect::<Vec<_>>();
+                  let mut first = group.pop().unwrap();
+                  if group.is_empty() {
+                      self.push(first);
+                  } else {
+                      let mut predecessors_set: BTreeMap<_, _> = BTreeMap::new();
+                      for sibling in group {
+                          for predecessor in &sibling.predecessors {
+                              predecessors_set.insert(Arc::as_ptr(predecessor), predecessor.clone());
                           }
-                          Stage7ShiftsAndReduces::Split { shift: shift_state_id, reduces: len_to_nt_to_production_id }
+                      }
+                      let first_mut_ref = Arc::make_mut(&mut first);
+                      first_mut_ref.predecessors = predecessors_set.into_values().collect();
+                      self.push(first);
+                  }
+              }
+          }
+      }
+
+
+      // Helper function for prune_and_transform_roots
+      pub fn prune_and_transform_recursive<T: Clone>(
+          node_arc: &Arc<GSSNode<T>>,
+          closure: &impl Fn(&T) -> Option<(T, bool)>, // Returns Option<(NewValue, ContinueRecursion)>
+          memo: &mut HashMap<*const GSSNode<T>, Option<Arc<GSSNode<T>>>>,
+      ) -> Option<Arc<GSSNode<T>>> {
+          // TODO: clean up
+          let node_ptr = Arc::as_ptr(node_arc);
+          if let Some(cached_result) = memo.get(&node_ptr) {
+              return cached_result.clone();
+          }
+
+          match closure(&node_arc.value) {
+              None => {
+                  // Prune this node
+                  memo.insert(node_ptr, None);
+                  None
+              }
+              Some((new_value, continue_recursion)) => {
+                  let new_node_arc = if !continue_recursion {
+                      // Stop recursion, create new node with original predecessors but new value
+                      let mut transformed_predecessors = Vec::new();
+                      for pred_arc in &node_arc.predecessors {
+                           // Check memo for already transformed predecessor
+                          if let Some(existing_transformed) = memo.get(&Arc::as_ptr(pred_arc)) {
+                              if let Some(transformed_pred) = existing_transformed {
+                                  transformed_predecessors.push(transformed_pred.clone());
+                              }
+                              // If existing_transformed is None, the predecessor was pruned, so skip.
+                              println!("Skipping pruned predecessor");
+                          } else {
+                              // This case *shouldn't* happen if traversal order is correct (parents processed after children),
+                              // but as a fallback, keep the original if not found in memo. Or perhaps panic?
+                              // Let's assume the caller manages the order or this closure handles cycles/shared nodes correctly.
+                              // For simplicity now, let's just clone original predecessors if we stop early.
+                              // A more robust solution might involve ensuring all nodes are visited before finalizing.
+                              // Revisit required: This might lead to incorrect sharing if predecessors weren't processed.
+                              // A better approach for early stop might be needed, maybe marking nodes instead.
+                              // For now, let's stick to the logic: if we stop, we keep original pointers below.
+                               transformed_predecessors = node_arc.predecessors.clone(); // Keep original predecessors - CAUTION
+                               crate::debug!(3, "Keeping {} original predecessors", transformed_predecessors.len());
+                               break; // Exit loop once we decide to keep originals
+                          }
+                      }
+
+                      Arc::new(GSSNode::new_with_predecessors(new_value, transformed_predecessors))
+                  } else {
+                      // Continue recursion for predecessors
+                      let mut new_predecessors = Vec::new();
+                      for pred_arc in &node_arc.predecessors {
+                          if let Some(new_pred) = prune_and_transform_recursive(pred_arc, closure, memo) {
+                              new_predecessors.push(new_pred);
+                          }
+                      }
+
+                      // Only create a node if it has predecessors OR it's an original root (how to check?).
+                      // If new_predecessors is empty AND the original node had predecessors, it means all paths were pruned.
+                      if new_predecessors.is_empty() && !node_arc.predecessors.is_empty() {
+                           memo.insert(node_ptr, None); // Mark as pruned
+                           return None; // Return None, pruning this node
+                      } else {
+                           Arc::new(GSSNode::new_with_predecessors(new_value, new_predecessors))
                       }
                   };
-                  shifts_and_reduces.insert(terminal_id, converted_action);
-              }
-
-              for (nonterminal, next_item_set) in row.gotos {
-                  let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
-                  let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
-                  gotos.insert(non_terminal_id, next_state_id);
-              }
-
-              stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos });
-          }
-
-          let start_item = Item {
-              production: productions[start_production_id].clone(),
-              dot_position: 0,
-          };
-          let start_state_id = *item_set_map.get_by_left(&BTreeSet::from([start_item])).unwrap();
-
-          (stage_7_table, item_set_map, start_state_id)
-      }
-
-      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
-          crate::debug!(2, "Validating");
-          validate(productions).expect("Validation error");
-
-          crate::debug!(2, "Stage 1");
-          let stage_1_table = stage_1(productions, start_production_id);
-          crate::debug!(3, &stage_1_table);
-          crate::debug!(2, "Stage 2");
-          let stage_2_table = stage_2(stage_1_table, productions);
-          crate::debug!(3, &stage_2_table);
-          crate::debug!(2, "Stage 3");
-          let stage_3_table = stage_3(stage_2_table, productions);
-          crate::debug!(3, &stage_3_table);
-          crate::debug!(2, "Stage 4");
-          let stage_4_table = stage_4(stage_3_table, productions);
-          crate::debug!(3, &stage_4_table);
-          crate::debug!(2, "Stage 5");
-          let stage_5_table = stage_5(stage_4_table, productions);
-          crate::debug!(3, &stage_5_table);
-          crate::debug!(2, "Stage 6");
-          let stage_6_table = stage_6(stage_5_table);
-          crate::debug!(3, &stage_6_table);
-          crate::debug!(2, "Stage 7");
-          let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, productions, start_production_id, &terminal_map, &non_terminal_map);
-          crate::debug!(3, &stage_7_table);
-          crate::debug!(2, "Done generating GLR parser");
-
-          GLRParser::new(stage_7_table, productions.to_vec(), terminal_map, non_terminal_map, item_set_map, start_state_id)
-      }
-
-      pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
-          let terminal_map = assign_terminal_ids(productions);
-          let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
-      }
-
-      pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
-          let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
-      }
-
-      pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
-          let mut terminal_map = BiBTreeMap::new();
-          let mut next_terminal_id = 0;
-
-          for p in productions {
-              for symbol in &p.rhs {
-                  if let Symbol::Terminal(t) = symbol {
-                      if !terminal_map.contains_left(t) {
-                          terminal_map.insert(t.clone(), TerminalID(next_terminal_id));
-                          next_terminal_id += 1;
-                      }
-                  }
+                  memo.insert(node_ptr, Some(new_node_arc.clone()));
+                  Some(new_node_arc)
               }
           }
-
-          terminal_map
       }
 
-      pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerminal, NonTerminalID> {
-          let mut non_terminal_map = BiBTreeMap::new();
-          let mut next_non_terminal_id = 0;
+      /// Traverses the GSS forest defined by `roots`, applying `closure` to each node's value.
+      /// Handles shared nodes using memoization. Prunes branches where `closure` returns `None`.
+      /// Stops recursion down a path if `closure` returns `(_, false)`.
+      /// Returns a Vec of `Option<Arc<GSSNode<T>>>` corresponding to the input `roots`.
+      pub fn prune_and_transform_roots<T: Clone>(
+          roots: &[Arc<GSSNode<T>>],
+          closure: &impl Fn(&T) -> Option<(T, bool)>, // Returns Option<(NewValue, ContinueRecursion)>
+      ) -> Vec<Option<Arc<GSSNode<T>>>> {
+          // We need a processing order that ensures children are processed before parents
+          // if we want the early-stop optimization (`continue_recursion = false`) to work reliably
+          // with shared nodes. A simple recursive approach might process shared children multiple times
+          // or incorrectly reuse non-transformed predecessors.
+          // For now, let's proceed with the simple recursive approach + memoization, acknowledging the
+          // potential issue with the early-stop logic accuracy for shared nodes below the stop point.
+          // A full topological sort or iterative approach might be needed for perfect early-stop.
 
-          for p in productions {
-              if !non_terminal_map.contains_left(&p.lhs) {
-                  non_terminal_map.insert(p.lhs.clone(), NonTerminalID(next_non_terminal_id));
-                  next_non_terminal_id += 1;
-              }
-          }
-          non_terminal_map
+          let mut memo = HashMap::new();
+          roots
+              .iter()
+              .map(|root| prune_and_transform_recursive(root, closure, &mut memo))
+              .collect()
       }
-
     src/glr/parser.rs: |-
       use crate::datastructures::gss::BulkMerge;
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
@@ -1587,7 +1441,9 @@ local_system:
                               });
                           }
                           Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
-                              debug!(5, "State {}: Reducing by production {} with len {}", current_state_id.0, production_id.0, len);
+                              let nt_name = self.parser.non_terminal_map.get_by_right(nonterminal).unwrap();
+                              let node_ptr = Arc::as_ptr(&stack);
+                              debug!(5, "State {}, Node {:?}: Reducing by production {} ({}) with len {}", current_state_id.0, node_ptr, production_id.0, nt_name.0, len);
                               let mut popped_stack_nodes = stack.popn(*len);
                               let gt = popped_stack_nodes.len() > 1;
                               if gt { crate::debug!(4, "Popped {} times to reveal {} stack nodes (1)", len, popped_stack_nodes.len()); }
@@ -1601,7 +1457,8 @@ local_system:
                                   let revealed_t = &revealed_content.t;
                                   let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nonterminal];
 
-                                  debug!(5, "Revealed state {}, going to state {}", revealed_state_id.0, goto_state.0);
+                                  let node_ptr = Arc::as_ptr(&stack_node);
+                                  debug!(5, "  Node {:?}: Revealed state {}, going to state {} for NonTerminal {}", node_ptr, revealed_state_id.0, goto_state.0, nt_name.0);
                                   let combined_t = revealed_t.intersect(current_t);
                                   let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                                   let new_stack = stack_node.push(new_content);
@@ -1630,13 +1487,15 @@ local_system:
                                   popped_stack_nodes.bulk_merge();
                                   crate::debug!(4, "Popped {} times to reveal {} stack nodes", len, popped_stack_nodes.len());
                                   crate::debug!(4, "nt_ids.len(): {}", nt_ids.len());
-                                  for nt_id in nt_ids.keys() {
+                                  for (nt_id, _prod_ids) in nt_ids { // Iterate over NonTerminalIDs in the split reduce
+                                      let nt_name = self.parser.non_terminal_map.get_by_right(nt_id).unwrap();
+                                      debug!(5, "  - Reducing for NonTerminal {} ({})", nt_name.0, nt_id.0);
                                       for stack_node in &popped_stack_nodes {
                                           // Reduce part (same as above)
                                           let revealed_content = stack_node.peek();
                                           let revealed_state_id = revealed_content.state_id;
                                           let revealed_t = &revealed_content.t;
-                                          let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id];
+                                          let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id]; // Use the current nt_id for goto lookup
 
                                           let combined_t = revealed_t.intersect(current_t);
                                           let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
@@ -1660,9 +1519,10 @@ local_system:
                       });
                   }
               }
+              self.merge_active_states();
               self.active_states = next_active_states;
               self.action_not_found_states = current_action_not_found_states; // Replace previous not-found states
-              crate::debug!(3, "After stepping, there are {} active states and {} action not found states", self.active_states.len(), self.action_not_found_states.len());
+              crate::debug!(3, "After step (token {:?}), there are {} active states and {} action not found states", token_id, self.active_states.len(), self.action_not_found_states.len());
 
               // TODO: decide whether to keep action_not_found_states or not
               self.action_not_found_states.clear();
@@ -1748,7 +1608,7 @@ local_system:
               }
           }
       }
-  diffs_applied_this_send: true
+  diffs_applied_this_send: false
 system:
   message: |2
 
@@ -1762,6 +1622,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
+    - copy-all/paste
     - copy-one/paste
   code_completion_model:
     - gemini/gemini-2.5-flash-preview-04-17
@@ -1772,450 +1633,374 @@ system:
   apply_mode: git
 messages:
   - user: |-
-      ```rust 'src/glr/table.rs'
-      use super::items::{compute_closure, compute_goto, split_on_dot, Item};
-      use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
-      use crate::glr::parser::GLRParser;
-      use bimap::BiBTreeMap;
-      use std::collections::{HashMap, VecDeque};
-      use std::collections::{BTreeMap, BTreeSet};
-      use std::fmt::Display;
-      use crate::glr::analyze::{drop_dead, validate};
-      pub use crate::types::{TerminalID};
+      ```rust 'src/datastructures/gss.rs'
+      use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+      use std::sync::Arc;
 
-      type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
-      type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
-      type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
-      type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Row>;
-      type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
-      type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
-      pub type Stage7Table = BTreeMap<StateID, Stage7Row>;
-
-
-      type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
-      #[derive(Debug)]
-      struct Stage2Row {
-          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-          reduces: BTreeSet<Item>,
-      }
-      #[derive(Debug)]
-      struct Stage3Row {
-          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-          reduces: BTreeMap<Terminal, BTreeSet<Item>>,
-      }
-      #[derive(Debug)]
-      struct Stage4Row {
-          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-          reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
-      }
-      type Stage5Row = Stage4Row;
-      #[derive(Debug)]
-      struct Stage6Row {
-          shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
-          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct GSSNode<T> {
+          pub value: T,
+          predecessors: Vec<Arc<GSSNode<T>>>,
       }
 
-      #[derive(Debug)]
-      enum Stage6ShiftsAndReduces {
-          Shift(BTreeSet<Item>),
-          Reduce(ProductionID),
-          Split {
-              shift: Option<BTreeSet<Item>>,
-              reduces: BTreeSet<ProductionID>,
-          },
-      }
-
-      #[derive(Debug, Clone)]
-      pub enum Stage7ShiftsAndReduces {
-          Shift(StateID),
-          Reduce { production_id: ProductionID, nonterminal_id: NonTerminalID, len: usize },
-          Split {
-              shift: Option<StateID>,
-              reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>,
-          },
-      }
-
-      #[derive(Debug, Clone)]
-      pub struct Stage7Row {
-          pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
-          pub gotos: BTreeMap<NonTerminalID, StateID>,
-      }
-
-      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct StateID(pub usize);
-      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct ProductionID(pub usize);
-      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct NonTerminalID(pub usize);
-
-      type Stage1Result = Stage1Table;
-      type Stage2Result = Stage2Table;
-      type Stage3Result = Stage3Table;
-      type Stage4Result = Stage4Table;
-      type Stage5Result = Stage5Table;
-      type Stage6Result = Stage6Table;
-      type Stage7Result = (
-          Stage7Table,
-          BiBTreeMap<BTreeSet<Item>, StateID>,
-          StateID,
-      );
-
-      fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
-          let initial_item = Item {
-              production: productions[start_production_id].clone(),
-              dot_position: 0,
-          };
-          let initial_closure = BTreeSet::from([initial_item]);
-          let mut worklist = VecDeque::from([initial_closure.clone()]);
-
-          let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
-
-          while let Some(items) = worklist.pop_front() {
-              if transitions.contains_key(&items) {
-                  continue;
+      impl<T> GSSNode<T> {
+          pub fn new(value: T) -> Self {
+              Self {
+                  value,
+                  predecessors: Vec::new(),
               }
-
-              let closure = compute_closure(&items, productions);
-              let splits = split_on_dot(&closure);
-              let mut row = BTreeMap::new();
-
-              for (symbol, items) in splits {
-                  if symbol.is_none() {
-                      continue;
-                  }
-                  let goto_set = compute_goto(&items);
-                  row.insert(symbol.clone(), goto_set.clone());
-                  worklist.push_back(goto_set);
+          }
+          pub fn new_with_predecessors(value: T, predecessors: Vec<Arc<GSSNode<T>>>) -> Self {
+              Self {
+                  value,
+                  predecessors: predecessors.into_iter().collect(),
               }
-
-              transitions.insert(items.clone(), row);
           }
 
-          transitions
-      }
+          pub fn from_iter<I>(iter: I) -> Self
+          where
+              I: IntoIterator<Item = T>,
+          {
+              let mut iter = iter.into_iter();
+              let mut root = Self::new(iter.next().unwrap());
+              for value in iter {
+                  root = root.push(value);
+              }
+              root
+          }
 
-      fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
-          let mut stage_2_table = BTreeMap::new();
-          for (item_set, transitions) in stage_1_table {
-              let mut shifts = BTreeMap::new();
-              let mut gotos = BTreeMap::new();
-              let mut reduces = BTreeSet::new();
+          pub fn push(self, value: T) -> Self {
+              let mut new_node = Self::new(value);
+              new_node.predecessors.push(Arc::new(self));
+              new_node
+          }
 
-              for item in &item_set {
-                  if item.dot_position >= item.production.rhs.len() {
-                      reduces.insert(item.clone());
-                  }
+          pub fn pop(&self) -> Vec<Arc<Self>> {
+              self.predecessors.clone()
+          }
+
+          pub fn popn(&self, n: usize) -> Vec<Arc<Self>>
+          where
+              T: Clone,
+          {
+              if n == 0 {
+                  return vec![Arc::new(self.clone())];
               }
 
-              for (symbol_opt, next_item_set) in &transitions {
-                  if let Some(symbol) = symbol_opt {
-                      match symbol {
-                          Symbol::Terminal(t) => {
-                              shifts.insert(t.clone(), next_item_set.clone());
-                          }
-                          Symbol::NonTerminal(nt) => {
-                              gotos.insert(nt.clone(), next_item_set.clone());
-                          }
+              let mut result = Vec::new();
+              let mut seen: HashSet<*const GSSNode<T>> = HashSet::new();
+
+              // recurse on predecessors and collect, skipping duplicates
+              for predecessor in &self.predecessors {
+                  for node in predecessor.popn(n - 1) {
+                      let ptr = Arc::as_ptr(&node);
+                      if seen.insert(ptr) {
+                          result.push(node);
                       }
                   }
               }
 
-              stage_2_table.insert(
-                  item_set,
-                  Stage2Row {
-                      shifts,
-                      gotos,
-                      reduces,
-                  },
-              );
-          }
-          stage_2_table
-      }
-
-      fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-          let follow_sets = compute_follow_sets(productions);
-
-          let mut stage_3_table = BTreeMap::new();
-
-          for (item_set, row) in stage_2_table {
-              let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
-
-              for item in &row.reduces {
-                  let lhs = &item.production.lhs;
-                  let lookaheads = follow_sets.get(lhs).unwrap();
-
-                  for terminal in lookaheads {
-                      reduces
-                          .entry(terminal.clone())
-                          .or_default()
-                          .insert(item.clone());
-                  }
-              }
-
-              stage_3_table.insert(
-                  item_set,
-                  Stage3Row {
-                      shifts: row.shifts,
-                      gotos: row.gotos,
-                      reduces,
-                  },
-              );
+              result
           }
 
-          stage_3_table
-      }
-
-      fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
-          let production_ids: BTreeMap<Production, ProductionID> = productions
-              .iter()
-              .enumerate()
-              .map(|(i, p)| (p.clone(), ProductionID(i)))
-              .collect();
-
-          let mut stage_4_table = BTreeMap::new();
-
-          for (item_set, row) in stage_3_table {
-              let mut reduces = BTreeMap::new();
-
-              for (terminal, items) in row.reduces {
-                  let mut prod_ids = BTreeSet::new();
-                  for item in items {
-                      let prod_id = production_ids.get(&item.production).unwrap();
-                      prod_ids.insert(*prod_id);
-                  }
-                  reduces.insert(terminal.clone(), prod_ids);
-              }
-
-              stage_4_table.insert(
-                  item_set,
-                  Stage4Row {
-                      shifts: row.shifts,
-                      gotos: row.gotos,
-                      reduces,
-                  },
-              );
+          pub fn peek(&self) -> &T {
+              &self.value
           }
 
-          stage_4_table
-      }
+          pub fn value_mut(&mut self) -> &mut T {
+              &mut self.value
+          }
 
-      fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
-          // todo: remove this
-          stage_4_table
-      }
-
-      fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
-          let mut stage_6_table = BTreeMap::new();
-
-          for (item_set, row) in stage_5_table {
-              let mut shifts_and_reduces = BTreeMap::new();
-
-              for (terminal, next_item_set) in row.shifts {
-                  shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Shift(next_item_set));
-              }
-
-              for (terminal, mut production_ids) in row.reduces {
-                  if let Some(mut existing) = shifts_and_reduces.remove(&terminal) {
-                      match existing {
-                          Stage6ShiftsAndReduces::Shift(shift_set) => {
-                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
-                                  shift: Some(shift_set.clone()),
-                                  reduces: production_ids.clone(),
-                              });
-                          }
-                          Stage6ShiftsAndReduces::Reduce(existing_production_id) => {
-                              production_ids.insert(existing_production_id);
-                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
-                                  shift: None,
-                                  reduces: production_ids,
-                              });
-                          }
-                          Stage6ShiftsAndReduces::Split { shift, mut reduces } => {
-                              reduces.extend(production_ids.into_iter());
-                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift, reduces });
-                          }
-                      }
+          pub fn flatten(&self) -> Vec<Vec<T>>
+          where
+              T: Clone,
+          {
+              let mut result = Vec::new();
+              let mut stack = Vec::new();
+              stack.push((self, Vec::new()));
+              while let Some((node, mut path)) = stack.pop() {
+                  path.push(node.value.clone());
+                  if node.predecessors.is_empty() {
+                      result.push(path);
                   } else {
-                      // If there's only one production ID, we can optimize by storing it directly
-                      if production_ids.len() == 1 {
-                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Reduce(production_ids.iter().next().unwrap().clone()));
-                      } else {
-                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift: None, reduces: production_ids });
+                      for predecessor in &node.predecessors {
+                          stack.push((predecessor, path.clone()));
                       }
                   }
               }
-
-              stage_6_table.insert(
-                  item_set,
-                  Stage6Row {
-                      shifts_and_reduces,
-                      gotos: row.gotos,
-                  },
-              );
+              result
           }
 
-          stage_6_table
+          pub fn flatten_bulk(nodes: &[Self]) -> Vec<Vec<T>>
+          where
+              T: Clone,
+          {
+              nodes.iter().flat_map(|node| node.flatten()).collect()
+          }
+
+          pub fn merge(&mut self, mut other: Self)
+          where
+              T: PartialEq,
+          {
+              assert!(self.value == other.value);
+              self.predecessors.append(&mut other.predecessors);
+          }
+
+          pub fn merge_unchecked(&mut self, mut other: Self)
+          where
+              T: PartialEq,
+          {
+              self.predecessors.append(&mut other.predecessors);
+          }
+
+          pub fn map<F, U>(&self, f: F) -> GSSNode<U>
+          where
+              F: Copy + Fn(&T) -> U,
+          {
+              GSSNode {
+                  value: f(&self.value),
+                  predecessors: self.predecessors.clone().into_iter()
+                      .map(|node| Arc::new(node.map(f)))
+                      .collect(),
+              }
+          }
       }
 
-      fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
-          let mut item_set_map = BiBTreeMap::new();
-          let mut next_state_id = 0;
-
-          let mut terminals = BTreeSet::new();
-          let mut non_terminals = BTreeSet::new();
-
-          for (item_set, row) in &stage_6_table {
-              item_set_map.insert(item_set.clone(), StateID(next_state_id));
-              next_state_id += 1;
-
-              for t in row.shifts_and_reduces.keys() {
-                  terminals.insert(t.clone());
-              }
-
-              for nt in row.gotos.keys() {
-                  non_terminals.insert(nt.clone());
+      impl<T> Drop for GSSNode<T> {
+          fn drop(&mut self) {
+              let mut cur_nodes = std::mem::take(&mut self.predecessors);
+              while let Some(node) = cur_nodes.pop() {
+                  if let Ok(mut inner_node) = Arc::try_unwrap(node) {
+                      cur_nodes.append(&mut inner_node.predecessors);
+                  }
               }
           }
+      }
 
-          let mut stage_7_table = BTreeMap::new();
+      pub trait GSSTrait<T: Clone> {
+          type Peek<'a> where T: 'a, Self: 'a;
+          fn peek(&self) -> Self::Peek<'_>;
+          fn push(&self, value: T) -> GSSNode<T>;
+          fn pop(&self) -> Vec<Arc<GSSNode<T>>>;
+          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>>;
+      }
 
-          for (item_set, row) in stage_6_table {
-              let state_id = *item_set_map.get_by_left(&item_set).unwrap();
-              let mut shifts_and_reduces = BTreeMap::new();
-              let mut gotos = BTreeMap::new();
+      impl<T: Clone> GSSTrait<T> for GSSNode<T> {
+          type Peek<'a> = &'a T where T: 'a;
 
-              // Determine if this state is an accepting state
-              let is_accepting_state = item_set.iter().any(|item| {
-                  item.production == productions[start_production_id] && item.dot_position == item.production.rhs.len()
-              });
+          fn peek(&self) -> Self::Peek<'_> {
+              &self.value
+          }
 
+          fn push(&self, value: T) -> GSSNode<T> {
+              let mut new_node = GSSNode::new(value);
+              new_node.predecessors.push(Arc::new(self.clone()));
+              new_node
+          }
 
+          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
+              self.predecessors.clone()
+          }
 
-              for (terminal, action) in row.shifts_and_reduces {
-                  let terminal_id = *terminal_map.get_by_left(&terminal).expect(format!("{:?} not found in terminal map {:?}", terminal, terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
-                  let converted_action = match action {
-                      Stage6ShiftsAndReduces::Shift(next_item_set) => {
-                          let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
-                          Stage7ShiftsAndReduces::Shift(next_state_id)
-                      }
-                      Stage6ShiftsAndReduces::Reduce(production_id) => {
-                          let production = productions.get(production_id.0).unwrap();
-                          let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
-                          let len = production.rhs.len();
-                          Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len }
-                      }
-                      Stage6ShiftsAndReduces::Split { shift, reduces } => {
-                          let shift_state_id = shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
-                          let mut len_to_nt_to_production_id: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
-                          for production_id in reduces {
-                              let production = productions.get(production_id.0).unwrap();
-                              let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
-                              let len = production.rhs.len();
-                              len_to_nt_to_production_id.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id);
+          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
+              // Delegate to the inherent, de-duplicating implementation above
+              GSSNode::popn(self, n)
+          }
+      }
+
+      impl<T: Clone> GSSTrait<T> for Arc<GSSNode<T>> {
+          type Peek<'a> = &'a T where T: 'a;
+
+          fn peek(&self) -> Self::Peek<'_> {
+              &self.value
+          }
+
+          fn push(&self, value: T) -> GSSNode<T> {
+              let mut new_node = GSSNode::new(value);
+              new_node.predecessors.push(self.clone());
+              new_node
+          }
+
+          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
+              self.predecessors.clone()
+          }
+
+          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
+              // Re-use the implementation on the underlying node, which already de-duplicates.
+              self.as_ref().popn(n)
+          }
+      }
+
+      impl<T: Clone> GSSTrait<T> for Option<Arc<GSSNode<T>>> {
+          type Peek<'a> = Option<&'a T> where T: 'a;
+
+          fn peek(&self) -> Self::Peek<'_> {
+              self.as_ref().map(|node| node.peek())
+          }
+
+          fn push(&self, value: T) -> GSSNode<T> {
+              self.clone().map(|node| node.push(value.clone())).unwrap_or_else(|| GSSNode::new(value))
+          }
+
+          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
+              self.as_ref().map(|node| node.pop()).unwrap_or_default()
+          }
+
+          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
+              self.as_ref().map(|node| node.popn(n)).unwrap_or_default()
+          }
+      }
+
+      impl<T: Clone> GSSTrait<T> for Option<GSSNode<T>> {
+          type Peek<'a> = Option<&'a T> where T: 'a;
+
+          fn peek(&self) -> Self::Peek<'_> {
+              self.as_ref().map(|node| node.peek())
+          }
+
+          fn push(&self, value: T) -> GSSNode<T> {
+              self.clone().map(|node| node.push(value.clone())).unwrap_or_else(|| GSSNode::new(value))
+          }
+
+          fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
+              self.as_ref().map(|node| node.pop()).unwrap_or_default()
+          }
+
+          fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
+              self.as_ref().map(|node| node.popn(n)).unwrap_or_default()
+          }
+      }
+
+      pub trait BulkMerge<T> {
+          fn bulk_merge(&mut self);
+      }
+
+      impl<T: Clone + Ord> BulkMerge<T> for Vec<Arc<GSSNode<T>>> {
+          fn bulk_merge(&mut self) {
+              // todo: should be possible to avoid cloning T in some cases by using &T in this map,
+              //  but we need to be careful about lifetimes. If we use `node.as_ref().value`, then node
+              //  will go out of bounds while the reference to its value is still inside `groups`.
+              let mut groups: BTreeMap<T, HashMap<_, Arc<GSSNode<T>>>> = BTreeMap::new();
+              for node in self.drain(..) {
+                  groups.entry(node.value.clone()).or_default().entry(Arc::as_ptr(&node)).or_insert(node);
+              }
+              for mut group in groups.into_values() {
+                  let mut group = group.into_values().collect::<Vec<_>>();
+                  let mut first = group.pop().unwrap();
+                  if group.is_empty() {
+                      self.push(first);
+                  } else {
+                      let mut predecessors_set: BTreeMap<_, _> = BTreeMap::new();
+                      for sibling in group {
+                          for predecessor in &sibling.predecessors {
+                              predecessors_set.insert(Arc::as_ptr(predecessor), predecessor.clone());
                           }
-                          Stage7ShiftsAndReduces::Split { shift: shift_state_id, reduces: len_to_nt_to_production_id }
+                      }
+                      let first_mut_ref = Arc::make_mut(&mut first);
+                      first_mut_ref.predecessors = predecessors_set.into_values().collect();
+                      self.push(first);
+                  }
+              }
+          }
+      }
+
+
+      // Helper function for prune_and_transform_roots
+      pub fn prune_and_transform_recursive<T: Clone>(
+          node_arc: &Arc<GSSNode<T>>,
+          closure: &impl Fn(&T) -> Option<(T, bool)>, // Returns Option<(NewValue, ContinueRecursion)>
+          memo: &mut HashMap<*const GSSNode<T>, Option<Arc<GSSNode<T>>>>,
+      ) -> Option<Arc<GSSNode<T>>> {
+          // TODO: clean up
+          let node_ptr = Arc::as_ptr(node_arc);
+          if let Some(cached_result) = memo.get(&node_ptr) {
+              return cached_result.clone();
+          }
+
+          match closure(&node_arc.value) {
+              None => {
+                  // Prune this node
+                  memo.insert(node_ptr, None);
+                  None
+              }
+              Some((new_value, continue_recursion)) => {
+                  let new_node_arc = if !continue_recursion {
+                      // Stop recursion, create new node with original predecessors but new value
+                      let mut transformed_predecessors = Vec::new();
+                      for pred_arc in &node_arc.predecessors {
+                           // Check memo for already transformed predecessor
+                          if let Some(existing_transformed) = memo.get(&Arc::as_ptr(pred_arc)) {
+                              if let Some(transformed_pred) = existing_transformed {
+                                  transformed_predecessors.push(transformed_pred.clone());
+                              }
+                              // If existing_transformed is None, the predecessor was pruned, so skip.
+                              println!("Skipping pruned predecessor");
+                          } else {
+                              // This case *shouldn't* happen if traversal order is correct (parents processed after children),
+                              // but as a fallback, keep the original if not found in memo. Or perhaps panic?
+                              // Let's assume the caller manages the order or this closure handles cycles/shared nodes correctly.
+                              // For simplicity now, let's just clone original predecessors if we stop early.
+                              // A more robust solution might involve ensuring all nodes are visited before finalizing.
+                              // Revisit required: This might lead to incorrect sharing if predecessors weren't processed.
+                              // A better approach for early stop might be needed, maybe marking nodes instead.
+                              // For now, let's stick to the logic: if we stop, we keep original pointers below.
+                               transformed_predecessors = node_arc.predecessors.clone(); // Keep original predecessors - CAUTION
+                               crate::debug!(3, "Keeping {} original predecessors", transformed_predecessors.len());
+                               break; // Exit loop once we decide to keep originals
+                          }
+                      }
+
+                      Arc::new(GSSNode::new_with_predecessors(new_value, transformed_predecessors))
+                  } else {
+                      // Continue recursion for predecessors
+                      let mut new_predecessors = Vec::new();
+                      for pred_arc in &node_arc.predecessors {
+                          if let Some(new_pred) = prune_and_transform_recursive(pred_arc, closure, memo) {
+                              new_predecessors.push(new_pred);
+                          }
+                      }
+
+                      // Only create a node if it has predecessors OR it's an original root (how to check?).
+                      // If new_predecessors is empty AND the original node had predecessors, it means all paths were pruned.
+                      if new_predecessors.is_empty() && !node_arc.predecessors.is_empty() {
+                           memo.insert(node_ptr, None); // Mark as pruned
+                           return None; // Return None, pruning this node
+                      } else {
+                           Arc::new(GSSNode::new_with_predecessors(new_value, new_predecessors))
                       }
                   };
-                  shifts_and_reduces.insert(terminal_id, converted_action);
-              }
-
-              for (nonterminal, next_item_set) in row.gotos {
-                  let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
-                  let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
-                  gotos.insert(non_terminal_id, next_state_id);
-              }
-
-              stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos });
-          }
-
-          let start_item = Item {
-              production: productions[start_production_id].clone(),
-              dot_position: 0,
-          };
-          let start_state_id = *item_set_map.get_by_left(&BTreeSet::from([start_item])).unwrap();
-
-          (stage_7_table, item_set_map, start_state_id)
-      }
-
-      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
-          crate::debug!(2, "Validating");
-          validate(productions).expect("Validation error");
-
-          crate::debug!(2, "Stage 1");
-          let stage_1_table = stage_1(productions, start_production_id);
-          crate::debug!(3, &stage_1_table);
-          crate::debug!(2, "Stage 2");
-          let stage_2_table = stage_2(stage_1_table, productions);
-          crate::debug!(3, &stage_2_table);
-          crate::debug!(2, "Stage 3");
-          let stage_3_table = stage_3(stage_2_table, productions);
-          crate::debug!(3, &stage_3_table);
-          crate::debug!(2, "Stage 4");
-          let stage_4_table = stage_4(stage_3_table, productions);
-          crate::debug!(3, &stage_4_table);
-          crate::debug!(2, "Stage 5");
-          let stage_5_table = stage_5(stage_4_table, productions);
-          crate::debug!(3, &stage_5_table);
-          crate::debug!(2, "Stage 6");
-          let stage_6_table = stage_6(stage_5_table);
-          crate::debug!(3, &stage_6_table);
-          crate::debug!(2, "Stage 7");
-          let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, productions, start_production_id, &terminal_map, &non_terminal_map);
-          crate::debug!(3, &stage_7_table);
-          crate::debug!(2, "Done generating GLR parser");
-
-          GLRParser::new(stage_7_table, productions.to_vec(), terminal_map, non_terminal_map, item_set_map, start_state_id)
-      }
-
-      pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
-          let terminal_map = assign_terminal_ids(productions);
-          let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
-      }
-
-      pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
-          let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
-      }
-
-      pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
-          let mut terminal_map = BiBTreeMap::new();
-          let mut next_terminal_id = 0;
-
-          for p in productions {
-              for symbol in &p.rhs {
-                  if let Symbol::Terminal(t) = symbol {
-                      if !terminal_map.contains_left(t) {
-                          terminal_map.insert(t.clone(), TerminalID(next_terminal_id));
-                          next_terminal_id += 1;
-                      }
-                  }
+                  memo.insert(node_ptr, Some(new_node_arc.clone()));
+                  Some(new_node_arc)
               }
           }
-
-          terminal_map
       }
 
-      pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerminal, NonTerminalID> {
-          let mut non_terminal_map = BiBTreeMap::new();
-          let mut next_non_terminal_id = 0;
+      /// Traverses the GSS forest defined by `roots`, applying `closure` to each node's value.
+      /// Handles shared nodes using memoization. Prunes branches where `closure` returns `None`.
+      /// Stops recursion down a path if `closure` returns `(_, false)`.
+      /// Returns a Vec of `Option<Arc<GSSNode<T>>>` corresponding to the input `roots`.
+      pub fn prune_and_transform_roots<T: Clone>(
+          roots: &[Arc<GSSNode<T>>],
+          closure: &impl Fn(&T) -> Option<(T, bool)>, // Returns Option<(NewValue, ContinueRecursion)>
+      ) -> Vec<Option<Arc<GSSNode<T>>>> {
+          // We need a processing order that ensures children are processed before parents
+          // if we want the early-stop optimization (`continue_recursion = false`) to work reliably
+          // with shared nodes. A simple recursive approach might process shared children multiple times
+          // or incorrectly reuse non-transformed predecessors.
+          // For now, let's proceed with the simple recursive approach + memoization, acknowledging the
+          // potential issue with the early-stop logic accuracy for shared nodes below the stop point.
+          // A full topological sort or iterative approach might be needed for perfect early-stop.
 
-          for p in productions {
-              if !non_terminal_map.contains_left(&p.lhs) {
-                  non_terminal_map.insert(p.lhs.clone(), NonTerminalID(next_non_terminal_id));
-                  next_non_terminal_id += 1;
-              }
-          }
-          non_terminal_map
+          let mut memo = HashMap::new();
+          roots
+              .iter()
+              .map(|root| prune_and_transform_recursive(root, closure, &mut memo))
+              .collect()
       }
-
 
       ```
     metadata:
-      filename: src/glr/table.rs
+      filename: src/datastructures/gss.rs
   - user: |-
       ```rust 'src/glr/parser.rs'
       use crate::datastructures::gss::BulkMerge;
@@ -2487,7 +2272,9 @@ messages:
                               });
                           }
                           Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
-                              debug!(5, "State {}: Reducing by production {} with len {}", current_state_id.0, production_id.0, len);
+                              let nt_name = self.parser.non_terminal_map.get_by_right(nonterminal).unwrap();
+                              let node_ptr = Arc::as_ptr(&stack);
+                              debug!(5, "State {}, Node {:?}: Reducing by production {} ({}) with len {}", current_state_id.0, node_ptr, production_id.0, nt_name.0, len);
                               let mut popped_stack_nodes = stack.popn(*len);
                               let gt = popped_stack_nodes.len() > 1;
                               if gt { crate::debug!(4, "Popped {} times to reveal {} stack nodes (1)", len, popped_stack_nodes.len()); }
@@ -2501,7 +2288,8 @@ messages:
                                   let revealed_t = &revealed_content.t;
                                   let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nonterminal];
 
-                                  debug!(5, "Revealed state {}, going to state {}", revealed_state_id.0, goto_state.0);
+                                  let node_ptr = Arc::as_ptr(&stack_node);
+                                  debug!(5, "  Node {:?}: Revealed state {}, going to state {} for NonTerminal {}", node_ptr, revealed_state_id.0, goto_state.0, nt_name.0);
                                   let combined_t = revealed_t.intersect(current_t);
                                   let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                                   let new_stack = stack_node.push(new_content);
@@ -2530,13 +2318,15 @@ messages:
                                   popped_stack_nodes.bulk_merge();
                                   crate::debug!(4, "Popped {} times to reveal {} stack nodes", len, popped_stack_nodes.len());
                                   crate::debug!(4, "nt_ids.len(): {}", nt_ids.len());
-                                  for nt_id in nt_ids.keys() {
+                                  for (nt_id, _prod_ids) in nt_ids { // Iterate over NonTerminalIDs in the split reduce
+                                      let nt_name = self.parser.non_terminal_map.get_by_right(nt_id).unwrap();
+                                      debug!(5, "  - Reducing for NonTerminal {} ({})", nt_name.0, nt_id.0);
                                       for stack_node in &popped_stack_nodes {
                                           // Reduce part (same as above)
                                           let revealed_content = stack_node.peek();
                                           let revealed_state_id = revealed_content.state_id;
                                           let revealed_t = &revealed_content.t;
-                                          let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id];
+                                          let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id]; // Use the current nt_id for goto lookup
 
                                           let combined_t = revealed_t.intersect(current_t);
                                           let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
@@ -2560,9 +2350,10 @@ messages:
                       });
                   }
               }
+              self.merge_active_states();
               self.active_states = next_active_states;
               self.action_not_found_states = current_action_not_found_states; // Replace previous not-found states
-              crate::debug!(3, "After stepping, there are {} active states and {} action not found states", self.active_states.len(), self.action_not_found_states.len());
+              crate::debug!(3, "After step (token {:?}), there are {} active states and {} action not found states", token_id, self.active_states.len(), self.action_not_found_states.len());
 
               // TODO: decide whether to keep action_not_found_states or not
               self.action_not_found_states.clear();
@@ -2651,70 +2442,9 @@ messages:
       ```
     metadata:
       filename: src/glr/parser.rs
-  - user: Modify this so in parser's step, when a nonterminal ID is mentioned in a
-      print or debug statement, the nonterminal name is shown as well.
-    metadata:
-  - assistant: |-
-      Hi!
-
-      ```diff
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -238,7 +238,8 @@
-                               });
-                           }
-                           Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
-      -                        debug!(5, "State {}: Reducing by production {} with len {}", current_state_id.0, production_id.0, len);
-      +                        let nt_name = self.parser.non_terminal_map.get_by_right(nonterminal).unwrap();
-      +                        debug!(5, "State {}: Reducing by production {} (-> {}) with len {}", current_state_id.0, production_id.0, nt_name.0, len);
-                               let mut popped_stack_nodes = stack.popn(*len);
-                               let gt = popped_stack_nodes.len() > 1;
-                               if gt { crate::debug!(4, "Popped {} times to reveal {} stack nodes (1)", len, popped_stack_nodes.len()); }
-      @@ -252,7 +253,7 @@
-                                   let revealed_t = &revealed_content.t;
-                                   let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nonterminal];
-       
-      -                            debug!(5, "Revealed state {}, going to state {}", revealed_state_id.0, goto_state.0);
-      +                            debug!(5, "  Revealed state {}, going to state {} for NonTerminal {}", revealed_state_id.0, goto_state.0, nt_name.0);
-                                   let combined_t = revealed_t.intersect(current_t);
-                                   let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
-                                   let new_stack = stack_node.push(new_content);
-      @@ -280,13 +281,15 @@
-                                   popped_stack_nodes.bulk_merge();
-                                   crate::debug!(4, "Popped {} times to reveal {} stack nodes", len, popped_stack_nodes.len());
-                                   crate::debug!(4, "nt_ids.len(): {}", nt_ids.len());
-      -                            for nt_id in nt_ids.keys() {
-      +                            for (nt_id, _prod_ids) in nt_ids { // Iterate over NonTerminalIDs in the split reduce
-      +                                let nt_name = self.parser.non_terminal_map.get_by_right(nt_id).unwrap();
-      +                                debug!(5, "  - Reducing for NonTerminal {} ({})", nt_name.0, nt_id.0);
-                                       for stack_node in &popped_stack_nodes {
-                                           // Reduce part (same as above)
-                                           let revealed_content = stack_node.peek();
-                                           let revealed_state_id = revealed_content.state_id;
-                                           let revealed_t = &revealed_content.t;
-      -                                    let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id];
-      +                                    let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id]; // Use the current nt_id for goto lookup
-       
-                                           let combined_t = revealed_t.intersect(current_t);
-                                           let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
-      @@ -307,7 +310,7 @@
-               }
-               self.active_states = next_active_states;
-               self.action_not_found_states = current_action_not_found_states; // Replace previous not-found states
-      -        crate::debug!(3, "After stepping, there are {} active states and {} action not found states", self.active_states.len(), self.action_not_found_states.len());
-      +        crate::debug!(3, "After step (token {:?}), there are {} active states and {} action not found states", token_id, self.active_states.len(), self.action_not_found_states.len());
-       
-               // TODO: decide whether to keep action_not_found_states or not
-               self.action_not_found_states.clear();
-      ```
-    metadata:
-  - user: |
-      Git apply result:
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
+  - user: Think of as many useful stats about the GSS as you can, particularly related
+      to the size/complexity of the tree. Write a struct that stores these stats and
+      a function that gathers them. Show them at the beginning of `step` in the parser
+      code.
     metadata:
 ...
