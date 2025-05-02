@@ -267,7 +267,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                         });
                     }
                     Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
-                        debug!(5, "State {}: Reducing by production {:?} with len {}", current_state_id.0, production_id, len);
+                        debug!(5, "State {}: Reducing by production {} with len {}", current_state_id.0, production_id.0, len);
                         let mut popped_stack_nodes = stack.popn(*len);
                         let gt = popped_stack_nodes.len() > 1;
                         if gt { crate::debug!(4, "Popped {} times to reveal {} stack nodes (1)", len, popped_stack_nodes.len()); }
