@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GSSNode<T> {
@@ -360,4 +360,72 @@ pub fn prune_and_transform_roots<T: Clone>(
         .iter()
         .map(|root| prune_and_transform_recursive(root, closure, &mut memo))
         .collect()
+}
+
+
+/// Statistics about the structure of a GSS forest.
+#[derive(Debug, Clone, Default)]
+pub struct GSSStats {
+    /// Number of root nodes provided.
+    pub num_roots: usize,
+    /// Total number of unique nodes reachable from the roots.
+    pub unique_nodes: usize,
+    /// Maximum depth encountered (distance from a root node).
+    pub max_depth: usize,
+    /// Average depth of nodes (distance from a root node).
+    pub average_depth: f64,
+    /// Number of nodes with more than one predecessor (merge points).
+    pub merge_points: usize,
+    /// Maximum number of predecessors for any single node.
+    pub max_predecessors: usize,
+    /// Average number of predecessors per node.
+    pub average_predecessors: f64,
+}
+
+/// Gathers statistics about the GSS forest defined by the given roots.
+/// Traverses the graph using BFS to calculate depths from roots.
+pub fn gather_gss_stats<T: Clone>(roots: &[Arc<GSSNode<T>>]) -> GSSStats {
+    let mut stats = GSSStats::default();
+    stats.num_roots = roots.len();
+
+    let mut visited: HashSet<*const GSSNode<T>> = HashSet::new();
+    let mut queue: VecDeque<(Arc<GSSNode<T>>, usize)> = VecDeque::new(); // (node, depth)
+
+    let mut total_depth_sum: u64 = 0;
+    let mut total_predecessors_sum: u64 = 0;
+
+    for root_arc in roots {
+        let root_ptr = Arc::as_ptr(root_arc);
+        if visited.insert(root_ptr) {
+            queue.push_back((root_arc.clone(), 0));
+        }
+    }
+
+    while let Some((current_node_arc, current_depth)) = queue.pop_front() {
+        let current_node = current_node_arc.as_ref(); // Borrow the content
+        stats.unique_nodes += 1;
+        stats.max_depth = stats.max_depth.max(current_depth);
+        total_depth_sum += current_depth as u64;
+
+        let num_predecessors = current_node.predecessors.len();
+        stats.max_predecessors = stats.max_predecessors.max(num_predecessors);
+        total_predecessors_sum += num_predecessors as u64;
+        if num_predecessors > 1 {
+            stats.merge_points += 1;
+        }
+
+        for pred_arc in &current_node.predecessors {
+            let pred_ptr = Arc::as_ptr(pred_arc);
+            if visited.insert(pred_ptr) {
+                queue.push_back((pred_arc.clone(), current_depth + 1));
+            }
+        }
+    }
+
+    if stats.unique_nodes > 0 {
+        stats.average_depth = total_depth_sum as f64 / stats.unique_nodes as f64;
+        stats.average_predecessors = total_predecessors_sum as f64 / stats.unique_nodes as f64;
+    }
+
+    stats
 }

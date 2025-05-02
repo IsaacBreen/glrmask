@@ -1,10 +1,10 @@
-use crate::datastructures::gss::BulkMerge;
+use crate::datastructures::gss::{BulkMerge, gather_gss_stats};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
 use crate::glr::table::{
     NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID,
 };
-use crate::datastructures::gss::{GSSNode, GSSTrait};
+use crate::datastructures::gss::{GSSNode, GSSTrait, GSSStats};
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};
@@ -242,7 +242,10 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
     }
 
     pub fn step(&mut self, token_id: TerminalID) {
-        crate::debug!(3, "Stepping with token {:?}, {} active states", token_id, self.active_states.len());
+        // Gather and log GSS stats before processing the step
+        let root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+        let stats = gather_gss_stats(&root_nodes);
+        crate::debug!(3, "Step Start (Token {:?}): Active States: {}, GSS Stats: {:?}", token_id, self.active_states.len(), stats);
         let mut next_active_states = Vec::new();
         // This will store states where the current token_id leads to no action.
         let mut current_action_not_found_states = Vec::new();
@@ -347,7 +350,10 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
         }
         self.active_states = next_active_states;
         self.action_not_found_states = current_action_not_found_states; // Replace previous not-found states
-        crate::debug!(3, "After step (token {:?}), there are {} active states and {} action not found states", token_id, self.active_states.len(), self.action_not_found_states.len());
+
+        let end_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+        let end_stats = gather_gss_stats(&end_root_nodes);
+        crate::debug!(3, "Step End (Token {:?}): Active States: {}, Action Not Found: {}, GSS Stats: {:?}", token_id, self.active_states.len(), self.action_not_found_states.len(), end_stats);
 
         // TODO: decide whether to keep action_not_found_states or not
         self.action_not_found_states.clear();
