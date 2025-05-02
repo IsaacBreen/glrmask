@@ -250,8 +250,9 @@ if __name__ == "__main__":
     chars = set()
     for token in llm_tokens:
         chars.update(set(token))
-    print(f"All characters in the vocab: {chars}")
+    print(f"All characters in the vocab: {"".join(chars)}")
     time.sleep(3)
+    exit()
 
 #     ts = ['Paris', 'London']
 #     llm_tokens = [x.encode() for x in ts]
