@@ -232,8 +232,15 @@ if __name__ == "__main__":
 #     model_name = "gpt2"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    llm_token_to_id = {token.replace("Ġ", " ").encode(): i for token, i in tokenizer.vocab.items()}
-    llm_tokens = list(tokenizer.vocab.keys())
+    tokenizer_vocab = tokenizer.get_vocab()
+    # Remove tokens that have any letter other than 'a'
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isalpha() and c != 'a' for c in k)}
+    # ...or have any number other than '1'
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isdigit() and c != '1' for c in k)}
+
+    llm_token_to_id = {token.replace("Ġ", " ").encode(): i for token, i in tokenizer_vocab.items()}
+    llm_tokens = list(tokenizer_vocab.keys()) # Use all tokens
+
     print("vocab size:", len(llm_tokens))
 
 #     ts = ['Paris', 'London']
