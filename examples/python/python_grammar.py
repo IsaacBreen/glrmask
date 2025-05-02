@@ -240,7 +240,8 @@ if __name__ == "__main__":
     # ...or have any letter or number
     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isalpha() or c.isdigit() for c in k)}
     # ...or have any character other than those in the given set
-    allowed_chars = set("÷$(¾&§.-}][¢^·/?'¼\×´¨,¡¦*¸¥»±«¤¶>+~_°¯#;½¿=!£|:%)\"{<`©®@¬")
+#     allowed_chars = set("÷$(¾&§.-}][¢^·/?'¼\×´¨,¡¦*¸¥»±«¤¶>+~_°¯#;½¿=!£|:%)\"{<`©®@¬")
+    allowed_chars = set("*>+_;=!|:%)\"{<")
     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c not in allowed_chars for c in k)}
 
     llm_token_to_id = {token.replace("Ġ", " ").encode(): i for token, i in tokenizer_vocab.items()}
