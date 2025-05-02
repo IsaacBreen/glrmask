@@ -20,7 +20,7 @@ use chrono::Local; // Import the Local timezone functionality
 macro_rules! debug {
     ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {{
         // Define the compile-time debug level (adjust as needed)
-        const MACRO_DEBUG_LEVEL: usize = 4;
+        const MACRO_DEBUG_LEVEL: usize = 5;
 
         // Runtime check against the message's level
         if $level <= MACRO_DEBUG_LEVEL {
@@ -40,7 +40,7 @@ macro_rules! debug {
 
     ($level:expr, $msg:expr) => {{
         // Define the compile-time debug level (adjust as needed)
-        const MACRO_DEBUG_LEVEL: usize = 4;
+        const MACRO_DEBUG_LEVEL: usize = 5;
 
         // Runtime check against the message's level
         if $level <= MACRO_DEBUG_LEVEL {
