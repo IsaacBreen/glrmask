@@ -240,12 +240,18 @@ if __name__ == "__main__":
     # ...or have any letter or number
     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isalpha() or c.isdigit() for c in k)}
     # ...or have any character other than those in '=-'
-    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c not in '=-' for c in k)}
+#     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c not in '=-' for c in k)}
 
     llm_token_to_id = {token.replace("Ġ", " ").encode(): i for token, i in tokenizer_vocab.items()}
     llm_tokens = list(tokenizer_vocab.keys()) # Use all tokens
 
     print("vocab size:", len(llm_tokens))
+    # Print all characters in the vocab
+    chars = set()
+    for token in llm_tokens:
+        chars.update(set(token))
+    print(f"All characters in the vocab: {chars}")
+    time.sleep(3)
 
 #     ts = ['Paris', 'London']
 #     llm_tokens = [x.encode() for x in ts]
