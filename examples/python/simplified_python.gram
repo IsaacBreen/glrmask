@@ -1,9 +1,4 @@
-# Minimal PEG grammar for testing pegen parsing
-
 start: expr ENDMARKER
-
 expr: term ('+' term)*
 term: atom ('*' atom)*
 atom: NAME | NUMBER | '(' expr ')'
-
-# Assume NAME, NUMBER, ENDMARKER are defined tokens
