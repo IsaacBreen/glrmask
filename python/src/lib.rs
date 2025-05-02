@@ -57,6 +57,12 @@ impl PyGrammarExpr {
         }
     }
 
+    fn repeat1(expr: PyGrammarExpr) -> Self {
+        Self {
+            inner: grammar_sequence(vec![expr.inner.clone(), grammar_repeat(expr.inner)]),
+        }
+    }
+
     #[staticmethod]
     fn regex(regex: PyRegexExpr) -> Self {
         Self {
