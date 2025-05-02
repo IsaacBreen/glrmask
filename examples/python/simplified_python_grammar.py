@@ -131,22 +131,30 @@ def pegen_to_sep1_grammar(grammar_path: Path) -> PyGrammar:
     try:
         grammar_bytes = grammar_text.encode('utf-8')
         token_stream = tokenize.tokenize(io.BytesIO(grammar_bytes).readline)
-        # Use pegen's tokenizer wrapper
-        pegen_tokenizer_inst = pegen.tokenizer.Tokenizer(token_stream, verbose=False)
+        # Use pegen's tokenizer wrapper - ENABLE VERBOSE MODE HERE
+        pegen_tokenizer_inst = pegen.tokenizer.Tokenizer(token_stream, verbose=True) # <--- SET verbose=True
         parser = pegen.grammar_parser.GeneratedParser(pegen_tokenizer_inst)
         grammar = parser.start()
         if not grammar:
-             raise ValueError("Failed to parse grammar file using pegen.")
+             # If grammar is None or parsing failed before returning, raise error
+             raise ValueError("Failed to parse grammar file using pegen (parser.start() returned None or failed).")
     except tokenize.TokenError as e:
         print(f"Token Error parsing grammar file: {e}")
         raise
     except Exception as e:
-        print(f"Error parsing grammar file with pegen: {e}")
-        raise
+        # Catch potential errors from parser.start() itself
+        print(f"Error during pegen grammar parsing: {e}")
+        # Optionally re-raise or wrap in a custom exception
+        raise ValueError(f"Failed to parse grammar file using pegen. Details: {e}")
+
 
     print("Converting pegen grammar to sep1 format...")
     memo = {}
     exprs: list[tuple[str, Any]] = [] # List of (rule_name, sep1_expression)
+
+    # Ensure grammar object is valid before accessing rules
+    if not grammar or not grammar.rules:
+         raise ValueError("Pegen parsing resulted in an invalid or empty grammar object.")
 
     start_rule_name = next(iter(grammar.rules)) # Get the first rule as start
     print(f"Identified start rule: {start_rule_name}")
