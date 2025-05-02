@@ -1,4 +1,4 @@
-# Simplified PEG grammar for a subset of Python (Revised)
+# Simplified PEG grammar for a subset of Python (Revised v2)
 
 # Start rule
 file: statements? ENDMARKER
@@ -88,7 +88,8 @@ primary:
 # Revised slices structure
 slices: slice | expression_list
 slice: expression? ':' expression? [':' expression?]
-expression_list: ','.expression+ [','] | expression
+# MODIFIED expression_list rule
+expression_list: expression (',' expression)* [',']
 
 atom:
     | NAME
@@ -114,8 +115,8 @@ kwarg: NAME '=' expression
 
 # Assignment Targets (Simplified)
 target: NAME | subscription | attribute | '(' targets? ')' | '[' targets? ']'
-# Allow single target in tuple/list context without comma
-targets: ','.target+ [','] | target
+# MODIFIED targets rule
+targets: target (',' target)* [',']
 subscription: primary '[' slices ']'
 attribute: primary '.' NAME
 
