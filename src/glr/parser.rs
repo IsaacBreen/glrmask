@@ -267,7 +267,8 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                         });
                     }
                     Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
-                        debug!(5, "State {}: Reducing by production {} with len {}", current_state_id.0, production_id.0, len);
+                        let nt_name = self.parser.non_terminal_map.get_by_right(nonterminal).unwrap();
+                        debug!(5, "State {}: Reducing by production {} (-> {}) with len {}", current_state_id.0, production_id.0, nt_name.0, len);
                         let mut popped_stack_nodes = stack.popn(*len);
                         let gt = popped_stack_nodes.len() > 1;
                         if gt { crate::debug!(4, "Popped {} times to reveal {} stack nodes (1)", len, popped_stack_nodes.len()); }
@@ -281,7 +282,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                             let revealed_t = &revealed_content.t;
                             let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nonterminal];
 
-                            debug!(5, "Revealed state {}, going to state {}", revealed_state_id.0, goto_state.0);
+                            debug!(5, "  Revealed state {}, going to state {} for NonTerminal {}", revealed_state_id.0, goto_state.0, nt_name.0);
                             let combined_t = revealed_t.intersect(current_t);
                             let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
                             let new_stack = stack_node.push(new_content);
@@ -310,13 +311,15 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                             popped_stack_nodes.bulk_merge();
                             crate::debug!(4, "Popped {} times to reveal {} stack nodes", len, popped_stack_nodes.len());
                             crate::debug!(4, "nt_ids.len(): {}", nt_ids.len());
-                            for nt_id in nt_ids.keys() {
+                            for (nt_id, _prod_ids) in nt_ids { // Iterate over NonTerminalIDs in the split reduce
+                                let nt_name = self.parser.non_terminal_map.get_by_right(nt_id).unwrap();
+                                debug!(5, "  - Reducing for NonTerminal {} ({})", nt_name.0, nt_id.0);
                                 for stack_node in &popped_stack_nodes {
                                     // Reduce part (same as above)
                                     let revealed_content = stack_node.peek();
                                     let revealed_state_id = revealed_content.state_id;
                                     let revealed_t = &revealed_content.t;
-                                    let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id];
+                                    let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id]; // Use the current nt_id for goto lookup
 
                                     let combined_t = revealed_t.intersect(current_t);
                                     let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
@@ -342,7 +345,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
         }
         self.active_states = next_active_states;
         self.action_not_found_states = current_action_not_found_states; // Replace previous not-found states
-        crate::debug!(3, "After stepping, there are {} active states and {} action not found states", self.active_states.len(), self.action_not_found_states.len());
+        crate::debug!(3, "After step (token {:?}), there are {} active states and {} action not found states", token_id, self.active_states.len(), self.action_not_found_states.len());
 
         // TODO: decide whether to keep action_not_found_states or not
         self.action_not_found_states.clear();
