@@ -270,7 +270,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                         debug!(5, "Reducing by production {:?} with len {}", production_id, len);
                         let mut popped_stack_nodes = stack.popn(*len);
                         let gt = popped_stack_nodes.len() > 1;
-                        if gt { crate::debug!(4, "Popped {} stack nodes (1)", popped_stack_nodes.len()); }
+                        if gt { crate::debug!(4, "Popped {} times to reveal {} stack nodes (1)", len, popped_stack_nodes.len()); }
                         popped_stack_nodes.bulk_merge();
                         if gt { crate::debug!(4, "Merged into {} stack nodes (1)", popped_stack_nodes.len()); }
                         let mut new_stacks = Vec::new();
@@ -308,7 +308,7 @@ impl<'a, T: MergeAndIntersect> GLRParserState<'a, T> {
                         for (len, nt_ids) in reduces {
                             let mut popped_stack_nodes = stack.popn(*len);
                             popped_stack_nodes.bulk_merge();
-                            crate::debug!(4, "Popped {} stack nodes", popped_stack_nodes.len());
+                            crate::debug!(4, "Popped {} times to reveal {} stack nodes", len, popped_stack_nodes.len());
                             crate::debug!(4, "nt_ids.len(): {}", nt_ids.len());
                             for nt_id in nt_ids.keys() {
                                 for stack_node in &popped_stack_nodes {
