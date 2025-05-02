@@ -237,6 +237,10 @@ if __name__ == "__main__":
     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isalpha() and c != 'a' for c in k)}
     # ...or have any number other than '1'
     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isdigit() and c != '1' for c in k)}
+    # ...or have any letter or number
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isalpha() or c.isdigit() for c in k)}
+    # ...or have any character other than '='
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c != '=' for c in k)}
 
     llm_token_to_id = {token.replace("Ġ", " ").encode(): i for token, i in tokenizer_vocab.items()}
     llm_tokens = list(tokenizer_vocab.keys()) # Use all tokens
