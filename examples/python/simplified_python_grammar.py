@@ -15,6 +15,9 @@ def eat_string(s: str) -> Regex:
         raise TypeError(f"eat_string expects a string, got {type(s)}")
     return Regex.seq([Regex.eat_u8(b) for b in s.encode('utf-8')])
 
+def repeat1(expr: PyRegexExpr) -> PyRegexExpr:
+    return ge.sequence([expr, ge.repeat(expr)])
+
 # Define tokens required by the SIMPLIFIED PYTHON grammar
 def define_python_tokens() -> list[tuple[str, Any]]:
     tokens = {}
@@ -87,7 +90,7 @@ def define_simplified_python_grammar_directly() -> PyGrammar:
 
     # # Statements
     # statements: statement+
-    exprs_map["statements"] = ge.repeat1(ge.ref("statement")) # repeat1 means 1 or more
+    exprs_map["statements"] = repeat1(ge.ref("statement")) # repeat1 means 1 or more
 
     # statement: compound_stmt | simple_stmts
     exprs_map["statement"] = ge.choice([
