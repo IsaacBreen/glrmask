@@ -1,4 +1,0 @@
-start: expr ENDMARKER
-expr: term ('+' term)*
-term: atom ('*' atom)*
-atom: NAME | NUMBER | '(' expr ')'
