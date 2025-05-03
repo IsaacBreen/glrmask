@@ -953,7 +953,7 @@ local_system:
               crate::debug!(3, "Step Start (Token {:?}): Active States: {}, GSS Stats: {:?}", token_id, self.active_states.len(), stats);
 
               // Log the GSS structure if it's reasonably small
-              const MAX_NODES_TO_PRINT: usize = 30;
+              const MAX_NODES_TO_PRINT_FULL: usize = 30;
               // debug!(3, "{}", { // Use a closure to avoid potentially expensive calculations if debug level is lower
               //     let final_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
               //     let final_stats = gather_gss_stats(&final_root_nodes);
@@ -1092,12 +1092,21 @@ local_system:
               let end_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
               let end_stats = gather_gss_stats(&end_root_nodes);
               crate::debug!(3, "Step End (Token {:?}): Active States: {}, Action Not Found: {}, GSS Stats: {:?}", token_id, self.active_states.len(), self.action_not_found_states.len(), end_stats);
-
-              // TODO: decide whether to keep action_not_found_states or not
+              debug!(3, "{}", { // Use a closure to avoid potentially expensive calculations if debug level is lower
+                  if end_stats.unique_nodes <= MAX_NODES_TO_PRINT_FULL {
+                      format!("GSS Structure ({} nodes):\n{}", end_stats.unique_nodes, print_gss_forest(&end_root_nodes, MAX_NODES_TO_PRINT_FULL))
+                  } else {
+                      use crate::datastructures::gss::find_longest_gss_path;
+                      let longest_path_str = match find_longest_gss_path(&end_root_nodes) {
+                          Some(path) => format!("Example Longest Path ({} nodes): {:?}", path.len(), path.iter().map(|n| n.state_id.0).collect::<Vec<_>>()), // Assuming T is ParseStateNodeContent
+                          None => "No paths found.".to_string(),
+                      };
+                      format!("GSS Structure too large ({} nodes > {}). {}", end_stats.unique_nodes, MAX_NODES_TO_PRINT_FULL, longest_path_str)
+                  }
+              });
               self.action_not_found_states.clear();
           }
 
-          // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
           pub fn merge_active_states(&mut self) {
               let mut active_state_map: BTreeMap<ParseStateKey, ParseState<T>> = BTreeMap::new();
               let num_active_states = self.active_states.len();
@@ -1700,6 +1709,74 @@ local_system:
 
 
           output
+      }
+
+      /// Finds the longest path (in terms of number of nodes) ending at one of the given root nodes.
+      /// Traverses backwards through predecessors. Handles shared nodes using memoization.
+      /// Returns the sequence of values (T) along the longest path found, starting from the deepest node.
+      pub fn find_longest_gss_path<T: Clone>(roots: &[Arc<GSSNode<T>>]) -> Option<Vec<T>> {
+          if roots.is_empty() {
+              return None;
+          }
+
+          // Memoization: Node Ptr -> (Length of longest path ending here, Predecessor that achieves this length)
+          let mut memo: HashMap<*const GSSNode<T>, (usize, Option<Arc<GSSNode<T>>>)> = HashMap::new();
+
+          fn find_longest_recursive<T: Clone>(
+              node_arc: &Arc<GSSNode<T>>,
+              memo: &mut HashMap<*const GSSNode<T>, (usize, Option<Arc<GSSNode<T>>>)>,
+          ) -> (usize, Option<Arc<GSSNode<T>>>) {
+              let node_ptr = Arc::as_ptr(node_arc);
+              if let Some(cached) = memo.get(&node_ptr) {
+                  return cached.clone();
+              }
+
+              if node_arc.predecessors.is_empty() {
+                  let result = (1, None);
+                  memo.insert(node_ptr, result.clone());
+                  return result;
+              }
+
+              let mut max_len = 0;
+              let mut best_pred: Option<Arc<GSSNode<T>>> = None;
+
+              for pred_arc in &node_arc.predecessors {
+                  let (pred_len, _) = find_longest_recursive(pred_arc, memo);
+                  if pred_len > max_len {
+                      max_len = pred_len;
+                      best_pred = Some(pred_arc.clone());
+                  }
+              }
+
+              let result = (1 + max_len, best_pred);
+              memo.insert(node_ptr, result.clone());
+              result
+          }
+
+          // Run DFS from all roots to populate memo
+          let mut max_root_len = 0;
+          let mut start_node: Option<Arc<GSSNode<T>>> = None;
+          for root_arc in roots {
+              let (len, _) = find_longest_recursive(root_arc, &mut memo);
+              if len > max_root_len {
+                  max_root_len = len;
+                  start_node = Some(root_arc.clone());
+              }
+          }
+
+          // Reconstruct the path by backtracking from the start_node
+          let mut path = Vec::new();
+          let mut current_node_opt = start_node;
+          while let Some(current_node) = current_node_opt {
+              path.push(current_node.value.clone());
+              let node_ptr = Arc::as_ptr(&current_node);
+              // Get the predecessor from the memo that led to the longest path
+              current_node_opt = memo.get(&node_ptr).and_then(|(_, pred_opt)| pred_opt.clone());
+          }
+
+          // The path is constructed backwards, so reverse it
+          path.reverse();
+          Some(path)
       }
   prev_file_contents:
     src/constraint.rs: |
@@ -2649,7 +2726,7 @@ local_system:
               crate::debug!(3, "Step Start (Token {:?}): Active States: {}, GSS Stats: {:?}", token_id, self.active_states.len(), stats);
 
               // Log the GSS structure if it's reasonably small
-              const MAX_NODES_TO_PRINT: usize = 30;
+              const MAX_NODES_TO_PRINT_FULL: usize = 30;
               // debug!(3, "{}", { // Use a closure to avoid potentially expensive calculations if debug level is lower
               //     let final_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
               //     let final_stats = gather_gss_stats(&final_root_nodes);
@@ -2788,12 +2865,21 @@ local_system:
               let end_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
               let end_stats = gather_gss_stats(&end_root_nodes);
               crate::debug!(3, "Step End (Token {:?}): Active States: {}, Action Not Found: {}, GSS Stats: {:?}", token_id, self.active_states.len(), self.action_not_found_states.len(), end_stats);
-
-              // TODO: decide whether to keep action_not_found_states or not
+              debug!(3, "{}", { // Use a closure to avoid potentially expensive calculations if debug level is lower
+                  if end_stats.unique_nodes <= MAX_NODES_TO_PRINT_FULL {
+                      format!("GSS Structure ({} nodes):\n{}", end_stats.unique_nodes, print_gss_forest(&end_root_nodes, MAX_NODES_TO_PRINT_FULL))
+                  } else {
+                      use crate::datastructures::gss::find_longest_gss_path;
+                      let longest_path_str = match find_longest_gss_path(&end_root_nodes) {
+                          Some(path) => format!("Example Longest Path ({} nodes): {:?}", path.len(), path.iter().map(|n| n.state_id.0).collect::<Vec<_>>()), // Assuming T is ParseStateNodeContent
+                          None => "No paths found.".to_string(),
+                      };
+                      format!("GSS Structure too large ({} nodes > {}). {}", end_stats.unique_nodes, MAX_NODES_TO_PRINT_FULL, longest_path_str)
+                  }
+              });
               self.action_not_found_states.clear();
           }
 
-          // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
           pub fn merge_active_states(&mut self) {
               let mut active_state_map: BTreeMap<ParseStateKey, ParseState<T>> = BTreeMap::new();
               let num_active_states = self.active_states.len();
@@ -3396,6 +3482,74 @@ local_system:
 
 
           output
+      }
+
+      /// Finds the longest path (in terms of number of nodes) ending at one of the given root nodes.
+      /// Traverses backwards through predecessors. Handles shared nodes using memoization.
+      /// Returns the sequence of values (T) along the longest path found, starting from the deepest node.
+      pub fn find_longest_gss_path<T: Clone>(roots: &[Arc<GSSNode<T>>]) -> Option<Vec<T>> {
+          if roots.is_empty() {
+              return None;
+          }
+
+          // Memoization: Node Ptr -> (Length of longest path ending here, Predecessor that achieves this length)
+          let mut memo: HashMap<*const GSSNode<T>, (usize, Option<Arc<GSSNode<T>>>)> = HashMap::new();
+
+          fn find_longest_recursive<T: Clone>(
+              node_arc: &Arc<GSSNode<T>>,
+              memo: &mut HashMap<*const GSSNode<T>, (usize, Option<Arc<GSSNode<T>>>)>,
+          ) -> (usize, Option<Arc<GSSNode<T>>>) {
+              let node_ptr = Arc::as_ptr(node_arc);
+              if let Some(cached) = memo.get(&node_ptr) {
+                  return cached.clone();
+              }
+
+              if node_arc.predecessors.is_empty() {
+                  let result = (1, None);
+                  memo.insert(node_ptr, result.clone());
+                  return result;
+              }
+
+              let mut max_len = 0;
+              let mut best_pred: Option<Arc<GSSNode<T>>> = None;
+
+              for pred_arc in &node_arc.predecessors {
+                  let (pred_len, _) = find_longest_recursive(pred_arc, memo);
+                  if pred_len > max_len {
+                      max_len = pred_len;
+                      best_pred = Some(pred_arc.clone());
+                  }
+              }
+
+              let result = (1 + max_len, best_pred);
+              memo.insert(node_ptr, result.clone());
+              result
+          }
+
+          // Run DFS from all roots to populate memo
+          let mut max_root_len = 0;
+          let mut start_node: Option<Arc<GSSNode<T>>> = None;
+          for root_arc in roots {
+              let (len, _) = find_longest_recursive(root_arc, &mut memo);
+              if len > max_root_len {
+                  max_root_len = len;
+                  start_node = Some(root_arc.clone());
+              }
+          }
+
+          // Reconstruct the path by backtracking from the start_node
+          let mut path = Vec::new();
+          let mut current_node_opt = start_node;
+          while let Some(current_node) = current_node_opt {
+              path.push(current_node.value.clone());
+              let node_ptr = Arc::as_ptr(&current_node);
+              // Get the predecessor from the memo that led to the longest path
+              current_node_opt = memo.get(&node_ptr).and_then(|(_, pred_opt)| pred_opt.clone());
+          }
+
+          // The path is constructed backwards, so reverse it
+          path.reverse();
+          Some(path)
       }
   diffs_applied_this_send: true
 system:
@@ -4373,7 +4527,7 @@ messages:
               crate::debug!(3, "Step Start (Token {:?}): Active States: {}, GSS Stats: {:?}", token_id, self.active_states.len(), stats);
 
               // Log the GSS structure if it's reasonably small
-              const MAX_NODES_TO_PRINT: usize = 30;
+              const MAX_NODES_TO_PRINT_FULL: usize = 30;
               // debug!(3, "{}", { // Use a closure to avoid potentially expensive calculations if debug level is lower
               //     let final_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
               //     let final_stats = gather_gss_stats(&final_root_nodes);
@@ -4512,12 +4666,21 @@ messages:
               let end_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
               let end_stats = gather_gss_stats(&end_root_nodes);
               crate::debug!(3, "Step End (Token {:?}): Active States: {}, Action Not Found: {}, GSS Stats: {:?}", token_id, self.active_states.len(), self.action_not_found_states.len(), end_stats);
-
-              // TODO: decide whether to keep action_not_found_states or not
+              debug!(3, "{}", { // Use a closure to avoid potentially expensive calculations if debug level is lower
+                  if end_stats.unique_nodes <= MAX_NODES_TO_PRINT_FULL {
+                      format!("GSS Structure ({} nodes):\n{}", end_stats.unique_nodes, print_gss_forest(&end_root_nodes, MAX_NODES_TO_PRINT_FULL))
+                  } else {
+                      use crate::datastructures::gss::find_longest_gss_path;
+                      let longest_path_str = match find_longest_gss_path(&end_root_nodes) {
+                          Some(path) => format!("Example Longest Path ({} nodes): {:?}", path.len(), path.iter().map(|n| n.state_id.0).collect::<Vec<_>>()), // Assuming T is ParseStateNodeContent
+                          None => "No paths found.".to_string(),
+                      };
+                      format!("GSS Structure too large ({} nodes > {}). {}", end_stats.unique_nodes, MAX_NODES_TO_PRINT_FULL, longest_path_str)
+                  }
+              });
               self.action_not_found_states.clear();
           }
 
-          // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
           pub fn merge_active_states(&mut self) {
               let mut active_state_map: BTreeMap<ParseStateKey, ParseState<T>> = BTreeMap::new();
               let num_active_states = self.active_states.len();
@@ -5127,150 +5290,146 @@ messages:
           output
       }
 
+      /// Finds the longest path (in terms of number of nodes) ending at one of the given root nodes.
+      /// Traverses backwards through predecessors. Handles shared nodes using memoization.
+      /// Returns the sequence of values (T) along the longest path found, starting from the deepest node.
+      pub fn find_longest_gss_path<T: Clone>(roots: &[Arc<GSSNode<T>>]) -> Option<Vec<T>> {
+          if roots.is_empty() {
+              return None;
+          }
+
+          // Memoization: Node Ptr -> (Length of longest path ending here, Predecessor that achieves this length)
+          let mut memo: HashMap<*const GSSNode<T>, (usize, Option<Arc<GSSNode<T>>>)> = HashMap::new();
+
+          fn find_longest_recursive<T: Clone>(
+              node_arc: &Arc<GSSNode<T>>,
+              memo: &mut HashMap<*const GSSNode<T>, (usize, Option<Arc<GSSNode<T>>>)>,
+          ) -> (usize, Option<Arc<GSSNode<T>>>) {
+              let node_ptr = Arc::as_ptr(node_arc);
+              if let Some(cached) = memo.get(&node_ptr) {
+                  return cached.clone();
+              }
+
+              if node_arc.predecessors.is_empty() {
+                  let result = (1, None);
+                  memo.insert(node_ptr, result.clone());
+                  return result;
+              }
+
+              let mut max_len = 0;
+              let mut best_pred: Option<Arc<GSSNode<T>>> = None;
+
+              for pred_arc in &node_arc.predecessors {
+                  let (pred_len, _) = find_longest_recursive(pred_arc, memo);
+                  if pred_len > max_len {
+                      max_len = pred_len;
+                      best_pred = Some(pred_arc.clone());
+                  }
+              }
+
+              let result = (1 + max_len, best_pred);
+              memo.insert(node_ptr, result.clone());
+              result
+          }
+
+          // Run DFS from all roots to populate memo
+          let mut max_root_len = 0;
+          let mut start_node: Option<Arc<GSSNode<T>>> = None;
+          for root_arc in roots {
+              let (len, _) = find_longest_recursive(root_arc, &mut memo);
+              if len > max_root_len {
+                  max_root_len = len;
+                  start_node = Some(root_arc.clone());
+              }
+          }
+
+          // Reconstruct the path by backtracking from the start_node
+          let mut path = Vec::new();
+          let mut current_node_opt = start_node;
+          while let Some(current_node) = current_node_opt {
+              path.push(current_node.value.clone());
+              let node_ptr = Arc::as_ptr(&current_node);
+              // Get the predecessor from the memo that led to the longest path
+              current_node_opt = memo.get(&node_ptr).and_then(|(_, pred_opt)| pred_opt.clone());
+          }
+
+          // The path is constructed backwards, so reverse it
+          path.reverse();
+          Some(path)
+      }
+
       ```
     metadata:
       filename: src/datastructures/gss.rs
-  - user: When the GSS is too large to print in `step`, instead print an example path
-      through it. Print the longest path through it. If there are multiple longest
-      paths, print any one of them.
+  - user: |-
+      Modify the Debug/Display of LLMTokenInfo to display just the set bits of the bitsets (rather than using the bitset's Debug/Display), ie display a list of integers.
+      Truncate it if it's very long.
     metadata:
   - assistant: |-
-      Okay, I will modify the debug logging in the `step` function of the GLR parser to print the longest path when the GSS structure is too large.
-
-      First, let's add a helper function to `src/datastructures/gss.rs` to find the longest path.
+      Okay, I will implement the `Debug` trait for `LLMTokenInfo` to provide a more concise representation, showing only the set bits (token IDs) and truncating the list if it becomes too long.
 
       ```diff
-      --- a/src/datastructures/gss.rs
-      +++ b/src/datastructures/gss.rs
-      @@ -340,3 +340,61 @@
-       
-           output
-       }
-      +
-      +/// Finds the longest path (in terms of number of nodes) ending at one of the given root nodes.
-      +/// Traverses backwards through predecessors. Handles shared nodes using memoization.
-      +/// Returns the sequence of values (T) along the longest path found, starting from the deepest node.
-      +pub fn find_longest_gss_path<T: Clone>(roots: &[Arc<GSSNode<T>>]) -> Option<Vec<T>> {
-      +    if roots.is_empty() {
-      +        return None;
-      +    }
-      +
-      +    // Memoization: Node Ptr -> (Length of longest path ending here, Predecessor that achieves this length)
-      +    let mut memo: HashMap<*const GSSNode<T>, (usize, Option<Arc<GSSNode<T>>>)> = HashMap::new();
-      +
-      +    fn find_longest_recursive<T: Clone>(
-      +        node_arc: &Arc<GSSNode<T>>,
-      +        memo: &mut HashMap<*const GSSNode<T>, (usize, Option<Arc<GSSNode<T>>>)>,
-      +    ) -> (usize, Option<Arc<GSSNode<T>>>) {
-      +        let node_ptr = Arc::as_ptr(node_arc);
-      +        if let Some(cached) = memo.get(&node_ptr) {
-      +            return cached.clone();
-      +        }
-      +
-      +        if node_arc.predecessors.is_empty() {
-      +            let result = (1, None);
-      +            memo.insert(node_ptr, result.clone());
-      +            return result;
-      +        }
-      +
-      +        let mut max_len = 0;
-      +        let mut best_pred: Option<Arc<GSSNode<T>>> = None;
-      +
-      +        for pred_arc in &node_arc.predecessors {
-      +            let (pred_len, _) = find_longest_recursive(pred_arc, memo);
-      +            if pred_len > max_len {
-      +                max_len = pred_len;
-      +                best_pred = Some(pred_arc.clone());
-      +            }
-      +        }
-      +
-      +        let result = (1 + max_len, best_pred);
-      +        memo.insert(node_ptr, result.clone());
-      +        result
-      +    }
-      +
-      +    // Run DFS from all roots to populate memo
-      +    let mut max_root_len = 0;
-      +    let mut start_node: Option<Arc<GSSNode<T>>> = None;
-      +    for root_arc in roots {
-      +        let (len, _) = find_longest_recursive(root_arc, &mut memo);
-      +        if len > max_root_len {
-      +            max_root_len = len;
-      +            start_node = Some(root_arc.clone());
-      +        }
-      +    }
-      +
-      +    // Reconstruct the path by backtracking from the start_node
-      +    let mut path = Vec::new();
-      +    let mut current_node_opt = start_node;
-      +    while let Some(current_node) = current_node_opt {
-      +        path.push(current_node.value.clone());
-      +        let node_ptr = Arc::as_ptr(&current_node);
-      +        // Get the predecessor from the memo that led to the longest path
-      +        current_node_opt = memo.get(&node_ptr).and_then(|(_, pred_opt)| pred_opt.clone());
-      +    }
-      +
-      +    // The path is constructed backwards, so reverse it
-      +    path.reverse();
-      +    Some(path)
-      +}
-
-      ```
-
-      Now, modify the `step` function in `src/glr/parser.rs` to use this new function.
-
-      ```diff
-      --- a/src/glr/parser.rs
-      +++ b/src/glr/parser.rs
-      @@ -228,7 +228,7 @@
-               crate::debug!(3, "Step Start (Token {:?}): Active States: {}, GSS Stats: {:?}", token_id, self.active_states.len(), stats);
-       
-               // Log the GSS structure if it's reasonably small
-      -        const MAX_NODES_TO_PRINT: usize = 30;
-      +        const MAX_NODES_TO_PRINT_FULL: usize = 30;
-               // debug!(3, "{}", { // Use a closure to avoid potentially expensive calculations if debug level is lower
-               //     let final_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
-               //     let final_stats = gather_gss_stats(&final_root_nodes);
-      @@ -370,13 +370,19 @@
-               let end_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
-               let end_stats = gather_gss_stats(&end_root_nodes);
-               crate::debug!(3, "Step End (Token {:?}): Active States: {}, Action Not Found: {}, GSS Stats: {:?}", token_id, self.active_states.len(), self.action_not_found_states.len(), end_stats);
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -13,7 +13,7 @@
+       use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
+       use crate::types::{TerminalID as GrammarTokenID, TerminalID};
+       use crate::glr::parser::ParseStateNodeContent;
       -
-      -        // TODO: decide whether to keep action_not_found_states or not
-      +        debug!(3, "{}", { // Use a closure to avoid potentially expensive calculations if debug level is lower
-      +            if end_stats.unique_nodes <= MAX_NODES_TO_PRINT_FULL {
-      +                format!("GSS Structure ({} nodes):\n{}", end_stats.unique_nodes, print_gss_forest(&end_root_nodes, MAX_NODES_TO_PRINT_FULL))
-      +            } else {
-      +                use crate::datastructures::gss::find_longest_gss_path;
-      +                let longest_path_str = match find_longest_gss_path(&end_root_nodes) {
-      +                    Some(path) => format!("Example Longest Path ({} nodes): {:?}", path.len(), path.iter().map(|n| n.state_id.0).collect::<Vec<_>>()), // Assuming T is ParseStateNodeContent
-      +                    None => "No paths found.".to_string(),
-      +                };
-      +                format!("GSS Structure too large ({} nodes > {}). {}", end_stats.unique_nodes, MAX_NODES_TO_PRINT_FULL, longest_path_str)
-      +            }
-      +        });
-               self.action_not_found_states.clear();
-           }
+      +use std::fmt;
+       pub type LLMTokenBV = BitVec;
+       pub type GrammarTokenBV = BitVec;
        
-      -    // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
-           pub fn merge_active_states(&mut self) {
-               let mut active_state_map: BTreeMap<ParseStateKey, ParseState<T>> = BTreeMap::new();
-               let num_active_states = self.active_states.len();
+      @@ -36,7 +36,7 @@
+       
+       /// Holds the set of active LLM tokens and the intersection of tokens
+       /// guaranteed to be possible in all future paths from this GSS node.
+      -#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      +#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+       pub struct LLMTokenInfo {
+           /// Union of possible LLM tokens allowed by paths reaching this node.
+           pub active: LLMTokenBV,
+      @@ -51,6 +51,31 @@
+           }
+       }
+       
+      +impl fmt::Debug for LLMTokenInfo {
+      +    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      +        const MAX_IDS_TO_PRINT: usize = 20;
+      +
+      +        let format_bv = |bv: &LLMTokenBV| -> String {
+      +            let ids: Vec<_> = bv.iter_ones().collect();
+      +            if ids.len() > MAX_IDS_TO_PRINT {
+      +                format!(
+      +                    "[{:?}... (+{} more)]",
+      +                    &ids[..MAX_IDS_TO_PRINT],
+      +                    ids.len() - MAX_IDS_TO_PRINT
+      +                )
+      +            } else {
+      +                format!("{:?}", ids)
+      +            }
+      +        };
+      +
+      +        f.debug_struct("LLMTokenInfo")
+      +            .field("active", &format_args!("{}", format_bv(&self.active)))
+      +            .field("intersection", &format_args!("{}", format_bv(&self.intersection)))
+      +            .finish()
+      +    }
+      +}
+      +
+       
+       #[derive(Debug, Clone)] // Removed pub(crate) as it's likely used externally
+       pub struct GrammarConstraint {
 
       ```
     metadata:
   - user: |
       Git apply result:
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/glr/parser.rs
-      Applying patch to 'src/glr/parser.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/parser.rs.
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
     metadata:
 ...
