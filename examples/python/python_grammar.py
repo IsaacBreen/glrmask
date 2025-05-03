@@ -286,19 +286,22 @@ if __name__ == "__main__":
 #     input_text = "i^10=i*"
 #     input_text = "5*6 + 7*2 = 5+5+5+"
     input_text = "# hello = world\nhello ="
+    expected_next_token = "world"
 
     # DEMO: Get the mask
     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
     tokens = tokenizer.encode(input_text, return_tensors="pt")
     tokens: list[int] = tokens.tolist()[0]
-#     for token_id in tokens:
-#         grammar_constraint_state.commit(token_id)
+    for token_id in tokens:
+        grammar_constraint_state.commit(token_id)
     mask = grammar_constraint_state.get_mask()
     print("Got mask")
     print(f"Mask: {mask}")
     mask_ids = np.where(mask)[0].tolist()
-    mask_token_ids = [tokenizer.convert_ids_to_tokens(id) for id in mask_ids]
+    mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
     print(f"Mask Tokens: {mask_token_ids}")
+    if expected_next_token:
+        assert expected_next_token in mask_token_ids, f"Expected '{expected_next_token}' in mask"
 
     # DEMO: Generate text.
     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
