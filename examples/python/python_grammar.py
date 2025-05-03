@@ -197,6 +197,7 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
         current_input_ids = input_ids.view(-1).tolist()
         new_token_ids = current_input_ids[len(self.seen_input_ids):]
 
+        print(f"Committing tokens: {new_token_ids}")
         for token_id in new_token_ids:
             debug_print(f"Committing token: {self.llm_token_id_to_token.get(token_id)} (ID: {token_id})")
             timeit(self.grammar_constraint_state.commit)(token_id)
