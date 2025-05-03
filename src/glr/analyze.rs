@@ -50,12 +50,13 @@ fn detect_cycles_recursive(
 
                 // Find where the cycle starts in the current path
                 let cycle_start_index = path.iter().position(|n| n == neighbor).unwrap_or(0);
-                let cycle_nodes: Vec<_> = path[cycle_start_index..].iter().map(|n| n.0.as_str()).collect();
+                // Get only the nodes involved in the cycle itself
+                let cycle_nodes_in_path: Vec<_> = path[cycle_start_index..].iter().map(|n| n.0.as_str()).collect();
 
                 // Format the cycle path string: "A -> B -> C -> A"
-                let cycle_path_str = cycle_nodes.join(" -> ");
+                let cycle_path_str = cycle_nodes_in_path.join(" -> ");
 
-                let recursion_type = if cycle_nodes.len() == 2 && cycle_nodes[0] == cycle_nodes[1] { // A -> A case
+                let recursion_type = if cycle_nodes_in_path.len() == 2 && cycle_nodes_in_path[0] == cycle_nodes_in_path[1] { // A -> A case
                     "Direct"
                 } else {
                     "Indirect"
@@ -92,10 +93,9 @@ fn detect_cycles_recursive(
 /// Checks for:
 /// 1. Undefined non-terminals (non-terminals used in RHS but never defined in LHS).
 /// 2. Length-1 recursion (direct or indirect), considering nullable prefixes.
-///    - e.g., `A ::= A`
-///    - e.g., `A ::= B A` where `B` is nullable
-///    - e.g., `A ::= B`, `B ::= C`, `C ::= A`
-///    - e.g., `A ::= X B`, `B ::= Y C`, `C ::= Z A` where `X, Y, Z` are nullable
+///    A rule `A ::= α` contributes to a potential cycle if `α` consists of
+///    zero or more nullable non-terminals, followed by a single non-terminal `B`,
+///    and nothing else (i.e., `A ::= Nullable* B`).
 pub fn validate(productions: &[Production]) -> Result<(), String> {
     // --- Check 1: Missing Productions ---
     let mut lhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
@@ -129,48 +129,75 @@ pub fn validate(productions: &[Production]) -> Result<(), String> {
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
     crate::debug!(3, "Nullable non-terminals: {:?}", nullable_nonterminals.iter().map(|nt| &nt.0).collect::<Vec<_>>());
 
-    // Build a graph where an edge A -> B exists if A can derive B potentially preceded by nullable symbols.
+    // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B exists.
     let mut unit_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
     for nt in &all_nonterminals { // Initialize graph with all nodes
         unit_graph.entry(nt.clone()).or_default();
     }
 
+    // --- Corrected Logic for Building Unit Graph ---
     for prod in productions {
         let lhs = &prod.lhs;
-        let mut first_non_nullable_nt: Option<&NonTerminal> = None;
+        let rhs = &prod.rhs;
 
-        for symbol in &prod.rhs {
+        let mut first_non_nullable_symbol: Option<&Symbol> = None;
+        let mut first_non_nullable_idx: Option<usize> = None;
+
+        // Find the first non-nullable symbol and its index
+        for (idx, symbol) in rhs.iter().enumerate() {
             match symbol {
                 Symbol::Terminal(_) => {
-                    // Found a terminal before any non-nullable non-terminal.
-                    // This rule cannot contribute to length-1 recursion.
-                    first_non_nullable_nt = None;
-                    break;
+                    first_non_nullable_symbol = Some(symbol);
+                    first_non_nullable_idx = Some(idx);
+                    break; // Found first non-nullable, stop scanning
                 }
                 Symbol::NonTerminal(nt) => {
                     if !nullable_nonterminals.contains(nt) {
-                        // Found the first non-nullable non-terminal.
-                        first_non_nullable_nt = Some(nt);
-                        break;
+                        first_non_nullable_symbol = Some(symbol);
+                        first_non_nullable_idx = Some(idx);
+                        break; // Found first non-nullable, stop scanning
                     }
-                    // This non-terminal is nullable, continue scanning.
+                    // It's a nullable non-terminal, continue scanning
                 }
             }
         }
 
-        // If the first non-nullable symbol in the RHS is a non-terminal B,
-        // add a directed edge A -> B to the graph.
-        if let Some(target_nt) = first_non_nullable_nt {
-            unit_graph.entry(lhs.clone()).or_default().insert(target_nt.clone());
-            crate::debug!(4, "Unit graph edge added: {} -> {}", lhs.0, target_nt.0);
+        match first_non_nullable_symbol {
+            Some(Symbol::NonTerminal(target_nt)) => {
+                // Found a non-terminal B as the first non-nullable symbol at index k
+                let k = first_non_nullable_idx.unwrap();
+
+                // Check if B is the *last* symbol in the RHS
+                if k == rhs.len() - 1 {
+                    // Rule is of the form A ::= Nullable* B. Add edge A -> B.
+                    unit_graph.entry(lhs.clone()).or_default().insert(target_nt.clone());
+                    crate::debug!(4, "Unit graph edge added ({} -> {} from rule: {} ::= {:?})", lhs.0, target_nt.0, lhs.0, prod.rhs);
+                } else {
+                    // Rule is A ::= Nullable* B NonEmptySuffix... Does not contribute.
+                    crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): Non-terminal {} followed by other symbols.", lhs.0, prod.rhs, target_nt.0);
+                }
+            }
+            Some(Symbol::Terminal(_)) => {
+                // First non-nullable symbol is a terminal. Rule is A ::= Nullable* Terminal ... Does not contribute.
+                crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): First non-nullable symbol is a terminal.", lhs.0, prod.rhs);
+            }
+            None => {
+                // All symbols in RHS are nullable, or RHS is empty. Rule is A ::= Nullable*. Does not contribute.
+                crate::debug!(5, "Rule skipped for unit graph ({} ::= {:?}): RHS is fully nullable or empty.", lhs.0, prod.rhs);
+            }
         }
     }
+    // --- End Corrected Logic ---
+
 
     // Detect cycles in the unit graph using DFS
     let mut visiting = BTreeSet::new(); // Nodes currently in DFS stack
     let mut visited = BTreeSet::new();  // Nodes fully explored
 
-    for nt in &all_nonterminals {
+    // Sort the non-terminals for deterministic traversal order (optional, but good for consistency)
+    let sorted_nonterminals: Vec<_> = all_nonterminals.iter().collect();
+
+    for nt in sorted_nonterminals {
         if !visited.contains(nt) { // Only start DFS from unvisited nodes
             let mut path = Vec::new(); // Track path for error reporting
             detect_cycles_recursive(nt, &unit_graph, &mut visiting, &mut visited, &mut path)?;
