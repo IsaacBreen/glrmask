@@ -276,7 +276,6 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         cur_t: &T,
     ) -> Vec<Arc<GSSNode<ParseStateNodeContent<T>>>> {
         let mut parents = stack.popn(len);        // 1. pop
-        parents.bulk_merge();                     // 2. merge duplicates
         let mut out = Vec::new();
 
         for parent in parents {
