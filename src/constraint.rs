@@ -17,7 +17,7 @@ use crate::datastructures::gss::prune_and_transform_recursive;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::glr::parser::ParseStateNodeContent;
-use std::fmt;
+
 pub type LLMTokenBV = BitVec;
 pub type GrammarTokenBV = BitVec;
 
@@ -44,7 +44,7 @@ pub(crate) type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode>;
 
 /// Holds the set of active LLM tokens and the intersection of tokens
 /// guaranteed to be possible in all future paths from this GSS node.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LLMTokenInfo {
     /// Union of possible LLM tokens allowed by paths reaching this node.
     pub active: LLMTokenBV,
@@ -56,30 +56,6 @@ pub struct LLMTokenInfo {
 impl Default for LLMTokenInfo {
     fn default() -> Self {
         Self { active: Default::default(), intersection: Default::default() }
-    }
-}
-
-impl fmt::Debug for LLMTokenInfo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        const MAX_IDS_TO_PRINT: usize = 20;
-
-        let format_bv = |bv: &LLMTokenBV| -> String {
-            let ids: Vec<_> = bv.iter_ones().collect();
-            if ids.len() > MAX_IDS_TO_PRINT {
-                format!(
-                    "[{:?}... (+{} more)]",
-                    &ids[..MAX_IDS_TO_PRINT],
-                    ids.len() - MAX_IDS_TO_PRINT
-                )
-            } else {
-                format!("{:?}", ids)
-            }
-        };
-
-        f.debug_struct("LLMTokenInfo")
-            .field("active", &format_args!("{}", format_bv(&self.active)))
-            .field("intersection", &format_args!("{}", format_bv(&self.intersection)))
-            .finish()
     }
 }
 
