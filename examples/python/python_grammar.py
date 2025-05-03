@@ -22,9 +22,9 @@ def eat_string(s: bytes) -> Regex:
 #     return Regex.eat_u8(ord("0"))
 
 def rule_name_is_valid(name: str) -> bool:
-    return not name.startswith("invalid_")
-#     # TODO: delete this
-#     return True
+#     return not name.startswith("invalid_")
+    # TODO: delete this
+    return True
 
 
 def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Regex:
@@ -226,6 +226,7 @@ def generate_text(model, tokenizer, grammar_processor, input_text, max_new_token
         max_new_tokens=max_new_tokens,
         logits_processor=[grammar_processor]
     )
+    print(f"{len(output[0])} tokens generated")
     return tokenizer.decode(output[0], skip_special_tokens=True)
 
 if __name__ == "__main__":
@@ -301,4 +302,5 @@ if __name__ == "__main__":
     # DEMO: Generate text.
     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
 #     output_text = generate_text(model, tokenizer, grammar_processor, input_text)
-#     print(output_text)
+    output_text = timeit(generate_text)(model, tokenizer, grammar_processor, input_text)
+    print(output_text)
