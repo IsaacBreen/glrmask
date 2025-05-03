@@ -470,6 +470,7 @@ fn test_hidden_left_recursion() {
     assert!(analyze::validate(&productions).is_ok());
 
     let parser = generate_glr_parser(&productions, 0);
+    println!("Parser: {}", parser);
     let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
 
     let test_cases = [
