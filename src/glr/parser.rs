@@ -410,8 +410,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
             fuel -= 1;
 
             // --- Get current state info ---
-            let stack = state.stack; // Arc<GSSNode<ParseStateNodeContent<T>>>
-            let current_content = stack.peek();
+            let current_content = state.stack.peek();
             let current_state_id = current_content.state_id;
             let current_t = &current_content.t; // Reference to T in the current top node
 
@@ -433,7 +432,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                     Stage7ShiftsAndReduces::Shift(next_state_id) => {
                         crate::debug!(5, "State {} -> {}: Shifting", current_state_id.0, next_state_id.0);
                         let new_content = ParseStateNodeContent { state_id: *next_state_id, t: current_t.clone() };
-                        let new_stack = stack.push(new_content); // push returns GSSNode
+                        let new_stack = state.stack.push(new_content); // push returns GSSNode
                         // Add shift results directly to the list for the *next* step.
                         next_active_states.push(ParseState { stack: Arc::new(new_stack) });
                     }
@@ -442,7 +441,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                         crate::debug!(5, "State {}: Reducing by production {} ({}) len {}", current_state_id.0, production_id.0, nt_name.0, len);
 
                         // Perform the reduction, get resulting stacks (unmerged)
-                        let new_stacks = self.perform_reduction(&stack, *len, *nonterminal_id, current_t);
+                        let new_stacks = self.perform_reduction(&state.stack, *len, *nonterminal_id, current_t);
                         // Add these new stacks to the collection for this state's reductions
                         reduction_results_for_this_state.extend(new_stacks);
                     }
@@ -452,7 +451,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                         if let Some(shift_state_id) = shift {
                             crate::debug!(5, "  Split -> Shift to {}", shift_state_id.0);
                             let new_content = ParseStateNodeContent { state_id: *shift_state_id, t: current_t.clone() };
-                            let new_stack = stack.push(new_content);
+                            let new_stack = state.stack.push(new_content);
                             // Add shift results directly to the list for the *next* step.
                             next_active_states.push(ParseState { stack: Arc::new(new_stack) });
                         }
@@ -465,7 +464,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                                  let nt_name = self.parser.non_terminal_map.get_by_right(nt_id).unwrap();
                                  crate::debug!(6, "      Reducing for NT {} ({} productions)", nt_name.0, prod_ids.len());
                                  // Perform the reduction for this specific NT and len
-                                 let new_stacks = self.perform_reduction(&stack, *len, *nt_id, current_t);
+                                 let new_stacks = self.perform_reduction(&state.stack, *len, *nt_id, current_t);
                                  // Add results to the collection for this state's reductions
                                  reduction_results_for_this_state.extend(new_stacks);
                             }
