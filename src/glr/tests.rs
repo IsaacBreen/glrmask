@@ -125,9 +125,6 @@ fn test_expression_parse_table_generation_and_parse() {
     }
 }
 
-// --- Tests Specifically for Grammar Validation Logic ---
-
-#[test]
 fn validation_passes_standard_grammars() {
     // Simple Grammar (already tested implicitly above, but good to be explicit)
     let simple_productions = vec![
@@ -488,6 +485,45 @@ fn test_hidden_left_recursion() {
         state.parse(&tokens);
         state.step(eof);
         assert_eq!(state.is_ok(), expected_match, "Parse check failed for hidden left recursion input: '{}'", input);
+    }
+}
+
+#[test]
+fn test_hidden_right_recursion() {
+    // Grammar: S' -> S $
+    //          S  -> a S B | b
+    //          B  -> epsilon
+    // This grammar has hidden right recursion because B is nullable.
+    // S -> a S B can effectively act like S -> a S.
+    // GLR parsers should handle this correctly.
+    let productions = vec![
+        prod("S'", vec![nt("S"), t("$")]), // Start
+        prod("S", vec![t("a"), nt("S"), nt("B")]),
+        prod("S", vec![t("b")]),
+        prod("B", vec![]), // Epsilon
+    ];
+
+    // Validation should pass as it's not length-1 recursion
+    assert!(analyze::validate(&productions).is_ok());
+
+    let parser = generate_glr_parser(&productions, 0);
+    let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+
+    let test_cases = [
+        ("b", true),    // S -> b
+        ("ab", true),   // S -> a S B -> a b B -> a b e
+        ("aab", true),  // S -> a S B -> a (a S B) B -> a a b B B -> a a b e e
+        ("aaab", true),
+        ("a", false),   // Needs a 'b'
+        ("ba", false),  // Cannot start with 'b' then 'a'
+    ];
+
+    for (input, expected_match) in test_cases {
+        let tokens = tokenize(&parser, input);
+        let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+        state.parse(&tokens);
+        state.step(eof);
+        assert_eq!(state.is_ok(), expected_match, "Parse check failed for hidden right recursion input: '{}'", input);
     }
 }
 
