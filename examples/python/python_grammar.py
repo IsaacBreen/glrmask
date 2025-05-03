@@ -284,7 +284,8 @@ if __name__ == "__main__":
 
     print("Generating text...")
 #     input_text = "i^10=i*"
-    input_text = "5*6 + 7*2 = 5+5+5+"
+#     input_text = "5*6 + 7*2 = 5+5+5+"
+#     input_text = "123+456+"
 
     # DEMO: Get the mask
     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
