@@ -7,7 +7,7 @@ use crate::glr::table::{
 use crate::datastructures::gss::{GSSNode, GSSTrait, GSSStats};
 
 use bimap::BiBTreeMap;
-use std::collections::{BTreeMap, BTreeSet, VecDeque}; // ADDED VecDeque
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
 use std::sync::Arc;
@@ -273,103 +273,178 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
     }
 
     pub fn step(&mut self, token_id: TerminalID) {
-        // Work-queue of states that still have to consume the *current* token.
-        let mut todo: VecDeque<ParseState<T>> =
-            self.active_states.drain(..).collect();
+        // Gather and log GSS stats before processing the step
+        let root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+        let stats = gather_gss_stats(&root_nodes);
+        crate::debug!(3, "Step Start (Token {:?}): Active States: {}, GSS Stats: {:?}", token_id, self.active_states.len(), stats);
 
-        // States produced by *shifts* (become the active set for the next token).
-        let mut next_active_states: Vec<ParseState<T>> = Vec::new();
-
-        while let Some(state) = todo.pop_front() {
-            let stack = state.stack.clone();                // Arc<GSSNode<_>>
-            let top    = stack.peek();                      // &ParseStateNodeContent<T>
-            let cur_id = top.state_id;
-            let cur_t  = &top.t;
-
-            // No table entry?  The state simply dies.
-            let row = match self.parser.stage_7_table.get(&cur_id) {
-                Some(r) => r,
-                None    => continue,
-            };
-
-            // Look-up the parser action for this token.
-            match row.shifts_and_reduces.get(&token_id) {
-                // ---------- 1  No action  ----------
-                None => { /* state dies */ }
-
-                // ---------- 2  Shift  ----------
-                Some(Stage7ShiftsAndReduces::Shift(next_state_id)) => {
-                    let new_content = ParseStateNodeContent {
-                        state_id: *next_state_id,
-                        t: cur_t.clone(),
-                    };
-                    next_active_states.push(ParseState {
-                        stack: Arc::new(stack.push(new_content)),
-                    });
+        // Log the GSS structure if it's reasonably small
+        const MAX_NODES_TO_PRINT: usize = 30;
+        debug!(4, "{}", { // Use a closure to avoid potentially expensive calculations if debug level is lower
+            let final_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+            let final_stats = gather_gss_stats(&final_root_nodes);
+            if final_stats.unique_nodes <= MAX_NODES_TO_PRINT {
+                format!("GSS Structure ({} nodes):\n{}", final_stats.unique_nodes, print_gss_forest(&final_root_nodes, MAX_NODES_TO_PRINT))
+            } else {
+                // Find and print the longest path instead
+                if let Some(longest_path) = find_longest_path(&final_root_nodes) {
+                    let path_str = longest_path.iter()
+                        .map(|node| format!("{}", node.value.state_id.0))
+                        .collect::<Vec<_>>()
+                        .join(" -> ");
+                    format!("GSS Structure too large ({} nodes > {}). Longest path ({} nodes): {}",
+                            final_stats.unique_nodes, MAX_NODES_TO_PRINT, longest_path.len(), path_str)
+                } else {
+                    format!("GSS Structure too large ({} nodes > {}), and no path found.",
+                            final_stats.unique_nodes, MAX_NODES_TO_PRINT)
                 }
+            }
+        });
 
-                // ---------- 3  Single reduce ----------
-                Some(Stage7ShiftsAndReduces::Reduce { nonterminal_id, len, .. }) => {
-                    // Pop `len` nodes, then compute goto and feed the result
-                    // back into the same work-queue (because it can reduce further).
-                    let mut popped = stack.popn(*len);
-                    popped.bulk_merge();
-                    for ancestor in popped {
-                        let anc_top = ancestor.peek();
-                        let goto_state =
-                            self.parser.stage_7_table[&anc_top.state_id].gotos[nonterminal_id];
+        let mut next_active_states = Vec::new();
+        // This will store states where the current token_id leads to no action.
+        let mut current_action_not_found_states = Vec::new();
+        let mut fuel = 1_000;
 
-                        let combined_t = anc_top.t.intersect(cur_t);
-                        let new_content = ParseStateNodeContent {
-                            state_id: goto_state,
-                            t: combined_t,
-                        };
-                        todo.push_back(ParseState {
-                            stack: Arc::new(ancestor.push(new_content)),
-                        });
+        while let Some(state) = self.active_states.pop() {
+            if fuel == 0 {
+                // Dump info
+                self.active_states.push(state);
+                let root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+                let stats = gather_gss_stats(&root_nodes);
+                crate::debug!(3, "Ran out of fuel. GSS Stats: {:?}", stats);
+                debug!(3, "{}", { // Use a closure to avoid potentially expensive calculations if debug level is lower
+                    let final_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+                    let final_stats = gather_gss_stats(&final_root_nodes);
+                    if final_stats.unique_nodes <= MAX_NODES_TO_PRINT {
+                        format!("GSS Structure ({} nodes):\n{}", final_stats.unique_nodes, print_gss_forest(&final_root_nodes, MAX_NODES_TO_PRINT))
+                    } else {
+                        // Find and print the longest path instead
+                        if let Some(longest_path) = find_longest_path(&final_root_nodes) {
+                            let path_str = longest_path.iter()
+                                .map(|node| format!("{}", node.value.state_id.0))
+                                .collect::<Vec<_>>()
+                                .join(" -> ");
+                            format!("GSS Structure too large ({} nodes > {}). Longest path ({} nodes): {}",
+                                    final_stats.unique_nodes, MAX_NODES_TO_PRINT, longest_path.len(), path_str)
+                        } else {
+                            format!("GSS Structure too large ({} nodes > {}), and no path found.",
+                                    final_stats.unique_nodes, MAX_NODES_TO_PRINT)
+                        }
                     }
-                }
+                });
+                panic!("Ran out of fuel");
+            }
+            fuel -= 1;
 
-                // ---------- 4  Split (shift/reduce conflict) ----------
-                Some(Stage7ShiftsAndReduces::Split { shift, reduces }) => {
-                    // 4a Optional shift part → “next token”
-                    if let Some(shift_state) = shift {
-                        let new_content = ParseStateNodeContent {
-                            state_id: *shift_state,
-                            t: cur_t.clone(),
-                        };
+            let stack = state.stack; // Arc<GSSNode<ParseStateNodeContent<T>>>
+            let current_content = stack.peek(); // &ParseStateNodeContent<T>
+            let current_state_id = current_content.state_id;
+            let current_t = &current_content.t;
+
+            let row = self.parser.stage_7_table.get(&current_state_id).unwrap();
+
+            if let Some(action) = row.shifts_and_reduces.get(&token_id) {
+                match action {
+                    Stage7ShiftsAndReduces::Shift(next_state_id) => {
+                        debug!(5, "State {} -> {}: Shifting", current_state_id.0, next_state_id.0);
+                        let new_content = ParseStateNodeContent { state_id: *next_state_id, t: current_t.clone() };
+                        let new_stack = stack.push(new_content);
                         next_active_states.push(ParseState {
-                            stack: Arc::new(stack.push(new_content)),
+                            // stack: Arc::new(new_stack), // GSSNode::push now returns Arc
+                            stack: Arc::new(new_stack),
                         });
                     }
+                    Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
+                        let nt_name = self.parser.non_terminal_map.get_by_right(nonterminal).unwrap();
+                        let node_ptr = Arc::as_ptr(&stack);
+                        debug!(5, "State {}, Node {:?}: Reducing by production {} ({}) with len {}", current_state_id.0, node_ptr, production_id.0, nt_name.0, len);
+                        let mut popped_stack_nodes = stack.popn(*len);
+                        let gt = popped_stack_nodes.len() > 1;
+                        if gt { crate::debug!(4, "Popped {} times to reveal {} stack nodes (1)", len, popped_stack_nodes.len()); }
+                        popped_stack_nodes.bulk_merge();
+                        if gt { crate::debug!(4, "Merged into {} stack nodes (1)", popped_stack_nodes.len()); }
+                        let mut new_stacks = Vec::new();
+                        for stack_node in popped_stack_nodes {
+                            // stack_node is Arc<GSSNode<ParseStateNodeContent<T>>>
+                            let revealed_content = stack_node.peek(); // &ParseStateNodeContent<T>
+                            let revealed_state_id = revealed_content.state_id;
+                            let revealed_t = &revealed_content.t;
+                            let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nonterminal];
 
-                    // 4b All reduce alternatives → back into current work-queue
-                    for (len, nt_map) in reduces {
-                        let mut popped = stack.popn(*len);
-                        popped.bulk_merge();
-                        for ancestor in popped {
-                            let anc_top = ancestor.peek();
-                            for (nt_id, _) in nt_map {
-                                let goto_state =
-                                    self.parser.stage_7_table[&anc_top.state_id].gotos[nt_id];
-                                let combined_t = anc_top.t.intersect(cur_t);
-                                let new_content = ParseStateNodeContent {
-                                    state_id: goto_state,
-                                    t: combined_t,
-                                };
-                                todo.push_back(ParseState {
-                                    stack: Arc::new(ancestor.push(new_content)),
-                                });
+                            let node_ptr = Arc::as_ptr(&stack_node);
+                            debug!(5, "  Node {:?}: Revealed state {}, going to state {} for NonTerminal {}", node_ptr, revealed_state_id.0, goto_state.0, nt_name.0);
+                            let combined_t = revealed_t.intersect(current_t);
+                            let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
+                            let new_stack = stack_node.push(new_content);
+                            new_stacks.push(Arc::new(new_stack));
+                        }
+                        new_stacks.bulk_merge();
+                        for stack in new_stacks {
+                            self.active_states.push(ParseState {
+                                stack,
+                            });
+                        }
+                    }
+                    Stage7ShiftsAndReduces::Split { shift, reduces } => {
+                        debug!(4, "Split");
+                        let mut new_stacks = Vec::new();
+                        if let Some(shift_state) = shift {
+                            // Shift part (same as above)
+                            let new_content = ParseStateNodeContent { state_id: *shift_state, t: current_t.clone() };
+                            let new_stack = stack.push(new_content);
+                            next_active_states.push(ParseState {
+                                stack: Arc::new(new_stack),
+                            });
+                        }
+
+                        crate::debug!(4, "State {}: Reduces: {}", current_state_id.0, reduces.len());
+                        for (len, nt_ids) in reduces {
+                            let mut popped_stack_nodes = stack.popn(*len);
+                            popped_stack_nodes.bulk_merge();
+                            crate::debug!(4, "Popped {} times to reveal {} stack nodes (2)", len, popped_stack_nodes.len());
+                            crate::debug!(4, "nt_ids.len(): {}", nt_ids.len());
+                            for (nt_id, _prod_ids) in nt_ids { // Iterate over NonTerminalIDs in the split reduce
+                                let nt_name = self.parser.non_terminal_map.get_by_right(nt_id).unwrap();
+                                debug!(5, "  - Reducing for NonTerminal {} ({})", nt_name.0, nt_id.0);
+                                for stack_node in &popped_stack_nodes {
+                                    // Reduce part (same as above)
+                                    let revealed_content = stack_node.peek();
+                                    let revealed_state_id = revealed_content.state_id;
+                                    let revealed_t = &revealed_content.t;
+                                    let goto_state = self.parser.stage_7_table[&revealed_state_id].gotos[nt_id]; // Use the current nt_id for goto lookup
+
+                                    let combined_t = revealed_t.intersect(current_t);
+                                    let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
+                                    let new_stack = stack_node.push(new_content);
+                                    new_stacks.push(Arc::new(new_stack));
+                                }
                             }
+                        }
+                        new_stacks.bulk_merge();
+                        for stack in new_stacks {
+                            self.active_states.push(ParseState {
+                                stack,
+                            });
                         }
                     }
                 }
+            } else {
+                // No action found for this token in this state
+                current_action_not_found_states.push(ParseState {
+                    stack,
+                });
             }
         }
-
-        // Prepare for the next token.
         self.active_states = next_active_states;
-        self.action_not_found_states.clear();   // we no longer track these
+        self.action_not_found_states = current_action_not_found_states; // Replace previous not-found states
+
+        let end_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+        let end_stats = gather_gss_stats(&end_root_nodes);
+        crate::debug!(3, "Step End (Token {:?}): Active States: {}, Action Not Found: {}, GSS Stats: {:?}", token_id, self.active_states.len(), self.action_not_found_states.len(), end_stats);
+
+        // TODO: decide whether to keep action_not_found_states or not
+        self.action_not_found_states.clear();
     }
 
     // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
