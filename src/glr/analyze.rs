@@ -256,7 +256,7 @@ pub fn remove_productions_with_undefined_nonterminals(initial_productions: &[Pro
             defined_lhs_nonterminals.insert(prod.lhs.clone());
         }
 
-        let next_productions: Vec<Production> = current_productions
+        let next_productions: Vec<Production> = current_productions.clone()
             .into_iter()
             .filter(|prod| {
                 prod.rhs.iter().all(|symbol| match symbol {

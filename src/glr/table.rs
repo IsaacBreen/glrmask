@@ -5,7 +5,7 @@ use bimap::BiBTreeMap;
 use std::collections::{HashMap, VecDeque};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
-use crate::glr::analyze::{drop_dead, validate};
+use crate::glr::analyze::{drop_dead, remove_productions_with_undefined_nonterminals, validate};
 pub use crate::types::{TerminalID};
 
 type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
@@ -367,33 +367,38 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 }
 
 pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
+    let original_productions = productions.to_vec();
+
+    crate::debug!(2, "Removing productions with undefined non-terminals");
+    let productions = remove_productions_with_undefined_nonterminals(productions);
+
     crate::debug!(2, "Validating");
-    validate(productions).expect("Validation error");
+    validate(&productions).expect("Validation error");
 
     crate::debug!(2, "Stage 1");
-    let stage_1_table = stage_1(productions, start_production_id);
+    let stage_1_table = stage_1(&productions, start_production_id);
     crate::debug!(6, &stage_1_table);
     crate::debug!(2, "Stage 2");
-    let stage_2_table = stage_2(stage_1_table, productions);
+    let stage_2_table = stage_2(stage_1_table, &productions);
     crate::debug!(6, &stage_2_table);
     crate::debug!(2, "Stage 3");
-    let stage_3_table = stage_3(stage_2_table, productions);
+    let stage_3_table = stage_3(stage_2_table, &productions);
     crate::debug!(6, &stage_3_table);
     crate::debug!(2, "Stage 4");
-    let stage_4_table = stage_4(stage_3_table, productions);
+    let stage_4_table = stage_4(stage_3_table, &productions);
     crate::debug!(6, &stage_4_table);
     crate::debug!(2, "Stage 5");
-    let stage_5_table = stage_5(stage_4_table, productions);
+    let stage_5_table = stage_5(stage_4_table, &productions);
     crate::debug!(6, &stage_5_table);
     crate::debug!(2, "Stage 6");
     let stage_6_table = stage_6(stage_5_table);
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
-    let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, productions, start_production_id, &terminal_map, &non_terminal_map);
+    let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
     crate::debug!(2, "Done generating GLR parser");
 
-    GLRParser::new(stage_7_table, productions.to_vec(), terminal_map, non_terminal_map, item_set_map, start_state_id)
+    GLRParser::new(stage_7_table, original_productions, terminal_map, non_terminal_map, item_set_map, start_state_id)
 }
 
 pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
