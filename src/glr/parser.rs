@@ -332,7 +332,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                         for (len, nt_ids) in reduces {
                             let mut popped_stack_nodes = stack.popn(*len);
                             popped_stack_nodes.bulk_merge();
-                            crate::debug!(4, "Popped {} times to reveal {} stack nodes", len, popped_stack_nodes.len());
+                            crate::debug!(4, "Popped {} times to reveal {} stack nodes (2)", len, popped_stack_nodes.len());
                             crate::debug!(4, "nt_ids.len(): {}", nt_ids.len());
                             for (nt_id, _prod_ids) in nt_ids { // Iterate over NonTerminalIDs in the split reduce
                                 let nt_name = self.parser.non_terminal_map.get_by_right(nt_id).unwrap();
