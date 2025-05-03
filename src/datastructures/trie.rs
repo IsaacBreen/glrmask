@@ -427,7 +427,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             // If arr_depth > node_max_depth, something is inconsistent. Warn?
             if arr_depth > node_max_depth {
                  // This can happen if max_depth was updated concurrently or if graph has cycles not caught by insertion
-                 eprintln!("Warning: Node {:?} has arrival depth {} > max_depth {}. Processing anyway.", arc_ptr, arr_depth, node_max_depth);
+                 crate::debug!(3, "Warning: Node {:?} has arrival depth {} > max_depth {}. Processing anyway.", arc_ptr, arr_depth, node_max_depth);
             }
 
 
