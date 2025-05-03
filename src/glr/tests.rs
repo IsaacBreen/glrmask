@@ -450,6 +450,45 @@ fn test_highly_ambiguous_potentially_slow() {
     assert!(state.is_ok(), "GLR parser should accept highly ambiguous S -> S S | a grammar");
 }
 
+#[test]
+fn test_hidden_left_recursion() {
+    // Grammar: S' -> S $
+    //          S  -> B S a | b
+    //          B  -> epsilon
+    // This grammar has hidden left recursion because B is nullable.
+    // S -> B S a can effectively act like S -> S a.
+    // GLR parsers should handle this correctly.
+    let productions = vec![
+        prod("S'", vec![nt("S"), t("$")]), // Start
+        prod("S", vec![nt("B"), nt("S"), t("a")]),
+        prod("S", vec![t("b")]),
+        prod("B", vec![]), // Epsilon
+    ];
+
+    // Validation should pass as it's not length-1 recursion
+    assert!(analyze::validate(&productions).is_ok());
+
+    let parser = generate_glr_parser(&productions, 0);
+    let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+
+    let test_cases = [
+        ("b", true),    // S -> b
+        ("ba", true),   // S -> B S a -> e S a -> S a -> b a
+        ("baa", true),  // S -> B S a -> e S a -> S a -> (B S a) a -> (e S a) a -> S a a -> b a a
+        ("baaa", true),
+        ("a", false),   // Cannot start with 'a'
+        ("bb", false),  // Cannot have two 'b's
+    ];
+
+    for (input, expected_match) in test_cases {
+        let tokens = tokenize(&parser, input);
+        let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+        state.parse(&tokens);
+        state.step(eof);
+        assert_eq!(state.is_ok(), expected_match, "Parse check failed for hidden left recursion input: '{}'", input);
+    }
+}
+
 // --- Notes on Limitations Not Easily Tested Here ---
 // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
 //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
