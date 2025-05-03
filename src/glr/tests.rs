@@ -489,7 +489,6 @@ fn test_epsilon_rules_ambiguity() {
     assert!(state.is_ok(), "GLR parser should accept ambiguous input involving epsilon rules");
 }
 
-#[ignore]
 #[test]
 fn test_highly_ambiguous_potentially_slow() {
     // Grammar: S -> S S | a
