@@ -245,6 +245,19 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         let root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
         let stats = gather_gss_stats(&root_nodes);
         crate::debug!(3, "Step Start (Token {:?}): Active States: {}, GSS Stats: {:?}", token_id, self.active_states.len(), stats);
+        
+        // Log the GSS structure if it's reasonably small
+        const MAX_NODES_TO_PRINT: usize = 30;
+        debug!(3, { // Use a closure to avoid potentially expensive calculations if debug level is lower
+            let final_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+            let final_stats = gather_gss_stats(&final_root_nodes);
+            if final_stats.unique_nodes <= MAX_NODES_TO_PRINT {
+                format!("GSS Structure ({} nodes):\n{}", final_stats.unique_nodes, print_gss_forest(&final_root_nodes, MAX_NODES_TO_PRINT))
+            } else {
+                format!("GSS Structure too large to print ({} nodes > {})", final_stats.unique_nodes, MAX_NODES_TO_PRINT)
+            }
+        });
+        
         let mut next_active_states = Vec::new();
         // This will store states where the current token_id leads to no action.
         let mut current_action_not_found_states = Vec::new();
@@ -356,18 +369,6 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
 
         // TODO: decide whether to keep action_not_found_states or not
         self.action_not_found_states.clear();
-
-        // Log the final GSS structure if it's reasonably small
-        const MAX_NODES_TO_PRINT: usize = 30;
-        debug!(4, { // Use a closure to avoid potentially expensive calculations if debug level is lower
-            let final_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
-            let final_stats = gather_gss_stats(&final_root_nodes);
-            if final_stats.unique_nodes <= MAX_NODES_TO_PRINT {
-                format!("GSS Structure ({} nodes):\n{}", final_stats.unique_nodes, print_gss_forest(&final_root_nodes, MAX_NODES_TO_PRINT))
-            } else {
-                format!("GSS Structure too large to print ({} nodes > {})", final_stats.unique_nodes, MAX_NODES_TO_PRINT)
-            }
-        });
     }
 
     // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
