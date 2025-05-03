@@ -17,9 +17,9 @@ from tqdm import tqdm
 
 
 def eat_string(s: bytes) -> Regex:
-    return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
-#     # TODO: delete this
-#     return Regex.eat_u8(ord("0"))
+#     return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
+    # TODO: delete this
+    return Regex.eat_u8(ord("0"))
 
 def rule_name_is_valid(name: str) -> bool:
     return not name.startswith("invalid_")
@@ -93,14 +93,14 @@ def define_tokens() -> list[tuple[str, Any]]:
     def regex(expr):
         return ge.regex(seq([ignore, expr]))
 
-    # TODO: uncomment this
-    digit = choice([eat_u8(c) for c in range(ord("0"), ord("9") + 1)])
-    alph_lower = choice([eat_u8(c) for c in range(ord("a"), ord("z") + 1)])
-    alph_upper = choice([eat_u8(c) for c in range(ord("A"), ord("Z") + 1)])
-# #     TODO: delete this
-#     digit = eat_u8(ord("1"))
-#     alph_lower = eat_u8(ord("a"))
-#     alph_upper = eat_u8(ord("a"))
+#     # TODO: uncomment this
+#     digit = choice([eat_u8(c) for c in range(ord("0"), ord("9") + 1)])
+#     alph_lower = choice([eat_u8(c) for c in range(ord("a"), ord("z") + 1)])
+#     alph_upper = choice([eat_u8(c) for c in range(ord("A"), ord("Z") + 1)])
+#     TODO: delete this
+    digit = eat_u8(ord("1"))
+    alph_lower = eat_u8(ord("a"))
+    alph_upper = eat_u8(ord("a"))
 
     name_start = choice([
         alph_lower,
@@ -233,22 +233,22 @@ if __name__ == "__main__":
 
     tokenizer_vocab = tokenizer.get_vocab()
 
-#     # TODO: delete this
-#     # Remove tokens that have any letter other than 'a'
-#     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isalpha() and c != 'a' for c in k)}
-#     # ...or have any number other than '1'
-#     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isdigit() and c != '1' for c in k)}
-#     # ...or have any letter or number
-#     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isalpha() or c.isdigit() for c in k)}
-#     # ...or have any character other than those in the given set
-# #     allowed_chars = set("÷$(¾&§.-}][¢^·/?'¼\×´¨,¡¦*¸¥»±«¤¶>+~_°¯#;½¿=!£|:%)\"{<`©®@¬")
-#     allowed_chars = set("_")
-#     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c not in allowed_chars for c in k)}
-#
-#     # Set the vocab to just underscores
-#     tokenizer_vocab = {"_": 0, "__": 1}
-#
-#     tokenizer_vocab = {"a": 0, "aa": 1}
+    # TODO: delete this
+    # Remove tokens that have any letter other than 'a'
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isalpha() and c != 'a' for c in k)}
+    # ...or have any number other than '1'
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isdigit() and c != '1' for c in k)}
+    # ...or have any letter or number
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isalpha() or c.isdigit() for c in k)}
+    # ...or have any character other than those in the given set
+#     allowed_chars = set("÷$(¾&§.-}][¢^·/?'¼\×´¨,¡¦*¸¥»±«¤¶>+~_°¯#;½¿=!£|:%)\"{<`©®@¬")
+    allowed_chars = set("_")
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c not in allowed_chars for c in k)}
+
+    # Set the vocab to just underscores
+    tokenizer_vocab = {"_": 0, "__": 1}
+
+    tokenizer_vocab = {"a": 0, "aa": 1}
 
     llm_token_to_id = {token.replace("Ġ", " ").encode(): i for token, i in tokenizer_vocab.items()}
     llm_tokens = list(tokenizer_vocab.keys()) # Use all tokens
