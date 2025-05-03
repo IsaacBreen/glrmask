@@ -148,6 +148,7 @@ impl Grammar {
             terminal_expr_to_group_id: &mut BiBTreeMap<Expr, usize>,
             next_terminal_id: &mut usize,
         ) -> Vec<Symbol> {
+            // TODO: Pre-collect all user-defined non-terminal names to ensure generated names are unique.
             // TODO: define a function that makes us a unique name for an internal rule, with an appropriate prefix.
             //  e.g. Option0, Repeat0, etc. Make sure there's no existing rule with that name (and there won't be one later either).
             //  i.e. collect all nonterminals in the grammar upfront and pass it to convert_expr.
@@ -260,22 +261,40 @@ impl Grammar {
         let mut next_non_terminal_id = 0;
         let mut tokens = BTreeMap::new();
 
+        // Process each rule definition
         for (name, expr) in tqdm!(exprs.iter()) {
-            let rhs = convert_expr(
-                expr,
-                &mut productions,
-                &mut non_terminal_map,
-                &mut next_non_terminal_id,
-                &mut literal_map,
-                &mut tokens,
-                &mut terminal_name_to_group_id,
-                &mut terminal_expr_to_group_id,
-                &mut next_terminal_id,
-            );
-            productions.push(Production {
-                lhs: NonTerminal(name.clone()),
-                rhs,
-            });
+            let lhs = NonTerminal(name.clone());
+            // Optimization: If the top-level expression is a Choice, create multiple productions directly.
+            if let GrammarExpr::Choice(choices) = expr {
+                for choice_expr in choices {
+                    let rhs = convert_expr(
+                        choice_expr,
+                        &mut productions,
+                        &mut non_terminal_map,
+                        &mut next_non_terminal_id,
+                        &mut literal_map,
+                        &mut tokens,
+                        &mut terminal_name_to_group_id,
+                        &mut terminal_expr_to_group_id,
+                        &mut next_terminal_id,
+                    );
+                    productions.push(Production { lhs: lhs.clone(), rhs });
+                }
+            } else {
+                // Otherwise, convert the expression as usual and create a single production.
+                let rhs = convert_expr(
+                    expr,
+                    &mut productions,
+                    &mut non_terminal_map,
+                    &mut next_non_terminal_id,
+                    &mut literal_map,
+                    &mut tokens,
+                    &mut terminal_name_to_group_id,
+                    &mut terminal_expr_to_group_id,
+                    &mut next_terminal_id,
+                );
+                productions.push(Production { lhs, rhs });
+            }
         }
 
         let tokenizer_exprs_vec: Vec<ExprGroup> = tokens
