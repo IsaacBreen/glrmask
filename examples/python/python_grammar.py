@@ -22,9 +22,9 @@ def eat_string(s: bytes) -> Regex:
 #     return Regex.eat_u8(ord("0"))
 
 def rule_name_is_valid(name: str) -> bool:
-#     return not name.startswith("invalid_")
+    return not name.startswith("invalid_")
     # TODO: delete this
-    return True
+#     return True
 
 
 def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Regex:
