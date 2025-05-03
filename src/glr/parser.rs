@@ -136,23 +136,32 @@ impl Display for GLRParser {
         let non_terminal_map = &self.non_terminal_map;
         let item_set_map = &self.item_set_map;
 
+        // Import necessary items for closure computation
+        use crate::glr::items::{compute_closure, Item};
+        use std::collections::BTreeSet;
+
         writeln!(f, "Parse Table:")?;
         writeln!(f, "  Start State: {}", self.start_state_id.0)?;
         for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
             writeln!(f, "  State {}:", state_id.0)?;
 
-            writeln!(f, "    Items:")?;
-            let item_set = item_set_map.get_by_right(&state_id).unwrap();
-            for item in item_set {
+            // Get the core items that define this state
+            let core_item_set = item_set_map.get_by_right(&state_id).unwrap();
+            // Compute the full closure based on the core items
+            let full_closure = compute_closure(core_item_set, &self.productions);
+
+            // Print Core Items
+            writeln!(f, "    Core Items:")?;
+            for item in core_item_set {
                 write!(f, "      - {} ->", item.production.lhs.0)?;
                 for (i, symbol) in item.production.rhs.iter().enumerate() {
                     if i == item.dot_position {
                         write!(f, " •")?;
                     }
                     match symbol {
-                        Symbol::Terminal(terminal) => write!(f, " {:?}", terminal.0)?,
-                        Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
-                    }
+                        Symbol::Terminal(terminal) => write!(f, " {:?}", terminal.0),
+                        Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
+                    }?;
                 }
                 if item.dot_position == item.production.rhs.len() {
                     write!(f, " •")?;
@@ -160,6 +169,29 @@ impl Display for GLRParser {
                 writeln!(f)?;
             }
 
+            // Print Closure Items (items in full_closure but not in core_item_set)
+            let closure_only_items: BTreeSet<_> = full_closure.difference(core_item_set).cloned().collect();
+            if !closure_only_items.is_empty() {
+                writeln!(f, "    Closure Items:")?;
+                for item in &closure_only_items {
+                    write!(f, "      - {} ->", item.production.lhs.0)?;
+                    for (i, symbol) in item.production.rhs.iter().enumerate() {
+                        if i == item.dot_position {
+                            write!(f, " •")?;
+                        }
+                        match symbol {
+                            Symbol::Terminal(terminal) => write!(f, " {:?}", terminal.0),
+                            Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
+                        }?;
+                    }
+                    if item.dot_position == item.production.rhs.len() {
+                        write!(f, " •")?;
+                    }
+                    writeln!(f)?;
+                }
+            }
+
+            // --- Rest of the state information ---
             writeln!(f, "    Actions:")?;
             for (&terminal_id, action) in &row.shifts_and_reduces {
                 let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
