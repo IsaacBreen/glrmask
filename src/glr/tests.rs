@@ -1,7 +1,7 @@
 use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, GLRParserState};
 use crate::glr::table::{generate_glr_parser, TerminalID};
-use crate::glr::analyze; // Import the analyze module
+use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals}; // Import the analyze module
 use bimap::BiBTreeMap;
 
 // --- Helper Functions for Tests ---
@@ -302,6 +302,61 @@ fn validation_passes_complex_unit_rules_no_cycle() {
      assert!(analyze::validate(&productions).is_ok());
 }
 
+// --- Tests for remove_productions_with_undefined_nonterminals ---
+
+#[test]
+fn test_remove_undefined_simple() {
+    // S -> A
+    // A -> B (B is undefined)
+    // C -> c
+    let productions = vec![
+        prod("S", vec![nt("A")]),
+        prod("A", vec![nt("B")]), // This should be removed
+        prod("C", vec![t("c")]),  // This should remain
+    ];
+    let expected = vec![
+        prod("C", vec![t("c")]),
+    ];
+    let result = remove_productions_with_undefined_nonterminals(&productions);
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_remove_undefined_iterative() {
+    // S -> A
+    // A -> B
+    // B -> C (C is undefined)
+    // D -> d
+    let productions = vec![
+        prod("S", vec![nt("A")]), // Removed in iteration 2 (because A becomes undefined)
+        prod("A", vec![nt("B")]), // Removed in iteration 2 (because B becomes undefined)
+        prod("B", vec![nt("C")]), // Removed in iteration 1 (because C is undefined)
+        prod("D", vec![t("d")]),  // Remains
+    ];
+    let expected = vec![
+        prod("D", vec![t("d")]),
+    ];
+    let result = remove_productions_with_undefined_nonterminals(&productions);
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_remove_undefined_no_change() {
+    // S -> A
+    // A -> a
+    let productions = vec![
+        prod("S", vec![nt("A")]),
+        prod("A", vec![t("a")]),
+    ];
+    let expected = productions.clone();
+    let result = remove_productions_with_undefined_nonterminals(&productions);
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_remove_undefined_empty_input() {
+    assert!(remove_productions_with_undefined_nonterminals(&[]).is_empty());
+}
 // --- Tests Demonstrating GLR Capabilities / Limitations ---
 
 #[test]
