@@ -59,10 +59,7 @@ pub enum Stage7ShiftsAndReduces {
     Reduce { production_id: ProductionID, nonterminal_id: NonTerminalID, len: usize },
     Split {
         shift: Option<StateID>,
-        // Map: len -> NonTerminalID -> Set<ProductionID>
-        // We need the ProductionID(s) associated with each NonTerminalID reduction
-        // to correctly populate the Action::Reduce history.
-        reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>, // Keep this structure
+        reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>,
     },
 }
 
@@ -344,11 +341,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
                         let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
                         let len = production.rhs.len();
                         len_to_nt_to_production_id.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id);
-
                     }
-                    // The Stage7ShiftsAndReduces::Split variant now correctly contains
-                    // the necessary ProductionIDs grouped by length and NonTerminalID,
-                    // which parser.rs step function can use for Action::Reduce.
                     Stage7ShiftsAndReduces::Split { shift: shift_state_id, reduces: len_to_nt_to_production_id }
                 }
             };
