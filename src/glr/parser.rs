@@ -343,12 +343,11 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         /* ---------- logging & preparation ---------- */
         self.log_gss("Step-start", token_id);
 
-        let mut todo = std::mem::take(&mut self.active_states);
         let mut next = Vec::<ParseState<T>>::new();
         let mut not_found = Vec::<ParseState<T>>::new();
 
         /* ---------- core loop ---------- */
-        while let Some(state) = todo.pop() {
+        while let Some(state) = self.active_states.pop() {
             let stack   = state.stack;
             let top     = stack.peek();
             let row     = &self.parser.stage_7_table[&top.state_id];
@@ -363,7 +362,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                 Some(Stage7ShiftsAndReduces::Reduce{ nonterminal_id: nt,
                                                      len, .. }) => {
                     for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
-                        todo.push(ParseState { stack: s });
+                        self.active_states.push(ParseState { stack: s });
                     }
                 }
 
@@ -377,7 +376,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                     for (len, nts) in reduces {
                         for (nt, _prod_ids) in nts {        // we ignore prod-ids here
                             for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
-                                todo.push(ParseState { stack: s });
+                                self.active_states.push(ParseState { stack: s });
                             }
                         }
                     }
