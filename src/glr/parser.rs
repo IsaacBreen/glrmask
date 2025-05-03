@@ -359,7 +359,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
 
         // Log the final GSS structure if it's reasonably small
         const MAX_NODES_TO_PRINT: usize = 30;
-        debug!(4, || { // Use a closure to avoid potentially expensive calculations if debug level is lower
+        debug!(4, { // Use a closure to avoid potentially expensive calculations if debug level is lower
             let final_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
             let final_stats = gather_gss_stats(&final_root_nodes);
             if final_stats.unique_nodes <= MAX_NODES_TO_PRINT {
