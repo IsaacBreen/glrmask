@@ -26,11 +26,13 @@ macro_rules! debug {
         if $level <= MACRO_DEBUG_LEVEL {
             // #[cfg(feature = "debug")] // Keep this if you want compile-time stripping
             { // Use a block to scope the 'now' variable and the import
-                use chrono::Local; // Make chrono available inside the macro expansion
+                // Make chrono, file! and line! available inside the macro expansion
+                use chrono::Local;
                 let now = Local::now();
                 println!(
-                    concat!("{} [DEBUG {}] ", $fmt), // Add timestamp placeholder
+                    concat!("{} [DEBUG {}] {}:{}: ", $fmt), // Add timestamp, file, line placeholders
                     now.format("%Y-%m-%d %H:%M:%S%.3f"), // Format the timestamp (YYYY-MM-DD HH:MM:SS.ms)
+                    file!(), line!(), // Add file and line number
                     $level
                     $(, $($arg)*)? // Forward the original arguments
                 );
@@ -46,11 +48,13 @@ macro_rules! debug {
         if $level <= MACRO_DEBUG_LEVEL {
             // #[cfg(feature = "debug")] // Keep this if you want compile-time stripping
             { // Use a block to scope the 'now' variable and the import
-                use chrono::Local; // Make chrono available inside the macro expansion
+                // Make chrono, file! and line! available inside the macro expansion
+                use chrono::Local;
                 let now = Local::now();
                 println!(
-                    "{} [DEBUG {}] {:?}", // Add timestamp placeholder
+                    "{} [DEBUG {}] {}:{}: {:?}", // Add timestamp, file, line placeholders
                     now.format("%Y-%m-%d %H:%M:%S%.3f"), // Format the timestamp
+                    file!(), line!(), // Add file and line number
                     $level,
                     $msg // Forward the original message expression
                 );
