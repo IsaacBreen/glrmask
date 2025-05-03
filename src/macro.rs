@@ -30,8 +30,8 @@ macro_rules! debug {
                 use chrono::Local;
                 let now = Local::now();
                 println!(
-                    concat!("{} [DEBUG {}] {}:{}: ", $fmt), // Add timestamp, file, line placeholders
-                    now.format("%Y-%m-%d %H:%M:%S%.3f"), // Format the timestamp (YYYY-MM-DD HH:MM:SS.ms)
+                    concat!("[DEBUG {}] {}:{}: ", $fmt), // Add timestamp, file, line placeholders
+                    // now.format("%Y-%m-%d %H:%M:%S%.3f"), // Format the timestamp (YYYY-MM-DD HH:MM:SS.ms)
                     file!(), line!(), // Add file and line number
                     $level
                     $(, $($arg)*)? // Forward the original arguments
@@ -52,8 +52,8 @@ macro_rules! debug {
                 use chrono::Local;
                 let now = Local::now();
                 println!(
-                    "{} [DEBUG {}] {}:{}: {:?}", // Add timestamp, file, line placeholders
-                    now.format("%Y-%m-%d %H:%M:%S%.3f"), // Format the timestamp
+                    "[DEBUG {}] {}:{}: {:?}", // Add timestamp, file, line placeholders
+                    // now.format("%Y-%m-%d %H:%M:%S%.3f"), // Format the timestamp
                     file!(), line!(), // Add file and line number
                     $level,
                     $msg // Forward the original message expression
