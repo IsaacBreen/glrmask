@@ -28,9 +28,6 @@ def rule_name_is_valid(name: str) -> bool:
 def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Regex:
     if isinstance(item, pegen.grammar.NameLeaf):
         if not rule_name_is_valid(item.value):
-            print(f"Ignoring invalid rule name: {item.value}")
-            return ge.choice([])
-        else:
             return ge.ref(item.value)
     elif isinstance(item, pegen.grammar.StringLeaf):
         value = item.value
@@ -154,6 +151,8 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
     for rule in grammar.rules.values():
         if not rule_name_is_valid(rule.name):
             print(f"Ignoring invalid rule name: {rule.name}")
+            memo[rule.name] = ge.ref(rule.name)
+            exprs.append((rule.name, ge.choice([])))
         else:
             memo[rule.name] = ge.ref(rule.name)
             exprs.append((rule.name, pegen_to_sep1_regex(rule.rhs, memo)))
