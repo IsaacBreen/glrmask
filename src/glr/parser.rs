@@ -281,7 +281,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
 
         for parent in parents {
             let top = parent.peek();
-            let goto = self.parser.stage_7_table[&top.state_id].gotos[nt];
+            let goto = self.parser.stage_7_table[&top.state_id].gotos[&nt];
             let merged_t = top.t.intersect(cur_t);
             out.push(Arc::new(parent.push(ParseStateNodeContent {
                 state_id: goto,
@@ -388,7 +388,6 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         }
 
         /* ---------- finish up ---------- */
-        next.bulk_merge();              // squash duplicate stacks
         self.active_states            = next;
         self.action_not_found_states  = not_found;   // keep for caller if wanted
 
