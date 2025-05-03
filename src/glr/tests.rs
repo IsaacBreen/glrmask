@@ -1,6 +1,6 @@
 use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, GLRParserState};
-use crate::glr::table::{generate_glr_parser, TerminalID, ProductionID};
+use crate::glr::table::{generate_glr_parser, TerminalID};
 use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals}; // Import the analyze module
 use bimap::BiBTreeMap;
 
@@ -487,40 +487,6 @@ fn test_epsilon_rules_ambiguity() {
 
     // Limitation/Capability: GLR handles ambiguity caused by epsilon rules.
     assert!(state.is_ok(), "GLR parser should accept ambiguous input involving epsilon rules");
-}
-
-#[test]
-fn test_action_history_simple() {
-    // S -> A $
-    // A -> b
-    let productions = vec![
-        prod("S", vec![nt("A"), t("$")]), // 0
-        prod("A", vec![t("b")]),          // 1
-    ];
-    let parser = generate_glr_parser(&productions, 0);
-    let b_id = *parser.terminal_map.get_by_left(&Terminal("b".to_string())).unwrap();
-    let eof_id = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
-    let a_ntid = *parser.non_terminal_map.get_by_left(&NonTerminal("A".to_string())).unwrap();
-    let s_ntid = *parser.non_terminal_map.get_by_left(&NonTerminal("S".to_string())).unwrap();
-
-    let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
-    state.step(b_id);
-    state.step(eof_id);
-
-    assert!(state.is_ok());
-    assert_eq!(state.active_states.len(), 1); // Should resolve to one final state
-
-    let final_leaf = state.active_states[0].action_leaf.clone();
-    let path = crate::glr::parser::get_action_path(&final_leaf);
-
-    // Expected path might vary slightly based on state IDs, but structure should be:
-    // Start, Input(b), Shift, Input($), Reduce(A->b), Goto(A), Reduce(S->A$), Goto(S)
-    // Let's check key actions are present and in order
-    use crate::glr::parser::Action;
-    assert!(path.iter().any(|a| matches!(a, Action::Input(id) if *id == b_id)));
-    assert!(path.iter().any(|a| matches!(a, Action::Reduce { production_id, .. } if *production_id == ProductionID(1)))); // A -> b
-    assert!(path.iter().any(|a| matches!(a, Action::Input(id) if *id == eof_id)));
-    assert!(path.iter().any(|a| matches!(a, Action::Reduce { production_id, .. } if *production_id == ProductionID(0)))); // S -> A $
 }
 
 #[ignore]

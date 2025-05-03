@@ -8,9 +8,9 @@ use crate::datastructures::gss::{GSSNode, GSSTrait, GSSStats};
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
-use std::fmt;
 use std::sync::Arc;
 use crate::debug;
 
@@ -70,7 +70,6 @@ pub struct ParseStateNodeContent<T: MergeAndIntersect> {
 }
 pub struct ParseState<T: MergeAndIntersect> {
     pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
-    pub action_leaf: Arc<ActionHistoryNode>, // Pointer to the current leaf in the action history tree
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -84,7 +83,6 @@ impl<T: MergeAndIntersect> Clone for ParseState<T> {
     fn clone(&self) -> Self {
         ParseState {
             stack: self.stack.clone(),
-            action_leaf: self.action_leaf.clone(),
         }
     }
 }
@@ -94,7 +92,6 @@ impl<T: MergeAndIntersect + Debug> Debug for ParseState<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ParseState")
          .field("stack (top state)", &self.stack.peek().state_id) // Avoid printing full stack
-         .field("action_leaf", &self.action_leaf.action) // Print only the last action
          .finish()
     }
 }
@@ -168,10 +165,8 @@ impl GLRParser {
             state_id: self.start_state_id,
             t,
         };
-        let initial_action_leaf = ActionHistoryNode::new(Action::Start, None);
         ParseState {
             stack: Arc::new(GSSNode::new(initial_content)),
-            action_leaf: initial_action_leaf,
         }
     }
 
@@ -387,7 +382,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         // This will store states where the current token_id leads to no action.
         let mut current_action_not_found_states = Vec::new();
         let mut fuel = 1_000;
-        let mut processed_states_in_step = Vec::new(); // Track states processed in this step for fuel exhaustion reporting
+
         while let Some(state) = self.active_states.pop() {
             if fuel == 0 {
                 // Dump info
@@ -395,11 +390,6 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                 let root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
                 let stats = gather_gss_stats(&root_nodes);
                 crate::debug!(3, "Ran out of fuel. GSS Stats: {:?}", stats);
-
-                // Find and print the longest action path
-                let all_leaves: Vec<_> = self.active_states.iter().chain(processed_states_in_step.iter()).map(|s| s.action_leaf.clone()).collect();
-                let longest_path = find_longest_action_path(&all_leaves);
-                crate::debug!(0, "Longest action path leading to fuel exhaustion ({} actions):\n{:#?}", longest_path.len(), longest_path);
                 debug!(3, "{}", { // Use a closure to avoid potentially expensive calculations if debug level is lower
                     let final_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
                     let final_stats = gather_gss_stats(&final_root_nodes);
@@ -423,7 +413,6 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                 panic!("Ran out of fuel");
             }
             fuel -= 1;
-            processed_states_in_step.push(state.clone()); // Track processed state
 
             let stack = state.stack; // Arc<GSSNode<ParseStateNodeContent<T>>>
             let current_content = stack.peek(); // &ParseStateNodeContent<T>
@@ -431,24 +420,18 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
             let current_t = &current_content.t;
 
             let row = self.parser.stage_7_table.get(&current_state_id).unwrap();
-            let current_action_leaf = state.action_leaf; // Get the action history leaf for this state
 
             if let Some(action) = row.shifts_and_reduces.get(&token_id) {
-                // Create Input node first, common to all actions for this token
-                let input_node = ActionHistoryNode::new(Action::Input(token_id), Some(current_action_leaf));
-
                 match action {
                     Stage7ShiftsAndReduces::Shift(next_state_id) => {
                         debug!(5, "State {} -> {}: Shifting", current_state_id.0, next_state_id.0);
                         let new_content = ParseStateNodeContent { state_id: *next_state_id, t: current_t.clone() };
                         let new_stack = stack.push(new_content);
-                        let shift_node = ActionHistoryNode::new(Action::Shift(*next_state_id), Some(input_node));
                         next_active_states.push(ParseState {
+                            // stack: Arc::new(new_stack), // GSSNode::push now returns Arc
                             stack: Arc::new(new_stack),
-                            action_leaf: shift_node,
                         });
                     }
-
                     Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
                         let nt_name = self.parser.non_terminal_map.get_by_right(nonterminal).unwrap();
                         let node_ptr = Arc::as_ptr(&stack);
@@ -458,15 +441,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                         if gt { crate::debug!(4, "Popped {} times to reveal {} stack nodes (1)", len, popped_stack_nodes.len()); }
                         popped_stack_nodes.bulk_merge();
                         if gt { crate::debug!(4, "Merged into {} stack nodes (1)", popped_stack_nodes.len()); }
-
-                        let reduce_action = Action::Reduce {
-                            production_id: *production_id,
-                            nonterminal_id: *nonterminal,
-                            nonterminal_name: nt_name.0.clone(),
-                            len: *len,
-                        };
-                        let reduce_node = ActionHistoryNode::new(reduce_action, Some(input_node));
-                        let mut new_stacks: Vec<T> = Vec::new();
+                        let mut new_stacks = Vec::new();
                         for stack_node in popped_stack_nodes {
                             // stack_node is Arc<GSSNode<ParseStateNodeContent<T>>>
                             let revealed_content = stack_node.peek(); // &ParseStateNodeContent<T>
@@ -478,43 +453,27 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                             debug!(5, "  Node {:?}: Revealed state {}, going to state {} for NonTerminal {}", node_ptr, revealed_state_id.0, goto_state.0, nt_name.0);
                             let combined_t = revealed_t.intersect(current_t);
                             let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
-
-                            let goto_action = Action::Goto {
-                                nonterminal_id: *nonterminal,
-                                nonterminal_name: nt_name.0.clone(),
-                                goto_state_id: goto_state,
-                            };
-                            // Each resulting state from the reduction gets its own Goto node branching from the *single* Reduce node
-                            let goto_node = ActionHistoryNode::new(goto_action, Some(reduce_node.clone()));
-
                             let new_stack = stack_node.push(new_content);
-                            // Push the new state back onto the *active* list for this step
+                            new_stacks.push(Arc::new(new_stack));
+                        }
+                        new_stacks.bulk_merge();
+                        for stack in new_stacks {
                             self.active_states.push(ParseState {
-                                stack: Arc::new(new_stack),
-                                action_leaf: goto_node,
+                                stack,
                             });
                         }
-                        // No need to add to next_active_states, they are processed now.
                     }
-
                     Stage7ShiftsAndReduces::Split { shift, reduces } => {
                         debug!(4, "Split");
-                        // Create a split node in the action history
-                        let split_node = ActionHistoryNode::new(Action::Split(token_id), Some(input_node));
-
+                        let mut new_stacks = Vec::new();
                         if let Some(shift_state) = shift {
                             // Shift part (same as above)
                             let new_content = ParseStateNodeContent { state_id: *shift_state, t: current_t.clone() };
                             let new_stack = stack.push(new_content);
-                            let shift_node = ActionHistoryNode::new(Action::Shift(*shift_state), Some(split_node.clone()));
-                            // Add shift result to next_active_states
-                            next_active_states.push(ParseState {
-                                stack: Arc::new(new_stack),
-                                action_leaf: shift_node,
-                            });
+                            new_stacks.push(Arc::new(new_stack));
                         }
 
-                        crate::debug!(4, "State {}: Reduces in Split: {}", current_state_id.0, reduces.len());
+                        crate::debug!(4, "State {}: Reduces: {}", current_state_id.0, reduces.len());
                         for (len, nt_ids) in reduces {
                             let mut popped_stack_nodes = stack.popn(*len);
                             popped_stack_nodes.bulk_merge();
@@ -523,14 +482,6 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                             for (nt_id, _prod_ids) in nt_ids { // Iterate over NonTerminalIDs in the split reduce
                                 let nt_name = self.parser.non_terminal_map.get_by_right(nt_id).unwrap();
                                 debug!(5, "  - Reducing for NonTerminal {} ({})", nt_name.0, nt_id.0);
-
-                                let reduce_action = Action::Reduce {
-                                    production_id: ProductionID(9999), // TODO: Need actual ProductionID here! Stage7 needs adjustment.
-                                    nonterminal_id: *nt_id,
-                                    nonterminal_name: nt_name.0.clone(),
-                                    len: *len,
-                                };
-                                let reduce_node = ActionHistoryNode::new(reduce_action, Some(split_node.clone()));
                                 for stack_node in &popped_stack_nodes {
                                     // Reduce part (same as above)
                                     let revealed_content = stack_node.peek();
@@ -540,31 +491,23 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
 
                                     let combined_t = revealed_t.intersect(current_t);
                                     let new_content = ParseStateNodeContent { state_id: goto_state, t: combined_t };
-
-                                    let goto_action = Action::Goto {
-                                        nonterminal_id: *nt_id,
-                                        nonterminal_name: nt_name.0.clone(),
-                                        goto_state_id: goto_state,
-                                    };
-                                    let goto_node = ActionHistoryNode::new(goto_action, Some(reduce_node.clone()));
-
                                     let new_stack = stack_node.push(new_content);
-                                    // Add reduce result back to active_states for immediate processing
-                                    self.active_states.push(ParseState {
-                                        stack: Arc::new(new_stack),
-                                        action_leaf: goto_node,
-                                    });
+                                    new_stacks.push(Arc::new(new_stack));
                                 }
                             }
+                        }
+                        new_stacks.bulk_merge();
+                        for stack in new_stacks {
+                            self.active_states.push(ParseState {
+                                stack,
+                            });
                         }
                     }
                 }
             } else {
                 // No action found for this token in this state
-                let input_node = ActionHistoryNode::new(Action::Input(token_id), Some(current_action_leaf));
                 current_action_not_found_states.push(ParseState {
                     stack,
-                    action_leaf: input_node, // Action history ends with the input attempt
                 });
             }
         }
@@ -611,7 +554,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseStateKey {
     stack_state_id: StateID,
-    // action_leaf is not part of the key for merging states
+    // Removed action_stack
 }
 
 impl<T: MergeAndIntersect> ParseState<T> {
@@ -621,10 +564,9 @@ impl<T: MergeAndIntersect> ParseState<T> {
         }
     }
 
+    /// Merges `other` into `self`. Assumes `self.key() == other.key()`.
     /// Merges the GSS structures and combines the `t` value at the top node using `MergeAndIntersect::merge`.
-    /// **Note:** This currently *doesn't* merge the `action_leaf`. It keeps the `action_leaf` of `self`.
     pub fn merge(&mut self, other: ParseState<T>) {
-        // TODO: Revisit action_leaf merging if needed.
         assert_eq!(self.key(), other.key());
 
         // Combine 't' values at the top node using 'or'
