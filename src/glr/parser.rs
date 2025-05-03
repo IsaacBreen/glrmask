@@ -328,7 +328,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                             new_stacks.push(Arc::new(new_stack));
                         }
 
-                        crate::debug!(4, "Reduces: {}", reduces.len());
+                        crate::debug!(4, "State {}: Reduces: {}", current_state_id.0, reduces.len());
                         for (len, nt_ids) in reduces {
                             let mut popped_stack_nodes = stack.popn(*len);
                             popped_stack_nodes.bulk_merge();
