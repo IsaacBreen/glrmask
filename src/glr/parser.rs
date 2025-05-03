@@ -287,7 +287,18 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                     if final_stats.unique_nodes <= MAX_NODES_TO_PRINT {
                         format!("GSS Structure ({} nodes):\n{}", final_stats.unique_nodes, print_gss_forest(&final_root_nodes, MAX_NODES_TO_PRINT))
                     } else {
-                        format!("GSS Structure too large to print ({} nodes > {})", final_stats.unique_nodes, MAX_NODES_TO_PRINT)
+                        // Find and print the longest path instead
+                        if let Some(longest_path) = find_longest_path(&final_root_nodes) {
+                            let path_str = longest_path.iter()
+                                .map(|node| format!("State({})", node.value.state_id.0))
+                                .collect::<Vec<_>>()
+                                .join(" -> ");
+                            format!("GSS Structure too large ({} nodes > {}). Longest path ({} nodes): {}",
+                                    final_stats.unique_nodes, MAX_NODES_TO_PRINT, longest_path.len(), path_str)
+                        } else {
+                            format!("GSS Structure too large ({} nodes > {}), and no path found.",
+                                    final_stats.unique_nodes, MAX_NODES_TO_PRINT)
+                        }
                     }
                 });
                 panic!("Ran out of fuel");
