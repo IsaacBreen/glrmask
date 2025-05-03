@@ -247,7 +247,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         crate::debug!(3, "Step Start (Token {:?}): Active States: {}, GSS Stats: {:?}", token_id, self.active_states.len(), stats);
 
         // Log the GSS structure if it's reasonably small
-        const MAX_NODES_TO_PRINT: usize = 30;
+        const MAX_NODES_TO_PRINT_FULL: usize = 30;
         // debug!(3, "{}", { // Use a closure to avoid potentially expensive calculations if debug level is lower
         //     let final_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
         //     let final_stats = gather_gss_stats(&final_root_nodes);
@@ -386,12 +386,21 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         let end_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
         let end_stats = gather_gss_stats(&end_root_nodes);
         crate::debug!(3, "Step End (Token {:?}): Active States: {}, Action Not Found: {}, GSS Stats: {:?}", token_id, self.active_states.len(), self.action_not_found_states.len(), end_stats);
-
-        // TODO: decide whether to keep action_not_found_states or not
+        debug!(3, "{}", { // Use a closure to avoid potentially expensive calculations if debug level is lower
+            if end_stats.unique_nodes <= MAX_NODES_TO_PRINT_FULL {
+                format!("GSS Structure ({} nodes):\n{}", end_stats.unique_nodes, print_gss_forest(&end_root_nodes, MAX_NODES_TO_PRINT_FULL))
+            } else {
+                use crate::datastructures::gss::find_longest_gss_path;
+                let longest_path_str = match find_longest_gss_path(&end_root_nodes) {
+                    Some(path) => format!("Example Longest Path ({} nodes): {:?}", path.len(), path.iter().map(|n| n.state_id.0).collect::<Vec<_>>()), // Assuming T is ParseStateNodeContent
+                    None => "No paths found.".to_string(),
+                };
+                format!("GSS Structure too large ({} nodes > {}). {}", end_stats.unique_nodes, MAX_NODES_TO_PRINT_FULL, longest_path_str)
+            }
+        });
         self.action_not_found_states.clear();
     }
 
-    // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
     pub fn merge_active_states(&mut self) {
         let mut active_state_map: BTreeMap<ParseStateKey, ParseState<T>> = BTreeMap::new();
         let num_active_states = self.active_states.len();
