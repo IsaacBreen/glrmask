@@ -393,7 +393,9 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                             // Shift part (same as above)
                             let new_content = ParseStateNodeContent { state_id: *shift_state, t: current_t.clone() };
                             let new_stack = stack.push(new_content);
-                            new_stacks.push(Arc::new(new_stack));
+                            next_active_states.push(ParseState {
+                                stack: Arc::new(new_stack),
+                            });
                         }
 
                         crate::debug!(4, "State {}: Reduces: {}", current_state_id.0, reduces.len());
