@@ -533,10 +533,10 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         for initial_arc_ptr in initial_set {
             if !processed.contains(&initial_arc_ptr) {
                 if !unprocessed_initial {
-                     eprintln!("Warning: Some initial nodes were not processed (Arc Ptrs):");
+                     crate::debug!(3, "Warning: Some initial nodes were not processed (Arc Ptrs):");
                      unprocessed_initial = true;
                 }
-                eprintln!("  - {:?}", initial_arc_ptr);
+                crate::debug!(3, "  - {:?}", initial_arc_ptr);
             }
         }
         // Check nodes remaining in state
