@@ -301,11 +301,7 @@ impl Grammar {
 impl GrammarConstraint {
     pub fn from_grammar(grammar: Grammar, llm_tokens: LLMTokenMap, eof_llm_token_id: usize, max_llm_token_id: usize) -> Self {
         debug!(2, "GrammarConstraint::from_grammar");
-        let terminal_map = grammar.terminal_name_to_group_id.iter().map(|(name, group_id)| { (Terminal(name.clone()), TerminalID(*group_id)) }).collect();
-        let non_terminal_map = assign_non_terminal_ids(&grammar.productions);
-        debug!(2, "Generating GLR parser");
-        let parser = generate_glr_parser_with_maps(&grammar.productions, grammar.start_production_id, terminal_map, non_terminal_map);
-
+        let parser = grammar.glr_parser();
         debug!(2, "Precomputing");
         let mut precomputed = GrammarConstraint::precompute(&grammar.tokenizer, &llm_tokens, max_llm_token_id);
         debug!(2, "precomputed.len(): {}", precomputed.len());

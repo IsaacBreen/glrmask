@@ -268,7 +268,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                 panic!("Ran out of fuel");
             }
             fuel -= 1;
-            
+
             let stack = state.stack; // Arc<GSSNode<ParseStateNodeContent<T>>>
             let current_content = stack.peek(); // &ParseStateNodeContent<T>
             let current_state_id = current_content.state_id;

@@ -207,16 +207,6 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
         scores = np.where(mask, scores, -np.inf)
         return torch.tensor(scores)
 
-def create_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id):
-    print("Initializing PyGrammarConstraint...")
-    grammar_constraint = PyGrammarConstraint(grammar, llm_token_to_id, max_llm_token_id)
-    return grammar_constraint
-
-def initialize_grammar_constraint(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id):
-    grammar_constraint = timeit(create_grammar_constraint)(grammar, llm_token_to_id, eof_llm_token_id, max_llm_token_id)
-#     grammar_constraint.print()
-    return grammar_constraint
-
 def generate_text(model, tokenizer, grammar_processor, input_text, max_new_tokens=50):
     input_ids = tokenizer.encode(input_text, return_tensors="pt")
     grammar_processor.seen_input_ids = input_ids[0].tolist()
@@ -266,8 +256,11 @@ if __name__ == "__main__":
     print("Defining grammar...")
     grammar = define_python_grammar()
     grammar.print()
+    print("Initializing Parser...")
+    parser = grammar.glr_parser()
+    parser.print()
     print("Initializing Grammar Constraint...")
-    grammar_constraint = initialize_grammar_constraint(grammar, llm_token_to_id, tokenizer.eos_token_id, max(llm_token_to_id.values()))
+    grammar_constraint = PyGrammarConstraint(grammar, llm_token_to_id, max(llm_token_to_id.values()))
     print("Initializing grammar constraint state...")
     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
     print("Initializing grammar processor...")
