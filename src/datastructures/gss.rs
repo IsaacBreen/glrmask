@@ -363,6 +363,70 @@ pub fn prune_and_transform_roots<T: Clone>(
         .collect()
 }
 
+// --- Longest Path ---
+
+// Recursive helper for find_longest_path.
+// Returns the longest path *ending* at node_arc, discovered so far.
+fn find_longest_path_recursive<T>(
+    node_arc: &Arc<GSSNode<T>>,
+    memo: &mut HashMap<*const GSSNode<T>, Vec<Arc<GSSNode<T>>>>, // Stores longest path ending at the key node
+    visited_recursion: &mut HashSet<*const GSSNode<T>>, // Detects cycles during the current DFS traversal
+) -> Vec<Arc<GSSNode<T>>> {
+    let node_ptr = Arc::as_ptr(node_arc);
+
+    // Check memo first
+    if let Some(cached_path) = memo.get(&node_ptr) {
+        return cached_path.clone();
+    }
+
+    // Cycle detection for the current traversal path
+    if !visited_recursion.insert(node_ptr) {
+        // Cycle detected, return an empty path to avoid infinite recursion
+        // and signal that this path shouldn't be considered the longest.
+        return Vec::new();
+    }
+
+    let mut longest_pred_path: Vec<Arc<GSSNode<T>>> = Vec::new();
+
+    // Explore predecessors recursively
+    if !node_arc.predecessors.is_empty() {
+        for pred_arc in &node_arc.predecessors {
+            let pred_path = find_longest_path_recursive(pred_arc, memo, visited_recursion);
+            // Only update if the predecessor path is valid (non-empty, meaning no cycle encountered below)
+            if !pred_path.is_empty() && pred_path.len() > longest_pred_path.len() {
+                longest_pred_path = pred_path;
+            }
+        }
+    }
+    // else: This node has no predecessors, it's a starting point for paths ending here.
+
+    // Construct the path ending at the current node
+    let mut current_path = longest_pred_path; // Starts with the longest path ending at a predecessor
+    current_path.push(node_arc.clone()); // Appends the current node
+
+    // Store in memo and backtrack from recursion stack
+    memo.insert(node_ptr, current_path.clone());
+    visited_recursion.remove(&node_ptr);
+
+    current_path
+}
+
+/// Finds one of the longest paths in the GSS forest defined by the given roots.
+/// Handles cycles by ignoring paths that contain them.
+/// Returns the path as a Vec of nodes from a root to a leaf (or the longest path found).
+/// Returns `None` if there are no roots or no valid paths (e.g., only cycles).
+pub fn find_longest_path<T>(roots: &[Arc<GSSNode<T>>]) -> Option<Vec<Arc<GSSNode<T>>>> {
+    let mut memo: HashMap<*const GSSNode<T>, Vec<Arc<GSSNode<T>>>> = HashMap::new();
+
+    // Populate the memo by traversing from all roots
+    for root_arc in roots {
+        let mut visited_recursion = HashSet::new(); // Reset cycle detection for each root
+        find_longest_path_recursive(root_arc, &mut memo, &mut visited_recursion);
+    }
+
+    // Find the longest path among all paths stored in the memo values
+    memo.into_values().max_by_key(|path| path.len())
+}
 
 /// Statistics about the structure of a GSS forest.
 #[derive(Debug, Clone, Default)]

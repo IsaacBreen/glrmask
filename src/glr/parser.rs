@@ -1,4 +1,4 @@
-use crate::datastructures::gss::{print_gss_forest, BulkMerge, gather_gss_stats};
+use crate::datastructures::gss::{print_gss_forest, BulkMerge, gather_gss_stats, find_longest_path};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
 use crate::glr::table::{
@@ -248,13 +248,24 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
 
         // Log the GSS structure if it's reasonably small
         const MAX_NODES_TO_PRINT: usize = 30;
-        debug!(3, "{}", { // Use a closure to avoid potentially expensive calculations if debug level is lower
+        debug!(4, "{}", { // Use a closure to avoid potentially expensive calculations if debug level is lower
             let final_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
             let final_stats = gather_gss_stats(&final_root_nodes);
             if final_stats.unique_nodes <= MAX_NODES_TO_PRINT {
                 format!("GSS Structure ({} nodes):\n{}", final_stats.unique_nodes, print_gss_forest(&final_root_nodes, MAX_NODES_TO_PRINT))
             } else {
-                format!("GSS Structure too large to print ({} nodes > {})", final_stats.unique_nodes, MAX_NODES_TO_PRINT)
+                // Find and print the longest path instead
+                if let Some(longest_path) = find_longest_path(&final_root_nodes) {
+                    let path_str = longest_path.iter()
+                        .map(|node| format!("State({})", node.value.state_id.0))
+                        .collect::<Vec<_>>()
+                        .join(" -> ");
+                    format!("GSS Structure too large ({} nodes > {}). Longest path ({} nodes): {}",
+                            final_stats.unique_nodes, MAX_NODES_TO_PRINT, longest_path.len(), path_str)
+                } else {
+                    format!("GSS Structure too large ({} nodes > {}), and no path found.",
+                            final_stats.unique_nodes, MAX_NODES_TO_PRINT)
+                }
             }
         });
 

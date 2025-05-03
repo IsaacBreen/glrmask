@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use crate::datastructures::trie::Trie;
 use crate::finite_automata::Regex;
+use crate::glr::parser::ParseStateNodeContent;
 use crate::glr::parser::{MergeAndIntersect, GLRParser, GLRParserState, ParseState, ParseStateKey};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use bimap::BiBTreeMap;
@@ -16,7 +17,6 @@ use crate::datastructures::charmap::TrieMap;
 use crate::datastructures::gss::prune_and_transform_recursive;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
-use crate::glr::parser::ParseStateNodeContent;
 
 pub type LLMTokenBV = BitVec;
 pub type GrammarTokenBV = BitVec;
@@ -43,8 +43,8 @@ pub(crate) type PrecomputeNode = Trie<Option<GrammarTokenID>, LLMTokenBV, Precom
 pub(crate) type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode>;
 
 /// Holds the set of active LLM tokens and the intersection of tokens
-/// guaranteed to be possible in all future paths from this GSS node.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// guaranteed to be possible in all paths *below* this GSS node.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LLMTokenInfo {
     /// Union of possible LLM tokens allowed by paths reaching this node.
     pub active: LLMTokenBV,
@@ -56,6 +56,29 @@ pub struct LLMTokenInfo {
 impl Default for LLMTokenInfo {
     fn default() -> Self {
         Self { active: Default::default(), intersection: Default::default() }
+    }
+}
+
+impl std::fmt::Debug for LLMTokenInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const MAX_ITEMS: usize = 10;
+
+        let format_bv = |bv: &LLMTokenBV| -> String {
+            let ids: Vec<_> = bv.iter_ones().collect();
+            if ids.len() > MAX_ITEMS {
+                format!("[{:?}... ({} total)]", &ids[..MAX_ITEMS], ids.len())
+            } else {
+                format!("{:?}", ids)
+            }
+        };
+
+        f.debug_struct("LLMTokenInfo")
+            .field("active", &format_args!("{}", format_bv(&self.active)))
+            .field(
+                "intersection",
+                &format_args!("{}", format_bv(&self.intersection)),
+            )
+            .finish()
     }
 }
 
@@ -578,7 +601,7 @@ mod tests {
 
     #[test]
     fn test_constraint_simple() {
-        // LLM tokens: "ab", "ac"
+        // LLM tokens: "ab", "ac", "$"
         // Grammar tokens: "a", "ab", "b|c", "$" (EOF)
         // Grammar: S -> X $ ; X -> "a" ("b|c") ("b|c") | "ab"
         let expr = groups![
@@ -594,17 +617,18 @@ mod tests {
         llm_token_map.insert(b"ac".to_vec(), LLMTokenID(1));
         llm_token_map.insert(b"$".to_vec(), LLMTokenID(2));
 
-        let productions = vec![
-            prod("S", vec![nt("X")]),
-            prod("X", vec![t("A"), t("B_OR_C"), t("B_OR_C"), t("EOF")]),
-            prod("X", vec![t("AB"), t("EOF")]),
-        ];
-
+        // Grammar Terminals mapped to Tokenizer IDs
         let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-        grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0));
-        grammar_token_map.insert(Terminal("AB".to_string()), TerminalID(1));
-        grammar_token_map.insert(Terminal("B_OR_C".to_string()), TerminalID(2));
-        grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(3));
+        grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0)); // Corresponds to eat_u8(b'a')
+        grammar_token_map.insert(Terminal("AB".to_string()), TerminalID(1)); // Corresponds to seq![eat_u8(b'a'), eat_u8(b'b')]
+        grammar_token_map.insert(Terminal("B_OR_C".to_string()), TerminalID(2)); // Corresponds to choice![eat_u8(b'b'), eat_u8(b'c')]
+        grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(3)); // Corresponds to eat_u8(b'$')
+
+        let productions = vec![
+            prod("S", vec![nt("X"), t("EOF")]), // S -> X $
+            prod("X", vec![t("A"), t("B_OR_C")]), // X -> a (b|c)
+            prod("X", vec![t("AB")]),             // X -> ab
+        ];
 
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
         dbg!(&parser);
@@ -616,14 +640,17 @@ mod tests {
 
         constraint_state.step_with_all_llm_tokens();
 
+        // Initially, we can match "a" (part of "ab" or "ac") or "ab".
+        // "a" leads to expecting "b" or "c".
+        // "ab" leads to expecting "$".
         let mask = constraint_state.get_mask();
-        assert_eq!(mask, LLMTokenBV::from_iter([true, true, false]));
+        assert_eq!(mask, LLMTokenBV::from_iter([true, true, false])); // Expect "ab" or "ac"
 
+        // Commit "ab" (LLMTokenID 0)
         constraint_state.commit(LLMTokenID(0));
         constraint_state.step_with_all_llm_tokens();
-
         let mask = constraint_state.get_mask();
-        assert_eq!(mask, LLMTokenBV::from_iter([false, false, true]));
+        assert_eq!(mask, LLMTokenBV::from_iter([false, false, true])); // Expect "$" (EOF)
     }
 
     #[test]
