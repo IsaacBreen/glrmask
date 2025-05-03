@@ -289,3 +289,176 @@ fn validation_passes_complex_unit_rules_no_cycle() {
     ];
      assert!(analyze::validate(&productions).is_ok());
 }
+
+// --- Tests Demonstrating GLR Capabilities / Limitations ---
+
+#[test]
+fn test_ambiguous_dangling_else() {
+    // Grammar: Stmt -> if Expr then Stmt
+    //                | if Expr then Stmt else Stmt
+    //                | other
+    //          Expr -> id
+    // Input: if id then if id then other else other
+    // This is ambiguous: the 'else' can attach to the inner or outer 'if'.
+    // GLR should *accept* this input by exploring both possibilities.
+    let productions = vec![
+        prod("S'", vec![nt("Stmt"), t("$")]), // Start
+        prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt")]),
+        prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt"), t("else"), nt("Stmt")]),
+        prod("Stmt", vec![t("other")]),
+        prod("Expr", vec![t("id")]),
+    ];
+    let parser = generate_glr_parser(&productions, 0);
+    let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+    let tokens = vec![
+        *parser.terminal_map.get_by_left(&Terminal("if".to_string())).unwrap(),
+        *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
+        *parser.terminal_map.get_by_left(&Terminal("then".to_string())).unwrap(),
+        *parser.terminal_map.get_by_left(&Terminal("if".to_string())).unwrap(),
+        *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
+        *parser.terminal_map.get_by_left(&Terminal("then".to_string())).unwrap(),
+        *parser.terminal_map.get_by_left(&Terminal("other".to_string())).unwrap(),
+        *parser.terminal_map.get_by_left(&Terminal("else".to_string())).unwrap(),
+        *parser.terminal_map.get_by_left(&Terminal("other".to_string())).unwrap(),
+    ];
+
+    let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+    state.parse(&tokens);
+    state.step(eof);
+
+    // Limitation/Capability: GLR succeeds because it can handle the shift/reduce conflict
+    // by splitting the state. We expect is_ok() to be true.
+    // Verifying *both* parse trees were found would require inspecting the GSS
+    // or using a non-unit T.
+    assert!(state.is_ok(), "GLR parser should accept ambiguous dangling else input");
+}
+
+#[test]
+fn test_ambiguous_arithmetic() {
+    // Grammar: E -> E + E | E * E | id
+    // Input: id + id * id
+    // This is ambiguous: (id + id) * id or id + (id * id)
+    // GLR should accept this.
+     let productions = vec![
+        prod("S'", vec![nt("E"), t("$")]), // Start
+        prod("E", vec![nt("E"), t("+"), nt("E")]),
+        prod("E", vec![nt("E"), t("*"), nt("E")]),
+        prod("E", vec![t("id")]),
+    ];
+    let parser = generate_glr_parser(&productions, 0);
+    let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+    let tokens = vec![
+        *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
+        *parser.terminal_map.get_by_left(&Terminal("+".to_string())).unwrap(),
+        *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
+        *parser.terminal_map.get_by_left(&Terminal("*".to_string())).unwrap(),
+        *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
+    ];
+
+    let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+    state.parse(&tokens);
+    state.step(eof);
+
+    // Limitation/Capability: GLR succeeds on ambiguous arithmetic.
+    assert!(state.is_ok(), "GLR parser should accept ambiguous arithmetic input");
+}
+
+#[test]
+fn test_reduce_reduce_conflict() {
+    // Grammar: S -> A | B
+    //          A -> x
+    //          B -> x
+    // Input: x
+    // This grammar has a reduce/reduce conflict on 'x'.
+    // GLR should handle this by performing both reductions.
+    let productions = vec![
+        prod("S'", vec![nt("S"), t("$")]), // Start
+        prod("S", vec![nt("A")]),
+        prod("S", vec![nt("B")]),
+        prod("A", vec![t("x")]),
+        prod("B", vec![t("x")]),
+    ];
+     let parser = generate_glr_parser(&productions, 0);
+    let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+    let tokens = vec![
+        *parser.terminal_map.get_by_left(&Terminal("x".to_string())).unwrap(),
+    ];
+
+    let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+    state.parse(&tokens);
+    state.step(eof);
+
+    // Limitation/Capability: GLR succeeds despite reduce/reduce conflict.
+    assert!(state.is_ok(), "GLR parser should accept input with reduce/reduce conflict");
+    // We expect multiple active states before the final step, or merged states in the GSS.
+}
+
+#[test]
+fn test_epsilon_rules_ambiguity() {
+    // Grammar: S -> A B
+    //          A -> x | epsilon
+    //          B -> x | epsilon
+    // Input: x
+    // This is ambiguous: S -> A B => x B => x epsilon OR S -> A B => epsilon B => epsilon x
+    let productions = vec![
+        prod("S'", vec![nt("S"), t("$")]), // Start
+        prod("S", vec![nt("A"), nt("B")]),
+        prod("A", vec![t("x")]),
+        prod("A", vec![]), // Epsilon
+        prod("B", vec![t("x")]),
+        prod("B", vec![]), // Epsilon
+    ];
+    let parser = generate_glr_parser(&productions, 0);
+    let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+    let tokens = vec![
+        *parser.terminal_map.get_by_left(&Terminal("x".to_string())).unwrap(),
+    ];
+
+    let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+    state.parse(&tokens);
+    state.step(eof);
+
+    // Limitation/Capability: GLR handles ambiguity caused by epsilon rules.
+    assert!(state.is_ok(), "GLR parser should accept ambiguous input involving epsilon rules");
+}
+
+#[test]
+fn test_highly_ambiguous_potentially_slow() {
+    // Grammar: S -> S S | a
+    // Input: aaa
+    // This grammar is highly ambiguous (Catalan numbers of parses).
+    // GLR should accept it, but performance *could* degrade on larger inputs.
+    let productions = vec![
+        prod("S'", vec![nt("S"), t("$")]), // Start
+        prod("S", vec![nt("S"), nt("S")]),
+        prod("S", vec![t("a")]),
+    ];
+    let parser = generate_glr_parser(&productions, 0);
+    let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+    let tokens = vec![
+        *parser.terminal_map.get_by_left(&Terminal("a".to_string())).unwrap(),
+        *parser.terminal_map.get_by_left(&Terminal("a".to_string())).unwrap(),
+        *parser.terminal_map.get_by_left(&Terminal("a".to_string())).unwrap(),
+    ];
+
+    let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+    state.parse(&tokens);
+    state.step(eof);
+
+    // Limitation/Capability: GLR handles highly ambiguous grammars.
+    // Performance is a potential limitation not tested for correctness here.
+    assert!(state.is_ok(), "GLR parser should accept highly ambiguous S -> S S | a grammar");
+}
+
+// --- Notes on Limitations Not Easily Tested Here ---
+// 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
+//    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
+//    results (parse trees) would be represented or combined. A more complex `MergeAndIntersect`
+//    implementation for T would be needed to show this.
+// 2. Performance: While `test_highly_ambiguous_potentially_slow` uses a grammar known for
+//    exponential ambiguity, verifying performance limits requires benchmarking, not just correctness checks.
+// 3. Error Reporting: The current tests check `is_ok()`. A limitation could be the quality/detail
+//    of error reporting when `is_ok()` is false (e.g., pinpointing the error location).
+// 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
+//    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
+//    or non-productive non-terminals), which could be considered a limitation of the validation step.
