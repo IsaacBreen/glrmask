@@ -544,10 +544,10 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         for (arc_ptr, (_v, arr_depth)) in state.iter() {
             if !processed.contains(arc_ptr) {
                  if !unprocessed_in_state {
-                     eprintln!("Warning: Nodes remaining in state but not processed (Arc Ptr, arrival_depth):");
+                     crate::debug!(3, "Warning: Nodes remaining in state but not processed (Arc Ptr, arrival_depth):");
                      unprocessed_in_state = true;
                  }
-                 eprintln!("  - ({:?}, {})", arc_ptr, arr_depth);
+                crate::debug!(3, "  - ({:?}, {})", arc_ptr, arr_depth);
             }
         }
     }
