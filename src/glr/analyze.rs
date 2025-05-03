@@ -94,6 +94,7 @@ fn detect_cycles_recursive(
 /// 1. Undefined non-terminals (non-terminals used in RHS but never defined in LHS).
 /// 2. Length-1 recursion (direct or indirect), considering nullable prefixes.
 ///    A rule `A ::= α` contributes to a potential cycle if `α` consists of
+/// 3. Left-nullable left recursion: Rules of the form `A ::= B1 ... Bk A ...` where `k > 0`
 ///    zero or more nullable non-terminals, followed by a single non-terminal `B`,
 ///    and nothing else (i.e., `A ::= Nullable* B`).
 pub fn validate(productions: &[Production]) -> Result<(), String> {
@@ -201,6 +202,37 @@ pub fn validate(productions: &[Production]) -> Result<(), String> {
         if !visited.contains(nt) { // Only start DFS from unvisited nodes
             let mut path = Vec::new(); // Track path for error reporting
             detect_cycles_recursive(nt, &unit_graph, &mut visiting, &mut visited, &mut path)?;
+        }
+    }
+
+    // --- Check 3: Left-Nullable Left Recursion ---
+    // Detect rules like A ::= B A ... where B is nullable.
+    for prod in productions {
+        let lhs = &prod.lhs;
+        let rhs = &prod.rhs;
+
+        // Iterate through RHS symbols to find the recursive non-terminal A
+        for (i, symbol) in rhs.iter().enumerate() {
+            if let Symbol::NonTerminal(nt) = symbol {
+                if nt == lhs { // Found potential left recursion: A ::= ... A ...
+                    // Check if all preceding symbols (if any) are nullable non-terminals
+                    let prefix = &rhs[0..i];
+                    if !prefix.is_empty() { // Only check if there's a prefix
+                        let prefix_is_nullable = prefix.iter().all(|sym| match sym {
+                            Symbol::NonTerminal(prefix_nt) => nullable_nonterminals.contains(prefix_nt),
+                            Symbol::Terminal(_) => false, // Terminals are not nullable
+                        });
+
+                        if prefix_is_nullable {
+                            return Err(format!("Validation Error: Left-nullable left recursion detected in rule '{} ::= {:?}'. The prefix '{:?}' before the recursive non-terminal '{}' is nullable.", lhs.0, rhs, prefix, lhs.0));
+                        }
+                    }
+                    // If the prefix is empty (direct left recursion A ::= A ...) or not fully nullable,
+                    // we don't flag it here (GLR can handle standard left recursion).
+                    // We only care about the case where a nullable sequence precedes the recursion.
+                    break; // Found the first instance of A on RHS, no need to check further in this rule
+                }
+            }
         }
     }
 

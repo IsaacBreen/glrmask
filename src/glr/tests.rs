@@ -250,6 +250,21 @@ fn validation_passes_non_unit_recursion() {
      assert!(analyze::validate(&productions_2).is_ok());
 }
 
+#[test]
+fn validation_fails_left_nullable_left_recursion() {
+    // S -> B S a
+    // B -> epsilon
+    let productions = vec![
+        prod("S'", vec![nt("S"), t("$")]), // Start rule
+        prod("S", vec![nt("B"), nt("S"), t("a")]), // Problematic rule
+        prod("S", vec![t("b")]),
+        prod("B", vec![]), // B is nullable
+    ];
+    let result = analyze::validate(&productions);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err();
+    assert!(err_msg.contains("Left-nullable left recursion detected in rule 'S ::= [NonTerminal(NonTerminal(\"B\")), NonTerminal(NonTerminal(\"S\")), Terminal(Terminal(\"a\"))]'. The prefix '[NonTerminal(NonTerminal(\"B\"))]' before the recursive non-terminal 'S' is nullable."));
+}
 
 #[test]
 fn validation_fails_missing_nonterminal() {
@@ -463,8 +478,8 @@ fn test_hidden_left_recursion() {
         prod("B", vec![]), // Epsilon
     ];
 
-    // Validation should pass as it's not length-1 recursion
-    assert!(analyze::validate(&productions).is_ok());
+    // Validation should fail due to left-nullable left recursion
+    assert!(analyze::validate(&productions).is_err(), "Validation should fail for left-nullable left recursion");
 
     let parser = generate_glr_parser(&productions, 0);
     println!("Parser: {}", parser);

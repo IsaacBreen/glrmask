@@ -1552,9 +1552,6 @@ local_system:
           }
       }
 
-      // --- Tests Specifically for Grammar Validation Logic ---
-
-      #[test]
       fn validation_passes_standard_grammars() {
           // Simple Grammar (already tested implicitly above, but good to be explicit)
           let simple_productions = vec![
@@ -1915,6 +1912,45 @@ local_system:
               state.parse(&tokens);
               state.step(eof);
               assert_eq!(state.is_ok(), expected_match, "Parse check failed for hidden left recursion input: '{}'", input);
+          }
+      }
+
+      #[test]
+      fn test_hidden_right_recursion() {
+          // Grammar: S' -> S $
+          //          S  -> a S B | b
+          //          B  -> epsilon
+          // This grammar has hidden right recursion because B is nullable.
+          // S -> a S B can effectively act like S -> a S.
+          // GLR parsers should handle this correctly.
+          let productions = vec![
+              prod("S'", vec![nt("S"), t("$")]), // Start
+              prod("S", vec![t("a"), nt("S"), nt("B")]),
+              prod("S", vec![t("b")]),
+              prod("B", vec![]), // Epsilon
+          ];
+
+          // Validation should pass as it's not length-1 recursion
+          assert!(analyze::validate(&productions).is_ok());
+
+          let parser = generate_glr_parser(&productions, 0);
+          let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+
+          let test_cases = [
+              ("b", true),    // S -> b
+              ("ab", true),   // S -> a S B -> a b B -> a b e
+              ("aab", true),  // S -> a S B -> a (a S B) B -> a a b B B -> a a b e e
+              ("aaab", true),
+              ("a", false),   // Needs a 'b'
+              ("ba", false),  // Cannot start with 'b' then 'a'
+          ];
+
+          for (input, expected_match) in test_cases {
+              let tokens = tokenize(&parser, input);
+              let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+              state.parse(&tokens);
+              state.step(eof);
+              assert_eq!(state.is_ok(), expected_match, "Parse check failed for hidden right recursion input: '{}'", input);
           }
       }
 
@@ -3473,9 +3509,6 @@ local_system:
           }
       }
 
-      // --- Tests Specifically for Grammar Validation Logic ---
-
-      #[test]
       fn validation_passes_standard_grammars() {
           // Simple Grammar (already tested implicitly above, but good to be explicit)
           let simple_productions = vec![
@@ -3836,6 +3869,45 @@ local_system:
               state.parse(&tokens);
               state.step(eof);
               assert_eq!(state.is_ok(), expected_match, "Parse check failed for hidden left recursion input: '{}'", input);
+          }
+      }
+
+      #[test]
+      fn test_hidden_right_recursion() {
+          // Grammar: S' -> S $
+          //          S  -> a S B | b
+          //          B  -> epsilon
+          // This grammar has hidden right recursion because B is nullable.
+          // S -> a S B can effectively act like S -> a S.
+          // GLR parsers should handle this correctly.
+          let productions = vec![
+              prod("S'", vec![nt("S"), t("$")]), // Start
+              prod("S", vec![t("a"), nt("S"), nt("B")]),
+              prod("S", vec![t("b")]),
+              prod("B", vec![]), // Epsilon
+          ];
+
+          // Validation should pass as it's not length-1 recursion
+          assert!(analyze::validate(&productions).is_ok());
+
+          let parser = generate_glr_parser(&productions, 0);
+          let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+
+          let test_cases = [
+              ("b", true),    // S -> b
+              ("ab", true),   // S -> a S B -> a b B -> a b e
+              ("aab", true),  // S -> a S B -> a (a S B) B -> a a b B B -> a a b e e
+              ("aaab", true),
+              ("a", false),   // Needs a 'b'
+              ("ba", false),  // Cannot start with 'b' then 'a'
+          ];
+
+          for (input, expected_match) in test_cases {
+              let tokens = tokenize(&parser, input);
+              let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+              state.parse(&tokens);
+              state.step(eof);
+              assert_eq!(state.is_ok(), expected_match, "Parse check failed for hidden right recursion input: '{}'", input);
           }
       }
 
@@ -5443,9 +5515,6 @@ messages:
           }
       }
 
-      // --- Tests Specifically for Grammar Validation Logic ---
-
-      #[test]
       fn validation_passes_standard_grammars() {
           // Simple Grammar (already tested implicitly above, but good to be explicit)
           let simple_productions = vec![
@@ -5809,6 +5878,45 @@ messages:
           }
       }
 
+      #[test]
+      fn test_hidden_right_recursion() {
+          // Grammar: S' -> S $
+          //          S  -> a S B | b
+          //          B  -> epsilon
+          // This grammar has hidden right recursion because B is nullable.
+          // S -> a S B can effectively act like S -> a S.
+          // GLR parsers should handle this correctly.
+          let productions = vec![
+              prod("S'", vec![nt("S"), t("$")]), // Start
+              prod("S", vec![t("a"), nt("S"), nt("B")]),
+              prod("S", vec![t("b")]),
+              prod("B", vec![]), // Epsilon
+          ];
+
+          // Validation should pass as it's not length-1 recursion
+          assert!(analyze::validate(&productions).is_ok());
+
+          let parser = generate_glr_parser(&productions, 0);
+          let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+
+          let test_cases = [
+              ("b", true),    // S -> b
+              ("ab", true),   // S -> a S B -> a b B -> a b e
+              ("aab", true),  // S -> a S B -> a (a S B) B -> a a b B B -> a a b e e
+              ("aaab", true),
+              ("a", false),   // Needs a 'b'
+              ("ba", false),  // Cannot start with 'b' then 'a'
+          ];
+
+          for (input, expected_match) in test_cases {
+              let tokens = tokenize(&parser, input);
+              let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+              state.parse(&tokens);
+              state.step(eof);
+              assert_eq!(state.is_ok(), expected_match, "Parse check failed for hidden right recursion input: '{}'", input);
+          }
+      }
+
       // --- Notes on Limitations Not Easily Tested Here ---
       // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
       //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
@@ -5826,71 +5934,160 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      Add a test for hidden right-recursion.
-      S′ ::= S
-      S ::= aSB | b
-      B ::= ϵ
+      Modify the src/glr/analyse.rs to detect
+      - nullable rules
+
+      And detect and raise an error in the case of:
+      - direct length-1 recursion
+          - Example form:
+              - A ::= A
+          - Ensure nullable rules are accounted for, e.g. this could direct length-1 recursion:
+              - A ::= B A
+              - B ::= ϵ
+      - indirect length-1 recursion
+          - Example form:
+              - A ::= B
+              - B ::= C
+              - ...
+              - Y ::= A
+          - Ensure nullable rules are accounted for, e.g. this could be indirect length-1 recursion:
+              - A ::= B
+              - B ::=  Z C
+              - ...
+              - Y ::= A
+              - Z ::= ϵ
+      - left-nullable left recursion
+          - Example form:
+              - S′ ::= S
+              - S ::= BSa | b
+              - B ::= ϵ
+          - This can result in infinite reduction for B
+          - Left-recursion is allowed. For example, this is fine because B we can't reduce a nullable rule before left-recursing:
+              - S′ ::= S
+              - S ::= BSa | b
+              - B ::= c
+          - Even this is allowed:
+              - S′ ::= S
+              - S ::= BSa | b
+              - B ::= SBc | d
+    metadata:
+  - user: 'Note: all these are done except the last one.'
     metadata:
   - assistant: |-
-      Okay, I will add a test case for hidden right-recursion to `src/glr/tests.rs`.
-
+      ```diff
+      --- a/src/glr/analyze.rs
+      +++ b/src/glr/analyze.rs
+      @@ -108,6 +108,7 @@
+       /// 1. Undefined non-terminals (non-terminals used in RHS but never defined in LHS).
+       /// 2. Length-1 recursion (direct or indirect), considering nullable prefixes.
+       ///    A rule `A ::= α` contributes to a potential cycle if `α` consists of
+      +/// 3. Left-nullable left recursion: Rules of the form `A ::= B1 ... Bk A ...` where `k > 0`
+       ///    zero or more nullable non-terminals, followed by a single non-terminal `B`,
+       ///    and nothing else (i.e., `A ::= Nullable* B`).
+       pub fn validate(productions: &[Production]) -> Result<(), String> {
+      @@ -216,6 +217,31 @@
+               }
+           }
+       
+      +    // --- Check 3: Left-Nullable Left Recursion ---
+      +    // Detect rules like A ::= B A ... where B is nullable.
+      +    for prod in productions {
+      +        let lhs = &prod.lhs;
+      +        let rhs = &prod.rhs;
+      +
+      +        // Iterate through RHS symbols to find the recursive non-terminal A
+      +        for (i, symbol) in rhs.iter().enumerate() {
+      +            if let Symbol::NonTerminal(nt) = symbol {
+      +                if nt == lhs { // Found potential left recursion: A ::= ... A ...
+      +                    // Check if all preceding symbols (if any) are nullable non-terminals
+      +                    let prefix = &rhs[0..i];
+      +                    if !prefix.is_empty() { // Only check if there's a prefix
+      +                        let prefix_is_nullable = prefix.iter().all(|sym| match sym {
+      +                            Symbol::NonTerminal(prefix_nt) => nullable_nonterminals.contains(prefix_nt),
+      +                            Symbol::Terminal(_) => false, // Terminals are not nullable
+      +                        });
+      +
+      +                        if prefix_is_nullable {
+      +                            return Err(format!("Validation Error: Left-nullable left recursion detected in rule '{} ::= {:?}'. The prefix '{:?}' before the recursive non-terminal '{}' is nullable.", lhs.0, rhs, prefix, lhs.0));
+      +                        }
+      +                    }
+      +                    // If the prefix is empty (direct left recursion A ::= A ...) or not fully nullable,
+      +                    // we don't flag it here (GLR can handle standard left recursion).
+      +                    // We only care about the case where a nullable sequence precedes the recursion.
+      +                    break; // Found the first instance of A on RHS, no need to check further in this rule
+      +                }
+      +            }
+      +        }
+      +    }
+      +
+           // --- Validation Successful ---
+           Ok(())
+       }
+      ```
       ```diff
       --- a/src/glr/tests.rs
       +++ b/src/glr/tests.rs
-      @@ -341,6 +341,39 @@
-           }
+      @@ -201,6 +201,21 @@
+            assert!(analyze::validate(&productions_2).is_ok());
        }
        
       +#[test]
-      +fn test_hidden_right_recursion() {
-      +    // Grammar: S' -> S $
-      +    //          S  -> a S B | b
-      +    //          B  -> epsilon
-      +    // This grammar has hidden right recursion because B is nullable.
-      +    // S -> a S B can effectively act like S -> a S.
-      +    // GLR parsers should handle this correctly.
+      +fn validation_fails_left_nullable_left_recursion() {
+      +    // S -> B S a
+      +    // B -> epsilon
       +    let productions = vec![
-      +        prod("S'", vec![nt("S"), t("$")]), // Start
-      +        prod("S", vec![t("a"), nt("S"), nt("B")]),
+      +        prod("S'", vec![nt("S"), t("$")]), // Start rule
+      +        prod("S", vec![nt("B"), nt("S"), t("a")]), // Problematic rule
       +        prod("S", vec![t("b")]),
-      +        prod("B", vec![]), // Epsilon
+      +        prod("B", vec![]), // B is nullable
       +    ];
-      +
-      +    // Validation should pass as it's not length-1 recursion
-      +    assert!(analyze::validate(&productions).is_ok());
-      +
-      +    let parser = generate_glr_parser(&productions, 0);
-      +    let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
-      +
-      +    let test_cases = [
-      +        ("b", true),    // S -> b
-      +        ("ab", true),   // S -> a S B -> a b B -> a b e
-      +        ("aab", true),  // S -> a S B -> a (a S B) B -> a a b B B -> a a b e e
-      +        ("aaab", true),
-      +        ("a", false),   // Needs a 'b'
-      +        ("ba", false),  // Cannot start with 'b' then 'a'
-      +    ];
-      +
-      +    for (input, expected_match) in test_cases {
-      +        let tokens = tokenize(&parser, input);
-      +        let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
-      +        state.parse(&tokens);
-      +        state.step(eof);
-      +        assert_eq!(state.is_ok(), expected_match, "Parse check failed for hidden right recursion input: '{}'", input);
-      +    }
+      +    let result = analyze::validate(&productions);
+      +    assert!(result.is_err());
+      +    let err_msg = result.unwrap_err();
+      +    assert!(err_msg.contains("Left-nullable left recursion detected in rule 'S ::= [NonTerminal(NonTerminal(\"B\")), NonTerminal(NonTerminal(\"S\")), Terminal(Terminal(\"a\"))]'. The prefix '[NonTerminal(NonTerminal(\"B\"))]' before the recursive non-terminal 'S' is nullable."));
       +}
-      +
-       // --- Notes on Limitations Not Easily Tested Here ---
-       // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
-       //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
-
+       
+       #[test]
+       fn validation_fails_missing_nonterminal() {
+      @@ -360,7 +375,7 @@
+               prod("B", vec![]), // Epsilon
+           ];
+       
+      -    // Validation should pass as it's not length-1 recursion
+      +    // Validation should fail due to left-nullable left recursion
+           assert!(analyze::validate(&productions).is_ok());
+       
+           let parser = generate_glr_parser(&productions, 0);
+      ```
+      ```diff
+      --- a/src/glr/tests.rs
+      +++ b/src/glr/tests.rs
+      @@ -363,7 +363,7 @@
+           ];
+       
+           // Validation should fail due to left-nullable left recursion
+      -    assert!(analyze::validate(&productions).is_ok());
+      +    assert!(analyze::validate(&productions).is_err(), "Validation should fail for left-nullable left recursion");
+       
+           let parser = generate_glr_parser(&productions, 0);
+           println!("Parser: {}", parser);
       ```
     metadata:
   - user: |
       Git apply result:
-      Found 1 diff block(s) to process using custom patcher.
+      Found 3 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: src/glr/analyze.rs
+      Applying patch to 'src/glr/analyze.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/analyze.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/tests.rs
+      Applying patch to 'src/glr/tests.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/tests.rs.
+
+      --- Processing Diff Block 3 ---
       Identified target file: src/glr/tests.rs
       Applying patch to 'src/glr/tests.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/tests.rs.
