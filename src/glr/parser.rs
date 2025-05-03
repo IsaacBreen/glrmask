@@ -261,10 +261,24 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         let mut next_active_states = Vec::new();
         // This will store states where the current token_id leads to no action.
         let mut current_action_not_found_states = Vec::new();
-        let mut fuel = 100_000;
+        let mut fuel = 1_000;
 
         while let Some(state) = self.active_states.pop() {
             if fuel == 0 {
+                // Dump info
+                self.active_states.push(state);
+                let root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+                let stats = gather_gss_stats(&root_nodes);
+                crate::debug!(3, "Ran out of fuel. GSS Stats: {:?}", stats);
+                debug!(3, "{}", { // Use a closure to avoid potentially expensive calculations if debug level is lower
+                    let final_root_nodes: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+                    let final_stats = gather_gss_stats(&final_root_nodes);
+                    if final_stats.unique_nodes <= MAX_NODES_TO_PRINT {
+                        format!("GSS Structure ({} nodes):\n{}", final_stats.unique_nodes, print_gss_forest(&final_root_nodes, MAX_NODES_TO_PRINT))
+                    } else {
+                        format!("GSS Structure too large to print ({} nodes > {})", final_stats.unique_nodes, MAX_NODES_TO_PRINT)
+                    }
+                });
                 panic!("Ran out of fuel");
             }
             fuel -= 1;
