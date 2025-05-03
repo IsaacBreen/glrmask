@@ -261,7 +261,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         let mut next_active_states = Vec::new();
         // This will store states where the current token_id leads to no action.
         let mut current_action_not_found_states = Vec::new();
-        let mut fuel = 1_000;
+        let mut fuel = 100_000;
 
         while let Some(state) = self.active_states.pop() {
             if fuel == 0 {

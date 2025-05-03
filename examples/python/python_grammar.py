@@ -21,9 +21,17 @@ def eat_string(s: bytes) -> Regex:
     # TODO: delete this
     return Regex.eat_u8(ord("0"))
 
+def rule_name_is_valid(name: str) -> bool:
+    return name.startswith("invalid_")
+
+
 def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Regex:
     if isinstance(item, pegen.grammar.NameLeaf):
-        return ge.ref(item.value)
+        if not rule_name_is_valid(item.value):
+            print(f"Ignoring invalid rule name: {item.value}")
+            return ge.choice([])
+        else:
+            return ge.ref(item.value)
     elif isinstance(item, pegen.grammar.StringLeaf):
         value = item.value
         if value[0] == value[-1] in {'"', "'"}:
@@ -144,8 +152,11 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
     exprs.append(("start'''", ge.ref("file")))
 
     for rule in grammar.rules.values():
-        memo[rule.name] = ge.ref(rule.name)
-        exprs.append((rule.name, pegen_to_sep1_regex(rule.rhs, memo)))
+        if not rule_name_is_valid(rule.name):
+            print(f"Ignoring invalid rule name: {rule.name}")
+        else:
+            memo[rule.name] = ge.ref(rule.name)
+            exprs.append((rule.name, pegen_to_sep1_regex(rule.rhs, memo)))
 
     tokens = define_tokens()
     exprs.extend(tokens)
