@@ -47,17 +47,26 @@ fn detect_cycles_recursive(
             if visiting.contains(neighbor) {
                 // Cycle detected: neighbor is already in the current recursion stack
                 path.push(neighbor.clone()); // Add the node that closes the cycle to the path
+
                 // Find where the cycle starts in the current path
                 let cycle_start_index = path.iter().position(|n| n == neighbor).unwrap_or(0);
-                let cycle_nodes: Vec<_> = path[cycle_start_index..].iter().map(|n| n.0.clone()).collect();
+                let cycle_nodes: Vec<_> = path[cycle_start_index..].iter().map(|n| n.0.as_str()).collect();
+
+                // Format the cycle path string: "A -> B -> C -> A"
+                let cycle_path_str = cycle_nodes.join(" -> ");
+
                 let recursion_type = if cycle_nodes.len() == 2 && cycle_nodes[0] == cycle_nodes[1] { // A -> A case
                     "Direct"
                 } else {
                     "Indirect"
                 };
+
+                // Remove the temporary node added to path for cycle detection before returning error
+                path.pop();
+
                 return Err(format!(
-                    "{} length-1 recursion cycle detected involving: {:?}",
-                    recursion_type, cycle_nodes
+                    "{} length-1 recursion cycle detected: {}",
+                    recursion_type, cycle_path_str
                 ));
             }
             // If the neighbor hasn't been fully explored yet, recurse
