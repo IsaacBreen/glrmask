@@ -466,7 +466,6 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                             len: *len,
                         };
                         let reduce_node = ActionHistoryNode::new(reduce_action, Some(input_node));
-                        let mut new_stacks: Vec<T> = Vec::new();
                         for stack_node in popped_stack_nodes {
                             // stack_node is Arc<GSSNode<ParseStateNodeContent<T>>>
                             let revealed_content = stack_node.peek(); // &ParseStateNodeContent<T>
@@ -488,13 +487,11 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                             let goto_node = ActionHistoryNode::new(goto_action, Some(reduce_node.clone()));
 
                             let new_stack = stack_node.push(new_content);
-                            // Push the new state back onto the *active* list for this step
                             self.active_states.push(ParseState {
                                 stack: Arc::new(new_stack),
                                 action_leaf: goto_node,
                             });
                         }
-                        // No need to add to next_active_states, they are processed now.
                     }
 
                     Stage7ShiftsAndReduces::Split { shift, reduces } => {
@@ -549,7 +546,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                                     let goto_node = ActionHistoryNode::new(goto_action, Some(reduce_node.clone()));
 
                                     let new_stack = stack_node.push(new_content);
-                                    // Add reduce result back to active_states for immediate processing
+
                                     self.active_states.push(ParseState {
                                         stack: Arc::new(new_stack),
                                         action_leaf: goto_node,
