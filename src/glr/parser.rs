@@ -261,8 +261,14 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         let mut next_active_states = Vec::new();
         // This will store states where the current token_id leads to no action.
         let mut current_action_not_found_states = Vec::new();
+        let mut fuel = 1000;
 
         while let Some(state) = self.active_states.pop() {
+            if fuel == 0 {
+                panic!("Ran out of fuel");
+            }
+            fuel -= 1;
+            
             let stack = state.stack; // Arc<GSSNode<ParseStateNodeContent<T>>>
             let current_content = stack.peek(); // &ParseStateNodeContent<T>
             let current_state_id = current_content.state_id;
