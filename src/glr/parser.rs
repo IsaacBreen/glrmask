@@ -582,20 +582,17 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
     // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
     pub fn merge_active_states(&mut self) {
         let mut active_state_map: BTreeMap<ParseStateKey, ParseState<T>> = BTreeMap::new();
-        // let num_active_states = self.active_states.len();
+        let num_active_states = self.active_states.len();
 
         for state in std::mem::take(&mut self.active_states) {
             let key = state.key();
             active_state_map.insert_with(key, state, |existing, new_state| {
                 existing.merge(new_state);
-                // How to merge action_leaf? For now, just keep the existing one.
-                // A more sophisticated approach might create a Merge action node,
-                // but linking it correctly is complex without changing ActionHistoryNode structure.
             });
         }
 
-        // crate::debug!(3, "Merged {} active states into {} active states", num_active_states, active_state_map.len());
-        // self.active_states = active_state_map.into_values().collect();
+        crate::debug!(3, "Merged {} active states into {} active states", num_active_states, active_state_map.len());
+        self.active_states = active_state_map.into_values().collect();
     }
 
     pub fn merge_with(&mut self, other: GLRParserState<T>) {
