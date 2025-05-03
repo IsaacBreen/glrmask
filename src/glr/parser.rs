@@ -257,7 +257,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                 // Find and print the longest path instead
                 if let Some(longest_path) = find_longest_path(&final_root_nodes) {
                     let path_str = longest_path.iter()
-                        .map(|node| format!("State({})", node.value.state_id.0))
+                        .map(|node| format!("{}", node.value.state_id.0))
                         .collect::<Vec<_>>()
                         .join(" -> ");
                     format!("GSS Structure too large ({} nodes > {}). Longest path ({} nodes): {}",
@@ -290,7 +290,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                         // Find and print the longest path instead
                         if let Some(longest_path) = find_longest_path(&final_root_nodes) {
                             let path_str = longest_path.iter()
-                                .map(|node| format!("State({})", node.value.state_id.0))
+                                .map(|node| format!("{}", node.value.state_id.0))
                                 .collect::<Vec<_>>()
                                 .join(" -> ");
                             format!("GSS Structure too large ({} nodes > {}). Longest path ({} nodes): {}",
