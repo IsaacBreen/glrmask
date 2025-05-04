@@ -18,7 +18,7 @@ from tqdm import tqdm
 
 def eat(s: bytes) -> Regex:
     if len(s) == 1:
-        return eat_u8(s[0])
+        return Regex.eat_u8(s[0])
     else:
         return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
 #     # TODO: delete this
