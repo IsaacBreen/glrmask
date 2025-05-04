@@ -365,6 +365,10 @@ impl<'a> IncrementalParser<'a> {
     /// Processes a chunk of input bytes, updating the internal state.
     pub fn feed(&mut self, bytes: &[u8]) {
         let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>> = BTreeMap::new();
+        let initial_tokenizer_state = self.grammar.tokenizer.initial_state_id();
+
+        // Ensure we only process valid GLR states
+        self.state.retain(|_, glr_state| glr_state.is_ok());
 
         for (current_tokenizer_state_id, current_glr_state) in std::mem::take(&mut self.state) {
             // Execute the tokenizer from the current state with the new bytes
@@ -373,27 +377,37 @@ impl<'a> IncrementalParser<'a> {
                 .tokenizer
                 .execute_from_state(bytes, current_tokenizer_state_id);
 
-            // Handle full token matches
-            for token in results.matches {
-                let grammar_token_id = TerminalID(token.id); // Assuming GroupID maps directly to TerminalID
-                let mut next_glr_state = current_glr_state.clone(); // Clone before stepping
-                next_glr_state.step(grammar_token_id);
+            if !results.matches.is_empty() {
+                // Handle full token matches
+                for token in results.matches {
+                    let grammar_token_id = TerminalID(token.id); // Assuming GroupID maps directly to TerminalID
+                    // Clone the GLR state *before* stepping for this specific match path
+                    let mut next_glr_state = current_glr_state.clone();
+                    next_glr_state.step(grammar_token_id);
 
-                if next_glr_state.is_ok() {
-                    // After a full match, the tokenizer resets to its initial state
-                    let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
-                    next_states.entry(next_tokenizer_state_id)
-                        .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
-                        .or_insert(next_glr_state);
+                    if next_glr_state.is_ok() {
+                        // After a full match, the tokenizer state resets for the *next* input
+                        let next_tokenizer_state_id = initial_tokenizer_state;
+                        next_states.entry(next_tokenizer_state_id)
+                            .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
+                            .or_insert(next_glr_state);
+                    }
+                    // If !next_glr_state.is_ok(), this specific match path dies.
                 }
-            }
-
-            // Handle partial matches (tokenizer ended mid-token)
-            if let Some(end_state_id) = results.end_state {
-                let next_tokenizer_state_id = TokenizerStateID(end_state_id);
-                next_states.entry(next_tokenizer_state_id)
-                    .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
-                    .or_insert(current_glr_state); // Carry over the *original* GLR state
+            } else {
+                // No full matches occurred. Handle partial matches.
+                if let Some(end_state_id) = results.end_state {
+                    let next_tokenizer_state_id = TokenizerStateID(end_state_id);
+                    // If the tokenizer ended back at the initial state *without* matching anything,
+                    // it signifies that the input led to a dead end from the current tokenizer state. Prune this path.
+                    if next_tokenizer_state_id != initial_tokenizer_state {
+                        // Carry over the *original* GLR state, associated with the new tokenizer state
+                        next_states.entry(next_tokenizer_state_id)
+                            .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
+                            .or_insert(current_glr_state);
+                    }
+                }
+                // If no matches and end_state is None, or if end_state is initial_state, this path dies naturally.
             }
         }
 
