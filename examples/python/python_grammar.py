@@ -255,8 +255,8 @@ if __name__ == "__main__":
 #     # Set the vocab to just "a" and "aa"
 #     tokenizer_vocab = {"a": 0, "aa": 1}
 #
-#     # Set the vocab to "hello" "=" "world"
-#     tokenizer_vocab = {"hello": 0, "=": 1, "world": 2}
+    # Set the vocab to "hello" "=" "world"
+    tokenizer_vocab = {"hello": 0, "=": 1, "world": 2}
 
     llm_token_to_id = {token.replace("Ġ", " ").encode(): i for token, i in tokenizer_vocab.items()}
     llm_tokens = list(tokenizer_vocab.keys()) # Use all tokens
