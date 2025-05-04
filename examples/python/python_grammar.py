@@ -333,6 +333,7 @@ if __name__ == "__main__":
 #     input_text = "i^10=i*"
 #     input_text = "5*6 + 7*2 = 5+5+5+"
     input_text = "123+456+"
+    expected_next_token = "789"
 
 #     pre_input_text = ""
 #     input_text = "hello="
@@ -358,13 +359,15 @@ if __name__ == "__main__":
     tokens: list[int] = tokens.tolist()[0]
     print(f"Committing tokens: {tokens}")
     for token_id in tokens:
+        print("--- Committing token {} ---".format(token_id))
         grammar_constraint_state.commit(token_id)
-    mask = grammar_constraint_state.get_mask()
-    print("Got mask")
-    print(f"Mask: {mask}")
-    mask_ids = np.where(mask)[0].tolist()
-    mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
-    print(f"Mask Tokens: {mask_token_ids}")
+        mask = grammar_constraint_state.get_mask()
+        print("Got mask")
+        print(f"Mask: {mask}")
+        mask_ids = np.where(mask)[0].tolist()
+        mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
+        print(f"Mask Tokens: {mask_token_ids}")
+    print("--- End Committing Tokens ---")
     if expected_next_token:
         assert expected_next_token in mask_token_ids, f"Expected '{expected_next_token}' in mask"
 
