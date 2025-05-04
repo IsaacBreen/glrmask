@@ -2095,7 +2095,7 @@ mod tests_nov_24 {
 }
 
 #[cfg(test)]
-mod test_full_python_tokenizer_recognizes_name {
+mod test_python {
     use super::*;
     use crate::datastructures::u8set::U8Set; // Added for U8Set usage in new test
     use crate::{choice, seq};
