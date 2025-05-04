@@ -374,13 +374,13 @@ impl<'a> IncrementalParser<'a> {
         }
 
         while let Some(((position, current_tokenizer_state_id), current_glr_state)) = queue.pop_first() {
-            crate::debug!(4, "Processing position {} in state {}", position, current_tokenizer_state_id.0);
             // Execute the tokenizer from the current state with the new bytes
             let results: ExecuteResult = self
                 .grammar
                 .tokenizer
                 .execute_from_state(&bytes[position..], current_tokenizer_state_id);
 
+            crate::debug!(4, "Processing position {} in state {}. Matches: {}", position, current_tokenizer_state_id.0, results.matches.len());
             // Handle full token matches
             for token in results.matches {
                 let grammar_token_id = TerminalID(token.id); // Assuming GroupID maps directly to TerminalID
