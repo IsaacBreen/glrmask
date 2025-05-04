@@ -82,8 +82,6 @@ def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Regex:
 def define_tokens() -> list[tuple[str, Any]]:
     tokens = {}
 
-    tokens["HELLO"] = eat("hello")
-
     choice = Regex.choice
     eat_u8 = Regex.eat_u8
     eat_u8_negation = Regex.eat_u8_negation
@@ -290,8 +288,13 @@ if __name__ == "__main__":
 #     llm_token_to_id = {token.encode(): tokenizer.convert_tokens_to_ids(token) for token in ts}
 
     print("Defining grammar...")
-    grammar = define_python_grammar()
+#     grammar = define_python_grammar()
+    # TODO: delete this
+    # Define a dummy grammar that only accepts "hello"
+    exprs = [("S", ge.sequence([eat("hello"), eat("$")]))]
+    grammar = PyGrammar(exprs)
     grammar.print()
+
 #     print("Initializing parser...")
 #     parser = grammar.glr_parser()
 #     parser.print()
