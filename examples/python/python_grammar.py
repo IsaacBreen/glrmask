@@ -11,7 +11,7 @@ import numpy as np
 import pegen.grammar
 import pegen.grammar_parser
 import pegen.tokenizer
-import torch
+import torch # type: ignore
 from _sep1 import PyRegexExpr as Regex, PyGrammar, PyGrammarExpr as ge, PyGrammarConstraint, PyGrammarConstraintState
 from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
@@ -22,9 +22,23 @@ def eat(s: bytes) -> Regex:
         return Regex.eat_u8(ord(s[0]))
     else:
         return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
-#     # TODO: delete this
-#     return Regex.eat_u8(ord("0"))
+#     print(f"After '():': valid={inc_parser.is_valid()}")
+#     print("--- End Incremental Parser Demo ---")
 
+#     print("--- End Incremental Parser Demo ---")
+
+#     # DEMO: Incremental Parser
+#     from _sep1 import PyIncrementalParser
+#     print("\n--- Incremental Parser Demo ---")
+#     inc_parser = PyIncrementalParser(grammar)
+#     print(f"Initial valid: {inc_parser.is_valid()}")
+#     inc_parser.feed(b"def ")
+#     print(f"After 'def ': valid={inc_parser.is_valid()}")
+#     inc_parser.feed(b"my_func")
+#     print(f"After 'my_func': valid={inc_parser.is_valid()}")
+#     inc_parser.feed(b"():")
+#     print(f"After '():': valid={inc_parser.is_valid()}")
+#     print("--- End Incremental Parser Demo ---")
 def rule_name_is_valid(name: str) -> bool:
     return not name.startswith("invalid_")
     # TODO: delete this
