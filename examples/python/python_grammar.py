@@ -17,7 +17,10 @@ from tqdm import tqdm
 
 
 def eat_string(s: bytes) -> Regex:
-    return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
+    if len(s) == 1:
+        return eat_u8(s[0])
+    else:
+        return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
 #     # TODO: delete this
 #     return Regex.eat_u8(ord("0"))
 
@@ -90,6 +93,8 @@ def define_tokens() -> list[tuple[str, Any]]:
 
     def eat_u8_range(start: char, end: char) -> Regex:
         return Regex.seq([Regex.eat_u8(ord(c)) for c in range(ord(start), ord(end) + 1)])
+
+    # TODO: Use eat(s) instead of eg eat_u8(ord("a")). It's a bit more readable.
 
     ignore = rep(choice([
         eat_u8(ord(" ")),
