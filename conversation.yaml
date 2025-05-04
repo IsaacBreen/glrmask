@@ -6,18 +6,18 @@ local_system:
     - src/tokenizer.rs
     - src/glr/parser.rs
     - src/interface/interface.rs
-    - src/interface/tests.rs
+    - src/macro.rs
   conversation_file:
   compile_command:
   initial_file_contents:
-    python/src/lib.rs: |-
+    python/src/lib.rs: |
       use sep1::tokenizer::LLMTokenID;
       use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq};
       use sep1::finite_automata::Regex;
       use pyo3::prelude::*;
       use pyo3::types::{PyDict};
       use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-      use sep1::glr::parser::GLRParser;
+      use sep1::glr::parser::{GLRParser, GLRParserState};
       use sep1::glr::table::{generate_glr_parser, StateID};
       use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence};
       use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
@@ -26,6 +26,7 @@ local_system:
       use std::sync::Arc;
       use ouroboros::self_referencing;
       use numpy::{IntoPyArray, PyArray1, ToPyArray};
+      use sep1::interface::IncrementalParser; // Added import
 
       #[pyclass]
       #[derive(Clone)]
@@ -254,6 +255,8 @@ local_system:
               // print_precomputed(&self.inner.precomputed);
               println!("Printing precomputed data is not implemented in this binding yet.");
           }
+          
+          
       }
 
 
@@ -307,6 +310,42 @@ local_system:
           }
       }
 
+      #[self_referencing]
+      struct PyIncrementalParserWrapper {
+          // Owns the grammar
+          grammar: PyGrammar,
+          // Borrows from the owned grammar via the 'this lifetime
+          #[borrows(grammar)]
+          #[covariant] // Allows the lifetime 'this to be shortened
+          parser: IncrementalParser<'this>,
+      }
+
+      #[pyclass]
+      pub struct PyIncrementalParser {
+          inner: PyIncrementalParserWrapper,
+      }
+
+      #[pymethods]
+      impl PyIncrementalParser {
+          #[new]
+          fn new(grammar: PyGrammar) -> PyResult<Self> {
+              Ok(PyIncrementalParser {
+                  inner: PyIncrementalParserWrapperTryBuilder {
+                      grammar,
+                      parser_builder: |g: &PyGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
+                  }.try_build()?
+              })
+          }
+
+          fn feed(&mut self, bytes: &[u8]) {
+              self.inner.with_parser_mut(|p| p.feed(bytes));
+          }
+
+          fn is_valid(&self) -> bool {
+              self.inner.with_parser(|p| p.is_valid())
+          }
+      }
+
       #[pymodule]
       fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
           m.add_class::<PyGrammarExpr>()?;
@@ -316,6 +355,7 @@ local_system:
           m.add_class::<PyGrammar>()?;
           m.add_class::<PyGrammarConstraint>()?;
           m.add_class::<PyGrammarConstraintState>()?;
+          m.add_class::<PyIncrementalParser>()?; // Added class
           Ok(())
       }
     examples/python/python_grammar.py: |-
@@ -331,7 +371,7 @@ local_system:
       import numpy as np
       import pegen.grammar
       import pegen.grammar_parser
-      import pegen.tokenizer
+      import pegen.tokenizer # type: ignore
       import torch # type: ignore
       from _sep1 import PyRegexExpr as Regex, PyGrammar, PyGrammarExpr as ge, PyGrammarConstraint, PyGrammarConstraintState
       from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
@@ -343,23 +383,6 @@ local_system:
               return Regex.eat_u8(ord(s[0]))
           else:
               return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
-      #     print(f"After '():': valid={inc_parser.is_valid()}")
-      #     print("--- End Incremental Parser Demo ---")
-
-      #     print("--- End Incremental Parser Demo ---")
-
-      #     # DEMO: Incremental Parser
-      #     from _sep1 import PyIncrementalParser
-      #     print("\n--- Incremental Parser Demo ---")
-      #     inc_parser = PyIncrementalParser(grammar)
-      #     print(f"Initial valid: {inc_parser.is_valid()}")
-      #     inc_parser.feed(b"def ")
-      #     print(f"After 'def ': valid={inc_parser.is_valid()}")
-      #     inc_parser.feed(b"my_func")
-      #     print(f"After 'my_func': valid={inc_parser.is_valid()}")
-      #     inc_parser.feed(b"():")
-      #     print(f"After '():': valid={inc_parser.is_valid()}")
-      #     print("--- End Incremental Parser Demo ---")
       def rule_name_is_valid(name: str) -> bool:
           return not name.startswith("invalid_")
           # TODO: delete this
@@ -494,7 +517,7 @@ local_system:
           exprs: list[tuple[str, Any]] = []
 
           # Make sure the start production is first
-          exprs.append(("start'''", ge.ref("file")))
+      #     exprs.append(("start'''", ge.ref("file")))
       #     # TODO: delete this
       #     # Add a rule for "hello=world$" to the start rule
       #     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
@@ -502,9 +525,9 @@ local_system:
       #     exprs.append(("file", ge.sequence([ge.regex(eat("fk")), ge.regex(eat("ing"))])))
 
       #     # TODO: delete this
-      #     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
-      #     SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g", "h"]
-      #     exprs.append(("file", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
+          exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
+          SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g", "h"]
+          exprs.append(("file", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
 
       #     # TODO: delete this
       #     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.regex(eat("hello"))])))
@@ -597,6 +620,7 @@ local_system:
           return tokenizer.decode(output[0], skip_special_tokens=True)
 
       if __name__ == "__main__":
+          from _sep1 import PyIncrementalParser # Import here after module is built
           model_name = "Qwen/Qwen2.5-Coder-0.5B"
       #     model_name = "gpt2"
           tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -655,6 +679,7 @@ local_system:
       #     print("Initializing parser...")
       #     parser = grammar.glr_parser()
       #     parser.print()
+          grammar.glr_parser().print()
           print("Initializing grammar constraint...")
           grammar_constraint = PyGrammarConstraint(grammar, llm_token_to_id, max(llm_token_to_id.values()))
           print("Initializing grammar constraint state...")
@@ -670,8 +695,8 @@ local_system:
       #     input_text = "5*6 + 7*2 = 5+5+5+"
 
           pre_input_text = ""
-          input_text = "hello="
-          expected_next_token = "world"
+          input_text = "hello"
+          expected_next_token = "="
 
           # DEMO: Get the mask
           mask = grammar_constraint_state.get_mask()
@@ -682,9 +707,9 @@ local_system:
           print(f"Mask Tokens: {mask_token_ids}")
 
           # DEMO: Incremental Parser
-          parser_state = PyIncrementalParser(grammar)
+          parser_state = PyIncrementalParser(grammar) # Use the imported class
           print(f"Initial valid: {parser_state.is_valid()}")
-          parser_state.feed(input_text)
+          parser_state.feed(input_text.encode("utf-8"))
           print(f"After '{input_text}': valid={parser_state.is_valid()}")
           print("--- End Incremental Parser Demo ---")
 
@@ -1768,6 +1793,7 @@ local_system:
                   let top = parent.peek();
                   let goto = self.parser.stage_7_table[&top.state_id].gotos[&nt];
                   let merged_t = top.t.intersect(cur_t);
+                  crate::debug!(4, "  Goto from state {} to state {}", top.state_id.0, goto.0);
                   out.push(Arc::new(parent.push(ParseStateNodeContent {
                       state_id: goto,
                       t: merged_t,
@@ -1841,12 +1867,14 @@ local_system:
                   match row.shifts_and_reduces.get(&token_id) {
                       /* ------ 1. plain shift ------ */
                       Some(Stage7ShiftsAndReduces::Shift(to)) => {
+                          crate::debug!(4, "Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
                           next.push(self.push_state(&stack, *to, top.t.clone()));
                       }
 
                       /* ------ 2. single reduce ------ */
                       Some(Stage7ShiftsAndReduces::Reduce{ nonterminal_id: nt,
                                                            len, .. }) => {
+                          crate::debug!(4, "Reduce from state {} via token {} to nonterminal {}", top.state_id.0, token_id.0, nt.0);
                           for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
                               todo.push(ParseState { stack: s });
                           }
@@ -1854,12 +1882,15 @@ local_system:
 
                       /* ------ 3. shift / reduce split ------ */
                       Some(Stage7ShiftsAndReduces::Split { shift, reduces }) => {
+                          crate::debug!(4, "Split from state {} via token {}", top.state_id.0, token_id.0);
                           // optional shift part
                           if let Some(to) = shift {
+                              crate::debug!(4, " Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
                               next.push(self.push_state(&stack, *to, top.t.clone()));
                           }
                           // every reduce alternative
                           for (len, nts) in reduces {
+                              crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top.state_id.0, token_id.0, nts);
                               for (nt, _prod_ids) in nts {        // we ignore prod-ids here
                                   for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
                                       todo.push(ParseState { stack: s });
@@ -2369,6 +2400,8 @@ local_system:
                   // Handle partial matches (tokenizer ended mid-token)
                   if let Some(end_state_id) = results.end_state {
                       // Ensure at least one possible final token parses
+                      // TODO: no need to do this here unless it's needed in is_valid. Don't want to do it in is_valid because it's expensive.
+                      //  Would be better to put this in a lazily-initialized field in each entry in self.states, and compute it only when is_valid is called.
                       let possible_final_grammar_tokens: Vec<_> = self.grammar.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id));
                       for possible_final_grammar_token in possible_final_grammar_tokens {
                           let mut final_glr_state = current_glr_state.clone(); // Clone before stepping
@@ -2666,63 +2699,81 @@ local_system:
               println!("Done precomputing");
           }
       }
-    src/interface/tests.rs: |
-      use crate::interface::IncrementalParser;
-
-      #[cfg(test)]
-      mod tests {
-          use crate::finite_automata::eat_u8;
-          use crate::interface::{choice, sequence, regex, Grammar, IncrementalParser};
-          use crate::tokenizer::TokenizerStateID; // Import necessary types
-
-          #[test]
-          fn test_incremental_parser_simple() {
-              // Grammar: S -> 'a' 'b' | 'a' 'c'
-              let exprs = vec![
-                  (
-                      "S".to_string(),
-                      choice(vec![
-                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))]),
-                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'c'))]),
-                      ]),
-                  ),
-              ];
-              let grammar = Grammar::from_exprs(exprs);
-              let mut parser = IncrementalParser::new(&grammar);
-
-              assert!(parser.is_valid()); // Initial state is valid
-
-              parser.feed(b"a");
-              assert!(parser.is_valid()); // After 'a', still valid (expecting 'b' or 'c')
-              // Check internal state (optional): should have one GLR state in tokenizer state 0
-              // The tokenizer state after matching 'a' should reset to 0.
-              assert_eq!(parser.state.len(), 1, "Expected 1 state after feeding 'a'");
-              assert!(parser.state.contains_key(&TokenizerStateID(0)), "Expected tokenizer state 0 after 'a'");
-
-              parser.feed(b"b");
-              assert!(parser.is_valid()); // After 'ab', it's a valid complete parse
-
-              // Reset and try the other path
-              parser = IncrementalParser::new(&grammar);
-              parser.feed(b"ac");
-              assert!(parser.is_valid()); // After 'ac', also valid
-
-              // Try invalid sequence
-              parser = IncrementalParser::new(&grammar);
-              parser.feed(b"ad");
-              dbg!(&parser.state.keys().collect::<Vec<_>>());
-              assert!(!parser.is_valid()); // After 'ad', invalid
-          }
+    src/macro.rs: |+
+      /// Macro for creating a sequence of parsers
+      #[macro_export]
+      macro_rules! seq_fast {
+          ($($x:expr),* $(,)?) => {
+              $crate::interface::tokenizer_combinators::seq_fast(vec![$($x),*])
+          };
       }
+
+      /// Macro for creating a choice of parsers
+      #[macro_export]
+      macro_rules! choice_fast {
+          ($($x:expr),* $(,)?) => {
+              $crate::interface::tokenizer_combinators::choice_fast(vec![$($x),*])
+          };
+      }
+
+      use chrono::Local; // Import the Local timezone functionality
+
+      #[macro_export]
+      macro_rules! debug {
+          ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {{
+              // Define the compile-time debug level (adjust as needed)
+              const MACRO_DEBUG_LEVEL: usize = 5;
+
+              // Runtime check against the message's level
+              if $level <= MACRO_DEBUG_LEVEL {
+                  // #[cfg(feature = "debug")] // Keep this if you want compile-time stripping
+                  { // Use a block to scope the 'now' variable and the import
+                      // Make chrono, file! and line! available inside the macro expansion
+                      use chrono::Local;
+                      let now = Local::now();
+                      println!(
+                          concat!("[DEBUG {}] {}:{}: ", $fmt), // Add timestamp, file, line placeholders
+                          // now.format("%Y-%m-%d %H:%M:%S%.3f"), // Format the timestamp (YYYY-MM-DD HH:MM:SS.ms)
+                          file!(), line!(), // Add file and line number
+                          $level
+                          $(, $($arg)*)? // Forward the original arguments
+                      );
+                  }
+              }
+          }};
+
+          ($level:expr, $msg:expr) => {{
+              // Define the compile-time debug level (adjust as needed)
+              const MACRO_DEBUG_LEVEL: usize = 5;
+
+              // Runtime check against the message's level
+              if $level <= MACRO_DEBUG_LEVEL {
+                  // #[cfg(feature = "debug")] // Keep this if you want compile-time stripping
+                  { // Use a block to scope the 'now' variable and the import
+                      // Make chrono, file! and line! available inside the macro expansion
+                      use chrono::Local;
+                      let now = Local::now();
+                      println!(
+                          "[DEBUG {}] {}:{}: {:?}", // Add timestamp, file, line placeholders
+                          // now.format("%Y-%m-%d %H:%M:%S%.3f"), // Format the timestamp
+                          file!(), line!(), // Add file and line number
+                          $level,
+                          $msg // Forward the original message expression
+                      );
+                  }
+              }
+          }};
+      }
+
   prev_file_contents:
-    python/src/lib.rs: |-
+    python/src/lib.rs: |
       use sep1::tokenizer::LLMTokenID;
       use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq};
       use sep1::finite_automata::Regex;
       use pyo3::prelude::*;
       use pyo3::types::{PyDict};
       use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-      use sep1::glr::parser::GLRParser;
+      use sep1::glr::parser::{GLRParser, GLRParserState};
       use sep1::glr::table::{generate_glr_parser, StateID};
       use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence};
       use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
@@ -2731,6 +2782,7 @@ local_system:
       use std::sync::Arc;
       use ouroboros::self_referencing;
       use numpy::{IntoPyArray, PyArray1, ToPyArray};
+      use sep1::interface::IncrementalParser; // Added import
 
       #[pyclass]
       #[derive(Clone)]
@@ -2959,6 +3011,8 @@ local_system:
               // print_precomputed(&self.inner.precomputed);
               println!("Printing precomputed data is not implemented in this binding yet.");
           }
+          
+          
       }
 
 
@@ -3012,6 +3066,42 @@ local_system:
           }
       }
 
+      #[self_referencing]
+      struct PyIncrementalParserWrapper {
+          // Owns the grammar
+          grammar: PyGrammar,
+          // Borrows from the owned grammar via the 'this lifetime
+          #[borrows(grammar)]
+          #[covariant] // Allows the lifetime 'this to be shortened
+          parser: IncrementalParser<'this>,
+      }
+
+      #[pyclass]
+      pub struct PyIncrementalParser {
+          inner: PyIncrementalParserWrapper,
+      }
+
+      #[pymethods]
+      impl PyIncrementalParser {
+          #[new]
+          fn new(grammar: PyGrammar) -> PyResult<Self> {
+              Ok(PyIncrementalParser {
+                  inner: PyIncrementalParserWrapperTryBuilder {
+                      grammar,
+                      parser_builder: |g: &PyGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
+                  }.try_build()?
+              })
+          }
+
+          fn feed(&mut self, bytes: &[u8]) {
+              self.inner.with_parser_mut(|p| p.feed(bytes));
+          }
+
+          fn is_valid(&self) -> bool {
+              self.inner.with_parser(|p| p.is_valid())
+          }
+      }
+
       #[pymodule]
       fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
           m.add_class::<PyGrammarExpr>()?;
@@ -3021,6 +3111,7 @@ local_system:
           m.add_class::<PyGrammar>()?;
           m.add_class::<PyGrammarConstraint>()?;
           m.add_class::<PyGrammarConstraintState>()?;
+          m.add_class::<PyIncrementalParser>()?; // Added class
           Ok(())
       }
     examples/python/python_grammar.py: |-
@@ -3036,7 +3127,7 @@ local_system:
       import numpy as np
       import pegen.grammar
       import pegen.grammar_parser
-      import pegen.tokenizer
+      import pegen.tokenizer # type: ignore
       import torch # type: ignore
       from _sep1 import PyRegexExpr as Regex, PyGrammar, PyGrammarExpr as ge, PyGrammarConstraint, PyGrammarConstraintState
       from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
@@ -3048,23 +3139,6 @@ local_system:
               return Regex.eat_u8(ord(s[0]))
           else:
               return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
-      #     print(f"After '():': valid={inc_parser.is_valid()}")
-      #     print("--- End Incremental Parser Demo ---")
-
-      #     print("--- End Incremental Parser Demo ---")
-
-      #     # DEMO: Incremental Parser
-      #     from _sep1 import PyIncrementalParser
-      #     print("\n--- Incremental Parser Demo ---")
-      #     inc_parser = PyIncrementalParser(grammar)
-      #     print(f"Initial valid: {inc_parser.is_valid()}")
-      #     inc_parser.feed(b"def ")
-      #     print(f"After 'def ': valid={inc_parser.is_valid()}")
-      #     inc_parser.feed(b"my_func")
-      #     print(f"After 'my_func': valid={inc_parser.is_valid()}")
-      #     inc_parser.feed(b"():")
-      #     print(f"After '():': valid={inc_parser.is_valid()}")
-      #     print("--- End Incremental Parser Demo ---")
       def rule_name_is_valid(name: str) -> bool:
           return not name.startswith("invalid_")
           # TODO: delete this
@@ -3199,7 +3273,7 @@ local_system:
           exprs: list[tuple[str, Any]] = []
 
           # Make sure the start production is first
-          exprs.append(("start'''", ge.ref("file")))
+      #     exprs.append(("start'''", ge.ref("file")))
       #     # TODO: delete this
       #     # Add a rule for "hello=world$" to the start rule
       #     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
@@ -3207,9 +3281,9 @@ local_system:
       #     exprs.append(("file", ge.sequence([ge.regex(eat("fk")), ge.regex(eat("ing"))])))
 
       #     # TODO: delete this
-      #     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
-      #     SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g", "h"]
-      #     exprs.append(("file", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
+          exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
+          SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g", "h"]
+          exprs.append(("file", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
 
       #     # TODO: delete this
       #     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.regex(eat("hello"))])))
@@ -3302,6 +3376,7 @@ local_system:
           return tokenizer.decode(output[0], skip_special_tokens=True)
 
       if __name__ == "__main__":
+          from _sep1 import PyIncrementalParser # Import here after module is built
           model_name = "Qwen/Qwen2.5-Coder-0.5B"
       #     model_name = "gpt2"
           tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -3360,6 +3435,7 @@ local_system:
       #     print("Initializing parser...")
       #     parser = grammar.glr_parser()
       #     parser.print()
+          grammar.glr_parser().print()
           print("Initializing grammar constraint...")
           grammar_constraint = PyGrammarConstraint(grammar, llm_token_to_id, max(llm_token_to_id.values()))
           print("Initializing grammar constraint state...")
@@ -3375,8 +3451,8 @@ local_system:
       #     input_text = "5*6 + 7*2 = 5+5+5+"
 
           pre_input_text = ""
-          input_text = "hello="
-          expected_next_token = "world"
+          input_text = "hello"
+          expected_next_token = "="
 
           # DEMO: Get the mask
           mask = grammar_constraint_state.get_mask()
@@ -3387,9 +3463,9 @@ local_system:
           print(f"Mask Tokens: {mask_token_ids}")
 
           # DEMO: Incremental Parser
-          parser_state = PyIncrementalParser(grammar)
+          parser_state = PyIncrementalParser(grammar) # Use the imported class
           print(f"Initial valid: {parser_state.is_valid()}")
-          parser_state.feed(input_text)
+          parser_state.feed(input_text.encode("utf-8"))
           print(f"After '{input_text}': valid={parser_state.is_valid()}")
           print("--- End Incremental Parser Demo ---")
 
@@ -4473,6 +4549,7 @@ local_system:
                   let top = parent.peek();
                   let goto = self.parser.stage_7_table[&top.state_id].gotos[&nt];
                   let merged_t = top.t.intersect(cur_t);
+                  crate::debug!(4, "  Goto from state {} to state {}", top.state_id.0, goto.0);
                   out.push(Arc::new(parent.push(ParseStateNodeContent {
                       state_id: goto,
                       t: merged_t,
@@ -4546,12 +4623,14 @@ local_system:
                   match row.shifts_and_reduces.get(&token_id) {
                       /* ------ 1. plain shift ------ */
                       Some(Stage7ShiftsAndReduces::Shift(to)) => {
+                          crate::debug!(4, "Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
                           next.push(self.push_state(&stack, *to, top.t.clone()));
                       }
 
                       /* ------ 2. single reduce ------ */
                       Some(Stage7ShiftsAndReduces::Reduce{ nonterminal_id: nt,
                                                            len, .. }) => {
+                          crate::debug!(4, "Reduce from state {} via token {} to nonterminal {}", top.state_id.0, token_id.0, nt.0);
                           for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
                               todo.push(ParseState { stack: s });
                           }
@@ -4559,12 +4638,15 @@ local_system:
 
                       /* ------ 3. shift / reduce split ------ */
                       Some(Stage7ShiftsAndReduces::Split { shift, reduces }) => {
+                          crate::debug!(4, "Split from state {} via token {}", top.state_id.0, token_id.0);
                           // optional shift part
                           if let Some(to) = shift {
+                              crate::debug!(4, " Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
                               next.push(self.push_state(&stack, *to, top.t.clone()));
                           }
                           // every reduce alternative
                           for (len, nts) in reduces {
+                              crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top.state_id.0, token_id.0, nts);
                               for (nt, _prod_ids) in nts {        // we ignore prod-ids here
                                   for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
                                       todo.push(ParseState { stack: s });
@@ -5074,6 +5156,8 @@ local_system:
                   // Handle partial matches (tokenizer ended mid-token)
                   if let Some(end_state_id) = results.end_state {
                       // Ensure at least one possible final token parses
+                      // TODO: no need to do this here unless it's needed in is_valid. Don't want to do it in is_valid because it's expensive.
+                      //  Would be better to put this in a lazily-initialized field in each entry in self.states, and compute it only when is_valid is called.
                       let possible_final_grammar_tokens: Vec<_> = self.grammar.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id));
                       for possible_final_grammar_token in possible_final_grammar_tokens {
                           let mut final_glr_state = current_glr_state.clone(); // Clone before stepping
@@ -5371,54 +5455,72 @@ local_system:
               println!("Done precomputing");
           }
       }
-    src/interface/tests.rs: |
-      use crate::interface::IncrementalParser;
-
-      #[cfg(test)]
-      mod tests {
-          use crate::finite_automata::eat_u8;
-          use crate::interface::{choice, sequence, regex, Grammar, IncrementalParser};
-          use crate::tokenizer::TokenizerStateID; // Import necessary types
-
-          #[test]
-          fn test_incremental_parser_simple() {
-              // Grammar: S -> 'a' 'b' | 'a' 'c'
-              let exprs = vec![
-                  (
-                      "S".to_string(),
-                      choice(vec![
-                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))]),
-                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'c'))]),
-                      ]),
-                  ),
-              ];
-              let grammar = Grammar::from_exprs(exprs);
-              let mut parser = IncrementalParser::new(&grammar);
-
-              assert!(parser.is_valid()); // Initial state is valid
-
-              parser.feed(b"a");
-              assert!(parser.is_valid()); // After 'a', still valid (expecting 'b' or 'c')
-              // Check internal state (optional): should have one GLR state in tokenizer state 0
-              // The tokenizer state after matching 'a' should reset to 0.
-              assert_eq!(parser.state.len(), 1, "Expected 1 state after feeding 'a'");
-              assert!(parser.state.contains_key(&TokenizerStateID(0)), "Expected tokenizer state 0 after 'a'");
-
-              parser.feed(b"b");
-              assert!(parser.is_valid()); // After 'ab', it's a valid complete parse
-
-              // Reset and try the other path
-              parser = IncrementalParser::new(&grammar);
-              parser.feed(b"ac");
-              assert!(parser.is_valid()); // After 'ac', also valid
-
-              // Try invalid sequence
-              parser = IncrementalParser::new(&grammar);
-              parser.feed(b"ad");
-              dbg!(&parser.state.keys().collect::<Vec<_>>());
-              assert!(!parser.is_valid()); // After 'ad', invalid
-          }
+    src/macro.rs: |+
+      /// Macro for creating a sequence of parsers
+      #[macro_export]
+      macro_rules! seq_fast {
+          ($($x:expr),* $(,)?) => {
+              $crate::interface::tokenizer_combinators::seq_fast(vec![$($x),*])
+          };
       }
+
+      /// Macro for creating a choice of parsers
+      #[macro_export]
+      macro_rules! choice_fast {
+          ($($x:expr),* $(,)?) => {
+              $crate::interface::tokenizer_combinators::choice_fast(vec![$($x),*])
+          };
+      }
+
+      use chrono::Local; // Import the Local timezone functionality
+
+      #[macro_export]
+      macro_rules! debug {
+          ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {{
+              // Define the compile-time debug level (adjust as needed)
+              const MACRO_DEBUG_LEVEL: usize = 5;
+
+              // Runtime check against the message's level
+              if $level <= MACRO_DEBUG_LEVEL {
+                  // #[cfg(feature = "debug")] // Keep this if you want compile-time stripping
+                  { // Use a block to scope the 'now' variable and the import
+                      // Make chrono, file! and line! available inside the macro expansion
+                      use chrono::Local;
+                      let now = Local::now();
+                      println!(
+                          concat!("[DEBUG {}] {}:{}: ", $fmt), // Add timestamp, file, line placeholders
+                          // now.format("%Y-%m-%d %H:%M:%S%.3f"), // Format the timestamp (YYYY-MM-DD HH:MM:SS.ms)
+                          file!(), line!(), // Add file and line number
+                          $level
+                          $(, $($arg)*)? // Forward the original arguments
+                      );
+                  }
+              }
+          }};
+
+          ($level:expr, $msg:expr) => {{
+              // Define the compile-time debug level (adjust as needed)
+              const MACRO_DEBUG_LEVEL: usize = 5;
+
+              // Runtime check against the message's level
+              if $level <= MACRO_DEBUG_LEVEL {
+                  // #[cfg(feature = "debug")] // Keep this if you want compile-time stripping
+                  { // Use a block to scope the 'now' variable and the import
+                      // Make chrono, file! and line! available inside the macro expansion
+                      use chrono::Local;
+                      let now = Local::now();
+                      println!(
+                          "[DEBUG {}] {}:{}: {:?}", // Add timestamp, file, line placeholders
+                          // now.format("%Y-%m-%d %H:%M:%S%.3f"), // Format the timestamp
+                          file!(), line!(), // Add file and line number
+                          $level,
+                          $msg // Forward the original message expression
+                      );
+                  }
+              }
+          }};
+      }
+
   diffs_applied_this_send: true
 system:
   message: |2
@@ -5450,7 +5552,7 @@ messages:
       use pyo3::prelude::*;
       use pyo3::types::{PyDict};
       use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-      use sep1::glr::parser::GLRParser;
+      use sep1::glr::parser::{GLRParser, GLRParserState};
       use sep1::glr::table::{generate_glr_parser, StateID};
       use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence};
       use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
@@ -5459,6 +5561,7 @@ messages:
       use std::sync::Arc;
       use ouroboros::self_referencing;
       use numpy::{IntoPyArray, PyArray1, ToPyArray};
+      use sep1::interface::IncrementalParser; // Added import
 
       #[pyclass]
       #[derive(Clone)]
@@ -5687,6 +5790,8 @@ messages:
               // print_precomputed(&self.inner.precomputed);
               println!("Printing precomputed data is not implemented in this binding yet.");
           }
+          
+          
       }
 
 
@@ -5740,6 +5845,42 @@ messages:
           }
       }
 
+      #[self_referencing]
+      struct PyIncrementalParserWrapper {
+          // Owns the grammar
+          grammar: PyGrammar,
+          // Borrows from the owned grammar via the 'this lifetime
+          #[borrows(grammar)]
+          #[covariant] // Allows the lifetime 'this to be shortened
+          parser: IncrementalParser<'this>,
+      }
+
+      #[pyclass]
+      pub struct PyIncrementalParser {
+          inner: PyIncrementalParserWrapper,
+      }
+
+      #[pymethods]
+      impl PyIncrementalParser {
+          #[new]
+          fn new(grammar: PyGrammar) -> PyResult<Self> {
+              Ok(PyIncrementalParser {
+                  inner: PyIncrementalParserWrapperTryBuilder {
+                      grammar,
+                      parser_builder: |g: &PyGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
+                  }.try_build()?
+              })
+          }
+
+          fn feed(&mut self, bytes: &[u8]) {
+              self.inner.with_parser_mut(|p| p.feed(bytes));
+          }
+
+          fn is_valid(&self) -> bool {
+              self.inner.with_parser(|p| p.is_valid())
+          }
+      }
+
       #[pymodule]
       fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
           m.add_class::<PyGrammarExpr>()?;
@@ -5749,8 +5890,10 @@ messages:
           m.add_class::<PyGrammar>()?;
           m.add_class::<PyGrammarConstraint>()?;
           m.add_class::<PyGrammarConstraintState>()?;
+          m.add_class::<PyIncrementalParser>()?; // Added class
           Ok(())
       }
+
       ```
     metadata:
       filename: python/src/lib.rs
@@ -5768,7 +5911,7 @@ messages:
       import numpy as np
       import pegen.grammar
       import pegen.grammar_parser
-      import pegen.tokenizer
+      import pegen.tokenizer # type: ignore
       import torch # type: ignore
       from _sep1 import PyRegexExpr as Regex, PyGrammar, PyGrammarExpr as ge, PyGrammarConstraint, PyGrammarConstraintState
       from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
@@ -5780,23 +5923,6 @@ messages:
               return Regex.eat_u8(ord(s[0]))
           else:
               return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
-      #     print(f"After '():': valid={inc_parser.is_valid()}")
-      #     print("--- End Incremental Parser Demo ---")
-
-      #     print("--- End Incremental Parser Demo ---")
-
-      #     # DEMO: Incremental Parser
-      #     from _sep1 import PyIncrementalParser
-      #     print("\n--- Incremental Parser Demo ---")
-      #     inc_parser = PyIncrementalParser(grammar)
-      #     print(f"Initial valid: {inc_parser.is_valid()}")
-      #     inc_parser.feed(b"def ")
-      #     print(f"After 'def ': valid={inc_parser.is_valid()}")
-      #     inc_parser.feed(b"my_func")
-      #     print(f"After 'my_func': valid={inc_parser.is_valid()}")
-      #     inc_parser.feed(b"():")
-      #     print(f"After '():': valid={inc_parser.is_valid()}")
-      #     print("--- End Incremental Parser Demo ---")
       def rule_name_is_valid(name: str) -> bool:
           return not name.startswith("invalid_")
           # TODO: delete this
@@ -5931,7 +6057,7 @@ messages:
           exprs: list[tuple[str, Any]] = []
 
           # Make sure the start production is first
-          exprs.append(("start'''", ge.ref("file")))
+      #     exprs.append(("start'''", ge.ref("file")))
       #     # TODO: delete this
       #     # Add a rule for "hello=world$" to the start rule
       #     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
@@ -5939,9 +6065,9 @@ messages:
       #     exprs.append(("file", ge.sequence([ge.regex(eat("fk")), ge.regex(eat("ing"))])))
 
       #     # TODO: delete this
-      #     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
-      #     SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g", "h"]
-      #     exprs.append(("file", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
+          exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
+          SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g", "h"]
+          exprs.append(("file", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
 
       #     # TODO: delete this
       #     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.regex(eat("hello"))])))
@@ -6034,6 +6160,7 @@ messages:
           return tokenizer.decode(output[0], skip_special_tokens=True)
 
       if __name__ == "__main__":
+          from _sep1 import PyIncrementalParser # Import here after module is built
           model_name = "Qwen/Qwen2.5-Coder-0.5B"
       #     model_name = "gpt2"
           tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -6092,6 +6219,7 @@ messages:
       #     print("Initializing parser...")
       #     parser = grammar.glr_parser()
       #     parser.print()
+          grammar.glr_parser().print()
           print("Initializing grammar constraint...")
           grammar_constraint = PyGrammarConstraint(grammar, llm_token_to_id, max(llm_token_to_id.values()))
           print("Initializing grammar constraint state...")
@@ -6107,8 +6235,8 @@ messages:
       #     input_text = "5*6 + 7*2 = 5+5+5+"
 
           pre_input_text = ""
-          input_text = "hello="
-          expected_next_token = "world"
+          input_text = "hello"
+          expected_next_token = "="
 
           # DEMO: Get the mask
           mask = grammar_constraint_state.get_mask()
@@ -6119,9 +6247,9 @@ messages:
           print(f"Mask Tokens: {mask_token_ids}")
 
           # DEMO: Incremental Parser
-          parser_state = PyIncrementalParser(grammar)
+          parser_state = PyIncrementalParser(grammar) # Use the imported class
           print(f"Initial valid: {parser_state.is_valid()}")
-          parser_state.feed(input_text)
+          parser_state.feed(input_text.encode("utf-8"))
           print(f"After '{input_text}': valid={parser_state.is_valid()}")
           print("--- End Incremental Parser Demo ---")
 
@@ -7218,6 +7346,7 @@ messages:
                   let top = parent.peek();
                   let goto = self.parser.stage_7_table[&top.state_id].gotos[&nt];
                   let merged_t = top.t.intersect(cur_t);
+                  crate::debug!(4, "  Goto from state {} to state {}", top.state_id.0, goto.0);
                   out.push(Arc::new(parent.push(ParseStateNodeContent {
                       state_id: goto,
                       t: merged_t,
@@ -7291,12 +7420,14 @@ messages:
                   match row.shifts_and_reduces.get(&token_id) {
                       /* ------ 1. plain shift ------ */
                       Some(Stage7ShiftsAndReduces::Shift(to)) => {
+                          crate::debug!(4, "Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
                           next.push(self.push_state(&stack, *to, top.t.clone()));
                       }
 
                       /* ------ 2. single reduce ------ */
                       Some(Stage7ShiftsAndReduces::Reduce{ nonterminal_id: nt,
                                                            len, .. }) => {
+                          crate::debug!(4, "Reduce from state {} via token {} to nonterminal {}", top.state_id.0, token_id.0, nt.0);
                           for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
                               todo.push(ParseState { stack: s });
                           }
@@ -7304,12 +7435,15 @@ messages:
 
                       /* ------ 3. shift / reduce split ------ */
                       Some(Stage7ShiftsAndReduces::Split { shift, reduces }) => {
+                          crate::debug!(4, "Split from state {} via token {}", top.state_id.0, token_id.0);
                           // optional shift part
                           if let Some(to) = shift {
+                              crate::debug!(4, " Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
                               next.push(self.push_state(&stack, *to, top.t.clone()));
                           }
                           // every reduce alternative
                           for (len, nts) in reduces {
+                              crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top.state_id.0, token_id.0, nts);
                               for (nt, _prod_ids) in nts {        // we ignore prod-ids here
                                   for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
                                       todo.push(ParseState { stack: s });
@@ -7824,6 +7958,8 @@ messages:
                   // Handle partial matches (tokenizer ended mid-token)
                   if let Some(end_state_id) = results.end_state {
                       // Ensure at least one possible final token parses
+                      // TODO: no need to do this here unless it's needed in is_valid. Don't want to do it in is_valid because it's expensive.
+                      //  Would be better to put this in a lazily-initialized field in each entry in self.states, and compute it only when is_valid is called.
                       let possible_final_grammar_tokens: Vec<_> = self.grammar.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id));
                       for possible_final_grammar_token in possible_final_grammar_tokens {
                           let mut final_glr_state = current_glr_state.clone(); // Clone before stepping
@@ -8126,222 +8262,207 @@ messages:
     metadata:
       filename: src/interface/interface.rs
   - user: |-
-      ```rust 'src/interface/tests.rs'
-      use crate::interface::IncrementalParser;
-
-      #[cfg(test)]
-      mod tests {
-          use crate::finite_automata::eat_u8;
-          use crate::interface::{choice, sequence, regex, Grammar, IncrementalParser};
-          use crate::tokenizer::TokenizerStateID; // Import necessary types
-
-          #[test]
-          fn test_incremental_parser_simple() {
-              // Grammar: S -> 'a' 'b' | 'a' 'c'
-              let exprs = vec![
-                  (
-                      "S".to_string(),
-                      choice(vec![
-                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))]),
-                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'c'))]),
-                      ]),
-                  ),
-              ];
-              let grammar = Grammar::from_exprs(exprs);
-              let mut parser = IncrementalParser::new(&grammar);
-
-              assert!(parser.is_valid()); // Initial state is valid
-
-              parser.feed(b"a");
-              assert!(parser.is_valid()); // After 'a', still valid (expecting 'b' or 'c')
-              // Check internal state (optional): should have one GLR state in tokenizer state 0
-              // The tokenizer state after matching 'a' should reset to 0.
-              assert_eq!(parser.state.len(), 1, "Expected 1 state after feeding 'a'");
-              assert!(parser.state.contains_key(&TokenizerStateID(0)), "Expected tokenizer state 0 after 'a'");
-
-              parser.feed(b"b");
-              assert!(parser.is_valid()); // After 'ab', it's a valid complete parse
-
-              // Reset and try the other path
-              parser = IncrementalParser::new(&grammar);
-              parser.feed(b"ac");
-              assert!(parser.is_valid()); // After 'ac', also valid
-
-              // Try invalid sequence
-              parser = IncrementalParser::new(&grammar);
-              parser.feed(b"ad");
-              dbg!(&parser.state.keys().collect::<Vec<_>>());
-              assert!(!parser.is_valid()); // After 'ad', invalid
-          }
+      ```rust 'src/macro.rs'
+      /// Macro for creating a sequence of parsers
+      #[macro_export]
+      macro_rules! seq_fast {
+          ($($x:expr),* $(,)?) => {
+              $crate::interface::tokenizer_combinators::seq_fast(vec![$($x),*])
+          };
       }
 
+      /// Macro for creating a choice of parsers
+      #[macro_export]
+      macro_rules! choice_fast {
+          ($($x:expr),* $(,)?) => {
+              $crate::interface::tokenizer_combinators::choice_fast(vec![$($x),*])
+          };
+      }
+
+      use chrono::Local; // Import the Local timezone functionality
+
+      #[macro_export]
+      macro_rules! debug {
+          ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {{
+              // Define the compile-time debug level (adjust as needed)
+              const MACRO_DEBUG_LEVEL: usize = 5;
+
+              // Runtime check against the message's level
+              if $level <= MACRO_DEBUG_LEVEL {
+                  // #[cfg(feature = "debug")] // Keep this if you want compile-time stripping
+                  { // Use a block to scope the 'now' variable and the import
+                      // Make chrono, file! and line! available inside the macro expansion
+                      use chrono::Local;
+                      let now = Local::now();
+                      println!(
+                          concat!("[DEBUG {}] {}:{}: ", $fmt), // Add timestamp, file, line placeholders
+                          // now.format("%Y-%m-%d %H:%M:%S%.3f"), // Format the timestamp (YYYY-MM-DD HH:MM:SS.ms)
+                          file!(), line!(), // Add file and line number
+                          $level
+                          $(, $($arg)*)? // Forward the original arguments
+                      );
+                  }
+              }
+          }};
+
+          ($level:expr, $msg:expr) => {{
+              // Define the compile-time debug level (adjust as needed)
+              const MACRO_DEBUG_LEVEL: usize = 5;
+
+              // Runtime check against the message's level
+              if $level <= MACRO_DEBUG_LEVEL {
+                  // #[cfg(feature = "debug")] // Keep this if you want compile-time stripping
+                  { // Use a block to scope the 'now' variable and the import
+                      // Make chrono, file! and line! available inside the macro expansion
+                      use chrono::Local;
+                      let now = Local::now();
+                      println!(
+                          "[DEBUG {}] {}:{}: {:?}", // Add timestamp, file, line placeholders
+                          // now.format("%Y-%m-%d %H:%M:%S%.3f"), // Format the timestamp
+                          file!(), line!(), // Add file and line number
+                          $level,
+                          $msg // Forward the original message expression
+                      );
+                  }
+              }
+          }};
+      }
+
+
       ```
     metadata:
-      filename: src/interface/tests.rs
+      filename: src/macro.rs
   - user: |-
-      I want to add to interface.rs a struct that holds a GLRParserState *and* its grammar, and manages incremental parsing for us.
-      It should support feeding in bytes and checking whether the current state is valid.
-      To see if the current state is valid, we need to get all tokens available from the current tokenizer state (which we'll need to track) using tokens_accessible_from_state and feed them into the parser. If any of them succeeds, the current state is valid. If any of the states are the initial state, it's automatically valid (we don't need to feed the final tokens into the parser).
-      Actually yes, kind of like GrammarConstraintState.state, we'll need to store a map from tokenizer state to GLR parser state.
-      When we get a result for a token, we'll need to feed it to the parser, and then set the tokenizer state to 0 and add it back to the states map, merging with any existing glr parser state.
-
-      At the beginning of IncrementalParser::feed, initialize a queue called 'todo' of states to process. Make it a btree map from position to a (single (merged)) GLRParserState. Start all at position 0 (ie position is relative to the passed 'bytes', not counting previously passed inputs).
-      If there's an end state, we add that to the final states.
-      For each match, we feed it into the parser and push the resulting state to the queue under the appropriate position (current pos + match width), merging if there's already an entry under that position.
-      EXCEPT if the match takes us to the end of the bytes. THEN we add an entry to the final states (also merging if necessary).
-
-      Update just interface.rs, completing the todo!() (I think that's all we need).
-
-      Update interface/tests.rs.
-
-      Modify lib.rs to make it easy to parse incrementally from Python.
-
-      ---
-
-      I've done most of this stuff, but lib.rs for the Python interface still needs to be updated.
+      Make it possible to specify a file filter in macro.rs. eg I might only want to show statements for parser.rs.
+      Since we can get the filepath and line number of the macro call, we should be able to filter by path, right?
+      Hardcode the files we want to show into the macro.
     metadata:
   - assistant: |-
-      Okay, let's add the Python bindings for the `IncrementalParser`.
+      Okay, I can modify the `debug!` macro to include a hardcoded file filter.
+
+      Here's the updated `src/macro.rs` with the filtering logic:
 
       ```diff
-      --- a/python/src/lib.rs
-      +++ b/python/src/lib.rs
-      @@ -6,7 +6,7 @@
-       use pyo3::prelude::*;
-       use pyo3::types::{PyDict};
-       use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-      -use sep1::glr::parser::GLRParser;
-      +use sep1::glr::parser::{GLRParser, GLRParserState};
-       use sep1::glr::table::{generate_glr_parser, StateID};
-       use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence};
-       use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
-      @@ -15,6 +15,7 @@
-       use std::sync::Arc;
-       use ouroboros::self_referencing;
-       use numpy::{IntoPyArray, PyArray1, ToPyArray};
-      +use sep1::interface::IncrementalParser; // Added import
+      --- a/src/macro.rs
+      +++ b/src/macro.rs
+      @@ -17,11 +17,17 @@
+       #[macro_export]
+       macro_rules! debug {
+           ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {{
+      -        // Define the compile-time debug level (adjust as needed)
+      +        // --- Configuration ---
+               const MACRO_DEBUG_LEVEL: usize = 5;
+      +        // List of filenames (not full paths) to allow debug messages from.
+      +        // Example: &["parser.rs", "constraint.rs"]
+      +        const ALLOWED_FILES: &[&str] = &[
+      +            // "parser.rs", // Example: Uncomment to allow messages from parser.rs
+      +            // "constraint.rs", // Example: Uncomment to allow messages from constraint.rs
+      +            // Add more filenames here as needed
+      +        ];
+      +        // --- End Configuration ---
        
-       #[pyclass]
-       #[derive(Clone)]
-      @@ -231,6 +232,40 @@
-           }
+      -        // Runtime check against the message's level
+      -        if $level <= MACRO_DEBUG_LEVEL {
+                   // #[cfg(feature = "debug")] // Keep this if you want compile-time stripping
+                   { // Use a block to scope the 'now' variable and the import
+                       // Make chrono, file! and line! available inside the macro expansion
+      @@ -29,13 +35,21 @@
+                       let now = Local::now();
+                       println!(
+                           concat!("[DEBUG {}] {}:{}: ", $fmt), // Add timestamp, file, line placeholders
+      -                    // now.format("%Y-%m-%d %H:%M:%S%.3f"), // Format the timestamp (YYYY-MM-DD HH:MM:SS.ms)
+                           file!(), line!(), // Add file and line number
+                           $level
+                           $(, $($arg)*)? // Forward the original arguments
+                       );
+                   }
+               }
+      +
+      +        // Runtime check against the message's level and file path
+      +        if $level <= MACRO_DEBUG_LEVEL {
+      +            let current_file_path = std::path::Path::new(file!());
+      +            let current_filename = current_file_path.file_name().map_or("", |os_str| os_str.to_str().unwrap_or(""));
+      +
+      +            // Allow if ALLOWED_FILES is empty (no filter) or if the current file is in the list
+      +            if ALLOWED_FILES.is_empty() || ALLOWED_FILES.contains(&current_filename) {
+      +                // #[cfg(feature = "debug")] // Keep this if you want compile-time stripping
+      +                { // Use a block to scope the 'now' variable and the import
+      +                    // Make chrono, file! and line! available inside the macro expansion
+      +                    use chrono::Local;
+      +                    let now = Local::now();
+      +                    println!(
+      +                        concat!("[DEBUG {}] {}:{}: ", $fmt), // Add timestamp, file, line placeholders
+      +                        file!(), line!(), // Add file and line number
+      +                        $level
+      +                        $(, $($arg)*)? // Forward the original arguments
+      +                    );
+      +                }
+      +            }
+      +        }
+           }};
+       
+           ($level:expr, $msg:expr) => {{
+               // Define the compile-time debug level (adjust as needed)
+               const MACRO_DEBUG_LEVEL: usize = 5;
+      +        // List of filenames (not full paths) to allow debug messages from.
+      +        // Example: &["parser.rs", "constraint.rs"]
+      +        const ALLOWED_FILES: &[&str] = &[
+      +            // "parser.rs", // Example: Uncomment to allow messages from parser.rs
+      +            // "constraint.rs", // Example: Uncomment to allow messages from constraint.rs
+      +            // Add more filenames here as needed
+      +        ];
+       
+      -        // Runtime check against the message's level
+      -        if $level <= MACRO_DEBUG_LEVEL {
+      +        // Runtime check against the message's level and file path
+      +        if $level <= MACRO_DEBUG_LEVEL {
+      +            let current_file_path = std::path::Path::new(file!());
+      +            let current_filename = current_file_path.file_name().map_or("", |os_str| os_str.to_str().unwrap_or(""));
+      +
+      +            // Allow if ALLOWED_FILES is empty (no filter) or if the current file is in the list
+      +            if ALLOWED_FILES.is_empty() || ALLOWED_FILES.contains(&current_filename) {
+                   // #[cfg(feature = "debug")] // Keep this if you want compile-time stripping
+                   { // Use a block to scope the 'now' variable and the import
+                       // Make chrono, file! and line! available inside the macro expansion
+      @@ -43,7 +57,6 @@
+                       let now = Local::now();
+                       println!(
+                           "[DEBUG {}] {}:{}: {:?}", // Add timestamp, file, line placeholders
+      -                    // now.format("%Y-%m-%d %H:%M:%S%.3f"), // Format the timestamp
+                           file!(), line!(), // Add file and line number
+                           $level,
+                           $msg // Forward the original message expression
+      @@ -51,5 +64,6 @@
+                   }
+               }
+           }};
+      +    }
        }
        
-      +#[self_referencing]
-      +struct PyIncrementalParserWrapper {
-      +    // Owns the grammar
-      +    grammar: PyGrammar,
-      +    // Borrows from the owned grammar via the 'this lifetime
-      +    #[borrows(grammar)]
-      +    #[covariant] // Allows the lifetime 'this to be shortened
-      +    parser: IncrementalParser<'this>,
-      +}
-      +
-      +#[pyclass]
-      +pub struct PyIncrementalParser {
-      +    inner: PyIncrementalParserWrapper,
-      +}
-      +
-      +#[pymethods]
-      +impl PyIncrementalParser {
-      +    #[new]
-      +    fn new(grammar: PyGrammar) -> PyResult<Self> {
-      +        Ok(PyIncrementalParser {
-      +            inner: PyIncrementalParserWrapperTryBuilder {
-      +                grammar,
-      +                parser_builder: |g: &PyGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
-      +            }.try_build()?
-      +        })
-      +    }
-      +
-      +    fn feed(&mut self, bytes: &[u8]) {
-      +        self.inner.with_parser_mut(|p| p.feed(bytes));
-      +    }
-      +
-      +    fn is_valid(&self) -> bool {
-      +        self.inner.with_parser(|p| p.is_valid())
-      +    }
-      +}
-      +
-       #[pymodule]
-       fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-           m.add_class::<PyGrammarExpr>()?;
-      @@ -240,5 +275,6 @@
-           m.add_class::<PyGrammar>()?;
-           m.add_class::<PyGrammarConstraint>()?;
-           m.add_class::<PyGrammarConstraintState>()?;
-      +    m.add_class::<PyIncrementalParser>()?; // Added class
-           Ok(())
-       }
+
       ```
 
-      ```diff
-      --- a/examples/python/python_grammar.py
-      +++ b/examples/python/python_grammar.py
-      @@ -8,7 +8,7 @@
-       import numpy as np
-       import pegen.grammar
-       import pegen.grammar_parser
-      -import pegen.tokenizer
-      +import pegen.tokenizer # type: ignore
-       import torch # type: ignore
-       from _sep1 import PyRegexExpr as Regex, PyGrammar, PyGrammarExpr as ge, PyGrammarConstraint, PyGrammarConstraintState
-       from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
-      @@ -20,19 +20,6 @@
-               return Regex.eat_u8(ord(s[0]))
-           else:
-               return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
-      -#     print(f"After '():': valid={inc_parser.is_valid()}")
-      -#     print("--- End Incremental Parser Demo ---")
-      -
-      -#     print("--- End Incremental Parser Demo ---")
-      -
-      -#     # DEMO: Incremental Parser
-      -#     from _sep1 import PyIncrementalParser
-      -#     print("\n--- Incremental Parser Demo ---")
-      -#     inc_parser = PyIncrementalParser(grammar)
-      -#     print(f"Initial valid: {inc_parser.is_valid()}")
-      -#     inc_parser.feed(b"def ")
-      -#     print(f"After 'def ': valid={inc_parser.is_valid()}")
-      -#     inc_parser.feed(b"my_func")
-      -#     print(f"After 'my_func': valid={inc_parser.is_valid()}")
-      -#     inc_parser.feed(b"():")
-      -#     print(f"After '():': valid={inc_parser.is_valid()}")
-      -#     print("--- End Incremental Parser Demo ---")
-       def rule_name_is_valid(name: str) -> bool:
-           return not name.startswith("invalid_")
-           # TODO: delete this
-      @@ -261,6 +248,7 @@
-           return tokenizer.decode(output[0], skip_special_tokens=True)
-       
-       if __name__ == "__main__":
-      +    from _sep1 import PyIncrementalParser # Import here after module is built
-           model_name = "Qwen/Qwen2.5-Coder-0.5B"
-       #     model_name = "gpt2"
-           tokenizer = AutoTokenizer.from_pretrained(model_name)
-      @@ -338,7 +326,7 @@
-           print(f"Mask Tokens: {mask_token_ids}")
-       
-           # DEMO: Incremental Parser
-      -    parser_state = PyIncrementalParser(grammar)
-      +    parser_state = PyIncrementalParser(grammar) # Use the imported class
-           print(f"Initial valid: {parser_state.is_valid()}")
-           parser_state.feed(input_text)
-           print(f"After '{input_text}': valid={parser_state.is_valid()}")
-      ```
+      **Explanation:**
+
+      1.  **`ALLOWED_FILES` Constant:** A `const` array `ALLOWED_FILES` is added at the beginning of each macro variant. You can uncomment or add filenames (like `"parser.rs"`, `"constraint.rs"`) to this list to specify which files should produce debug output.
+      2.  **Get Filename:** `std::path::Path::new(file!()).file_name()` is used to extract just the filename part from the full path provided by `file!()`.
+      3.  **Filtering Logic:**
+          *   The `if $level <= MACRO_DEBUG_LEVEL` check remains.
+          *   An additional check `ALLOWED_FILES.is_empty() || ALLOWED_FILES.contains(&current_filename)` is added.
+          *   This means the message will be printed if:
+              *   The debug level is sufficient **AND**
+              *   Either the `ALLOWED_FILES` list is empty (meaning no filtering is applied) **OR** the filename where the `debug!` macro is called is present in the `ALLOWED_FILES` list.
+      4.  **Applied to Both Variants:** This logic is duplicated in both the `fmt` (formatted string) and `msg` (expression) variants of the macro.
+
+      Now, you can control which files' debug messages appear by modifying the `ALLOWED_FILES` array within the macro definition itself. If the array is empty, all debug messages (respecting the `MACRO_DEBUG_LEVEL`) will be shown.
     metadata:
   - user: |
       Git apply result:
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/src/lib.rs
-      Applying patch to 'python/src/lib.rs' using custom patcher...
-      Successfully applied patch and wrote to python/src/lib.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: examples/python/python_grammar.py
-      Applying patch to 'examples/python/python_grammar.py' using custom patcher...
-      Successfully applied patch and wrote to examples/python/python_grammar.py.
+      Identified target file: src/macro.rs
+      Applying patch to 'src/macro.rs' using custom patcher...
+      Successfully applied patch and wrote to src/macro.rs.
     metadata:
 ...

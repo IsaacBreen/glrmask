@@ -282,7 +282,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
             let top = parent.peek();
             let goto = self.parser.stage_7_table[&top.state_id].gotos[&nt];
             let merged_t = top.t.intersect(cur_t);
-            crate::debug!(5, "  Goto from state {} to state {}", top.state_id.0, goto.0);
+            crate::debug!(4, "  Goto from state {} to state {}", top.state_id.0, goto.0);
             out.push(Arc::new(parent.push(ParseStateNodeContent {
                 state_id: goto,
                 t: merged_t,
@@ -356,14 +356,14 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
             match row.shifts_and_reduces.get(&token_id) {
                 /* ------ 1. plain shift ------ */
                 Some(Stage7ShiftsAndReduces::Shift(to)) => {
-                    crate::debug!(5, "Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
+                    crate::debug!(4, "Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
                     next.push(self.push_state(&stack, *to, top.t.clone()));
                 }
 
                 /* ------ 2. single reduce ------ */
                 Some(Stage7ShiftsAndReduces::Reduce{ nonterminal_id: nt,
                                                      len, .. }) => {
-                    crate::debug!(5, "Reduce from state {} via token {} to nonterminal {}", top.state_id.0, token_id.0, nt.0);
+                    crate::debug!(4, "Reduce from state {} via token {} to nonterminal {}", top.state_id.0, token_id.0, nt.0);
                     for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
                         todo.push(ParseState { stack: s });
                     }
@@ -371,15 +371,15 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
 
                 /* ------ 3. shift / reduce split ------ */
                 Some(Stage7ShiftsAndReduces::Split { shift, reduces }) => {
-                    crate::debug!(5, "Split from state {} via token {}", top.state_id.0, token_id.0);
+                    crate::debug!(4, "Split from state {} via token {}", top.state_id.0, token_id.0);
                     // optional shift part
                     if let Some(to) = shift {
-                        crate::debug!(5, " Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
+                        crate::debug!(4, " Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
                         next.push(self.push_state(&stack, *to, top.t.clone()));
                     }
                     // every reduce alternative
                     for (len, nts) in reduces {
-                        crate::debug!(5, " Reduce from state {} via token {} to nonterminals {:?}", top.state_id.0, token_id.0, nts);
+                        crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top.state_id.0, token_id.0, nts);
                         for (nt, _prod_ids) in nts {        // we ignore prod-ids here
                             for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
                                 todo.push(ParseState { stack: s });
