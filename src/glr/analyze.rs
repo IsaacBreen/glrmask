@@ -246,8 +246,6 @@ pub fn validate(productions: &[Production]) -> Result<(), String> {
 /// This is useful for cleaning up grammars before further analysis or parser generation,
 /// especially if the grammar might contain references to non-terminals that have no rules.
 pub fn remove_productions_with_undefined_nonterminals(initial_productions: &[Production]) -> Vec<Production> {
-    // TODO: delete this
-    return initial_productions.to_vec();
     let mut current_productions = initial_productions.to_vec();
     let mut changed = true;
 
@@ -281,8 +279,6 @@ pub fn remove_productions_with_undefined_nonterminals(initial_productions: &[Pro
 
 // TODO: This function is marked as broken and is not modified by this request.
 pub fn drop_dead(productions: &[Production]) -> Vec<Production> {
-    // TODO: delete this
-    return productions.to_vec();
     // todo: this function is broken
     let mut nt_reachables: BTreeMap<&NonTerminal, BTreeSet<&NonTerminal>> = BTreeMap::new();
 

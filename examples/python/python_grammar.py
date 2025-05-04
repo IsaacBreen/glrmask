@@ -162,9 +162,13 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
 #     exprs.append(("start'''", ge.ref("file")))
     # TODO: delete this
     # Add a rule for "hello=world$" to the start rule
-#     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
-    exprs.append(("start'''", ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])))
-    exprs.append(("S'", ge.sequence([ge.regex(eat("fk")), ge.regex(eat("ing"))])))
+    exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
+#     exprs.append(("start'''", ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])))
+#     exprs.append(("file", ge.sequence([ge.regex(eat("fk")), ge.regex(eat("ing"))])))
+
+    # TODO: delete this
+    SOFT_KEYWORDS = ["if", "else", "elif", "while", "for", "try", "except", "finally", "def", "class", "with", "pass", "break", "continue", "return", "assert", "raise", "global", "nonlocal", "del", "yield", "import", "from", "as"]
+    exprs.append(("file", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
 
     for rule in grammar.rules.values():
         memo[rule.name] = ge.ref(rule.name)
