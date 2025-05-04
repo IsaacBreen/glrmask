@@ -405,6 +405,8 @@ impl<'a> IncrementalParser<'a> {
             // Handle partial matches (tokenizer ended mid-token)
             if let Some(end_state_id) = results.end_state {
                 // Ensure at least one possible final token parses
+                // TODO: no need to do this here unless it's needed in is_valid. Don't want to do it in is_valid because it's expensive.
+                //  Would be better to put this in a lazily-initialized field in each entry in self.states, and compute it only when is_valid is called.
                 let possible_final_grammar_tokens: Vec<_> = self.grammar.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id));
                 for possible_final_grammar_token in possible_final_grammar_tokens {
                     let mut final_glr_state = current_glr_state.clone(); // Clone before stepping
