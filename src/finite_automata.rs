@@ -2209,7 +2209,7 @@ mod test_full_python_tokenizer_recognizes_name {
 
         let expr_groups = groups(token_groups);
         let regex = expr_groups.build();
-        // dbg!(®ex); // Uncomment for debugging DFA structure
+        // dbg!(ex); // Uncomment for debugging DFA structure
 
         let mut state = regex.init();
         state.execute(b"hello");
