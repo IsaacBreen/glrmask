@@ -313,7 +313,7 @@ if __name__ == "__main__":
 #     input_text = "5*6 + 7*2 = 5+5+5+"
 
     pre_input_text = ""
-    input_text = "hello"
+    input_text = "hello="
     expected_next_token = "world"
 
     # DEMO: Get the mask
