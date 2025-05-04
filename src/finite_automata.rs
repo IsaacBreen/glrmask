@@ -2116,7 +2116,7 @@ mod test_full_python_tokenizer_recognizes_name {
         let ignore = rep(choice![
              eat_u8(b' '),
              // Basic comment handling for the test
-             seq![eat_u8(b'#'), rep(Expr::U8Class(U8Set::all().remove(b'\n'))), opt(eat_u8(b'\n'))],
+             seq![eat_u8(b'#'), rep(Expr::U8Class(U8Set::all().without(b'\n'))), opt(eat_u8(b'\n'))],
              // Note: Real Python tokenizer handles more complex whitespace and line continuations
          ]);
 
@@ -2132,8 +2132,8 @@ mod test_full_python_tokenizer_recognizes_name {
                 // Simplified: Not including hex, oct, bin, complex for this test focus
             ]),
             ("STRING", choice![
-                seq![eat_u8(b'"'), rep(Expr::U8Class(U8Set::all().remove(b'"'))), eat_u8(b'"')],
-                seq![eat_u8(b'\''), rep(Expr::U8Class(U8Set::all().remove(b'\''))), eat_u8(b'\'')],
+                seq![eat_u8(b'"'), rep(Expr::U8Class(U8Set::all().without(b'"'))), eat_u8(b'"')],
+                seq![eat_u8(b'\''), rep(Expr::U8Class(U8Set::all().without(b'\''))), eat_u8(b'\'')],
                 // Simplified: Not including triple quotes, prefixes like r"", f"", etc.
             ]),
             ("FSTRING_START", Expr::U8Seq(b"f'".to_vec())), // Example, needs more variants

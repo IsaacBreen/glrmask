@@ -111,6 +111,14 @@ impl U8Set {
     pub fn from_char_negation_range(range: impl IntoIterator<Item = u8>) -> U8Set {
         Self::from_byte_range(range).complement()
     }
+    
+    pub fn from_slice(slice: &[u8]) -> Self {
+        let mut result = Self::none();
+        for byte in slice {
+            result.insert(*byte);
+        }
+        result
+    }
 
     #[inline]
     pub fn insert(&mut self, value: u8) -> bool {
@@ -133,6 +141,18 @@ impl U8Set {
         }
     }
 
+    pub fn without(&self, value: impl Into<u8>) -> Self {
+        let mut result = self.clone();
+        result.remove(value.into());
+        result
+    }
+
+    pub fn difference(&self, other: &Self) -> Self {
+        let mut result = self.clone();
+        result.x &= !other.x;
+        result.y &= !other.y;
+        result
+    }
 
     #[inline]
     pub fn contains(&self, value: impl Into<u8>) -> bool {
