@@ -251,7 +251,11 @@ if __name__ == "__main__":
 #     # Set the vocab to just underscores
 #     tokenizer_vocab = {"_": 0, "__": 1}
 #
+#     # Set the vocab to just "a" and "aa"
 #     tokenizer_vocab = {"a": 0, "aa": 1}
+#
+#     # Set the vocab to "hello" "=" "world"
+#     tokenizer_vocab = {"hello": 0, "=": 1, "world": 2}
 
     llm_token_to_id = {token.replace("Ġ", " ").encode(): i for token, i in tokenizer_vocab.items()}
     llm_tokens = list(tokenizer_vocab.keys()) # Use all tokens
@@ -285,7 +289,7 @@ if __name__ == "__main__":
     print("Generating text...")
 #     input_text = "i^10=i*"
 #     input_text = "5*6 + 7*2 = 5+5+5+"
-    input_text = "# hello = world\nhello ="
+    input_text = "hello="
     expected_next_token = "world"
 
     # DEMO: Get the mask
