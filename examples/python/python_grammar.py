@@ -333,8 +333,8 @@ if __name__ == "__main__":
 #     input_text = "5*6 + 7*2 = 5+5+5+"
 
     pre_input_text = ""
-    input_text = "hello="
-    expected_next_token = "world"
+    input_text = "hello"
+    expected_next_token = "="
 
     # DEMO: Get the mask
     mask = grammar_constraint_state.get_mask()
