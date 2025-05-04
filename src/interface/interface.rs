@@ -8,7 +8,7 @@ use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_g
 use crate::tokenizer::LLMTokenID;
 use bimap::BiBTreeMap;
 use kdam::tqdm;
-use std::collections::{BTreeMap, HashSet, HashMap};
+use std::collections::{BTreeMap, HashSet, HashMap, BTreeSet};
 use std::fmt::{Debug, Formatter};
 
 type LLMToken<'a> = &'a [u8];
@@ -386,18 +386,26 @@ impl<'a> IncrementalParser<'a> {
                 next_glr_state.step(grammar_token_id);
 
                 if next_glr_state.is_ok() {
-                    // After a full match, the tokenizer resets to its initial state
-                    let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
-                    next_states.entry(next_tokenizer_state_id)
-                        .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
-                        .or_insert(next_glr_state);
+                    if position + token.width == bytes.len() {
+                        // Reached the end of the input, so this is a clean match
+                        let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
+                        next_states.entry(next_tokenizer_state_id)
+                            .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
+                            .or_insert(next_glr_state.clone()); // Carry over the *original* GLR state
+                    } else {
+                        // After a full match, the tokenizer resets to its initial state
+                        let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
+                        queue.entry((position + token.width, next_tokenizer_state_id))
+                            .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
+                            .or_insert(next_glr_state);
+                    }
                 }
             }
 
             // Handle partial matches (tokenizer ended mid-token)
             if let Some(end_state_id) = results.end_state {
                 // Ensure at least one possible final token parses
-                let possible_final_grammar_tokens: BTreeSet<_> = self.grammar.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id)).into_iter().map(|token_id| GrammarTokenID(token_id.0)).collect();
+                let possible_final_grammar_tokens: Vec<_> = self.grammar.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id));
                 for possible_final_grammar_token in possible_final_grammar_tokens {
                     let mut final_glr_state = current_glr_state.clone(); // Clone before stepping
                     final_glr_state.step(possible_final_grammar_token);
@@ -405,9 +413,10 @@ impl<'a> IncrementalParser<'a> {
                         let next_tokenizer_state_id = TokenizerStateID(end_state_id);
                         next_states.entry(next_tokenizer_state_id)
                             .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
-                            .or_insert(current_glr_state); // Carry over the *original* GLR state
+                            .or_insert(current_glr_state.clone()); // Carry over the *original* GLR state
                     }
                 }
+            }
         }
 
         self.state = next_states;
