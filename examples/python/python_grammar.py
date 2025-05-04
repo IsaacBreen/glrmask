@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import textwrap
 import time
 import tokenize
 from pathlib import Path
@@ -266,6 +267,11 @@ if __name__ == "__main__":
 #
     # Set the vocab to "hello" "=" "world"
     tokenizer_vocab = {"hello": 0, "=": 1, "world": 2}
+
+    # Map the remaining tokens to their proper IDs.
+    actual_vocab = tokenizer.get_vocab()
+    tokenizer_vocab = {token: actual_vocab[token] for token in tokenizer_vocab}
+    print(f"tokenizer_vocab: {textwrap.shorten(str(tokenizer_vocab), width=100)}")
 
     llm_token_to_id = {token.replace("Ġ", " ").encode(): i for token, i in tokenizer_vocab.items()}
     llm_tokens = list(tokenizer_vocab.keys()) # Use all tokens
