@@ -218,7 +218,8 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
         scores = np.where(mask, scores, -np.inf)
         return torch.tensor(scores)
 
-def generate_text(model, tokenizer, grammar_processor, input_text, max_new_tokens=50):
+def generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text, max_new_tokens=50):
+    # TODO: We want pre_input_text to be input to the LLM that isn't passed into the grammar constraint.
     input_ids = tokenizer.encode(input_text, return_tensors="pt")
     grammar_processor.seen_input_ids = input_ids[0].tolist()
     output = model.generate(
@@ -287,8 +288,11 @@ if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(model_name)
 
     print("Generating text...")
+    pre_input_text = ""
 #     input_text = "i^10=i*"
 #     input_text = "5*6 + 7*2 = 5+5+5+"
+
+    pre_input_text = ""
     input_text = "hello="
     expected_next_token = "world"
 
@@ -310,6 +314,6 @@ if __name__ == "__main__":
 
     # DEMO: Generate text.
     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
-#     output_text = generate_text(model, tokenizer, grammar_processor, input_text)
-    output_text = timeit(generate_text)(model, tokenizer, grammar_processor, input_text)
+#     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
+    output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
     print(output_text)
