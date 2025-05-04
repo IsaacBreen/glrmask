@@ -283,8 +283,8 @@ if __name__ == "__main__":
 #     # Set the vocab to just "a" and "aa"
 #     tokenizer_vocab = {"a": 0, "aa": 1}
 #
-    # Set the vocab to "hello" "=" "world"
-    tokenizer_vocab = {"hello": 0, "=": 1, "world": 2}
+#     # Set the vocab to "hello" "=" "world"
+#     tokenizer_vocab = {"hello": 0, "=": 1, "world": 2}
 
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
