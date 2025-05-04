@@ -288,12 +288,13 @@ if __name__ == "__main__":
 #     llm_token_to_id = {token.encode(): tokenizer.convert_tokens_to_ids(token) for token in ts}
 
     print("Defining grammar...")
-#     grammar = define_python_grammar()
-    # TODO: delete this
-    # Define a dummy grammar that only accepts "hello=world"
-    exprs = [("S", ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))]))]
-    grammar = PyGrammar(exprs)
+    grammar = define_python_grammar()
     grammar.print()
+#     # TODO: delete this
+#     # Define a dummy grammar that only accepts "hello=world"
+#     exprs = [("S", ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))]))]
+#     grammar = PyGrammar(exprs)
+#     grammar.print()
 
 #     print("Initializing parser...")
 #     parser = grammar.glr_parser()
