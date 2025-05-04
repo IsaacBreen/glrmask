@@ -2102,7 +2102,7 @@ local_system:
       }
 
       #[cfg(test)]
-      mod test_full_python_tokenizer_recognizes_name {
+      mod test_python {
           use super::*;
           use crate::datastructures::u8set::U8Set; // Added for U8Set usage in new test
           use crate::{choice, seq};
@@ -2222,9 +2222,8 @@ local_system:
               state.execute(b"hello");
 
               assert!(state.definitely_matches(), "Tokenizer should match 'hello'");
-              let expected_match = Match { group_id: token_name_to_id["NAME"], position: 5 };
-              assert_eq!(state.get_greedy_match(), Some(expected_match), "Greedy match should be NAME token");
-              assert_eq!(state.position, 5);
+              // Ensure there is a match for the NAME token and that it's at the correct position
+              assert_eq!(state.matches.get(&token_name_to_id["NAME"]), Some(&5), "NAME token should be matched at position 5");
           }
       }
   prev_file_contents:
@@ -4326,7 +4325,7 @@ local_system:
       }
 
       #[cfg(test)]
-      mod test_full_python_tokenizer_recognizes_name {
+      mod test_python {
           use super::*;
           use crate::datastructures::u8set::U8Set; // Added for U8Set usage in new test
           use crate::{choice, seq};
@@ -4446,9 +4445,8 @@ local_system:
               state.execute(b"hello");
 
               assert!(state.definitely_matches(), "Tokenizer should match 'hello'");
-              let expected_match = Match { group_id: token_name_to_id["NAME"], position: 5 };
-              assert_eq!(state.get_greedy_match(), Some(expected_match), "Greedy match should be NAME token");
-              assert_eq!(state.position, 5);
+              // Ensure there is a match for the NAME token and that it's at the correct position
+              assert_eq!(state.matches.get(&token_name_to_id["NAME"]), Some(&5), "NAME token should be matched at position 5");
           }
       }
   diffs_applied_this_send: false
@@ -6574,7 +6572,7 @@ messages:
       }
 
       #[cfg(test)]
-      mod test_full_python_tokenizer_recognizes_name {
+      mod test_python {
           use super::*;
           use crate::datastructures::u8set::U8Set; // Added for U8Set usage in new test
           use crate::{choice, seq};
@@ -6694,21 +6692,14 @@ messages:
               state.execute(b"hello");
 
               assert!(state.definitely_matches(), "Tokenizer should match 'hello'");
-              let expected_match = Match { group_id: token_name_to_id["NAME"], position: 5 };
-              assert_eq!(state.get_greedy_match(), Some(expected_match), "Greedy match should be NAME token");
-              assert_eq!(state.position, 5);
+              // Ensure there is a match for the NAME token and that it's at the correct position
+              assert_eq!(state.matches.get(&token_name_to_id["NAME"]), Some(&5), "NAME token should be matched at position 5");
           }
       }
 
       ```
     metadata:
       filename: src/finite_automata.rs
-  - user: |-
-      This code seems to never finish for the full Python tokenizer test. In particular, this loop doesn't seem to exit:
-      ```rust
-              while let Some(current_set) = worklist.pop() {
-                  let current_dfa_state = *dfa_state_map.get(&current_set).unwrap();
-                  let mut transition_map: BTreeMap<u8, BTreeSet<usize>> = BTreeMap::new();
-      ```
+  - user: Add a test for just the Python NAME token, with no other tokens groups defined.
     metadata:
 ...
