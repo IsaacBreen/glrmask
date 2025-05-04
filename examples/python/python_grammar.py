@@ -150,7 +150,9 @@ def define_tokens() -> list[tuple[str, Any]]:
     ]))
     tokens["TYPE_COMMENT"] = eps()
     tokens["ENDMARKER"] = eps()
-    return [(name, regex(expr)) for name, expr in tokens.items()]
+#     return [(name, regex(expr)) for name, expr in tokens.items()]
+    # TODO: delete this
+    return []
 
 def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
     memo = {}
@@ -170,7 +172,8 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
             rhs = ge.choice([])
         else:
             rhs = pegen_to_sep1_regex(rule.rhs, memo)
-        exprs.append((rule.name, rhs))
+#        # TODO: uncomment this
+#         exprs.append((rule.name, rhs))
 
     tokens = define_tokens()
     exprs.extend(tokens)
