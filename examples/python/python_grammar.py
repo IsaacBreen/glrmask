@@ -18,7 +18,7 @@ from tqdm import tqdm
 
 def eat(s: bytes) -> Regex:
     if len(s) == 1:
-        return Regex.eat_u8(s[0])
+        return Regex.eat_u8(ord(s[0]))
     else:
         return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
 #     # TODO: delete this
@@ -92,7 +92,7 @@ def define_tokens() -> list[tuple[str, Any]]:
         return choice([eat_u8(ord(c)) for c in s])
 
     def eat_range(start: char, end: char) -> Regex:
-        return seq([Regex.eat_u8(ord(c)) for c in range(ord(start), ord(end) + 1)])
+        return seq([Regex.eat_u8(c) for c in range(ord(start), ord(end) + 1)])
 
     # TODO: Use eg eat("a") instead of eat_u8(ord("a")). It's a bit more readable.
 
