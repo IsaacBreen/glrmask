@@ -21,14 +21,14 @@ macro_rules! debug {
     ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {{
         // --- Configuration ---
         // Define the compile-time debug level (adjust as needed)
-        const MACRO_DEBUG_LEVEL: usize = 5;
+        const MACRO_DEBUG_LEVEL: usize = 2;
         // List of filenames (not full paths) to allow debug messages from.
         // If empty, all files are allowed (respecting MACRO_DEBUG_LEVEL).
         // Example: &["parser.rs", "constraint.rs"]
         const ALLOWED_FILES: &[&str] = &[
-            "parser.rs", // Example: Uncomment to allow messages from parser.rs
-            "constraint.rs", // Example: Uncomment to allow messages from constraint.rs
-            "interface.rs",
+            // "parser.rs", // Example: Uncomment to allow messages from parser.rs
+            // "constraint.rs", // Example: Uncomment to allow messages from constraint.rs
+            // "interface.rs",
             // Add more filenames here as needed
         ];
         // --- End Configuration ---
@@ -65,14 +65,14 @@ macro_rules! debug {
     ($level:expr, $msg:expr) => {{
         // --- Configuration ---
         // Define the compile-time debug level (adjust as needed)
-        const MACRO_DEBUG_LEVEL: usize = 5;
+        const MACRO_DEBUG_LEVEL: usize = 2;
         // List of filenames (not full paths) to allow debug messages from.
         // If empty, all files are allowed (respecting MACRO_DEBUG_LEVEL).
         // Example: &["parser.rs", "constraint.rs"]
         const ALLOWED_FILES: &[&str] = &[
-            "parser.rs", // Example: Uncomment to allow messages from parser.rs
-            "constraint.rs", // Example: Uncomment to allow messages from constraint.rs
-            "interface.rs",
+            // "parser.rs", // Example: Uncomment to allow messages from parser.rs
+            // "constraint.rs", // Example: Uncomment to allow messages from constraint.rs
+            // "interface.rs",
             // Add more filenames here as needed
         ];
         // --- End Configuration ---
