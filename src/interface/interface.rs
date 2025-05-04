@@ -144,7 +144,7 @@ impl Grammar {
             non_terminal_map: &mut BiBTreeMap<NonTerminal, NonTerminalID>,
             next_non_terminal_id: &mut usize,
             literal_map: &mut BTreeMap<String, String>,
-            tokens: &mut BTreeMap<String, Expr>,
+            terminal_string_to_expr: &mut BTreeMap<String, Expr>,
             terminal_name_to_group_id: &mut BiBTreeMap<String, usize>,
             // todo: make this `terminal_group_id_to_expr` instead
             terminal_expr_to_group_id: &mut BiBTreeMap<Expr, usize>,
@@ -166,7 +166,7 @@ impl Grammar {
                         let terminal_name = format!("__regex_{}", terminal_id);
                         terminal_name_to_group_id.insert(terminal_name.clone(), terminal_id);
                         terminal_expr_to_group_id.insert(regex_expr.clone(), terminal_id);
-                        tokens.insert(terminal_name.clone(), regex_expr.clone());
+                        terminal_string_to_expr.insert(terminal_name.clone(), regex_expr.clone());
                         *next_terminal_id += 1;
                         vec![Symbol::Terminal(Terminal(terminal_name))]
                     }
@@ -181,7 +181,7 @@ impl Grammar {
                             non_terminal_map,
                             next_non_terminal_id,
                             literal_map,
-                            tokens,
+                            terminal_string_to_expr,
                             terminal_name_to_group_id,
                             terminal_expr_to_group_id,
                             next_terminal_id,
@@ -206,7 +206,7 @@ impl Grammar {
                             non_terminal_map,
                             next_non_terminal_id,
                             literal_map,
-                            tokens,
+                            terminal_string_to_expr,
                             terminal_name_to_group_id,
                             terminal_expr_to_group_id,
                             next_terminal_id,
@@ -227,7 +227,7 @@ impl Grammar {
                         non_terminal_map,
                         next_non_terminal_id,
                         literal_map,
-                        tokens,
+                        terminal_string_to_expr,
                         terminal_name_to_group_id,
                         terminal_expr_to_group_id,
                         next_terminal_id,
@@ -245,7 +245,7 @@ impl Grammar {
                         non_terminal_map,
                         next_non_terminal_id,
                         literal_map,
-                        tokens,
+                        terminal_string_to_expr,
                         terminal_name_to_group_id,
                         terminal_expr_to_group_id,
                         next_terminal_id,
@@ -261,7 +261,7 @@ impl Grammar {
 
         let mut non_terminal_map = BiBTreeMap::new();
         let mut next_non_terminal_id = 0;
-        let mut tokens = BTreeMap::new();
+        let mut terminal_string_to_expr = BTreeMap::new();
 
         // Process each rule definition
         for (name, expr) in tqdm!(exprs.iter()) {
@@ -275,7 +275,7 @@ impl Grammar {
                         &mut non_terminal_map,
                         &mut next_non_terminal_id,
                         &mut literal_map,
-                        &mut tokens,
+                        &mut terminal_string_to_expr,
                         &mut terminal_name_to_group_id,
                         &mut terminal_expr_to_group_id,
                         &mut next_terminal_id,
@@ -290,7 +290,7 @@ impl Grammar {
                     &mut non_terminal_map,
                     &mut next_non_terminal_id,
                     &mut literal_map,
-                    &mut tokens,
+                    &mut terminal_string_to_expr,
                     &mut terminal_name_to_group_id,
                     &mut terminal_expr_to_group_id,
                     &mut next_terminal_id,
@@ -299,14 +299,11 @@ impl Grammar {
             }
         }
 
-        // let tokenizer_exprs_vec: Vec<ExprGroup> = tokens
-        //     .into_iter()
-        //     .map(|(_, expr)| greedy_group(expr))
-        //     .collect();
         let mut tokenizer_exprs_vec: Vec<ExprGroup> = Vec::new();
-        for (i, (name, expr)) in tokens.into_iter().enumerate() {
-            assert_eq!(i, *terminal_name_to_group_id.get_by_left(&name).unwrap());
-            tokenizer_exprs_vec.push(greedy_group(expr));
+        for group_id in 0..terminal_string_to_expr.len() {
+            let name = terminal_name_to_group_id.get_by_right(&group_id).unwrap();
+            let expr = terminal_string_to_expr.get(name).unwrap();
+            tokenizer_exprs_vec.push(greedy_group(expr.clone()));
         }
         let tokenizer_expr_groups = groups(tokenizer_exprs_vec);
         debug!(2, "Building tokenizer");
