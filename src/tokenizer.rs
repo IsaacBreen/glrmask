@@ -31,7 +31,7 @@ impl Regex {
         regex_state.execute(text);
 
         // dbg!(&regex_state.matches);
-        println!("Executed from state {} with text {:?}. Matches: {:?}", state.0, text, regex_state.matches);
+        // println!("Executed from state {} with text {:?}. Matches: {:?}", state.0, text, regex_state.matches);
 
         let matches: Vec<_> = regex_state.matches.iter().map(|(&id, &width)| Token { id, width })
             // Filter out zero-width tokens
