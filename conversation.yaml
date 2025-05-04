@@ -681,6 +681,13 @@ local_system:
           mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
           print(f"Mask Tokens: {mask_token_ids}")
 
+          # DEMO: Incremental Parser
+          parser_state = PyIncrementalParser(grammar)
+          print(f"Initial valid: {parser_state.is_valid()}")
+          parser_state.feed(input_text)
+          print(f"After '{input_text}': valid={parser_state.is_valid()}")
+          print("--- End Incremental Parser Demo ---")
+
       #     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
       #     tokens = tokenizer.encode(input_text, return_tensors="pt")
       #     tokens: list[int] = tokens.tolist()[0]
@@ -1965,7 +1972,7 @@ local_system:
       use crate::tokenizer::LLMTokenID;
       use bimap::BiBTreeMap;
       use kdam::tqdm;
-      use std::collections::{BTreeMap, HashSet, HashMap};
+      use std::collections::{BTreeMap, HashSet, HashMap, BTreeSet};
       use std::fmt::{Debug, Formatter};
 
       type LLMToken<'a> = &'a [u8];
@@ -2322,13 +2329,19 @@ local_system:
           /// Processes a chunk of input bytes, updating the internal state.
           pub fn feed(&mut self, bytes: &[u8]) {
               let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>> = BTreeMap::new();
+              let mut queue: BTreeMap<(usize, TokenizerStateID), GLRParserState<'a, ()>> = BTreeMap::new();
 
-              for (current_tokenizer_state_id, current_glr_state) in std::mem::take(&mut self.state) {
+              // Initialize the queue with the current state
+              for (tokenizer_state_id, glr_state) in std::mem::take(&mut self.state) {
+                  queue.insert((0, tokenizer_state_id), glr_state);
+              }
+
+              while let Some(((position, current_tokenizer_state_id), current_glr_state)) = queue.pop_first() {
                   // Execute the tokenizer from the current state with the new bytes
                   let results: ExecuteResult = self
                       .grammar
                       .tokenizer
-                      .execute_from_state(bytes, current_tokenizer_state_id);
+                      .execute_from_state(&bytes[position..], current_tokenizer_state_id);
 
                   // Handle full token matches
                   for token in results.matches {
@@ -2337,20 +2350,36 @@ local_system:
                       next_glr_state.step(grammar_token_id);
 
                       if next_glr_state.is_ok() {
-                          // After a full match, the tokenizer resets to its initial state
-                          let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
-                          next_states.entry(next_tokenizer_state_id)
-                              .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
-                              .or_insert(next_glr_state);
+                          if position + token.width == bytes.len() {
+                              // Reached the end of the input, so this is a clean match
+                              let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
+                              next_states.entry(next_tokenizer_state_id)
+                                  .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
+                                  .or_insert(next_glr_state.clone()); // Carry over the *original* GLR state
+                          } else {
+                              // After a full match, the tokenizer resets to its initial state
+                              let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
+                              queue.entry((position + token.width, next_tokenizer_state_id))
+                                  .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
+                                  .or_insert(next_glr_state);
+                          }
                       }
                   }
 
                   // Handle partial matches (tokenizer ended mid-token)
                   if let Some(end_state_id) = results.end_state {
-                      let next_tokenizer_state_id = TokenizerStateID(end_state_id);
-                      next_states.entry(next_tokenizer_state_id)
-                          .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
-                          .or_insert(current_glr_state); // Carry over the *original* GLR state
+                      // Ensure at least one possible final token parses
+                      let possible_final_grammar_tokens: Vec<_> = self.grammar.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id));
+                      for possible_final_grammar_token in possible_final_grammar_tokens {
+                          let mut final_glr_state = current_glr_state.clone(); // Clone before stepping
+                          final_glr_state.step(possible_final_grammar_token);
+                          if final_glr_state.is_ok() {
+                              let next_tokenizer_state_id = TokenizerStateID(end_state_id);
+                              next_states.entry(next_tokenizer_state_id)
+                                  .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
+                                  .or_insert(current_glr_state.clone()); // Carry over the *original* GLR state
+                          }
+                      }
                   }
               }
 
@@ -2373,6 +2402,7 @@ local_system:
           use crate::{choice_fast, groups, seq_fast};
           use bitvec::prelude::*;
           use std::sync::{Arc, Mutex};
+          use crate::constraint::LLMTokenBV;
 
           fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> BitVec {
               let mut bitvec = BitVec::new();
@@ -2548,7 +2578,7 @@ local_system:
               let llm_tokens: Vec<Vec<u8>> = vec![b"a".to_vec()];
               let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
               let eof_llm_token_id = llm_tokens.len();
-              let max_llm_token_id = llm_tokens.len();
+              let max_llm_token_id = llm_tokens.len() - 1;
               let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
               let mut grammar_constraint_state = grammar_constraint.init();
 
@@ -2565,7 +2595,7 @@ local_system:
 
               // Get the mask.
               let mask = grammar_constraint_state.get_mask();
-              let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"a"));
+              let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len(), llm_token_vec!(b"a"));
               assert_eq!(mask, expected_mask);
 
               // Commit "a"
@@ -2573,11 +2603,9 @@ local_system:
               grammar_constraint_state.commit_and_step_many(&terminals);
 
               // Get the mask.
-              let mask = grammar_constraint_state.get_mask();
-              let mut expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!());
-              // Add the EOF token
-              expected_mask.set(llm_tokens.len(), true);
-              assert_eq!(mask, expected_mask);
+              // let mask = grammar_constraint_state.get_mask();
+              // let expected_mask: LLMTokenBV = BitVec::repeat(false, llm_tokens.len());
+              // assert_eq!(mask, expected_mask);
           }
 
           #[test]
@@ -3358,6 +3386,13 @@ local_system:
           mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
           print(f"Mask Tokens: {mask_token_ids}")
 
+          # DEMO: Incremental Parser
+          parser_state = PyIncrementalParser(grammar)
+          print(f"Initial valid: {parser_state.is_valid()}")
+          parser_state.feed(input_text)
+          print(f"After '{input_text}': valid={parser_state.is_valid()}")
+          print("--- End Incremental Parser Demo ---")
+
       #     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
       #     tokens = tokenizer.encode(input_text, return_tensors="pt")
       #     tokens: list[int] = tokens.tolist()[0]
@@ -4642,7 +4677,7 @@ local_system:
       use crate::tokenizer::LLMTokenID;
       use bimap::BiBTreeMap;
       use kdam::tqdm;
-      use std::collections::{BTreeMap, HashSet, HashMap};
+      use std::collections::{BTreeMap, HashSet, HashMap, BTreeSet};
       use std::fmt::{Debug, Formatter};
 
       type LLMToken<'a> = &'a [u8];
@@ -4999,13 +5034,19 @@ local_system:
           /// Processes a chunk of input bytes, updating the internal state.
           pub fn feed(&mut self, bytes: &[u8]) {
               let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>> = BTreeMap::new();
+              let mut queue: BTreeMap<(usize, TokenizerStateID), GLRParserState<'a, ()>> = BTreeMap::new();
 
-              for (current_tokenizer_state_id, current_glr_state) in std::mem::take(&mut self.state) {
+              // Initialize the queue with the current state
+              for (tokenizer_state_id, glr_state) in std::mem::take(&mut self.state) {
+                  queue.insert((0, tokenizer_state_id), glr_state);
+              }
+
+              while let Some(((position, current_tokenizer_state_id), current_glr_state)) = queue.pop_first() {
                   // Execute the tokenizer from the current state with the new bytes
                   let results: ExecuteResult = self
                       .grammar
                       .tokenizer
-                      .execute_from_state(bytes, current_tokenizer_state_id);
+                      .execute_from_state(&bytes[position..], current_tokenizer_state_id);
 
                   // Handle full token matches
                   for token in results.matches {
@@ -5014,20 +5055,36 @@ local_system:
                       next_glr_state.step(grammar_token_id);
 
                       if next_glr_state.is_ok() {
-                          // After a full match, the tokenizer resets to its initial state
-                          let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
-                          next_states.entry(next_tokenizer_state_id)
-                              .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
-                              .or_insert(next_glr_state);
+                          if position + token.width == bytes.len() {
+                              // Reached the end of the input, so this is a clean match
+                              let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
+                              next_states.entry(next_tokenizer_state_id)
+                                  .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
+                                  .or_insert(next_glr_state.clone()); // Carry over the *original* GLR state
+                          } else {
+                              // After a full match, the tokenizer resets to its initial state
+                              let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
+                              queue.entry((position + token.width, next_tokenizer_state_id))
+                                  .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
+                                  .or_insert(next_glr_state);
+                          }
                       }
                   }
 
                   // Handle partial matches (tokenizer ended mid-token)
                   if let Some(end_state_id) = results.end_state {
-                      let next_tokenizer_state_id = TokenizerStateID(end_state_id);
-                      next_states.entry(next_tokenizer_state_id)
-                          .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
-                          .or_insert(current_glr_state); // Carry over the *original* GLR state
+                      // Ensure at least one possible final token parses
+                      let possible_final_grammar_tokens: Vec<_> = self.grammar.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id));
+                      for possible_final_grammar_token in possible_final_grammar_tokens {
+                          let mut final_glr_state = current_glr_state.clone(); // Clone before stepping
+                          final_glr_state.step(possible_final_grammar_token);
+                          if final_glr_state.is_ok() {
+                              let next_tokenizer_state_id = TokenizerStateID(end_state_id);
+                              next_states.entry(next_tokenizer_state_id)
+                                  .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
+                                  .or_insert(current_glr_state.clone()); // Carry over the *original* GLR state
+                          }
+                      }
                   }
               }
 
@@ -5050,6 +5107,7 @@ local_system:
           use crate::{choice_fast, groups, seq_fast};
           use bitvec::prelude::*;
           use std::sync::{Arc, Mutex};
+          use crate::constraint::LLMTokenBV;
 
           fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> BitVec {
               let mut bitvec = BitVec::new();
@@ -5225,7 +5283,7 @@ local_system:
               let llm_tokens: Vec<Vec<u8>> = vec![b"a".to_vec()];
               let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
               let eof_llm_token_id = llm_tokens.len();
-              let max_llm_token_id = llm_tokens.len();
+              let max_llm_token_id = llm_tokens.len() - 1;
               let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
               let mut grammar_constraint_state = grammar_constraint.init();
 
@@ -5242,7 +5300,7 @@ local_system:
 
               // Get the mask.
               let mask = grammar_constraint_state.get_mask();
-              let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"a"));
+              let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len(), llm_token_vec!(b"a"));
               assert_eq!(mask, expected_mask);
 
               // Commit "a"
@@ -5250,11 +5308,9 @@ local_system:
               grammar_constraint_state.commit_and_step_many(&terminals);
 
               // Get the mask.
-              let mask = grammar_constraint_state.get_mask();
-              let mut expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!());
-              // Add the EOF token
-              expected_mask.set(llm_tokens.len(), true);
-              assert_eq!(mask, expected_mask);
+              // let mask = grammar_constraint_state.get_mask();
+              // let expected_mask: LLMTokenBV = BitVec::repeat(false, llm_tokens.len());
+              // assert_eq!(mask, expected_mask);
           }
 
           #[test]
@@ -6061,6 +6117,13 @@ messages:
           mask_ids = np.where(mask)[0].tolist()
           mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
           print(f"Mask Tokens: {mask_token_ids}")
+
+          # DEMO: Incremental Parser
+          parser_state = PyIncrementalParser(grammar)
+          print(f"Initial valid: {parser_state.is_valid()}")
+          parser_state.feed(input_text)
+          print(f"After '{input_text}': valid={parser_state.is_valid()}")
+          print("--- End Incremental Parser Demo ---")
 
       #     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
       #     tokens = tokenizer.encode(input_text, return_tensors="pt")
@@ -7364,7 +7427,7 @@ messages:
       use crate::tokenizer::LLMTokenID;
       use bimap::BiBTreeMap;
       use kdam::tqdm;
-      use std::collections::{BTreeMap, HashSet, HashMap};
+      use std::collections::{BTreeMap, HashSet, HashMap, BTreeSet};
       use std::fmt::{Debug, Formatter};
 
       type LLMToken<'a> = &'a [u8];
@@ -7721,13 +7784,19 @@ messages:
           /// Processes a chunk of input bytes, updating the internal state.
           pub fn feed(&mut self, bytes: &[u8]) {
               let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>> = BTreeMap::new();
+              let mut queue: BTreeMap<(usize, TokenizerStateID), GLRParserState<'a, ()>> = BTreeMap::new();
 
-              for (current_tokenizer_state_id, current_glr_state) in std::mem::take(&mut self.state) {
+              // Initialize the queue with the current state
+              for (tokenizer_state_id, glr_state) in std::mem::take(&mut self.state) {
+                  queue.insert((0, tokenizer_state_id), glr_state);
+              }
+
+              while let Some(((position, current_tokenizer_state_id), current_glr_state)) = queue.pop_first() {
                   // Execute the tokenizer from the current state with the new bytes
                   let results: ExecuteResult = self
                       .grammar
                       .tokenizer
-                      .execute_from_state(bytes, current_tokenizer_state_id);
+                      .execute_from_state(&bytes[position..], current_tokenizer_state_id);
 
                   // Handle full token matches
                   for token in results.matches {
@@ -7736,20 +7805,36 @@ messages:
                       next_glr_state.step(grammar_token_id);
 
                       if next_glr_state.is_ok() {
-                          // After a full match, the tokenizer resets to its initial state
-                          let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
-                          next_states.entry(next_tokenizer_state_id)
-                              .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
-                              .or_insert(next_glr_state);
+                          if position + token.width == bytes.len() {
+                              // Reached the end of the input, so this is a clean match
+                              let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
+                              next_states.entry(next_tokenizer_state_id)
+                                  .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
+                                  .or_insert(next_glr_state.clone()); // Carry over the *original* GLR state
+                          } else {
+                              // After a full match, the tokenizer resets to its initial state
+                              let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
+                              queue.entry((position + token.width, next_tokenizer_state_id))
+                                  .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
+                                  .or_insert(next_glr_state);
+                          }
                       }
                   }
 
                   // Handle partial matches (tokenizer ended mid-token)
                   if let Some(end_state_id) = results.end_state {
-                      let next_tokenizer_state_id = TokenizerStateID(end_state_id);
-                      next_states.entry(next_tokenizer_state_id)
-                          .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
-                          .or_insert(current_glr_state); // Carry over the *original* GLR state
+                      // Ensure at least one possible final token parses
+                      let possible_final_grammar_tokens: Vec<_> = self.grammar.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id));
+                      for possible_final_grammar_token in possible_final_grammar_tokens {
+                          let mut final_glr_state = current_glr_state.clone(); // Clone before stepping
+                          final_glr_state.step(possible_final_grammar_token);
+                          if final_glr_state.is_ok() {
+                              let next_tokenizer_state_id = TokenizerStateID(end_state_id);
+                              next_states.entry(next_tokenizer_state_id)
+                                  .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
+                                  .or_insert(current_glr_state.clone()); // Carry over the *original* GLR state
+                          }
+                      }
                   }
               }
 
@@ -7772,6 +7857,7 @@ messages:
           use crate::{choice_fast, groups, seq_fast};
           use bitvec::prelude::*;
           use std::sync::{Arc, Mutex};
+          use crate::constraint::LLMTokenBV;
 
           fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> BitVec {
               let mut bitvec = BitVec::new();
@@ -7947,7 +8033,7 @@ messages:
               let llm_tokens: Vec<Vec<u8>> = vec![b"a".to_vec()];
               let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
               let eof_llm_token_id = llm_tokens.len();
-              let max_llm_token_id = llm_tokens.len();
+              let max_llm_token_id = llm_tokens.len() - 1;
               let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
               let mut grammar_constraint_state = grammar_constraint.init();
 
@@ -7964,7 +8050,7 @@ messages:
 
               // Get the mask.
               let mask = grammar_constraint_state.get_mask();
-              let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"a"));
+              let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len(), llm_token_vec!(b"a"));
               assert_eq!(mask, expected_mask);
 
               // Commit "a"
@@ -7972,11 +8058,9 @@ messages:
               grammar_constraint_state.commit_and_step_many(&terminals);
 
               // Get the mask.
-              let mask = grammar_constraint_state.get_mask();
-              let mut expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!());
-              // Add the EOF token
-              expected_mask.set(llm_tokens.len(), true);
-              assert_eq!(mask, expected_mask);
+              // let mask = grammar_constraint_state.get_mask();
+              // let expected_mask: LLMTokenBV = BitVec::repeat(false, llm_tokens.len());
+              // assert_eq!(mask, expected_mask);
           }
 
           #[test]
@@ -8094,94 +8178,170 @@ messages:
       ```
     metadata:
       filename: src/interface/tests.rs
-  - user: fk
+  - user: |-
+      I want to add to interface.rs a struct that holds a GLRParserState *and* its grammar, and manages incremental parsing for us.
+      It should support feeding in bytes and checking whether the current state is valid.
+      To see if the current state is valid, we need to get all tokens available from the current tokenizer state (which we'll need to track) using tokens_accessible_from_state and feed them into the parser. If any of them succeeds, the current state is valid. If any of the states are the initial state, it's automatically valid (we don't need to feed the final tokens into the parser).
+      Actually yes, kind of like GrammarConstraintState.state, we'll need to store a map from tokenizer state to GLR parser state.
+      When we get a result for a token, we'll need to feed it to the parser, and then set the tokenizer state to 0 and add it back to the states map, merging with any existing glr parser state.
+
+      At the beginning of IncrementalParser::feed, initialize a queue called 'todo' of states to process. Make it a btree map from position to a (single (merged)) GLRParserState. Start all at position 0 (ie position is relative to the passed 'bytes', not counting previously passed inputs).
+      If there's an end state, we add that to the final states.
+      For each match, we feed it into the parser and push the resulting state to the queue under the appropriate position (current pos + match width), merging if there's already an entry under that position.
+      EXCEPT if the match takes us to the end of the bytes. THEN we add an entry to the final states (also merging if necessary).
+
+      Update just interface.rs, completing the todo!() (I think that's all we need).
+
+      Update interface/tests.rs.
+
+      Modify lib.rs to make it easy to parse incrementally from Python.
+
+      ---
+
+      I've done most of this stuff, but lib.rs for the Python interface still needs to be updated.
     metadata:
   - assistant: |-
-      Okay, it looks like the `IncrementalParser::feed` method needs a small adjustment to handle cases where the tokenizer consumes input that doesn't lead to a valid token *or* a valid intermediate state. If the tokenizer ends up back in its initial state without having produced any matches, that specific parse path should be pruned.
+      Okay, let's add the Python bindings for the `IncrementalParser`.
 
-      ```diff --git a/src/interface/interface.rs b/src/interface/interface.rs
-      index 471134d..a9f571d 100644
-      --- a/src/interface/interface.rs
-      +++ b/src/interface/interface.rs
-      @@ -274,6 +274,11 @@
-           /// Processes a chunk of input bytes, updating the internal state.
-           pub fn feed(&mut self, bytes: &[u8]) {
-               let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>> = BTreeMap::new();
-      +        let initial_tokenizer_state = self.grammar.tokenizer.initial_state_id();
-      +
-      +        // Ensure we only process valid GLR states
-      +        self.state.retain(|_, glr_state| glr_state.is_ok());
+      ```diff
+      --- a/python/src/lib.rs
+      +++ b/python/src/lib.rs
+      @@ -6,7 +6,7 @@
+       use pyo3::prelude::*;
+       use pyo3::types::{PyDict};
+       use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      -use sep1::glr::parser::GLRParser;
+      +use sep1::glr::parser::{GLRParser, GLRParserState};
+       use sep1::glr::table::{generate_glr_parser, StateID};
+       use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence};
+       use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
+      @@ -15,6 +15,7 @@
+       use std::sync::Arc;
+       use ouroboros::self_referencing;
+       use numpy::{IntoPyArray, PyArray1, ToPyArray};
+      +use sep1::interface::IncrementalParser; // Added import
        
-               for (current_tokenizer_state_id, current_glr_state) in std::mem::take(&mut self.state) {
-                   // Execute the tokenizer from the current state with the new bytes
-      @@ -282,33 +287,36 @@
-                       .tokenizer
-                       .execute_from_state(bytes, current_tokenizer_state_id);
-       
-      -            // Handle full token matches
-      -            for token in results.matches {
-      -                let grammar_token_id = TerminalID(token.id); // Assuming GroupID maps directly to TerminalID
-      -                let mut next_glr_state = current_glr_state.clone(); // Clone before stepping
-      -                next_glr_state.step(grammar_token_id);
-      +            if !results.matches.is_empty() {
-      +                // Handle full token matches
-      +                for token in results.matches {
-      +                    let grammar_token_id = TerminalID(token.id); // Assuming GroupID maps directly to TerminalID
-      +                    // Clone the GLR state *before* stepping for this specific match path
-      +                    let mut next_glr_state = current_glr_state.clone();
-      +                    next_glr_state.step(grammar_token_id);
-       
-      -                if next_glr_state.is_ok() {
-      -                    // After a full match, the tokenizer resets to its initial state
-      -                    let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
-      -                    next_states.entry(next_tokenizer_state_id)
-      -                        .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
-      -                        .or_insert(next_glr_state);
-      +                    if next_glr_state.is_ok() {
-      +                        // After a full match, the tokenizer state resets for the *next* input
-      +                        let next_tokenizer_state_id = initial_tokenizer_state;
-      +                        next_states.entry(next_tokenizer_state_id)
-      +                            .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
-      +                            .or_insert(next_glr_state);
-      +                    }
-      +                    // If !next_glr_state.is_ok(), this specific match path dies.
-                       }
-      -            }
-      -
-      -            // Handle partial matches (tokenizer ended mid-token)
-      -            if let Some(end_state_id) = results.end_state {
-      -                let next_tokenizer_state_id = TokenizerStateID(end_state_id);
-      -                next_states.entry(next_tokenizer_state_id)
-      -                    .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
-      -                    .or_insert(current_glr_state); // Carry over the *original* GLR state
-      +            } else {
-      +                // No full matches occurred. Handle partial matches.
-      +                if let Some(end_state_id) = results.end_state {
-      +                    let next_tokenizer_state_id = TokenizerStateID(end_state_id);
-      +                    // If the tokenizer ended back at the initial state *without* matching anything,
-      +                    // it signifies that the input led to a dead end from the current tokenizer state. Prune this path.
-      +                    if next_tokenizer_state_id != initial_tokenizer_state {
-      +                        // Carry over the *original* GLR state, associated with the new tokenizer state
-      +                        next_states.entry(next_tokenizer_state_id)
-      +                            .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
-      +                            .or_insert(current_glr_state);
-      +                    }
-      +                }
-      +                // If no matches and end_state is None, or if end_state is initial_state, this path dies naturally.
-                   }
-               }
-       
-               self.state = next_states;
+       #[pyclass]
+       #[derive(Clone)]
+      @@ -231,6 +232,40 @@
            }
+       }
+       
+      +#[self_referencing]
+      +struct PyIncrementalParserWrapper {
+      +    // Owns the grammar
+      +    grammar: PyGrammar,
+      +    // Borrows from the owned grammar via the 'this lifetime
+      +    #[borrows(grammar)]
+      +    #[covariant] // Allows the lifetime 'this to be shortened
+      +    parser: IncrementalParser<'this>,
+      +}
+      +
+      +#[pyclass]
+      +pub struct PyIncrementalParser {
+      +    inner: PyIncrementalParserWrapper,
+      +}
+      +
+      +#[pymethods]
+      +impl PyIncrementalParser {
+      +    #[new]
+      +    fn new(grammar: PyGrammar) -> PyResult<Self> {
+      +        Ok(PyIncrementalParser {
+      +            inner: PyIncrementalParserWrapperTryBuilder {
+      +                grammar,
+      +                parser_builder: |g: &PyGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
+      +            }.try_build()?
+      +        })
+      +    }
+      +
+      +    fn feed(&mut self, bytes: &[u8]) {
+      +        self.inner.with_parser_mut(|p| p.feed(bytes));
+      +    }
+      +
+      +    fn is_valid(&self) -> bool {
+      +        self.inner.with_parser(|p| p.is_valid())
+      +    }
+      +}
+      +
+       #[pymodule]
+       fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
+           m.add_class::<PyGrammarExpr>()?;
+      @@ -240,5 +275,6 @@
+           m.add_class::<PyGrammar>()?;
+           m.add_class::<PyGrammarConstraint>()?;
+           m.add_class::<PyGrammarConstraintState>()?;
+      +    m.add_class::<PyIncrementalParser>()?; // Added class
+           Ok(())
+       }
+      ```
+
+      ```diff
+      --- a/examples/python/python_grammar.py
+      +++ b/examples/python/python_grammar.py
+      @@ -8,7 +8,7 @@
+       import numpy as np
+       import pegen.grammar
+       import pegen.grammar_parser
+      -import pegen.tokenizer
+      +import pegen.tokenizer # type: ignore
+       import torch # type: ignore
+       from _sep1 import PyRegexExpr as Regex, PyGrammar, PyGrammarExpr as ge, PyGrammarConstraint, PyGrammarConstraintState
+       from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
+      @@ -20,19 +20,6 @@
+               return Regex.eat_u8(ord(s[0]))
+           else:
+               return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
+      -#     print(f"After '():': valid={inc_parser.is_valid()}")
+      -#     print("--- End Incremental Parser Demo ---")
+      -
+      -#     print("--- End Incremental Parser Demo ---")
+      -
+      -#     # DEMO: Incremental Parser
+      -#     from _sep1 import PyIncrementalParser
+      -#     print("\n--- Incremental Parser Demo ---")
+      -#     inc_parser = PyIncrementalParser(grammar)
+      -#     print(f"Initial valid: {inc_parser.is_valid()}")
+      -#     inc_parser.feed(b"def ")
+      -#     print(f"After 'def ': valid={inc_parser.is_valid()}")
+      -#     inc_parser.feed(b"my_func")
+      -#     print(f"After 'my_func': valid={inc_parser.is_valid()}")
+      -#     inc_parser.feed(b"():")
+      -#     print(f"After '():': valid={inc_parser.is_valid()}")
+      -#     print("--- End Incremental Parser Demo ---")
+       def rule_name_is_valid(name: str) -> bool:
+           return not name.startswith("invalid_")
+           # TODO: delete this
+      @@ -261,6 +248,7 @@
+           return tokenizer.decode(output[0], skip_special_tokens=True)
+       
+       if __name__ == "__main__":
+      +    from _sep1 import PyIncrementalParser # Import here after module is built
+           model_name = "Qwen/Qwen2.5-Coder-0.5B"
+       #     model_name = "gpt2"
+           tokenizer = AutoTokenizer.from_pretrained(model_name)
+      @@ -338,7 +326,7 @@
+           print(f"Mask Tokens: {mask_token_ids}")
+       
+           # DEMO: Incremental Parser
+      -    parser_state = PyIncrementalParser(grammar)
+      +    parser_state = PyIncrementalParser(grammar) # Use the imported class
+           print(f"Initial valid: {parser_state.is_valid()}")
+           parser_state.feed(input_text)
+           print(f"After '{input_text}': valid={parser_state.is_valid()}")
       ```
     metadata:
   - user: |
       Git apply result:
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/interface/interface.rs
-      Applying patch to 'src/interface/interface.rs' using custom patcher...
-      Successfully applied patch and wrote to src/interface/interface.rs.
+      Identified target file: python/src/lib.rs
+      Applying patch to 'python/src/lib.rs' using custom patcher...
+      Successfully applied patch and wrote to python/src/lib.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: examples/python/python_grammar.py
+      Applying patch to 'examples/python/python_grammar.py' using custom patcher...
+      Successfully applied patch and wrote to examples/python/python_grammar.py.
     metadata:
 ...

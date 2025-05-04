@@ -4,7 +4,7 @@ use sep1::finite_automata::Regex;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict};
 use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use sep1::glr::parser::GLRParser;
+use sep1::glr::parser::{GLRParser, GLRParserState};
 use sep1::glr::table::{generate_glr_parser, StateID};
 use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence};
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
@@ -13,6 +13,7 @@ use bimap::BiBTreeMap;
 use std::sync::Arc;
 use ouroboros::self_referencing;
 use numpy::{IntoPyArray, PyArray1, ToPyArray};
+use sep1::interface::IncrementalParser; // Added import
 
 #[pyclass]
 #[derive(Clone)]
@@ -294,6 +295,42 @@ impl PyGrammarConstraintState {
     }
 }
 
+#[self_referencing]
+struct PyIncrementalParserWrapper {
+    // Owns the grammar
+    grammar: PyGrammar,
+    // Borrows from the owned grammar via the 'this lifetime
+    #[borrows(grammar)]
+    #[covariant] // Allows the lifetime 'this to be shortened
+    parser: IncrementalParser<'this>,
+}
+
+#[pyclass]
+pub struct PyIncrementalParser {
+    inner: PyIncrementalParserWrapper,
+}
+
+#[pymethods]
+impl PyIncrementalParser {
+    #[new]
+    fn new(grammar: PyGrammar) -> PyResult<Self> {
+        Ok(PyIncrementalParser {
+            inner: PyIncrementalParserWrapperTryBuilder {
+                grammar,
+                parser_builder: |g: &PyGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
+            }.try_build()?
+        })
+    }
+
+    fn feed(&mut self, bytes: &[u8]) {
+        self.inner.with_parser_mut(|p| p.feed(bytes));
+    }
+
+    fn is_valid(&self) -> bool {
+        self.inner.with_parser(|p| p.is_valid())
+    }
+}
+
 #[pymodule]
 fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGrammarExpr>()?;
@@ -303,5 +340,6 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGrammar>()?;
     m.add_class::<PyGrammarConstraint>()?;
     m.add_class::<PyGrammarConstraintState>()?;
+    m.add_class::<PyIncrementalParser>()?; // Added class
     Ok(())
 }
