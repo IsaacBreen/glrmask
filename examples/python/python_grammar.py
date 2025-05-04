@@ -291,7 +291,7 @@ if __name__ == "__main__":
 #     grammar = define_python_grammar()
     # TODO: delete this
     # Define a dummy grammar that only accepts "hello"
-    exprs = [("S", ge.sequence([regex(eat("hello")), regex(eat("$"))]))]
+    exprs = [("S", ge.sequence([ge.regex(eat("hello")), ge.regex(eat("$"))]))]
     grammar = PyGrammar(exprs)
     grammar.print()
 
