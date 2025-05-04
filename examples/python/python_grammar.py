@@ -82,6 +82,8 @@ def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Regex:
 def define_tokens() -> list[tuple[str, Any]]:
     tokens = {}
 
+    tokens["HELLO"] = eat("hello")
+
     choice = Regex.choice
     eat_u8 = Regex.eat_u8
     eat_u8_negation = Regex.eat_u8_negation
