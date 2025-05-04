@@ -358,7 +358,7 @@ if __name__ == "__main__":
     tokens = tokenizer.encode(input_text, return_tensors="pt")
     tokens: list[int] = tokens.tolist()[0]
     print(f"Committing tokens: {tokens}")
-    for token_id in tokens:
+    for i, token_id in enumerate(tokens):
         print("--- Committing token {} ---".format(token_id))
         grammar_constraint_state.commit(token_id)
         mask = grammar_constraint_state.get_mask()
@@ -367,6 +367,7 @@ if __name__ == "__main__":
         mask_ids = np.where(mask)[0].tolist()
         mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
         print(f"Mask Tokens: {textwrap.shorten(str(mask_token_ids), width=100)}")
+        print(f"Is next token {tokens[i+1]} in mask? {tokens[i+1] in mask_ids}")
     print("--- End Committing Tokens ---")
     if expected_next_token:
         assert expected_next_token in mask_token_ids, f"Expected '{expected_next_token}' in mask"
