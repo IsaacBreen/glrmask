@@ -167,7 +167,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
 #     exprs.append(("file", ge.sequence([ge.regex(eat("fk")), ge.regex(eat("ing"))])))
 
     # TODO: delete this
-    SOFT_KEYWORDS = ["if", "else", "elif", "while", "for", "try", "except", "finally", "def", "class", "with", "pass", "break", "continue", "return", "assert", "raise", "global", "nonlocal", "del", "yield", "import", "from", "as"]
+    SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g"]
     exprs.append(("file", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
 
     for rule in grammar.rules.values():
