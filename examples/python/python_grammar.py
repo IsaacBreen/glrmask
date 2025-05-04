@@ -347,7 +347,7 @@ if __name__ == "__main__":
     # DEMO: Incremental Parser
     parser_state = PyIncrementalParser(grammar) # Use the imported class
     print(f"Initial valid: {parser_state.is_valid()}")
-    parser_state.feed(input_text)
+    parser_state.feed(input_text.encode("utf-8"))
     print(f"After '{input_text}': valid={parser_state.is_valid()}")
     print("--- End Incremental Parser Demo ---")
 
