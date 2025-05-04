@@ -16,7 +16,7 @@ from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
 
-def eat_string(s: bytes) -> Regex:
+def eat(s: bytes) -> Regex:
     if len(s) == 1:
         return eat_u8(s[0])
     else:
@@ -40,7 +40,7 @@ def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Regex:
             value = value[1:-1]
         else:
             raise ValueError(f"Invalid string literal: {value}")
-        return ge.regex(eat_string(value))
+        return ge.regex(eat(value))
     elif isinstance(item, pegen.grammar.Opt):
         return ge.optional(pegen_to_sep1_regex(item.node, memo))
     elif isinstance(item, pegen.grammar.Gather):
@@ -136,16 +136,16 @@ def define_tokens() -> list[tuple[str, Any]]:
         seq([eat_u8(ord("'")), rep(eat_u8_negation(ord("'"))), eat_u8(ord("'"))]),
     ])
     tokens["FSTRING_START"] = choice([
-        eat_string('"""'),
-        eat_string("'''"),
+        eat('"""'),
+        eat("'''"),
     ])
     tokens["FSTRING_END"] = choice([
-        eat_string('"""'),
-        eat_string("'''"),
+        eat('"""'),
+        eat("'''"),
     ])
     tokens["FSTRING_MIDDLE"] = rep(choice([
         eat_u8_negation(ord("{")),
-        eat_string("{{"),
+        eat("{{"),
     ]))
     tokens["TYPE_COMMENT"] = eps()
     tokens["ENDMARKER"] = eps()
