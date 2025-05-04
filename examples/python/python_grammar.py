@@ -345,7 +345,7 @@ if __name__ == "__main__":
     print(f"Mask: {mask}")
     mask_ids = np.where(mask)[0].tolist()
     mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
-    print(f"Mask Tokens: {mask_token_ids}")
+    print(f"Mask Tokens: {textwrap.shorten(str(mask_token_ids), width=100)}")
 
     # DEMO: Incremental Parser
     parser_state = PyIncrementalParser(grammar) # Use the imported class
@@ -366,7 +366,7 @@ if __name__ == "__main__":
         print(f"Mask: {mask}")
         mask_ids = np.where(mask)[0].tolist()
         mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
-        print(f"Mask Tokens: {mask_token_ids}")
+        print(f"Mask Tokens: {textwrap.shorten(str(mask_token_ids), width=100)}")
     print("--- End Committing Tokens ---")
     if expected_next_token:
         assert expected_next_token in mask_token_ids, f"Expected '{expected_next_token}' in mask"
