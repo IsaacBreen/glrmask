@@ -365,13 +365,19 @@ impl<'a> IncrementalParser<'a> {
     /// Processes a chunk of input bytes, updating the internal state.
     pub fn feed(&mut self, bytes: &[u8]) {
         let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>> = BTreeMap::new();
+        let mut queue: BTreeMap<(usize, TokenizerStateID), GLRParserState<'a, ()>> = BTreeMap::new();
 
-        for (current_tokenizer_state_id, current_glr_state) in std::mem::take(&mut self.state) {
+        // Initialize the queue with the current state
+        for (tokenizer_state_id, glr_state) in std::mem::take(&mut self.state) {
+            queue.insert((0, tokenizer_state_id), glr_state);
+        }
+
+        while let Some(((position, current_tokenizer_state_id), current_glr_state)) = queue.pop_first() {
             // Execute the tokenizer from the current state with the new bytes
             let results: ExecuteResult = self
                 .grammar
                 .tokenizer
-                .execute_from_state(bytes, current_tokenizer_state_id);
+                .execute_from_state(&bytes[position..], current_tokenizer_state_id);
 
             // Handle full token matches
             for token in results.matches {
@@ -390,11 +396,18 @@ impl<'a> IncrementalParser<'a> {
 
             // Handle partial matches (tokenizer ended mid-token)
             if let Some(end_state_id) = results.end_state {
-                let next_tokenizer_state_id = TokenizerStateID(end_state_id);
-                next_states.entry(next_tokenizer_state_id)
-                    .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
-                    .or_insert(current_glr_state); // Carry over the *original* GLR state
-            }
+                // Ensure at least one possible final token parses
+                let possible_final_grammar_tokens: BTreeSet<_> = self.grammar.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id)).into_iter().map(|token_id| GrammarTokenID(token_id.0)).collect();
+                for possible_final_grammar_token in possible_final_grammar_tokens {
+                    let mut final_glr_state = current_glr_state.clone(); // Clone before stepping
+                    final_glr_state.step(possible_final_grammar_token);
+                    if final_glr_state.is_ok() {
+                        let next_tokenizer_state_id = TokenizerStateID(end_state_id);
+                        next_states.entry(next_tokenizer_state_id)
+                            .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
+                            .or_insert(current_glr_state); // Carry over the *original* GLR state
+                    }
+                }
         }
 
         self.state = next_states;
