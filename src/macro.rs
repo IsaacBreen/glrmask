@@ -26,8 +26,8 @@ macro_rules! debug {
         // If empty, all files are allowed (respecting MACRO_DEBUG_LEVEL).
         // Example: &["parser.rs", "constraint.rs"]
         const ALLOWED_FILES: &[&str] = &[
-            // "parser.rs", // Example: Uncomment to allow messages from parser.rs
-            // "constraint.rs", // Example: Uncomment to allow messages from constraint.rs
+            "parser.rs", // Example: Uncomment to allow messages from parser.rs
+            "constraint.rs", // Example: Uncomment to allow messages from constraint.rs
             // Add more filenames here as needed
         ];
         // --- End Configuration ---
@@ -69,8 +69,8 @@ macro_rules! debug {
         // If empty, all files are allowed (respecting MACRO_DEBUG_LEVEL).
         // Example: &["parser.rs", "constraint.rs"]
         const ALLOWED_FILES: &[&str] = &[
-            // "parser.rs", // Example: Uncomment to allow messages from parser.rs
-            // "constraint.rs", // Example: Uncomment to allow messages from constraint.rs
+            "parser.rs", // Example: Uncomment to allow messages from parser.rs
+            "constraint.rs", // Example: Uncomment to allow messages from constraint.rs
             // Add more filenames here as needed
         ];
         // --- End Configuration ---
