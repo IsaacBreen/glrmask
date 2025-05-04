@@ -389,7 +389,10 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                 }
 
                 /* ------ 4. no action ------ */
-                None => not_found.push(ParseState { stack }),
+                None => {
+                    crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, top.state_id.0);
+                    not_found.push(ParseState { stack })
+                },
             }
         }
 
