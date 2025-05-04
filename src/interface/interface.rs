@@ -383,6 +383,7 @@ impl<'a> IncrementalParser<'a> {
             crate::debug!(4, "Processing position {} in state {}. Matches: {}", position, current_tokenizer_state_id.0, results.matches.len());
             // Handle full token matches
             for token in results.matches {
+                crate::debug!(4, "Found match for token {:?} ({}) with width {}", token.id, self.grammar.terminal_name_to_group_id.get_by_right(&token.id).unwrap(), token.width);
                 let grammar_token_id = TerminalID(token.id); // Assuming GroupID maps directly to TerminalID
                 let mut next_glr_state = current_glr_state.clone(); // Clone before stepping
                 next_glr_state.step(grammar_token_id);
