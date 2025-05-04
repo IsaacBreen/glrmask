@@ -332,10 +332,11 @@ if __name__ == "__main__":
     pre_input_text = ""
 #     input_text = "i^10=i*"
 #     input_text = "5*6 + 7*2 = 5+5+5+"
+    input_text = "123+456+"
 
-    pre_input_text = ""
-    input_text = "hello="
-    expected_next_token = "world"
+#     pre_input_text = ""
+#     input_text = "hello="
+#     expected_next_token = "world"
 
     # DEMO: Get the mask
     mask = grammar_constraint_state.get_mask()
@@ -367,8 +368,8 @@ if __name__ == "__main__":
     if expected_next_token:
         assert expected_next_token in mask_token_ids, f"Expected '{expected_next_token}' in mask"
 
-#     # DEMO: Generate text.
-#     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
-# #     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
-#     output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
-#     print(output_text)
+    # DEMO: Generate text.
+    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
+#     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
+    output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
+    print(output_text)
