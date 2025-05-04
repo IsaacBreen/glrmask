@@ -27,6 +27,7 @@ def rule_name_is_valid(name: str) -> bool:
 #     return True
 
 
+
 def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Regex:
     if isinstance(item, pegen.grammar.NameLeaf):
         return ge.ref(item.value)
@@ -87,6 +88,9 @@ def define_tokens() -> list[tuple[str, Any]]:
     def eat_u8_choice(s):
         return choice([eat_u8(ord(c)) for c in s])
 
+    def eat_u8_range(start: char, end: char) -> Regex:
+        return Regex.seq([Regex.eat_u8(ord(c)) for c in range(ord(start), ord(end) + 1)])
+
     ignore = rep(choice([
         eat_u8(ord(" ")),
         seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]),
@@ -96,9 +100,9 @@ def define_tokens() -> list[tuple[str, Any]]:
         return ge.regex(seq([ignore, expr]))
 
     # TODO: uncomment this
-    digit = choice([eat_u8(c) for c in range(ord("0"), ord("9") + 1)])
-    alph_lower = choice([eat_u8(c) for c in range(ord("a"), ord("z") + 1)])
-    alph_upper = choice([eat_u8(c) for c in range(ord("A"), ord("Z") + 1)])
+    digit = eat_u8_range('0', '9')
+    alph_lower = eat_u8_range('a', 'z')
+    alph_upper = eat_u8_range('A', 'Z')
 # #     TODO: delete this
 #     digit = eat_u8(ord("1"))
 #     alph_lower = eat_u8(ord("a"))
