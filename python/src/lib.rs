@@ -242,6 +242,8 @@ impl PyGrammarConstraint {
         // print_precomputed(&self.inner.precomputed);
         println!("Printing precomputed data is not implemented in this binding yet.");
     }
+    
+    
 }
 
 

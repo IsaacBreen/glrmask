@@ -318,6 +318,7 @@ if __name__ == "__main__":
 #     print("Initializing parser...")
 #     parser = grammar.glr_parser()
 #     parser.print()
+    grammar.glr_parser().print()
     print("Initializing grammar constraint...")
     grammar_constraint = PyGrammarConstraint(grammar, llm_token_to_id, max(llm_token_to_id.values()))
     print("Initializing grammar constraint state...")
