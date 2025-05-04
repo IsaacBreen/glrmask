@@ -290,8 +290,8 @@ if __name__ == "__main__":
     print("Defining grammar...")
 #     grammar = define_python_grammar()
     # TODO: delete this
-    # Define a dummy grammar that only accepts "hello"
-    exprs = [("S", ge.sequence([ge.regex(eat("hello")), ge.regex(eat("$"))]))]
+    # Define a dummy grammar that only accepts "hello=world"
+    exprs = [("S", ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))]))]
     grammar = PyGrammar(exprs)
     grammar.print()
 
