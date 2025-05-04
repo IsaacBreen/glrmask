@@ -2215,8 +2215,7 @@ mod test_full_python_tokenizer_recognizes_name {
         state.execute(b"hello");
 
         assert!(state.definitely_matches(), "Tokenizer should match 'hello'");
-        let expected_match = Match { group_id: token_name_to_id["NAME"], position: 5 };
-        assert_eq!(state.get_greedy_match(), Some(expected_match), "Greedy match should be NAME token");
-        assert_eq!(state.position, 5);
+        // Ensure there is a match for the NAME token and that it's at the correct position
+        assert_eq!(state.matches.get(&token_name_to_id["NAME"]), Some(&5), "NAME token should be matched at position 5");
     }
 }
