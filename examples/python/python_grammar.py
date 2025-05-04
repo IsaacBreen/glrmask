@@ -160,15 +160,24 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
 
     # Make sure the start production is first
 #     exprs.append(("start'''", ge.ref("file")))
-    # TODO: delete this
-    # Add a rule for "hello=world$" to the start rule
-    exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
+#     # TODO: delete this
+#     # Add a rule for "hello=world$" to the start rule
+#     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
 #     exprs.append(("start'''", ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])))
 #     exprs.append(("file", ge.sequence([ge.regex(eat("fk")), ge.regex(eat("ing"))])))
 
-    # TODO: delete this
-    SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g"]
-    exprs.append(("file", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
+#     # TODO: delete this
+#     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
+#     SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g", "h"]
+#     exprs.append(("file", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
+
+#     # TODO: delete this
+#     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.regex(eat("hello"))])))
+#     SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g"]
+#     exprs.append(("file", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
+
+#     SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g", "hello"]
+#     exprs.append(("start'''", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
 
     for rule in grammar.rules.values():
         memo[rule.name] = ge.ref(rule.name)
@@ -337,20 +346,20 @@ if __name__ == "__main__":
     mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
     print(f"Mask Tokens: {mask_token_ids}")
 
-    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
-    tokens = tokenizer.encode(input_text, return_tensors="pt")
-    tokens: list[int] = tokens.tolist()[0]
-    print(f"Committing tokens: {tokens}")
-    for token_id in tokens:
-        grammar_constraint_state.commit(token_id)
-    mask = grammar_constraint_state.get_mask()
-    print("Got mask")
-    print(f"Mask: {mask}")
-    mask_ids = np.where(mask)[0].tolist()
-    mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
-    print(f"Mask Tokens: {mask_token_ids}")
-    if expected_next_token:
-        assert expected_next_token in mask_token_ids, f"Expected '{expected_next_token}' in mask"
+#     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
+#     tokens = tokenizer.encode(input_text, return_tensors="pt")
+#     tokens: list[int] = tokens.tolist()[0]
+#     print(f"Committing tokens: {tokens}")
+#     for token_id in tokens:
+#         grammar_constraint_state.commit(token_id)
+#     mask = grammar_constraint_state.get_mask()
+#     print("Got mask")
+#     print(f"Mask: {mask}")
+#     mask_ids = np.where(mask)[0].tolist()
+#     mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
+#     print(f"Mask Tokens: {mask_token_ids}")
+#     if expected_next_token:
+#         assert expected_next_token in mask_token_ids, f"Expected '{expected_next_token}' in mask"
 
 #     # DEMO: Generate text.
 #     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
