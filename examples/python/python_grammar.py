@@ -319,12 +319,13 @@ if __name__ == "__main__":
 #     parser = grammar.glr_parser()
 #     parser.print()
     grammar.glr_parser().print()
-    print("Initializing grammar constraint...")
-    grammar_constraint = PyGrammarConstraint(grammar, llm_token_to_id, max(llm_token_to_id.values()))
-    print("Initializing grammar constraint state...")
-    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
-    print("Initializing grammar processor...")
-    grammar_processor = GrammarConstrainedLogitsProcessor(grammar_constraint_state, llm_token_to_id)
+
+#     print("Initializing grammar constraint...")
+#     grammar_constraint = PyGrammarConstraint(grammar, llm_token_to_id, max(llm_token_to_id.values()))
+#     print("Initializing grammar constraint state...")
+#     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
+#     print("Initializing grammar processor...")
+#     grammar_processor = GrammarConstrainedLogitsProcessor(grammar_constraint_state, llm_token_to_id)
 
     model = AutoModelForCausalLM.from_pretrained(model_name)
 
@@ -337,13 +338,13 @@ if __name__ == "__main__":
     input_text = "hello"
     expected_next_token = "="
 
-    # DEMO: Get the mask
-    mask = grammar_constraint_state.get_mask()
-    print("Got mask")
-    print(f"Mask: {mask}")
-    mask_ids = np.where(mask)[0].tolist()
-    mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
-    print(f"Mask Tokens: {mask_token_ids}")
+#     # DEMO: Get the mask
+#     mask = grammar_constraint_state.get_mask()
+#     print("Got mask")
+#     print(f"Mask: {mask}")
+#     mask_ids = np.where(mask)[0].tolist()
+#     mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
+#     print(f"Mask Tokens: {mask_token_ids}")
 
     # DEMO: Incremental Parser
     parser_state = PyIncrementalParser(grammar) # Use the imported class

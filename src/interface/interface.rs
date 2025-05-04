@@ -364,6 +364,7 @@ impl<'a> IncrementalParser<'a> {
 
     /// Processes a chunk of input bytes, updating the internal state.
     pub fn feed(&mut self, bytes: &[u8]) {
+        crate::debug!(3, "Processing input bytes: {:?} with {} active tokenizer states", bytes, self.state.len());
         let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>> = BTreeMap::new();
         let mut queue: BTreeMap<(usize, TokenizerStateID), GLRParserState<'a, ()>> = BTreeMap::new();
 
@@ -373,6 +374,7 @@ impl<'a> IncrementalParser<'a> {
         }
 
         while let Some(((position, current_tokenizer_state_id), current_glr_state)) = queue.pop_first() {
+            crate::debug!(4, "Processing position {} in state {}", position, current_tokenizer_state_id.0);
             // Execute the tokenizer from the current state with the new bytes
             let results: ExecuteResult = self
                 .grammar
