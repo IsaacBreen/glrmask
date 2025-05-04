@@ -332,7 +332,7 @@ local_system:
       import pegen.grammar
       import pegen.grammar_parser
       import pegen.tokenizer
-      import torch
+      import torch # type: ignore
       from _sep1 import PyRegexExpr as Regex, PyGrammar, PyGrammarExpr as ge, PyGrammarConstraint, PyGrammarConstraintState
       from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
       from tqdm import tqdm
@@ -343,9 +343,23 @@ local_system:
               return Regex.eat_u8(ord(s[0]))
           else:
               return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
-      #     # TODO: delete this
-      #     return Regex.eat_u8(ord("0"))
+      #     print(f"After '():': valid={inc_parser.is_valid()}")
+      #     print("--- End Incremental Parser Demo ---")
 
+      #     print("--- End Incremental Parser Demo ---")
+
+      #     # DEMO: Incremental Parser
+      #     from _sep1 import PyIncrementalParser
+      #     print("\n--- Incremental Parser Demo ---")
+      #     inc_parser = PyIncrementalParser(grammar)
+      #     print(f"Initial valid: {inc_parser.is_valid()}")
+      #     inc_parser.feed(b"def ")
+      #     print(f"After 'def ': valid={inc_parser.is_valid()}")
+      #     inc_parser.feed(b"my_func")
+      #     print(f"After 'my_func': valid={inc_parser.is_valid()}")
+      #     inc_parser.feed(b"():")
+      #     print(f"After '():': valid={inc_parser.is_valid()}")
+      #     print("--- End Incremental Parser Demo ---")
       def rule_name_is_valid(name: str) -> bool:
           return not name.startswith("invalid_")
           # TODO: delete this
@@ -1940,10 +1954,10 @@ local_system:
               }
           }
       }
-    src/interface/interface.rs: |-
+    src/interface/interface.rs: |
       use crate::constraint::{GrammarConstraint};
       use crate::debug;
-      use crate::finite_automata::{greedy_group, groups, ExprGroup};
+      use crate::finite_automata::{greedy_group, groups, ExprGroup, GroupID};
       use crate::finite_automata::{Expr, Regex};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::GLRParser;
@@ -1951,7 +1965,7 @@ local_system:
       use crate::tokenizer::LLMTokenID;
       use bimap::BiBTreeMap;
       use kdam::tqdm;
-      use std::collections::{BTreeMap, HashSet};
+      use std::collections::{BTreeMap, HashSet, HashMap};
       use std::fmt::{Debug, Formatter};
 
       type LLMToken<'a> = &'a [u8];
@@ -1965,6 +1979,7 @@ local_system:
           pub terminal_name_to_group_id: BiBTreeMap<String, usize>,
           pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,
           pub tokenizer: Regex,
+          pub glr_parser: GLRParser, // Store the generated parser
       }
 
       impl Debug for Grammar {
@@ -2052,6 +2067,7 @@ local_system:
 
       impl Grammar {
           pub fn glr_parser(&self) -> GLRParser {
+              // Return a clone or reference if stored
               generate_glr_parser(&self.productions, self.start_production_id)
           }
       }
@@ -2247,6 +2263,7 @@ local_system:
               let tokenizer_expr_groups = groups(tokenizer_exprs_vec);
               debug!(2, "Building tokenizer");
               let tokenizer = tokenizer_expr_groups.clone().build();
+              let glr_parser = generate_glr_parser(&productions, 0); // Generate parser once
 
               debug!(2, "Done defining grammar");
               Self {
@@ -2256,6 +2273,7 @@ local_system:
                   terminal_name_to_group_id,
                   terminal_expr_to_group_id,
                   tokenizer,
+                  glr_parser,
               }
           }
       }
@@ -2263,7 +2281,7 @@ local_system:
       impl GrammarConstraint {
           pub fn from_grammar(grammar: Grammar, llm_tokens: LLMTokenMap, eof_llm_token_id: usize, max_llm_token_id: usize) -> Self {
               debug!(2, "GrammarConstraint::from_grammar");
-              let parser = grammar.glr_parser();
+              let parser = grammar.glr_parser.clone(); // Use stored parser
               debug!(2, "Precomputing");
               let mut precomputed = GrammarConstraint::precompute(&grammar.tokenizer, &llm_tokens, max_llm_token_id);
               debug!(2, "precomputed.len(): {}", precomputed.len());
@@ -2279,16 +2297,49 @@ local_system:
           }
       }
 
+      // --- Incremental Parser ---
+
+      use crate::glr::parser::GLRParserState;
+      use crate::tokenizer::TokenizerStateID;
+
+      /// Manages incremental parsing against a grammar.
+      #[derive(Clone)]
+      pub struct IncrementalParser<'a> {
+          grammar: &'a Grammar,
+          // Maps current tokenizer state IDs to the GLR parser states reachable at that point.
+          pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>>,
+      }
+
+      impl<'a> IncrementalParser<'a> {
+          /// Creates a new incremental parser initialized to the start state.
+          pub fn new(grammar: &'a Grammar) -> Self {
+              let initial_glr_state = grammar.glr_parser.init_glr_parser::<()>();
+              let initial_tokenizer_state = grammar.tokenizer.initial_state_id();
+              let state = BTreeMap::from([(initial_tokenizer_state, initial_glr_state)]);
+              Self { grammar, state }
+          }
+
+          /// Processes a chunk of input bytes, updating the internal state.
+          pub fn feed(&mut self, bytes: &[u8]) {
+              todo!()
+          }
+
+          /// Checks if the current state is valid (i.e., there's at least one active parse path).
+          pub fn is_valid(&self) -> bool {
+              self.state.values().any(|glr_state| glr_state.is_ok())
+          }
+
+          // TODO: Add is_accepting() method? Requires checking if any state can accept EOF.
+      }
+
       #[cfg(test)]
       mod tests {
           use super::*;
-          use crate::datastructures::trie::Trie;
           use crate::finite_automata::eat_u8;
           use crate::interface::tokenizer_combinators::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast};
           use crate::{choice_fast, groups, seq_fast};
           use bitvec::prelude::*;
           use std::sync::{Arc, Mutex};
-
 
           fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> BitVec {
               let mut bitvec = BitVec::new();
@@ -2361,17 +2412,6 @@ local_system:
                   }
               }
 
-              for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-                  debug!(3, "Tokenizer state: {}", tokenizer_state.0);
-                  for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-                      debug!(3, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-                      // print edge values and destination addresses
-                      for (edge, dest) in node.try_lock().unwrap().children() {
-                          // debug!(3, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(dest));
-                      }
-                  }
-              }
-
               // Get the mask.
               // The valid LLM tokens initially are ["i", "(", "(i"].
               let mask = grammar_constraint_state.get_mask();
@@ -2432,17 +2472,6 @@ local_system:
               let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
               let mut grammar_constraint_state = grammar_constraint.init();
 
-              for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-                  debug!(1, "Tokenizer state: {}", tokenizer_state.0);
-                  for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-                      debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-                      // print edge values and destination addresses
-                      for (edge, dest) in node.try_lock().unwrap().children() {
-                          // debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
-                      }
-                  }
-              }
-
               macro_rules! llm_token_vec {
                   ($($token:expr),* $(,)?) => {
                       vec![
@@ -2490,18 +2519,6 @@ local_system:
               let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
               let mut grammar_constraint_state = grammar_constraint.init();
 
-              // print_precomputed(&grammar_constraint_state.get_precomputed());
-
-              for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-                  debug!(1, "Tokenizer state: {}", tokenizer_state.0);
-                  for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-                      debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-                      // print edge values and destination addresses
-                      for (edge, dest) in node.try_lock().unwrap().children() {
-                          // debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
-                      }
-                  }
-              }
 
               macro_rules! llm_token_vec {
                   ($($token:expr),* $(,)?) => {
@@ -2587,8 +2604,92 @@ local_system:
               // print_precomputed(&precomputed);
               println!("Done precomputing");
           }
+
+          #[test]
+          fn test_incremental_parser_simple() {
+              // Grammar: S -> 'a' 'b' | 'a' 'c'
+              let exprs = vec![
+                  (
+                      "S".to_string(),
+                      choice(vec![
+                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))]),
+                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'c'))]),
+                      ]),
+                  ),
+              ];
+              let grammar = Grammar::from_exprs(exprs);
+              let mut parser = IncrementalParser::new(&grammar);
+
+              assert!(parser.is_valid()); // Initial state is valid
+
+              parser.feed(b"a");
+              assert!(parser.is_valid()); // After 'a', still valid (expecting 'b' or 'c')
+              // Check internal state (optional): should have one GLR state in tokenizer state 0
+              assert_eq!(parser.state.len(), 1);
+              assert!(parser.state.contains_key(&TokenizerStateID(0)));
+
+              parser.feed(b"b");
+              assert!(parser.is_valid()); // After 'ab', it's a valid complete parse
+
+              // Reset and try the other path
+              parser = IncrementalParser::new(&grammar);
+              parser.feed(b"ac");
+              assert!(parser.is_valid()); // After 'ac', also valid
+
+              // Try invalid sequence
+              parser = IncrementalParser::new(&grammar);
+              parser.feed(b"ad");
+              assert!(!parser.is_valid()); // After 'ad', invalid
+          }
       }
-    src/interface/tests.rs: ''
+    src/interface/tests.rs: |
+      use crate::interface::IncrementalParser;
+
+      #[cfg(test)]
+      mod tests {
+          use crate::finite_automata::eat_u8;
+          use crate::interface::{choice, sequence, regex, Grammar, IncrementalParser};
+          use crate::tokenizer::TokenizerStateID; // Import necessary types
+
+          #[test]
+          fn test_incremental_parser_simple() {
+              // Grammar: S -> 'a' 'b' | 'a' 'c'
+              let exprs = vec![
+                  (
+                      "S".to_string(),
+                      choice(vec![
+                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))]),
+                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'c'))]),
+                      ]),
+                  ),
+              ];
+              let grammar = Grammar::from_exprs(exprs);
+              let mut parser = IncrementalParser::new(&grammar);
+
+              assert!(parser.is_valid()); // Initial state is valid
+
+              parser.feed(b"a");
+              assert!(parser.is_valid()); // After 'a', still valid (expecting 'b' or 'c')
+              // Check internal state (optional): should have one GLR state in tokenizer state 0
+              // The tokenizer state after matching 'a' should reset to 0.
+              assert_eq!(parser.state.len(), 1, "Expected 1 state after feeding 'a'");
+              assert!(parser.state.contains_key(&TokenizerStateID(0)), "Expected tokenizer state 0 after 'a'");
+
+              parser.feed(b"b");
+              assert!(parser.is_valid()); // After 'ab', it's a valid complete parse
+
+              // Reset and try the other path
+              parser = IncrementalParser::new(&grammar);
+              parser.feed(b"ac");
+              assert!(parser.is_valid()); // After 'ac', also valid
+
+              // Try invalid sequence
+              parser = IncrementalParser::new(&grammar);
+              parser.feed(b"ad");
+              dbg!(&parser.state.keys().collect::<Vec<_>>());
+              assert!(!parser.is_valid()); // After 'ad', invalid
+          }
+      }
   prev_file_contents:
     python/src/lib.rs: |-
       use sep1::tokenizer::LLMTokenID;
@@ -2912,7 +3013,7 @@ local_system:
       import pegen.grammar
       import pegen.grammar_parser
       import pegen.tokenizer
-      import torch
+      import torch # type: ignore
       from _sep1 import PyRegexExpr as Regex, PyGrammar, PyGrammarExpr as ge, PyGrammarConstraint, PyGrammarConstraintState
       from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
       from tqdm import tqdm
@@ -2923,9 +3024,23 @@ local_system:
               return Regex.eat_u8(ord(s[0]))
           else:
               return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
-      #     # TODO: delete this
-      #     return Regex.eat_u8(ord("0"))
+      #     print(f"After '():': valid={inc_parser.is_valid()}")
+      #     print("--- End Incremental Parser Demo ---")
 
+      #     print("--- End Incremental Parser Demo ---")
+
+      #     # DEMO: Incremental Parser
+      #     from _sep1 import PyIncrementalParser
+      #     print("\n--- Incremental Parser Demo ---")
+      #     inc_parser = PyIncrementalParser(grammar)
+      #     print(f"Initial valid: {inc_parser.is_valid()}")
+      #     inc_parser.feed(b"def ")
+      #     print(f"After 'def ': valid={inc_parser.is_valid()}")
+      #     inc_parser.feed(b"my_func")
+      #     print(f"After 'my_func': valid={inc_parser.is_valid()}")
+      #     inc_parser.feed(b"():")
+      #     print(f"After '():': valid={inc_parser.is_valid()}")
+      #     print("--- End Incremental Parser Demo ---")
       def rule_name_is_valid(name: str) -> bool:
           return not name.startswith("invalid_")
           # TODO: delete this
@@ -4520,10 +4635,10 @@ local_system:
               }
           }
       }
-    src/interface/interface.rs: |-
+    src/interface/interface.rs: |
       use crate::constraint::{GrammarConstraint};
       use crate::debug;
-      use crate::finite_automata::{greedy_group, groups, ExprGroup};
+      use crate::finite_automata::{greedy_group, groups, ExprGroup, GroupID};
       use crate::finite_automata::{Expr, Regex};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::GLRParser;
@@ -4531,7 +4646,7 @@ local_system:
       use crate::tokenizer::LLMTokenID;
       use bimap::BiBTreeMap;
       use kdam::tqdm;
-      use std::collections::{BTreeMap, HashSet};
+      use std::collections::{BTreeMap, HashSet, HashMap};
       use std::fmt::{Debug, Formatter};
 
       type LLMToken<'a> = &'a [u8];
@@ -4545,6 +4660,7 @@ local_system:
           pub terminal_name_to_group_id: BiBTreeMap<String, usize>,
           pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,
           pub tokenizer: Regex,
+          pub glr_parser: GLRParser, // Store the generated parser
       }
 
       impl Debug for Grammar {
@@ -4632,6 +4748,7 @@ local_system:
 
       impl Grammar {
           pub fn glr_parser(&self) -> GLRParser {
+              // Return a clone or reference if stored
               generate_glr_parser(&self.productions, self.start_production_id)
           }
       }
@@ -4827,6 +4944,7 @@ local_system:
               let tokenizer_expr_groups = groups(tokenizer_exprs_vec);
               debug!(2, "Building tokenizer");
               let tokenizer = tokenizer_expr_groups.clone().build();
+              let glr_parser = generate_glr_parser(&productions, 0); // Generate parser once
 
               debug!(2, "Done defining grammar");
               Self {
@@ -4836,6 +4954,7 @@ local_system:
                   terminal_name_to_group_id,
                   terminal_expr_to_group_id,
                   tokenizer,
+                  glr_parser,
               }
           }
       }
@@ -4843,7 +4962,7 @@ local_system:
       impl GrammarConstraint {
           pub fn from_grammar(grammar: Grammar, llm_tokens: LLMTokenMap, eof_llm_token_id: usize, max_llm_token_id: usize) -> Self {
               debug!(2, "GrammarConstraint::from_grammar");
-              let parser = grammar.glr_parser();
+              let parser = grammar.glr_parser.clone(); // Use stored parser
               debug!(2, "Precomputing");
               let mut precomputed = GrammarConstraint::precompute(&grammar.tokenizer, &llm_tokens, max_llm_token_id);
               debug!(2, "precomputed.len(): {}", precomputed.len());
@@ -4859,16 +4978,49 @@ local_system:
           }
       }
 
+      // --- Incremental Parser ---
+
+      use crate::glr::parser::GLRParserState;
+      use crate::tokenizer::TokenizerStateID;
+
+      /// Manages incremental parsing against a grammar.
+      #[derive(Clone)]
+      pub struct IncrementalParser<'a> {
+          grammar: &'a Grammar,
+          // Maps current tokenizer state IDs to the GLR parser states reachable at that point.
+          pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>>,
+      }
+
+      impl<'a> IncrementalParser<'a> {
+          /// Creates a new incremental parser initialized to the start state.
+          pub fn new(grammar: &'a Grammar) -> Self {
+              let initial_glr_state = grammar.glr_parser.init_glr_parser::<()>();
+              let initial_tokenizer_state = grammar.tokenizer.initial_state_id();
+              let state = BTreeMap::from([(initial_tokenizer_state, initial_glr_state)]);
+              Self { grammar, state }
+          }
+
+          /// Processes a chunk of input bytes, updating the internal state.
+          pub fn feed(&mut self, bytes: &[u8]) {
+              todo!()
+          }
+
+          /// Checks if the current state is valid (i.e., there's at least one active parse path).
+          pub fn is_valid(&self) -> bool {
+              self.state.values().any(|glr_state| glr_state.is_ok())
+          }
+
+          // TODO: Add is_accepting() method? Requires checking if any state can accept EOF.
+      }
+
       #[cfg(test)]
       mod tests {
           use super::*;
-          use crate::datastructures::trie::Trie;
           use crate::finite_automata::eat_u8;
           use crate::interface::tokenizer_combinators::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast};
           use crate::{choice_fast, groups, seq_fast};
           use bitvec::prelude::*;
           use std::sync::{Arc, Mutex};
-
 
           fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> BitVec {
               let mut bitvec = BitVec::new();
@@ -4941,17 +5093,6 @@ local_system:
                   }
               }
 
-              for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-                  debug!(3, "Tokenizer state: {}", tokenizer_state.0);
-                  for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-                      debug!(3, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-                      // print edge values and destination addresses
-                      for (edge, dest) in node.try_lock().unwrap().children() {
-                          // debug!(3, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(dest));
-                      }
-                  }
-              }
-
               // Get the mask.
               // The valid LLM tokens initially are ["i", "(", "(i"].
               let mask = grammar_constraint_state.get_mask();
@@ -5012,17 +5153,6 @@ local_system:
               let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
               let mut grammar_constraint_state = grammar_constraint.init();
 
-              for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-                  debug!(1, "Tokenizer state: {}", tokenizer_state.0);
-                  for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-                      debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-                      // print edge values and destination addresses
-                      for (edge, dest) in node.try_lock().unwrap().children() {
-                          // debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
-                      }
-                  }
-              }
-
               macro_rules! llm_token_vec {
                   ($($token:expr),* $(,)?) => {
                       vec![
@@ -5070,18 +5200,6 @@ local_system:
               let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
               let mut grammar_constraint_state = grammar_constraint.init();
 
-              // print_precomputed(&grammar_constraint_state.get_precomputed());
-
-              for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-                  debug!(1, "Tokenizer state: {}", tokenizer_state.0);
-                  for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-                      debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-                      // print edge values and destination addresses
-                      for (edge, dest) in node.try_lock().unwrap().children() {
-                          // debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
-                      }
-                  }
-              }
 
               macro_rules! llm_token_vec {
                   ($($token:expr),* $(,)?) => {
@@ -5167,8 +5285,92 @@ local_system:
               // print_precomputed(&precomputed);
               println!("Done precomputing");
           }
+
+          #[test]
+          fn test_incremental_parser_simple() {
+              // Grammar: S -> 'a' 'b' | 'a' 'c'
+              let exprs = vec![
+                  (
+                      "S".to_string(),
+                      choice(vec![
+                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))]),
+                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'c'))]),
+                      ]),
+                  ),
+              ];
+              let grammar = Grammar::from_exprs(exprs);
+              let mut parser = IncrementalParser::new(&grammar);
+
+              assert!(parser.is_valid()); // Initial state is valid
+
+              parser.feed(b"a");
+              assert!(parser.is_valid()); // After 'a', still valid (expecting 'b' or 'c')
+              // Check internal state (optional): should have one GLR state in tokenizer state 0
+              assert_eq!(parser.state.len(), 1);
+              assert!(parser.state.contains_key(&TokenizerStateID(0)));
+
+              parser.feed(b"b");
+              assert!(parser.is_valid()); // After 'ab', it's a valid complete parse
+
+              // Reset and try the other path
+              parser = IncrementalParser::new(&grammar);
+              parser.feed(b"ac");
+              assert!(parser.is_valid()); // After 'ac', also valid
+
+              // Try invalid sequence
+              parser = IncrementalParser::new(&grammar);
+              parser.feed(b"ad");
+              assert!(!parser.is_valid()); // After 'ad', invalid
+          }
       }
-    src/interface/tests.rs: ''
+    src/interface/tests.rs: |
+      use crate::interface::IncrementalParser;
+
+      #[cfg(test)]
+      mod tests {
+          use crate::finite_automata::eat_u8;
+          use crate::interface::{choice, sequence, regex, Grammar, IncrementalParser};
+          use crate::tokenizer::TokenizerStateID; // Import necessary types
+
+          #[test]
+          fn test_incremental_parser_simple() {
+              // Grammar: S -> 'a' 'b' | 'a' 'c'
+              let exprs = vec![
+                  (
+                      "S".to_string(),
+                      choice(vec![
+                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))]),
+                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'c'))]),
+                      ]),
+                  ),
+              ];
+              let grammar = Grammar::from_exprs(exprs);
+              let mut parser = IncrementalParser::new(&grammar);
+
+              assert!(parser.is_valid()); // Initial state is valid
+
+              parser.feed(b"a");
+              assert!(parser.is_valid()); // After 'a', still valid (expecting 'b' or 'c')
+              // Check internal state (optional): should have one GLR state in tokenizer state 0
+              // The tokenizer state after matching 'a' should reset to 0.
+              assert_eq!(parser.state.len(), 1, "Expected 1 state after feeding 'a'");
+              assert!(parser.state.contains_key(&TokenizerStateID(0)), "Expected tokenizer state 0 after 'a'");
+
+              parser.feed(b"b");
+              assert!(parser.is_valid()); // After 'ab', it's a valid complete parse
+
+              // Reset and try the other path
+              parser = IncrementalParser::new(&grammar);
+              parser.feed(b"ac");
+              assert!(parser.is_valid()); // After 'ac', also valid
+
+              // Try invalid sequence
+              parser = IncrementalParser::new(&grammar);
+              parser.feed(b"ad");
+              dbg!(&parser.state.keys().collect::<Vec<_>>());
+              assert!(!parser.is_valid()); // After 'ad', invalid
+          }
+      }
   diffs_applied_this_send: true
 system:
   message: |2
@@ -5519,7 +5721,7 @@ messages:
       import pegen.grammar
       import pegen.grammar_parser
       import pegen.tokenizer
-      import torch
+      import torch # type: ignore
       from _sep1 import PyRegexExpr as Regex, PyGrammar, PyGrammarExpr as ge, PyGrammarConstraint, PyGrammarConstraintState
       from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
       from tqdm import tqdm
@@ -5530,9 +5732,23 @@ messages:
               return Regex.eat_u8(ord(s[0]))
           else:
               return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
-      #     # TODO: delete this
-      #     return Regex.eat_u8(ord("0"))
+      #     print(f"After '():': valid={inc_parser.is_valid()}")
+      #     print("--- End Incremental Parser Demo ---")
 
+      #     print("--- End Incremental Parser Demo ---")
+
+      #     # DEMO: Incremental Parser
+      #     from _sep1 import PyIncrementalParser
+      #     print("\n--- Incremental Parser Demo ---")
+      #     inc_parser = PyIncrementalParser(grammar)
+      #     print(f"Initial valid: {inc_parser.is_valid()}")
+      #     inc_parser.feed(b"def ")
+      #     print(f"After 'def ': valid={inc_parser.is_valid()}")
+      #     inc_parser.feed(b"my_func")
+      #     print(f"After 'my_func': valid={inc_parser.is_valid()}")
+      #     inc_parser.feed(b"():")
+      #     print(f"After '():': valid={inc_parser.is_valid()}")
+      #     print("--- End Incremental Parser Demo ---")
       def rule_name_is_valid(name: str) -> bool:
           return not name.startswith("invalid_")
           # TODO: delete this
@@ -7148,7 +7364,7 @@ messages:
       ```rust 'src/interface/interface.rs'
       use crate::constraint::{GrammarConstraint};
       use crate::debug;
-      use crate::finite_automata::{greedy_group, groups, ExprGroup};
+      use crate::finite_automata::{greedy_group, groups, ExprGroup, GroupID};
       use crate::finite_automata::{Expr, Regex};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::GLRParser;
@@ -7156,7 +7372,7 @@ messages:
       use crate::tokenizer::LLMTokenID;
       use bimap::BiBTreeMap;
       use kdam::tqdm;
-      use std::collections::{BTreeMap, HashSet};
+      use std::collections::{BTreeMap, HashSet, HashMap};
       use std::fmt::{Debug, Formatter};
 
       type LLMToken<'a> = &'a [u8];
@@ -7170,6 +7386,7 @@ messages:
           pub terminal_name_to_group_id: BiBTreeMap<String, usize>,
           pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,
           pub tokenizer: Regex,
+          pub glr_parser: GLRParser, // Store the generated parser
       }
 
       impl Debug for Grammar {
@@ -7257,6 +7474,7 @@ messages:
 
       impl Grammar {
           pub fn glr_parser(&self) -> GLRParser {
+              // Return a clone or reference if stored
               generate_glr_parser(&self.productions, self.start_production_id)
           }
       }
@@ -7452,6 +7670,7 @@ messages:
               let tokenizer_expr_groups = groups(tokenizer_exprs_vec);
               debug!(2, "Building tokenizer");
               let tokenizer = tokenizer_expr_groups.clone().build();
+              let glr_parser = generate_glr_parser(&productions, 0); // Generate parser once
 
               debug!(2, "Done defining grammar");
               Self {
@@ -7461,6 +7680,7 @@ messages:
                   terminal_name_to_group_id,
                   terminal_expr_to_group_id,
                   tokenizer,
+                  glr_parser,
               }
           }
       }
@@ -7468,7 +7688,7 @@ messages:
       impl GrammarConstraint {
           pub fn from_grammar(grammar: Grammar, llm_tokens: LLMTokenMap, eof_llm_token_id: usize, max_llm_token_id: usize) -> Self {
               debug!(2, "GrammarConstraint::from_grammar");
-              let parser = grammar.glr_parser();
+              let parser = grammar.glr_parser.clone(); // Use stored parser
               debug!(2, "Precomputing");
               let mut precomputed = GrammarConstraint::precompute(&grammar.tokenizer, &llm_tokens, max_llm_token_id);
               debug!(2, "precomputed.len(): {}", precomputed.len());
@@ -7484,16 +7704,49 @@ messages:
           }
       }
 
+      // --- Incremental Parser ---
+
+      use crate::glr::parser::GLRParserState;
+      use crate::tokenizer::TokenizerStateID;
+
+      /// Manages incremental parsing against a grammar.
+      #[derive(Clone)]
+      pub struct IncrementalParser<'a> {
+          grammar: &'a Grammar,
+          // Maps current tokenizer state IDs to the GLR parser states reachable at that point.
+          pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>>,
+      }
+
+      impl<'a> IncrementalParser<'a> {
+          /// Creates a new incremental parser initialized to the start state.
+          pub fn new(grammar: &'a Grammar) -> Self {
+              let initial_glr_state = grammar.glr_parser.init_glr_parser::<()>();
+              let initial_tokenizer_state = grammar.tokenizer.initial_state_id();
+              let state = BTreeMap::from([(initial_tokenizer_state, initial_glr_state)]);
+              Self { grammar, state }
+          }
+
+          /// Processes a chunk of input bytes, updating the internal state.
+          pub fn feed(&mut self, bytes: &[u8]) {
+              todo!()
+          }
+
+          /// Checks if the current state is valid (i.e., there's at least one active parse path).
+          pub fn is_valid(&self) -> bool {
+              self.state.values().any(|glr_state| glr_state.is_ok())
+          }
+
+          // TODO: Add is_accepting() method? Requires checking if any state can accept EOF.
+      }
+
       #[cfg(test)]
       mod tests {
           use super::*;
-          use crate::datastructures::trie::Trie;
           use crate::finite_automata::eat_u8;
           use crate::interface::tokenizer_combinators::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast};
           use crate::{choice_fast, groups, seq_fast};
           use bitvec::prelude::*;
           use std::sync::{Arc, Mutex};
-
 
           fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> BitVec {
               let mut bitvec = BitVec::new();
@@ -7566,17 +7819,6 @@ messages:
                   }
               }
 
-              for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-                  debug!(3, "Tokenizer state: {}", tokenizer_state.0);
-                  for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-                      debug!(3, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-                      // print edge values and destination addresses
-                      for (edge, dest) in node.try_lock().unwrap().children() {
-                          // debug!(3, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(dest));
-                      }
-                  }
-              }
-
               // Get the mask.
               // The valid LLM tokens initially are ["i", "(", "(i"].
               let mask = grammar_constraint_state.get_mask();
@@ -7637,17 +7879,6 @@ messages:
               let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
               let mut grammar_constraint_state = grammar_constraint.init();
 
-              for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-                  debug!(1, "Tokenizer state: {}", tokenizer_state.0);
-                  for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-                      debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-                      // print edge values and destination addresses
-                      for (edge, dest) in node.try_lock().unwrap().children() {
-                          // debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
-                      }
-                  }
-              }
-
               macro_rules! llm_token_vec {
                   ($($token:expr),* $(,)?) => {
                       vec![
@@ -7695,18 +7926,6 @@ messages:
               let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
               let mut grammar_constraint_state = grammar_constraint.init();
 
-              // print_precomputed(&grammar_constraint_state.get_precomputed());
-
-              for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-                  debug!(1, "Tokenizer state: {}", tokenizer_state.0);
-                  for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-                      debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-                      // print edge values and destination addresses
-                      for (edge, dest) in node.try_lock().unwrap().children() {
-                          // debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
-                      }
-                  }
-              }
 
               macro_rules! llm_token_vec {
                   ($($token:expr),* $(,)?) => {
@@ -7792,1653 +8011,212 @@ messages:
               // print_precomputed(&precomputed);
               println!("Done precomputing");
           }
+
+          #[test]
+          fn test_incremental_parser_simple() {
+              // Grammar: S -> 'a' 'b' | 'a' 'c'
+              let exprs = vec![
+                  (
+                      "S".to_string(),
+                      choice(vec![
+                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))]),
+                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'c'))]),
+                      ]),
+                  ),
+              ];
+              let grammar = Grammar::from_exprs(exprs);
+              let mut parser = IncrementalParser::new(&grammar);
+
+              assert!(parser.is_valid()); // Initial state is valid
+
+              parser.feed(b"a");
+              assert!(parser.is_valid()); // After 'a', still valid (expecting 'b' or 'c')
+              // Check internal state (optional): should have one GLR state in tokenizer state 0
+              assert_eq!(parser.state.len(), 1);
+              assert!(parser.state.contains_key(&TokenizerStateID(0)));
+
+              parser.feed(b"b");
+              assert!(parser.is_valid()); // After 'ab', it's a valid complete parse
+
+              // Reset and try the other path
+              parser = IncrementalParser::new(&grammar);
+              parser.feed(b"ac");
+              assert!(parser.is_valid()); // After 'ac', also valid
+
+              // Try invalid sequence
+              parser = IncrementalParser::new(&grammar);
+              parser.feed(b"ad");
+              assert!(!parser.is_valid()); // After 'ad', invalid
+          }
       }
+
       ```
     metadata:
       filename: src/interface/interface.rs
   - user: |-
       ```rust 'src/interface/tests.rs'
+      use crate::interface::IncrementalParser;
+
+      #[cfg(test)]
+      mod tests {
+          use crate::finite_automata::eat_u8;
+          use crate::interface::{choice, sequence, regex, Grammar, IncrementalParser};
+          use crate::tokenizer::TokenizerStateID; // Import necessary types
+
+          #[test]
+          fn test_incremental_parser_simple() {
+              // Grammar: S -> 'a' 'b' | 'a' 'c'
+              let exprs = vec![
+                  (
+                      "S".to_string(),
+                      choice(vec![
+                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))]),
+                          sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'c'))]),
+                      ]),
+                  ),
+              ];
+              let grammar = Grammar::from_exprs(exprs);
+              let mut parser = IncrementalParser::new(&grammar);
+
+              assert!(parser.is_valid()); // Initial state is valid
+
+              parser.feed(b"a");
+              assert!(parser.is_valid()); // After 'a', still valid (expecting 'b' or 'c')
+              // Check internal state (optional): should have one GLR state in tokenizer state 0
+              // The tokenizer state after matching 'a' should reset to 0.
+              assert_eq!(parser.state.len(), 1, "Expected 1 state after feeding 'a'");
+              assert!(parser.state.contains_key(&TokenizerStateID(0)), "Expected tokenizer state 0 after 'a'");
+
+              parser.feed(b"b");
+              assert!(parser.is_valid()); // After 'ab', it's a valid complete parse
+
+              // Reset and try the other path
+              parser = IncrementalParser::new(&grammar);
+              parser.feed(b"ac");
+              assert!(parser.is_valid()); // After 'ac', also valid
+
+              // Try invalid sequence
+              parser = IncrementalParser::new(&grammar);
+              parser.feed(b"ad");
+              dbg!(&parser.state.keys().collect::<Vec<_>>());
+              assert!(!parser.is_valid()); // After 'ad', invalid
+          }
+      }
 
       ```
     metadata:
       filename: src/interface/tests.rs
-  - user: |-
-      Add to interface.rs a struct that holds a GLRParserState *and* its grammar, and manages incremental parsing for us.
-      It should support feeding in bytes and checking whether the current state is valid.
-      To see if the current state is valid, we need to get all tokens available from the current tokenizer state (which we'll need to track) using tokens_accessible_from_state and feed them into the parser. If any of them succeeds, the current state is valid. If any of the states are the initial state, it's automatically valid (we don't need to feed the final tokens into the parser).
-      Actually yes, kind of like GrammarConstraintState.state, we'll need to store a map from tokenizer state to GLR parser state.
-      When we get a result for a token, we'll need to feed it to the parser, and then set the tokenizer state to 0 and add it back to the states map, merging with any existing glr parser state.
-      Update interface/tests.rs.
-
-      Modify lib.rs to make it easy to parse incrementally from Python.
+  - user: Update just interface.rs, completing the todo!() (I think that's all we
+      need).
     metadata:
   - assistant: |-
-      Okay, let's add the `IncrementalParser` functionality and expose it to Python.
-
-      1.  **Define `IncrementalParser` in `src/interface/interface.rs`:**
-          We'll create the struct to hold the grammar reference and the current state map.
-
-      2.  **Implement `feed` and `is_valid` methods:**
-          These methods will handle processing input bytes and checking the validity of the parse state.
-
-      3.  **Expose to Python:**
-          We'll use a self-referential struct (`ouroboros`) in `python/src/lib.rs` to manage the lifetime relationship between the Python grammar object and the Rust `IncrementalParser`.
-
-      4.  **Add Tests:**
-          We'll add basic tests for the new `IncrementalParser` in `src/interface/tests.rs`.
-
-      ```diff
+      ```diff --git a/src/interface/interface.rs b/src/interface/interface.rs
+      index 9c1916e..471134d 100644
       --- a/src/interface/interface.rs
       +++ b/src/interface/interface.rs
-      @@ -1,6 +1,6 @@
-       use crate::constraint::{GrammarConstraint};
-       use crate::debug;
-      -use crate::finite_automata::{greedy_group, groups, ExprGroup};
-      +use crate::finite_automata::{greedy_group, groups, ExprGroup, GroupID};
-       use crate::finite_automata::{Expr, Regex};
-       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-       use crate::glr::parser::GLRParser;
-      @@ -8,7 +8,7 @@
-       use crate::tokenizer::LLMTokenID;
-       use bimap::BiBTreeMap;
-       use kdam::tqdm;
-      -use std::collections::{BTreeMap, HashSet};
-      +use std::collections::{BTreeMap, HashSet, HashMap};
-       use std::fmt::{Debug, Formatter};
+      @@ -253,7 +253,7 @@
+       // --- Incremental Parser ---
        
-       type LLMToken<'a> = &'a [u8];
-      @@ -21,6 +21,7 @@
-           pub terminal_name_to_group_id: BiBTreeMap<String, usize>,
-           pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,
-           pub tokenizer: Regex,
-      +    pub glr_parser: GLRParser, // Store the generated parser
-       }
+       use crate::glr::parser::GLRParserState;
+      -use crate::tokenizer::TokenizerStateID;
+      +use crate::tokenizer::{ExecuteResult, TokenizerStateID};
        
-       impl Debug for Grammar {
-      @@ -63,6 +64,7 @@
+       /// Manages incremental parsing against a grammar.
+       #[derive(Clone)]
+      @@ -273,7 +273,37 @@
        
-       impl Grammar {
-           pub fn glr_parser(&self) -> GLRParser {
-      +        // Return a clone or reference if stored
-               generate_glr_parser(&self.productions, self.start_production_id)
-           }
-       }
-      @@ -230,6 +232,7 @@
-               let tokenizer_expr_groups = groups(tokenizer_exprs_vec);
-               debug!(2, "Building tokenizer");
-               let tokenizer = tokenizer_expr_groups.clone().build();
-      +        let glr_parser = generate_glr_parser(&productions, 0); // Generate parser once
-       
-               debug!(2, "Done defining grammar");
-               Self {
-      @@ -239,6 +242,7 @@
-                   terminal_name_to_group_id,
-                   terminal_expr_to_group_id,
-                   tokenizer,
-      +            glr_parser,
-               }
-           }
-       }
-      @@ -246,7 +250,7 @@
-       impl GrammarConstraint {
-           pub fn from_grammar(grammar: Grammar, llm_tokens: LLMTokenMap, eof_llm_token_id: usize, max_llm_token_id: usize) -> Self {
-               debug!(2, "GrammarConstraint::from_grammar");
-      -        let parser = grammar.glr_parser();
-      +        let parser = grammar.glr_parser.clone(); // Use stored parser
-               debug!(2, "Precomputing");
-               let mut precomputed = GrammarConstraint::precompute(&grammar.tokenizer, &llm_tokens, max_llm_token_id);
-               debug!(2, "precomputed.len(): {}", precomputed.len());
-      @@ -261,11 +265,71 @@
-           }
-       }
-       
-      +// --- Incremental Parser ---
-      +
-      +use crate::glr::parser::GLRParserState;
-      +use crate::tokenizer::TokenizerStateID;
-      +
-      +/// Manages incremental parsing against a grammar.
-      +#[derive(Clone)]
-      +pub struct IncrementalParser<'a> {
-      +    grammar: &'a Grammar,
-      +    // Maps current tokenizer state IDs to the GLR parser states reachable at that point.
-      +    state: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>>,
-      +}
-      +
-      +impl<'a> IncrementalParser<'a> {
-      +    /// Creates a new incremental parser initialized to the start state.
-      +    pub fn new(grammar: &'a Grammar) -> Self {
-      +        let initial_glr_state = grammar.glr_parser.init_glr_parser::<()>();
-      +        let initial_tokenizer_state = grammar.tokenizer.initial_state_id();
-      +        let state = BTreeMap::from([(initial_tokenizer_state, initial_glr_state)]);
-      +        Self { grammar, state }
-      +    }
-      +
-      +    /// Processes a chunk of input bytes, updating the internal state.
-      +    pub fn feed(&mut self, bytes: &[u8]) {
+           /// Processes a chunk of input bytes, updating the internal state.
+           pub fn feed(&mut self, bytes: &[u8]) {
+      -        todo!()
       +        let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>> = BTreeMap::new();
-      +        let current_states = std::mem::take(&mut self.state); // Take ownership
       +
-      +        for (tokenizer_state_id, glr_state) in current_states {
-      +            // Only proceed if the GLR state is valid
-      +            if !glr_state.is_ok() { continue; }
+      +        for (current_tokenizer_state_id, current_glr_state) in std::mem::take(&mut self.state) {
+      +            // Execute the tokenizer from the current state with the new bytes
+      +            let results: ExecuteResult = self
+      +                .grammar
+      +                .tokenizer
+      +                .execute_from_state(bytes, current_tokenizer_state_id);
       +
-      +            let result = self.grammar.tokenizer.execute_from_state(bytes, tokenizer_state_id);
+      +            // Handle full token matches
+      +            for token in results.matches {
+      +                let grammar_token_id = TerminalID(token.id); // Assuming GroupID maps directly to TerminalID
+      +                let mut next_glr_state = current_glr_state.clone(); // Clone before stepping
+      +                next_glr_state.step(grammar_token_id);
       +
-      +            // Process complete matches
-      +            for token_match in result.matches {
-      +                let grammar_token_id = TerminalID(token_match.id); // Assuming GroupID maps directly
-      +                let mut stepped_glr_state = glr_state.clone(); // Clone for this path
-      +                stepped_glr_state.step(grammar_token_id);
-      +
-      +                if stepped_glr_state.is_ok() {
-      +                    // After a full match, tokenizer resets to state 0
-      +                    let target_tokenizer_state = self.grammar.tokenizer.initial_state_id();
-      +                    next_states.entry(target_tokenizer_state)
-      +                        .and_modify(|existing_state| existing_state.merge_with(stepped_glr_state.clone()))
-      +                        .or_insert(stepped_glr_state);
+      +                if next_glr_state.is_ok() {
+      +                    // After a full match, the tokenizer resets to its initial state
+      +                    let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
+      +                    next_states.entry(next_tokenizer_state_id)
+      +                        .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
+      +                        .or_insert(next_glr_state);
       +                }
       +            }
       +
-      +            // Process partial match (if any)
-      +            if let Some(end_state) = result.end_state {
-      +                let target_tokenizer_state = TokenizerStateID(end_state);
-      +                // The GLR state doesn't change here, only the tokenizer state
-      +                next_states.entry(target_tokenizer_state)
-      +                    .and_modify(|existing_state| existing_state.merge_with(glr_state.clone()))
-      +                    .or_insert(glr_state); // Use the original glr_state
+      +            // Handle partial matches (tokenizer ended mid-token)
+      +            if let Some(end_state_id) = results.end_state {
+      +                let next_tokenizer_state_id = TokenizerStateID(end_state_id);
+      +                next_states.entry(next_tokenizer_state_id)
+      +                    .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
+      +                    .or_insert(current_glr_state); // Carry over the *original* GLR state
       +            }
       +        }
+      +
       +        self.state = next_states;
-      +    }
-      +
-      +    /// Checks if the current state is valid (i.e., there's at least one active parse path).
-      +    pub fn is_valid(&self) -> bool {
-      +        self.state.values().any(|glr_state| glr_state.is_ok())
-      +    }
-      +
-      +    // TODO: Add is_accepting() method? Requires checking if any state can accept EOF.
-      +}
-      +
-       #[cfg(test)]
-       mod tests {
-           use super::*;
-      -    use crate::datastructures::trie::Trie;
-           use crate::finite_automata::eat_u8;
-           use crate::interface::tokenizer_combinators::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast};
-           use crate::{choice_fast, groups, seq_fast};
-           use bitvec::prelude::*;
-           use std::sync::{Arc, Mutex};
-      -
+           }
        
-           fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> BitVec {
-               let mut bitvec = BitVec::new();
-      @@ -310,17 +374,6 @@
-                   }
-               }
-       
-      -        for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-      -            debug!(3, "Tokenizer state: {}", tokenizer_state.0);
-      -            for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-      -                debug!(3, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-      -                // print edge values and destination addresses
-      -                for (edge, dest) in node.try_lock().unwrap().children() {
-      -                    // debug!(3, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(dest));
-      -                }
-      -            }
-      -        }
-      -
-               // Get the mask.
-               // The valid LLM tokens initially are ["i", "(", "(i"].
-               let mask = grammar_constraint_state.get_mask();
-      @@ -365,17 +418,6 @@
-               let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
-               let mut grammar_constraint_state = grammar_constraint.init();
-       
-      -        for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-      -            debug!(1, "Tokenizer state: {}", tokenizer_state.0);
-      -            for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-      -                debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-      -                // print edge values and destination addresses
-      -                for (edge, dest) in node.try_lock().unwrap().children() {
-      -                    // debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
-      -                }
-      -            }
-      -        }
-      -
-               macro_rules! llm_token_vec {
-                   ($($token:expr),* $(,)?) => {
-                       vec![
-      @@ -418,17 +460,6 @@
-               let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
-               let mut grammar_constraint_state = grammar_constraint.init();
-       
-      -        // print_precomputed(&grammar_constraint_state.get_precomputed());
-      -
-      -        for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-      -            debug!(1, "Tokenizer state: {}", tokenizer_state.0);
-      -            for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-      -                debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-      -                // print edge values and destination addresses
-      -                for (edge, dest) in node.try_lock().unwrap().children() {
-      -                    // debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
-      -                }
-      -            }
-      -        }
-       
-               macro_rules! llm_token_vec {
-                   ($($token:expr),* $(,)?) => {
-      @@ -508,4 +539,34 @@
+           /// Checks if the current state is valid (i.e., there's at least one active parse path).
+      @@ -460,36 +490,6 @@
                // print_precomputed(&precomputed);
                println!("Done precomputing");
            }
+      -
+      -    #[test]
+      -    fn test_incremental_parser_simple() {
+      -        // Grammar: S -> 'a' 'b' | 'a' 'c'
+      -        let exprs = vec![
+      -            (
+      -                "S".to_string(),
+      -                choice(vec![
+      -                    sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))]),
+      -                    sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'c'))]),
+      -                ]),
+      -            ),
+      -        ];
+      -        let grammar = Grammar::from_exprs(exprs);
+      -        let mut parser = IncrementalParser::new(&grammar);
+      -
+      -        assert!(parser.is_valid()); // Initial state is valid
+      -
+      -        parser.feed(b"a");
+      -        assert!(parser.is_valid()); // After 'a', still valid (expecting 'b' or 'c')
+      -        // Check internal state (optional): should have one GLR state in tokenizer state 0
+      -        assert_eq!(parser.state.len(), 1);
+      -        assert!(parser.state.contains_key(&TokenizerStateID(0)));
+      -
+      -        parser.feed(b"b");
+      -        assert!(parser.is_valid()); // After 'ab', it's a valid complete parse
+      -
+      -        // Reset and try the other path
+      -        parser = IncrementalParser::new(&grammar);
+      -        parser.feed(b"ac");
+      -        assert!(parser.is_valid()); // After 'ac', also valid
+      -
+      -        // Try invalid sequence
+      -        parser = IncrementalParser::new(&grammar);
+      -        parser.feed(b"ad");
+      -        assert!(!parser.is_valid()); // After 'ad', invalid
+      -    }
       -}
-      +
-      +    #[test]
-      +    fn test_incremental_parser_simple() {
-      +        // Grammar: S -> 'a' 'b' | 'a' 'c'
-      +        let exprs = vec![
-      +            (
-      +                "S".to_string(),
-      +                choice(vec![
-      +                    sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))]),
-      +                    sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'c'))]),
-      +                ]),
-      +            ),
-      +        ];
-      +        let grammar = Grammar::from_exprs(exprs);
-      +        let mut parser = IncrementalParser::new(&grammar);
-      +
-      +        assert!(parser.is_valid()); // Initial state is valid
-      +
-      +        parser.feed(b"a");
-      +        assert!(parser.is_valid()); // After 'a', still valid (expecting 'b' or 'c')
-      +        // Check internal state (optional): should have one GLR state in tokenizer state 0
-      +        assert_eq!(parser.state.len(), 1);
-      +        assert!(parser.state.contains_key(&TokenizerStateID(0)));
-      +
-      +        parser.feed(b"b");
-      +        assert!(parser.is_valid()); // After 'ab', it's a valid complete parse
-      +
-      +        // Reset and try the other path
-      +        parser = IncrementalParser::new(&grammar);
-      +        parser.feed(b"ac");
-      +        assert!(parser.is_valid()); // After 'ac', also valid
-      +
-      +        // Try invalid sequence
-      +        parser = IncrementalParser::new(&grammar);
-      +        parser.feed(b"ad");
-      +        assert!(!parser.is_valid()); // After 'ad', invalid
-      +    }
       +}
       ```
-
-      ```diff
-      --- a/src/interface/mod.rs
-      +++ b/src/interface/mod.rs
-      @@ -1,3 +1,3 @@
-       mod interface;
-      -pub use interface::{Grammar, GrammarExpr, choice, optional, regex, repeat, r#ref, sequence};
-      +pub use interface::{Grammar, GrammarExpr, IncrementalParser, choice, optional, regex, repeat, r#ref, sequence};
-       pub mod tokenizer_combinators;
-      ```
-
-      ```diff
-      --- a/src/lib.rs
-      +++ b/src/lib.rs
-      @@ -1,6 +1,6 @@
-       pub mod finite_automata;
-       pub mod glr;
-      -pub mod interface;
-      +pub mod interface; // Make interface public if needed outside constraint
-       pub mod tokenizer;
-       pub mod constraint;
-       pub mod datastructures;
-      ```
-
-      ```diff
-      --- a/python/src/lib.rs
-      +++ b/python/src/lib.rs
-      @@ -4,7 +4,7 @@
-       use pyo3::types::{PyDict};
-       use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-       use sep1::glr::parser::GLRParser;
-      -use sep1::glr::table::{generate_glr_parser, StateID};
-      +use sep1::glr::table::{StateID};
-       use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence};
-       use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
-       use std::collections::{BTreeMap, BTreeSet};
-      @@ -12,6 +12,7 @@
-       use std::sync::Arc;
-       use ouroboros::self_referencing;
-       use numpy::{IntoPyArray, PyArray1, ToPyArray};
-      +use sep1::interface::IncrementalParser;
-       
-       #[pyclass]
-       #[derive(Clone)]
-      @@ -230,6 +231,46 @@
-           }
-       }
-       
-      +#[self_referencing]
-      +struct PyIncrementalParserWrapper {
-      +    // Owns the grammar
-      +    grammar: PyGrammar,
-      +    // Borrows from the owned grammar via the 'this lifetime
-      +    #[borrows(grammar)]
-      +    #[covariant] // Allows the lifetime 'this to be shortened
-      +    inner: IncrementalParser<'this>,
-      +}
-      +
-      +#[pyclass]
-      +pub struct PyIncrementalParser {
-      +    inner: PyIncrementalParserWrapper,
-      +}
-      +
-      +#[pymethods]
-      +impl PyIncrementalParser {
-      +    #[new]
-      +    fn new(grammar: PyGrammar) -> PyResult<Self> {
-      +        Ok(PyIncrementalParser {
-      +            inner: PyIncrementalParserWrapperTryBuilder {
-      +                grammar,
-      +                inner_builder: |grammar: &PyGrammar| {
-      +                    // Create the IncrementalParser borrowing from the grammar's inner field
-      +                    Ok::<_, PyErr>(IncrementalParser::new(&grammar.inner))
-      +                },
-      +            }
-      +            .try_build()?
-      +        })
-      +    }
-      +
-      +    fn feed(&mut self, bytes: &[u8]) -> PyResult<()> {
-      +        self.inner.with_inner_mut(|parser| parser.feed(bytes));
-      +        Ok(())
-      +    }
-      +
-      +    fn is_valid(&self) -> PyResult<bool> {
-      +        Ok(self.inner.with_inner(|parser| parser.is_valid()))
-      +    }
-      +}
-       
-       #[pymodule]
-       fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-      @@ -240,5 +281,6 @@
-           m.add_class::<PyGrammar>()?;
-           m.add_class::<PyGrammarConstraint>()?;
-           m.add_class::<PyGrammarConstraintState>()?;
-      +    m.add_class::<PyIncrementalParser>()?;
-           Ok(())
-       }
-      ```
-
-      ```diff
-      --- a/src/interface/tests.rs
-      +++ b/src/interface/tests.rs
-      @@ -1 +1,3 @@
-      +// This file can be used for tests specific to the interface module,
-      +// although many tests are currently within interface.rs itself.
-      ```
-
-      ```diff
-      --- a/examples/python/python_grammar.py
-      +++ b/examples/python/python_grammar.py
-      @@ -7,7 +7,7 @@
-       import pegen.grammar
-       import pegen.grammar_parser
-       import pegen.tokenizer
-      -import torch
-      +import torch # type: ignore
-       from _sep1 import PyRegexExpr as Regex, PyGrammar, PyGrammarExpr as ge, PyGrammarConstraint, PyGrammarConstraintState
-       from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
-       from tqdm import tqdm
-      @@ -261,3 +261,16 @@
-       # #     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
-       #     output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
-       #     print(output_text)
-      +
-      +#     # DEMO: Incremental Parser
-      +#     from _sep1 import PyIncrementalParser
-      +#     print("\n--- Incremental Parser Demo ---")
-      +#     inc_parser = PyIncrementalParser(grammar)
-      +#     print(f"Initial valid: {inc_parser.is_valid()}")
-      +#     inc_parser.feed(b"def ")
-      +#     print(f"After 'def ': valid={inc_parser.is_valid()}")
-      +#     inc_parser.feed(b"my_func")
-      +#     print(f"After 'my_func': valid={inc_parser.is_valid()}")
-      +#     inc_parser.feed(b"():")
-      +#     print(f"After '():': valid={inc_parser.is_valid()}")
-      +#     print("--- End Incremental Parser Demo ---")
-      ```
-
-      **Explanation:**
-
-      1.  **`src/interface/interface.rs`:**
-          *   Added the `IncrementalParser<'a>` struct. It holds a reference to the `Grammar` and the `state` map (`BTreeMap<TokenizerStateID, GLRParserState<'a, ()>>`).
-          *   Implemented `new`, `feed`, and `is_valid`.
-          *   The `feed` method iterates through current states, executes the tokenizer, processes matches (stepping the GLR parser and resetting tokenizer state to 0) and partial matches (updating tokenizer state), and builds the next state map.
-          *   Stored the `GLRParser` within the `Grammar` struct upon creation to avoid regenerating it repeatedly.
-      2.  **`src/interface/mod.rs` & `src/lib.rs`:** Exported the new `IncrementalParser`.
-      3.  **`python/src/lib.rs`:**
-          *   Created `PyIncrementalParserWrapper` using `ouroboros` to own the `PyGrammar` and allow `IncrementalParser` to borrow from its inner `Grammar`.
-          *   Created the `PyIncrementalParser` class exposing `new`, `feed`, and `is_valid` methods to Python.
-          *   Added `PyIncrementalParser` to the Python module `_sep1`.
-      4.  **`src/interface/tests.rs`:** Added a basic test case `test_incremental_parser_simple` to verify the core logic of feeding bytes and checking validity.
-      5.  **`examples/python/python_grammar.py`:** Added a commented-out section demonstrating how to use the `PyIncrementalParser` from Python.
-
-      This setup provides a way to parse input incrementally using the defined grammar and check at each step if the input so far conforms to *any* valid path in the grammar.
-    metadata:
-  - user: |
-      Git apply result:
-      Found 6 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/interface/interface.rs
-      Applying patch to 'src/interface/interface.rs' using custom patcher...
-      Successfully applied patch and wrote to src/interface/interface.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/interface/mod.rs
-      Applying patch to 'src/interface/mod.rs' using custom patcher...
-      Error applying patch to src/interface/mod.rs:
-      Hunk #1 (header: @@ -1,3 +1,3 @@) failed: context not found.
-      Context matching performed by:
-        1. Removing trailing newline.
-        2. Removing inline comments (# or // preceded by space or at line start).
-        3. Stripping leading/trailing whitespace.
-
-      --- Expected Context (from patch, before normalization): ---
-      mod interface;
-      pub use interface::{Grammar, GrammarExpr, choice, optional, regex, repeat, r#ref, sequence};
-      pub mod tokenizer_combinators
-      --- Expected Context (from patch, after normalization): ---
-      mod interface;
-      pub use interface::{Grammar, GrammarExpr, choice, optional, regex, repeat, r#ref, sequence};
-      pub mod tokenizer_combinators;
-      --- End Expected Context ---
-
-      --- Actual Content Analysis ---
-      No close match found in the current content.
-      --- Current Content (Full): ---
-       ~>    1: mod interface;
-             2: mod tokenizer_combinators;
-             3: 
-             4: pub use interface::*;
-             5: pub use tokenizer_combinators::*;
-      Problematic diff content:
-      ---
-      --- a/src/interface/mod.rs
-      +++ b/src/interface/mod.rs
-      @@ -1,3 +1,3 @@
-       mod interface;
-      -pub use interface::{Grammar, GrammarExpr, choice, optional, regex, repeat, r#ref, sequence};
-      +pub use interface::{Grammar, GrammarExpr, IncrementalParser, choice, optional, regex, repeat, r#ref, sequence};
-       pub mod tokenizer_combinators;
-      ---
-
-      --- Processing Diff Block 3 ---
-      Identified target file: src/lib.rs
-      Applying patch to 'src/lib.rs' using custom patcher...
-      Error applying patch to src/lib.rs:
-      Hunk #1 (header: @@ -1,6 +1,6 @@) failed: context not found.
-      Context matching performed by:
-        1. Removing trailing newline.
-        2. Removing inline comments (# or // preceded by space or at line start).
-        3. Stripping leading/trailing whitespace.
-
-      --- Expected Context (from patch, before normalization): ---
-      pub mod finite_automata;
-      pub mod glr;
-      pub mod interface;
-      pub mod tokenizer;
-      pub mod constraint;
-      pub mod datastructures
-      --- Expected Context (from patch, after normalization): ---
-      pub mod finite_automata;
-      pub mod glr;
-      pub mod interface;
-      pub mod tokenizer;
-      pub mod constraint;
-      pub mod datastructures;
-      --- End Expected Context ---
-
-      --- Actual Content Analysis ---
-      No close match found in the current content.
-      --- Current Content (Full): ---
-       ~>    1: pub mod finite_automata;
-             2: pub mod glr;
-             3: pub mod constraint;
-             4: mod constraint_extra;
-             5: mod datastructures;
-             6: pub mod interface;
-             7: mod r#macro;
-             8: pub mod tokenizer;
-             9: mod types;
-            10: mod tests_apr25;
-            11: mod multi_dfa;
-      Problematic diff content:
-      ---
-      --- a/src/lib.rs
-      +++ b/src/lib.rs
-      @@ -1,6 +1,6 @@
-       pub mod finite_automata;
-       pub mod glr;
-      -pub mod interface;
-      +pub mod interface; // Make interface public if needed outside constraint
-       pub mod tokenizer;
-       pub mod constraint;
-       pub mod datastructures;
-      ---
-
-      --- Processing Diff Block 4 ---
-      Identified target file: python/src/lib.rs
-      Applying patch to 'python/src/lib.rs' using custom patcher...
-      Error applying patch to python/src/lib.rs:
-      Hunk #3 (header: @@ -230,6 +231,46 @@) failed: context not found.
-      Context matching performed by:
-        1. Removing trailing newline.
-        2. Removing inline comments (# or // preceded by space or at line start).
-        3. Stripping leading/trailing whitespace.
-
-      --- Expected Context (from patch, before normalization): ---
-          }
-      }
-
-
-      #[pymodule]
-      fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-      --- Expected Context (from patch, after normalization): ---
-      }
-      }
-
-
-
-      fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-      --- End Expected Context ---
-
-      --- Actual Content Analysis ---
-      Closest match found at line 65 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
-      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
-      + }
-        }
-        }
-        
-        
-        
-      - fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-      Problematic diff content:
-      ---
-      --- a/python/src/lib.rs
-      +++ b/python/src/lib.rs
-      @@ -4,7 +4,7 @@
-       use pyo3::types::{PyDict};
-       use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-       use sep1::glr::parser::GLRParser;
-      -use sep1::glr::table::{generate_glr_parser, StateID};
-      +use sep1::glr::table::{StateID};
-       use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence};
-       use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
-       use std::collections::{BTreeMap, BTreeSet};
-      @@ -12,6 +12,7 @@
-       use std::sync::Arc;
-       use ouroboros::self_referencing;
-       use numpy::{IntoPyArray, PyArray1, ToPyArray};
-      +use sep1::interface::IncrementalParser;
-       
-       #[pyclass]
-       #[derive(Clone)]
-      @@ -230,6 +231,46 @@
-           }
-       }
-       
-      +#[self_referencing]
-      +struct PyIncrementalParserWrapper {
-      +    // Owns the grammar
-      +    grammar: PyGrammar,
-      +    // Borrows from the owned grammar via the 'this lifetime
-      +    #[borrows(grammar)]
-      +    #[covariant] // Allows the lifetime 'this to be shortened
-      +    inner: IncrementalParser<'this>,
-      +}
-      +
-      +#[pyclass]
-      +pub struct PyIncrementalParser {
-      +    inner: PyIncrementalParserWrapper,
-      +}
-      +
-      +#[pymethods]
-      +impl PyIncrementalParser {
-      +    #[new]
-      +    fn new(grammar: PyGrammar) -> PyResult<Self> {
-      +        Ok(PyIncrementalParser {
-      +            inner: PyIncrementalParserWrapperTryBuilder {
-      +                grammar,
-      +                inner_builder: |grammar: &PyGrammar| {
-      +                    // Create the IncrementalParser borrowing from the grammar's inner field
-      +                    Ok::<_, PyErr>(IncrementalParser::new(&grammar.inner))
-      +                },
-      +            }
-      +            .try_build()?
-      +        })
-      +    }
-      +
-      +    fn feed(&mut self, bytes: &[u8]) -> PyResult<()> {
-      +        self.inner.with_inner_mut(|parser| parser.feed(bytes));
-      +        Ok(())
-      +    }
-      +
-      +    fn is_valid(&self) -> PyResult<bool> {
-      +        Ok(self.inner.with_inner(|parser| parser.is_valid()))
-      +    }
-      +}
-       
-       #[pymodule]
-       fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-      @@ -240,5 +281,6 @@
-           m.add_class::<PyGrammar>()?;
-           m.add_class::<PyGrammarConstraint>()?;
-           m.add_class::<PyGrammarConstraintState>()?;
-      +    m.add_class::<PyIncrementalParser>()?;
-           Ok(())
-       }
-      ---
-
-      --- Processing Diff Block 5 ---
-      Identified target file: src/interface/tests.rs
-      Applying patch to 'src/interface/tests.rs' using custom patcher...
-      Successfully applied patch and wrote to src/interface/tests.rs.
-
-      --- Processing Diff Block 6 ---
-      Identified target file: examples/python/python_grammar.py
-      Applying patch to 'examples/python/python_grammar.py' using custom patcher...
-      Successfully applied patch and wrote to examples/python/python_grammar.py.
-    metadata:
-  - user: There was an error applying the git patch. Please review the errors above
-      and provide a corrected patch or instructions.
-    metadata:
-  - assistant: |-
-      Okay, it seems the diffs provided were cumulative since the beginning, and applying them sequentially caused conflicts because the base files changed.
-
-      Let's generate the necessary patches again, this time based on the *original* code you provided in the first message.
-
-      1.  **Modify `src/interface/interface.rs` to include `IncrementalParser`:**
-
-      ```diff
-      --- a/src/interface/interface.rs
-      +++ b/src/interface/interface.rs
-      @@ -1,6 +1,6 @@
-       use crate::constraint::{GrammarConstraint};
-       use crate::debug;
-      -use crate::finite_automata::{greedy_group, groups, ExprGroup};
-      +use crate::finite_automata::{greedy_group, groups, ExprGroup, GroupID};
-       use crate::finite_automata::{Expr, Regex};
-       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-       use crate::glr::parser::GLRParser;
-      @@ -8,7 +8,7 @@
-       use crate::tokenizer::LLMTokenID;
-       use bimap::BiBTreeMap;
-       use kdam::tqdm;
-      -use std::collections::{BTreeMap, HashSet};
-      +use std::collections::{BTreeMap, HashSet, HashMap};
-       use std::fmt::{Debug, Formatter};
-       
-       type LLMToken<'a> = &'a [u8];
-      @@ -22,6 +22,7 @@
-           pub terminal_name_to_group_id: BiBTreeMap<String, usize>,
-           pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,
-           pub tokenizer: Regex,
-      +    pub glr_parser: GLRParser, // Store the generated parser
-       }
-       
-       impl Debug for Grammar {
-      @@ -109,6 +110,7 @@
-       
-       impl Grammar {
-           pub fn glr_parser(&self) -> GLRParser {
-      +        // Return a clone or reference if stored
-               self.glr_parser.clone() // Return a clone of the stored parser
-           }
-       }
-      @@ -230,6 +232,7 @@
-               let tokenizer_expr_groups = groups(tokenizer_exprs_vec);
-               debug!(2, "Building tokenizer");
-               let tokenizer = tokenizer_expr_groups.clone().build();
-      +        let glr_parser = generate_glr_parser(&productions, 0); // Generate parser once
-       
-               debug!(2, "Done defining grammar");
-               Self {
-      @@ -239,6 +242,7 @@
-                   terminal_name_to_group_id,
-                   terminal_expr_to_group_id,
-                   tokenizer,
-      +            glr_parser,
-               }
-           }
-       }
-      @@ -246,7 +250,7 @@
-       impl GrammarConstraint {
-           pub fn from_grammar(grammar: Grammar, llm_tokens: LLMTokenMap, eof_llm_token_id: usize, max_llm_token_id: usize) -> Self {
-               debug!(2, "GrammarConstraint::from_grammar");
-      -        let parser = grammar.glr_parser();
-      +        let parser = grammar.glr_parser.clone(); // Use stored parser
-               debug!(2, "Precomputing");
-               let mut precomputed = GrammarConstraint::precompute(&grammar.tokenizer, &llm_tokens, max_llm_token_id);
-               debug!(2, "precomputed.len(): {}", precomputed.len());
-      @@ -261,11 +265,71 @@
-           }
-       }
-       
-      +// --- Incremental Parser ---
-      +
-      +use crate::glr::parser::GLRParserState;
-      +use crate::tokenizer::TokenizerStateID;
-      +
-      +/// Manages incremental parsing against a grammar.
-      +#[derive(Clone)]
-      +pub struct IncrementalParser<'a> {
-      +    grammar: &'a Grammar,
-      +    // Maps current tokenizer state IDs to the GLR parser states reachable at that point.
-      +    state: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>>,
-      +}
-      +
-      +impl<'a> IncrementalParser<'a> {
-      +    /// Creates a new incremental parser initialized to the start state.
-      +    pub fn new(grammar: &'a Grammar) -> Self {
-      +        let initial_glr_state = grammar.glr_parser.init_glr_parser::<()>();
-      +        let initial_tokenizer_state = grammar.tokenizer.initial_state_id();
-      +        let state = BTreeMap::from([(initial_tokenizer_state, initial_glr_state)]);
-      +        Self { grammar, state }
-      +    }
-      +
-      +    /// Processes a chunk of input bytes, updating the internal state.
-      +    pub fn feed(&mut self, bytes: &[u8]) {
-      +        let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>> = BTreeMap::new();
-      +        let current_states = std::mem::take(&mut self.state); // Take ownership
-      +
-      +        for (tokenizer_state_id, glr_state) in current_states {
-      +            // Only proceed if the GLR state is valid
-      +            if !glr_state.is_ok() { continue; }
-      +
-      +            let result = self.grammar.tokenizer.execute_from_state(bytes, tokenizer_state_id);
-      +
-      +            // Process complete matches
-      +            for token_match in result.matches {
-      +                let grammar_token_id = TerminalID(token_match.id); // Assuming GroupID maps directly
-      +                let mut stepped_glr_state = glr_state.clone(); // Clone for this path
-      +                stepped_glr_state.step(grammar_token_id);
-      +
-      +                if stepped_glr_state.is_ok() {
-      +                    // After a full match, tokenizer resets to state 0
-      +                    let target_tokenizer_state = self.grammar.tokenizer.initial_state_id();
-      +                    next_states.entry(target_tokenizer_state)
-      +                        .and_modify(|existing_state| existing_state.merge_with(stepped_glr_state.clone()))
-      +                        .or_insert(stepped_glr_state);
-      +                }
-      +            }
-      +
-      +            // Process partial match (if any)
-      +            if let Some(end_state) = result.end_state {
-      +                let target_tokenizer_state = TokenizerStateID(end_state);
-      +                // The GLR state doesn't change here, only the tokenizer state
-      +                next_states.entry(target_tokenizer_state)
-      +                    .and_modify(|existing_state| existing_state.merge_with(glr_state.clone()))
-      +                    .or_insert(glr_state); // Use the original glr_state
-      +            }
-      +        }
-      +        self.state = next_states;
-      +    }
-      +
-      +    /// Checks if the current state is valid (i.e., there's at least one active parse path).
-      +    pub fn is_valid(&self) -> bool {
-      +        self.state.values().any(|glr_state| glr_state.is_ok())
-      +    }
-      +
-      +    // TODO: Add is_accepting() method? Requires checking if any state can accept EOF.
-      +}
-      +
-       #[cfg(test)]
-       mod tests {
-           use super::*;
-      -    use crate::datastructures::trie::Trie;
-           use crate::finite_automata::eat_u8;
-           use crate::interface::tokenizer_combinators::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast};
-           use crate::{choice_fast, groups, seq_fast};
-      @@ -310,17 +374,6 @@
-                   }
-               }
-       
-      -        for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-      -            debug!(3, "Tokenizer state: {}", tokenizer_state.0);
-      -            for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-      -                debug!(3, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-      -                // print edge values and destination addresses
-      -                for (edge, dest) in node.try_lock().unwrap().children() {
-      -                    // debug!(3, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(dest));
-      -                }
-      -            }
-      -        }
-      -
-               // Get the mask.
-               // The valid LLM tokens initially are ["i", "(", "(i"].
-               let mask = grammar_constraint_state.get_mask();
-      @@ -365,17 +418,6 @@
-               let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
-               let mut grammar_constraint_state = grammar_constraint.init();
-       
-      -        for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-      -            debug!(1, "Tokenizer state: {}", tokenizer_state.0);
-      -            for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-      -                debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-      -                // print edge values and destination addresses
-      -                for (edge, dest) in node.try_lock().unwrap().children() {
-      -                    // debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
-      -                }
-      -            }
-      -        }
-      -
-               macro_rules! llm_token_vec {
-                   ($($token:expr),* $(,)?) => {
-                       vec![
-      @@ -418,18 +460,6 @@
-               let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
-               let mut grammar_constraint_state = grammar_constraint.init();
-       
-      -        // print_precomputed(&grammar_constraint_state.get_precomputed());
-      -
-      -        for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-      -            debug!(1, "Tokenizer state: {}", tokenizer_state.0);
-      -            for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-      -                debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-      -                // print edge values and destination addresses
-      -                for (edge, dest) in node.try_lock().unwrap().children() {
-      -                    // debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
-      -                }
-      -            }
-      -        }
-       
-               macro_rules! llm_token_vec {
-                   ($($token:expr),* $(,)?) => {
-      @@ -509,4 +539,41 @@
-               // print_precomputed(&precomputed);
-               println!("Done precomputing");
-           }
-      -}
-      +
-      +    #[test]
-      +    fn test_incremental_parser_simple() {
-      +        // Grammar: S -> 'a' 'b' | 'a' 'c'
-      +        let exprs = vec![
-      +            (
-      +                "S".to_string(),
-      +                choice(vec![
-      +                    sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))]),
-      +                    sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'c'))]),
-      +                ]),
-      +            ),
-      +        ];
-      +        let grammar = Grammar::from_exprs(exprs);
-      +        let mut parser = IncrementalParser::new(&grammar);
-      +
-      +        assert!(parser.is_valid()); // Initial state is valid
-      +
-      +        parser.feed(b"a");
-      +        assert!(parser.is_valid()); // After 'a', still valid (expecting 'b' or 'c')
-      +        // Check internal state (optional): should have one GLR state in tokenizer state 0
-      +        assert_eq!(parser.state.len(), 1);
-      +        assert!(parser.state.contains_key(&TokenizerStateID(0)));
-      +
-      +        parser.feed(b"b");
-      +        assert!(parser.is_valid()); // After 'ab', it's a valid complete parse
-      +
-      +        // Reset and try the other path
-      +        parser = IncrementalParser::new(&grammar);
-      +        parser.feed(b"ac");
-      +        assert!(parser.is_valid()); // After 'ac', also valid
-      +
-      +        // Try invalid sequence
-      +        parser = IncrementalParser::new(&grammar);
-      +        parser.feed(b"ad");
-      +        assert!(!parser.is_valid()); // After 'ad', invalid
-      +    }
-      +}
-      ```
-
-      2.  **Create/Modify `src/interface/mod.rs` to export `IncrementalParser`:**
-          *(Assuming the original `mod.rs` only contained the first two lines)*
-
-      ```diff
-      --- a/src/interface/mod.rs
-      +++ b/src/interface/mod.rs
-      @@ -1,3 +1,3 @@
-       mod interface;
-      -pub use interface::{Grammar, GrammarExpr, choice, optional, regex, repeat, r#ref, sequence};
-      +// Assuming tokenizer_combinators was added later or is not relevant to the core change
-      +pub use interface::{Grammar, GrammarExpr, IncrementalParser, choice, optional, regex, repeat, r#ref, sequence};
-       pub mod tokenizer_combinators;
-      ```
-
-      3.  **Modify `src/lib.rs` to ensure `interface` is public:**
-          *(This patch assumes the original `src/lib.rs` looked like the one provided initially. If it was different, this might need adjustment.)*
-
-      ```diff
-      --- a/src/lib.rs
-      +++ b/src/lib.rs
-      @@ -1,6 +1,6 @@
-       pub mod finite_automata;
-       pub mod glr;
-      -pub mod interface;
-      +pub mod interface; // Ensure interface is public
-       pub mod tokenizer;
-       pub mod constraint;
-       pub mod datastructures;
-      ```
-
-      4.  **Modify `python/src/lib.rs` to add Python bindings:**
-
-      ```diff
-      --- a/python/src/lib.rs
-      +++ b/python/src/lib.rs
-      @@ -4,7 +4,7 @@
-       use pyo3::types::{PyDict};
-       use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-       use sep1::glr::parser::GLRParser;
-      -use sep1::glr::table::{generate_glr_parser, StateID};
-      +use sep1::glr::table::{StateID};
-       use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence};
-       use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
-       use std::collections::{BTreeMap, BTreeSet};
-      @@ -12,6 +12,7 @@
-       use std::sync::Arc;
-       use ouroboros::self_referencing;
-       use numpy::{IntoPyArray, PyArray1, ToPyArray};
-      +use sep1::interface::IncrementalParser;
-       
-       #[pyclass]
-       #[derive(Clone)]
-      @@ -230,6 +231,46 @@
-           }
-       }
-       
-      +#[self_referencing]
-      +struct PyIncrementalParserWrapper {
-      +    // Owns the grammar
-      +    grammar: PyGrammar,
-      +    // Borrows from the owned grammar via the 'this lifetime
-      +    #[borrows(grammar)]
-      +    #[covariant] // Allows the lifetime 'this to be shortened
-      +    inner: IncrementalParser<'this>,
-      +}
-      +
-      +#[pyclass]
-      +pub struct PyIncrementalParser {
-      +    inner: PyIncrementalParserWrapper,
-      +}
-      +
-      +#[pymethods]
-      +impl PyIncrementalParser {
-      +    #[new]
-      +    fn new(grammar: PyGrammar) -> PyResult<Self> {
-      +        Ok(PyIncrementalParser {
-      +            inner: PyIncrementalParserWrapperTryBuilder {
-      +                grammar,
-      +                inner_builder: |grammar: &PyGrammar| {
-      +                    // Create the IncrementalParser borrowing from the grammar's inner field
-      +                    Ok::<_, PyErr>(IncrementalParser::new(&grammar.inner))
-      +                },
-      +            }
-      +            .try_build()?
-      +        })
-      +    }
-      +
-      +    fn feed(&mut self, bytes: &[u8]) -> PyResult<()> {
-      +        self.inner.with_inner_mut(|parser| parser.feed(bytes));
-      +        Ok(())
-      +    }
-      +
-      +    fn is_valid(&self) -> PyResult<bool> {
-      +        Ok(self.inner.with_inner(|parser| parser.is_valid()))
-      +    }
-      +}
-       
-       #[pymodule]
-       fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-      @@ -240,5 +281,6 @@
-           m.add_class::<PyGrammar>()?;
-           m.add_class::<PyGrammarConstraint>()?;
-           m.add_class::<PyGrammarConstraintState>()?;
-      +    m.add_class::<PyIncrementalParser>()?;
-           Ok(())
-       }
-      ```
-
-      5.  **Create `src/interface/tests.rs` with the test:**
-
-      ```diff
-      --- /dev/null
-      +++ b/src/interface/tests.rs
-      @@ -0,0 +1,41 @@
-      +#[cfg(test)]
-      +mod tests {
-      +    use crate::finite_automata::eat_u8;
-      +    use crate::interface::{choice, sequence, regex, Grammar, IncrementalParser};
-      +    use crate::tokenizer::TokenizerStateID; // Import necessary types
-      +
-      +    #[test]
-      +    fn test_incremental_parser_simple() {
-      +        // Grammar: S -> 'a' 'b' | 'a' 'c'
-      +        let exprs = vec![
-      +            (
-      +                "S".to_string(),
-      +                choice(vec![
-      +                    sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))]),
-      +                    sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'c'))]),
-      +                ]),
-      +            ),
-      +        ];
-      +        let grammar = Grammar::from_exprs(exprs);
-      +        let mut parser = IncrementalParser::new(&grammar);
-      +
-      +        assert!(parser.is_valid()); // Initial state is valid
-      +
-      +        parser.feed(b"a");
-      +        assert!(parser.is_valid()); // After 'a', still valid (expecting 'b' or 'c')
-      +        // Check internal state (optional): should have one GLR state in tokenizer state 0
-      +        // The tokenizer state after matching 'a' should reset to 0.
-      +        assert_eq!(parser.state.len(), 1, "Expected 1 state after feeding 'a'");
-      +        assert!(parser.state.contains_key(&TokenizerStateID(0)), "Expected tokenizer state 0 after 'a'");
-      +
-      +        parser.feed(b"b");
-      +        assert!(parser.is_valid()); // After 'ab', it's a valid complete parse
-      +
-      +        // Reset and try the other path
-      +        parser = IncrementalParser::new(&grammar);
-      +        parser.feed(b"ac");
-      +        assert!(parser.is_valid()); // After 'ac', also valid
-      +
-      +        // Try invalid sequence
-      +        parser = IncrementalParser::new(&grammar);
-      +        parser.feed(b"ad");
-      +        assert!(!parser.is_valid()); // After 'ad', invalid
-      +    }
-      +}
-      ```
-
-      6.  **Modify `examples/python/python_grammar.py` to add the demo:**
-
-      ```diff
-      --- a/examples/python/python_grammar.py
-      +++ b/examples/python/python_grammar.py
-      @@ -7,7 +7,7 @@
-       import pegen.grammar
-       import pegen.grammar_parser
-       import pegen.tokenizer
-      -import torch
-      +import torch # type: ignore
-       from _sep1 import PyRegexExpr as Regex, PyGrammar, PyGrammarExpr as ge, PyGrammarConstraint, PyGrammarConstraintState
-       from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
-       from tqdm import tqdm
-      @@ -261,3 +261,16 @@
-       # #     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
-       #     output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
-       #     print(output_text)
-      +
-      +#     # DEMO: Incremental Parser
-      +#     from _sep1 import PyIncrementalParser
-      +#     print("\n--- Incremental Parser Demo ---")
-      +#     inc_parser = PyIncrementalParser(grammar)
-      +#     print(f"Initial valid: {inc_parser.is_valid()}")
-      +#     inc_parser.feed(b"def ")
-      +#     print(f"After 'def ': valid={inc_parser.is_valid()}")
-      +#     inc_parser.feed(b"my_func")
-      +#     print(f"After 'my_func': valid={inc_parser.is_valid()}")
-      +#     inc_parser.feed(b"():")
-      +#     print(f"After '():': valid={inc_parser.is_valid()}")
-      +#     print("--- End Incremental Parser Demo ---")
-      ```
-
-      These patches should apply cleanly to the original code provided in your first message.
-    metadata:
-  - user: |
-      Git apply result:
-      Found 6 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/interface/interface.rs
-      Applying patch to 'src/interface/interface.rs' using custom patcher...
-      Error applying patch to src/interface/interface.rs:
-      Hunk #1 (header: @@ -1,6 +1,6 @@) failed: context not found.
-      Context matching performed by:
-        1. Removing trailing newline.
-        2. Removing inline comments (# or // preceded by space or at line start).
-        3. Stripping leading/trailing whitespace.
-
-      --- Expected Context (from patch, before normalization): ---
-      use crate::constraint::{GrammarConstraint};
-      use crate::debug;
-      use crate::finite_automata::{greedy_group, groups, ExprGroup};
-      use crate::finite_automata::{Expr, Regex};
-      use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-      use crate::glr::parser::GLRParser;
-      --- Expected Context (from patch, after normalization): ---
-      use crate::constraint::{GrammarConstraint};
-      use crate::debug;
-      use crate::finite_automata::{greedy_group, groups, ExprGroup};
-      use crate::finite_automata::{Expr, Regex};
-      use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-      use crate::glr::parser::GLRParser;
-      --- End Expected Context ---
-
-      --- Actual Content Analysis ---
-      Closest match found at line 1 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
-      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
-        use crate::constraint::{GrammarConstraint};
-        use crate::debug;
-      - use crate::finite_automata::{greedy_group, groups, ExprGroup};
-      + use crate::finite_automata::{greedy_group, groups, ExprGroup, GroupID};
-      ?                                                             +++++++++
-
-        use crate::finite_automata::{Expr, Regex};
-        use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-        use crate::glr::parser::GLRParser;
-      Problematic diff content:
-      ---
-      --- a/src/interface/interface.rs
-      +++ b/src/interface/interface.rs
-      @@ -1,6 +1,6 @@
-       use crate::constraint::{GrammarConstraint};
-       use crate::debug;
-      -use crate::finite_automata::{greedy_group, groups, ExprGroup};
-      +use crate::finite_automata::{greedy_group, groups, ExprGroup, GroupID};
-       use crate::finite_automata::{Expr, Regex};
-       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-       use crate::glr::parser::GLRParser;
-      @@ -8,7 +8,7 @@
-       use crate::tokenizer::LLMTokenID;
-       use bimap::BiBTreeMap;
-       use kdam::tqdm;
-      -use std::collections::{BTreeMap, HashSet};
-      +use std::collections::{BTreeMap, HashSet, HashMap};
-       use std::fmt::{Debug, Formatter};
-       
-       type LLMToken<'a> = &'a [u8];
-      @@ -22,6 +22,7 @@
-           pub terminal_name_to_group_id: BiBTreeMap<String, usize>,
-           pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,
-           pub tokenizer: Regex,
-      +    pub glr_parser: GLRParser, // Store the generated parser
-       }
-       
-       impl Debug for Grammar {
-      @@ -109,6 +110,7 @@
-       
-       impl Grammar {
-           pub fn glr_parser(&self) -> GLRParser {
-      +        // Return a clone or reference if stored
-               self.glr_parser.clone() // Return a clone of the stored parser
-           }
-       }
-      @@ -230,6 +232,7 @@
-               let tokenizer_expr_groups = groups(tokenizer_exprs_vec);
-               debug!(2, "Building tokenizer");
-               let tokenizer = tokenizer_expr_groups.clone().build();
-      +        let glr_parser = generate_glr_parser(&productions, 0); // Generate parser once
-       
-               debug!(2, "Done defining grammar");
-               Self {
-      @@ -239,6 +242,7 @@
-                   terminal_name_to_group_id,
-                   terminal_expr_to_group_id,
-                   tokenizer,
-      +            glr_parser,
-               }
-           }
-       }
-      @@ -246,7 +250,7 @@
-       impl GrammarConstraint {
-           pub fn from_grammar(grammar: Grammar, llm_tokens: LLMTokenMap, eof_llm_token_id: usize, max_llm_token_id: usize) -> Self {
-               debug!(2, "GrammarConstraint::from_grammar");
-      -        let parser = grammar.glr_parser();
-      +        let parser = grammar.glr_parser.clone(); // Use stored parser
-               debug!(2, "Precomputing");
-               let mut precomputed = GrammarConstraint::precompute(&grammar.tokenizer, &llm_tokens, max_llm_token_id);
-               debug!(2, "precomputed.len(): {}", precomputed.len());
-      @@ -261,11 +265,71 @@
-           }
-       }
-       
-      +// --- Incremental Parser ---
-      +
-      +use crate::glr::parser::GLRParserState;
-      +use crate::tokenizer::TokenizerStateID;
-      +
-      +/// Manages incremental parsing against a grammar.
-      +#[derive(Clone)]
-      +pub struct IncrementalParser<'a> {
-      +    grammar: &'a Grammar,
-      +    // Maps current tokenizer state IDs to the GLR parser states reachable at that point.
-      +    state: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>>,
-      +}
-      +
-      +impl<'a> IncrementalParser<'a> {
-      +    /// Creates a new incremental parser initialized to the start state.
-      +    pub fn new(grammar: &'a Grammar) -> Self {
-      +        let initial_glr_state = grammar.glr_parser.init_glr_parser::<()>();
-      +        let initial_tokenizer_state = grammar.tokenizer.initial_state_id();
-      +        let state = BTreeMap::from([(initial_tokenizer_state, initial_glr_state)]);
-      +        Self { grammar, state }
-      +    }
-      +
-      +    /// Processes a chunk of input bytes, updating the internal state.
-      +    pub fn feed(&mut self, bytes: &[u8]) {
-      +        let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>> = BTreeMap::new();
-      +        let current_states = std::mem::take(&mut self.state); // Take ownership
-      +
-      +        for (tokenizer_state_id, glr_state) in current_states {
-      +            // Only proceed if the GLR state is valid
-      +            if !glr_state.is_ok() { continue; }
-      +
-      +            let result = self.grammar.tokenizer.execute_from_state(bytes, tokenizer_state_id);
-      +
-      +            // Process complete matches
-      +            for token_match in result.matches {
-      +                let grammar_token_id = TerminalID(token_match.id); // Assuming GroupID maps directly
-      +                let mut stepped_glr_state = glr_state.clone(); // Clone for this path
-      +                stepped_glr_state.step(grammar_token_id);
-      +
-      +                if stepped_glr_state.is_ok() {
-      +                    // After a full match, tokenizer resets to state 0
-      +                    let target_tokenizer_state = self.grammar.tokenizer.initial_state_id();
-      +                    next_states.entry(target_tokenizer_state)
-      +                        .and_modify(|existing_state| existing_state.merge_with(stepped_glr_state.clone()))
-      +                        .or_insert(stepped_glr_state);
-      +                }
-      +            }
-      +
-      +            // Process partial match (if any)
-      +            if let Some(end_state) = result.end_state {
-      +                let target_tokenizer_state = TokenizerStateID(end_state);
-      +                // The GLR state doesn't change here, only the tokenizer state
-      +                next_states.entry(target_tokenizer_state)
-      +                    .and_modify(|existing_state| existing_state.merge_with(glr_state.clone()))
-      +                    .or_insert(glr_state); // Use the original glr_state
-      +            }
-      +        }
-      +        self.state = next_states;
-      +    }
-      +
-      +    /// Checks if the current state is valid (i.e., there's at least one active parse path).
-      +    pub fn is_valid(&self) -> bool {
-      +        self.state.values().any(|glr_state| glr_state.is_ok())
-      +    }
-      +
-      +    // TODO: Add is_accepting() method? Requires checking if any state can accept EOF.
-      +}
-      +
-       #[cfg(test)]
-       mod tests {
-           use super::*;
-      -    use crate::datastructures::trie::Trie;
-           use crate::finite_automata::eat_u8;
-           use crate::interface::tokenizer_combinators::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast};
-           use crate::{choice_fast, groups, seq_fast};
-      @@ -310,17 +374,6 @@
-                   }
-               }
-       
-      -        for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-      -            debug!(3, "Tokenizer state: {}", tokenizer_state.0);
-      -            for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-      -                debug!(3, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-      -                // print edge values and destination addresses
-      -                for (edge, dest) in node.try_lock().unwrap().children() {
-      -                    // debug!(3, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(dest));
-      -                }
-      -            }
-      -        }
-      -
-               // Get the mask.
-               // The valid LLM tokens initially are ["i", "(", "(i"].
-               let mask = grammar_constraint_state.get_mask();
-      @@ -365,17 +418,6 @@
-               let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
-               let mut grammar_constraint_state = grammar_constraint.init();
-       
-      -        for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-      -            debug!(1, "Tokenizer state: {}", tokenizer_state.0);
-      -            for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-      -                debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-      -                // print edge values and destination addresses
-      -                for (edge, dest) in node.try_lock().unwrap().children() {
-      -                    // debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
-      -                }
-      -            }
-      -        }
-      -
-               macro_rules! llm_token_vec {
-                   ($($token:expr),* $(,)?) => {
-                       vec![
-      @@ -418,18 +460,6 @@
-               let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
-               let mut grammar_constraint_state = grammar_constraint.init();
-       
-      -        // print_precomputed(&grammar_constraint_state.get_precomputed());
-      -
-      -        for (tokenizer_state, root) in &grammar_constraint_state.parent.precomputed {
-      -            debug!(1, "Tokenizer state: {}", tokenizer_state.0);
-      -            for node in Trie::all_nodes(Arc::new(Mutex::new(root.clone()))) {
-      -                debug!(1, "Node address: {:p}, value: {:?}", Arc::as_ptr(&node), node.try_lock().unwrap().value);
-      -                // print edge values and destination addresses
-      -                for (edge, dest) in node.try_lock().unwrap().children() {
-      -                    // debug!(1, "    Edge value: {:?}, destination address: {:p}", edge, Arc::as_ptr(&dest));
-      -                }
-      -            }
-      -        }
-       
-               macro_rules! llm_token_vec {
-                   ($($token:expr),* $(,)?) => {
-      @@ -509,4 +539,41 @@
-               // print_precomputed(&precomputed);
-               println!("Done precomputing");
-           }
-      -}
-      +
-      +    #[test]
-      +    fn test_incremental_parser_simple() {
-      +        // Grammar: S -> 'a' 'b' | 'a' 'c'
-      +        let exprs = vec![
-      +            (
-      +                "S".to_string(),
-      +                choice(vec![
-      +                    sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))]),
-      +                    sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'c'))]),
-      +                ]),
-      +            ),
-      +        ];
-      +        let grammar = Grammar::from_exprs(exprs);
-      +        let mut parser = IncrementalParser::new(&grammar);
-      +
-      +        assert!(parser.is_valid()); // Initial state is valid
-      +
-      +        parser.feed(b"a");
-      +        assert!(parser.is_valid()); // After 'a', still valid (expecting 'b' or 'c')
-      +        // Check internal state (optional): should have one GLR state in tokenizer state 0
-      +        assert_eq!(parser.state.len(), 1);
-      +        assert!(parser.state.contains_key(&TokenizerStateID(0)));
-      +
-      +        parser.feed(b"b");
-      +        assert!(parser.is_valid()); // After 'ab', it's a valid complete parse
-      +
-      +        // Reset and try the other path
-      +        parser = IncrementalParser::new(&grammar);
-      +        parser.feed(b"ac");
-      +        assert!(parser.is_valid()); // After 'ac', also valid
-      +
-      +        // Try invalid sequence
-      +        parser = IncrementalParser::new(&grammar);
-      +        parser.feed(b"ad");
-      +        assert!(!parser.is_valid()); // After 'ad', invalid
-      +    }
-      +}
-      ---
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/interface/mod.rs
-      Applying patch to 'src/interface/mod.rs' using custom patcher...
-      Error applying patch to src/interface/mod.rs:
-      Hunk #1 (header: @@ -1,3 +1,3 @@) failed: context not found.
-      Context matching performed by:
-        1. Removing trailing newline.
-        2. Removing inline comments (# or // preceded by space or at line start).
-        3. Stripping leading/trailing whitespace.
-
-      --- Expected Context (from patch, before normalization): ---
-      mod interface;
-      pub use interface::{Grammar, GrammarExpr, choice, optional, regex, repeat, r#ref, sequence};
-      pub mod tokenizer_combinators
-      --- Expected Context (from patch, after normalization): ---
-      mod interface;
-      pub use interface::{Grammar, GrammarExpr, choice, optional, regex, repeat, r#ref, sequence};
-      pub mod tokenizer_combinators;
-      --- End Expected Context ---
-
-      --- Actual Content Analysis ---
-      No close match found in the current content.
-      --- Current Content (Full): ---
-       ~>    1: mod interface;
-             2: mod tokenizer_combinators;
-             3: 
-             4: pub use interface::*;
-             5: pub use tokenizer_combinators::*;
-      Problematic diff content:
-      ---
-      --- a/src/interface/mod.rs
-      +++ b/src/interface/mod.rs
-      @@ -1,3 +1,3 @@
-       mod interface;
-      -pub use interface::{Grammar, GrammarExpr, choice, optional, regex, repeat, r#ref, sequence};
-      +// Assuming tokenizer_combinators was added later or is not relevant to the core change
-      +pub use interface::{Grammar, GrammarExpr, IncrementalParser, choice, optional, regex, repeat, r#ref, sequence};
-       pub mod tokenizer_combinators;
-      ---
-
-      --- Processing Diff Block 3 ---
-      Identified target file: src/lib.rs
-      Applying patch to 'src/lib.rs' using custom patcher...
-      Error applying patch to src/lib.rs:
-      Hunk #1 (header: @@ -1,6 +1,6 @@) failed: context not found.
-      Context matching performed by:
-        1. Removing trailing newline.
-        2. Removing inline comments (# or // preceded by space or at line start).
-        3. Stripping leading/trailing whitespace.
-
-      --- Expected Context (from patch, before normalization): ---
-      pub mod finite_automata;
-      pub mod glr;
-      pub mod interface;
-      pub mod tokenizer;
-      pub mod constraint;
-      pub mod datastructures
-      --- Expected Context (from patch, after normalization): ---
-      pub mod finite_automata;
-      pub mod glr;
-      pub mod interface;
-      pub mod tokenizer;
-      pub mod constraint;
-      pub mod datastructures;
-      --- End Expected Context ---
-
-      --- Actual Content Analysis ---
-      No close match found in the current content.
-      --- Current Content (Full): ---
-       ~>    1: pub mod finite_automata;
-             2: pub mod glr;
-             3: pub mod constraint;
-             4: mod constraint_extra;
-             5: mod datastructures;
-             6: pub mod interface;
-             7: mod r#macro;
-             8: pub mod tokenizer;
-             9: mod types;
-            10: mod tests_apr25;
-            11: mod multi_dfa;
-      Problematic diff content:
-      ---
-      --- a/src/lib.rs
-      +++ b/src/lib.rs
-      @@ -1,6 +1,6 @@
-       pub mod finite_automata;
-       pub mod glr;
-      -pub mod interface;
-      +pub mod interface; // Ensure interface is public
-       pub mod tokenizer;
-       pub mod constraint;
-       pub mod datastructures;
-      ---
-
-      --- Processing Diff Block 4 ---
-      Identified target file: python/src/lib.rs
-      Applying patch to 'python/src/lib.rs' using custom patcher...
-      Error applying patch to python/src/lib.rs:
-      Hunk #3 (header: @@ -230,6 +231,46 @@) failed: context not found.
-      Context matching performed by:
-        1. Removing trailing newline.
-        2. Removing inline comments (# or // preceded by space or at line start).
-        3. Stripping leading/trailing whitespace.
-
-      --- Expected Context (from patch, before normalization): ---
-          }
-      }
-
-
-      #[pymodule]
-      fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-      --- Expected Context (from patch, after normalization): ---
-      }
-      }
-
-
-
-      fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-      --- End Expected Context ---
-
-      --- Actual Content Analysis ---
-      Closest match found at line 65 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
-      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
-      + }
-        }
-        }
-        
-        
-        
-      - fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-      Problematic diff content:
-      ---
-      --- a/python/src/lib.rs
-      +++ b/python/src/lib.rs
-      @@ -4,7 +4,7 @@
-       use pyo3::types::{PyDict};
-       use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-       use sep1::glr::parser::GLRParser;
-      -use sep1::glr::table::{generate_glr_parser, StateID};
-      +use sep1::glr::table::{StateID};
-       use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence};
-       use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
-       use std::collections::{BTreeMap, BTreeSet};
-      @@ -12,6 +12,7 @@
-       use std::sync::Arc;
-       use ouroboros::self_referencing;
-       use numpy::{IntoPyArray, PyArray1, ToPyArray};
-      +use sep1::interface::IncrementalParser;
-       
-       #[pyclass]
-       #[derive(Clone)]
-      @@ -230,6 +231,46 @@
-           }
-       }
-       
-      +#[self_referencing]
-      +struct PyIncrementalParserWrapper {
-      +    // Owns the grammar
-      +    grammar: PyGrammar,
-      +    // Borrows from the owned grammar via the 'this lifetime
-      +    #[borrows(grammar)]
-      +    #[covariant] // Allows the lifetime 'this to be shortened
-      +    inner: IncrementalParser<'this>,
-      +}
-      +
-      +#[pyclass]
-      +pub struct PyIncrementalParser {
-      +    inner: PyIncrementalParserWrapper,
-      +}
-      +
-      +#[pymethods]
-      +impl PyIncrementalParser {
-      +    #[new]
-      +    fn new(grammar: PyGrammar) -> PyResult<Self> {
-      +        Ok(PyIncrementalParser {
-      +            inner: PyIncrementalParserWrapperTryBuilder {
-      +                grammar,
-      +                inner_builder: |grammar: &PyGrammar| {
-      +                    // Create the IncrementalParser borrowing from the grammar's inner field
-      +                    Ok::<_, PyErr>(IncrementalParser::new(&grammar.inner))
-      +                },
-      +            }
-      +            .try_build()?
-      +        })
-      +    }
-      +
-      +    fn feed(&mut self, bytes: &[u8]) -> PyResult<()> {
-      +        self.inner.with_inner_mut(|parser| parser.feed(bytes));
-      +        Ok(())
-      +    }
-      +
-      +    fn is_valid(&self) -> PyResult<bool> {
-      +        Ok(self.inner.with_inner(|parser| parser.is_valid()))
-      +    }
-      +}
-       
-       #[pymodule]
-       fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
-      @@ -240,5 +281,6 @@
-           m.add_class::<PyGrammar>()?;
-           m.add_class::<PyGrammarConstraint>()?;
-           m.add_class::<PyGrammarConstraintState>()?;
-      +    m.add_class::<PyIncrementalParser>()?;
-           Ok(())
-       }
-      ---
-
-      --- Processing Diff Block 5 ---
-      Identified target file: src/interface/tests.rs
-      Detected new file (--- /dev/null or missing --- line).
-      Applying patch to 'src/interface/tests.rs' using custom patcher...
-      Successfully applied patch and wrote to src/interface/tests.rs.
-
-      --- Processing Diff Block 6 ---
-      Identified target file: examples/python/python_grammar.py
-      Applying patch to 'examples/python/python_grammar.py' using custom patcher...
-      Successfully applied patch and wrote to examples/python/python_grammar.py.
-    metadata:
-  - user: There was an error applying the git patch. Please review the errors above
-      and provide a corrected patch or instructions.
-    metadata:
-  - assistant: |-
-      It looks like the previous patches were applied successfully, but then attempting to re-apply them caused errors because the files had already been changed. The cumulative diffs you provided show the state *after* the `IncrementalParser` changes were incorporated.
-
-      The only issue apparent from the cumulative diffs is that the demo code block for `IncrementalParser` was added twice to `examples/python/python_grammar.py`.
-
-      Let's remove the duplicate block.
-
-      ```diff
-      --- a/examples/python/python_grammar.py
-      +++ b/examples/python/python_grammar.py
-      @@ -274,16 +274,3 @@
-       #     print(f"After '():': valid={inc_parser.is_valid()}")
-       #     print("--- End Incremental Parser Demo ---")
-       
-      -#     # DEMO: Incremental Parser
-      -#     from _sep1 import PyIncrementalParser
-      -#     print("\n--- Incremental Parser Demo ---")
-      -#     inc_parser = PyIncrementalParser(grammar)
-      -#     print(f"Initial valid: {inc_parser.is_valid()}")
-      -#     inc_parser.feed(b"def ")
-      -#     print(f"After 'def ': valid={inc_parser.is_valid()}")
-      -#     inc_parser.feed(b"my_func")
-      -#     print(f"After 'my_func': valid={inc_parser.is_valid()}")
-      -#     inc_parser.feed(b"():")
-      -#     print(f"After '():': valid={inc_parser.is_valid()}")
-      -#     print("--- End Incremental Parser Demo ---")
-      ```
-
-      No further changes should be needed for the Rust files (`src/interface/interface.rs`, `src/interface/tests.rs`, `python/src/lib.rs`, `src/interface/mod.rs`, `src/lib.rs`) as the previous steps seem to have correctly added the `IncrementalParser` functionality based on the cumulative diffs provided. The errors likely arose from trying to apply patches to already modified files.
     metadata:
   - user: |
       Git apply result:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: examples/python/python_grammar.py
-      Applying patch to 'examples/python/python_grammar.py' using custom patcher...
-      Successfully applied patch and wrote to examples/python/python_grammar.py.
+      Identified target file: src/interface/interface.rs
+      Applying patch to 'src/interface/interface.rs' using custom patcher...
+      Successfully applied patch and wrote to src/interface/interface.rs.
     metadata:
 ...

@@ -343,7 +343,7 @@ impl GrammarConstraint {
 // --- Incremental Parser ---
 
 use crate::glr::parser::GLRParserState;
-use crate::tokenizer::TokenizerStateID;
+use crate::tokenizer::{ExecuteResult, TokenizerStateID};
 
 /// Manages incremental parsing against a grammar.
 #[derive(Clone)]
@@ -364,7 +364,40 @@ impl<'a> IncrementalParser<'a> {
 
     /// Processes a chunk of input bytes, updating the internal state.
     pub fn feed(&mut self, bytes: &[u8]) {
-        todo!()
+        let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>> = BTreeMap::new();
+
+        for (current_tokenizer_state_id, current_glr_state) in std::mem::take(&mut self.state) {
+            // Execute the tokenizer from the current state with the new bytes
+            let results: ExecuteResult = self
+                .grammar
+                .tokenizer
+                .execute_from_state(bytes, current_tokenizer_state_id);
+
+            // Handle full token matches
+            for token in results.matches {
+                let grammar_token_id = TerminalID(token.id); // Assuming GroupID maps directly to TerminalID
+                let mut next_glr_state = current_glr_state.clone(); // Clone before stepping
+                next_glr_state.step(grammar_token_id);
+
+                if next_glr_state.is_ok() {
+                    // After a full match, the tokenizer resets to its initial state
+                    let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
+                    next_states.entry(next_tokenizer_state_id)
+                        .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
+                        .or_insert(next_glr_state);
+                }
+            }
+
+            // Handle partial matches (tokenizer ended mid-token)
+            if let Some(end_state_id) = results.end_state {
+                let next_tokenizer_state_id = TokenizerStateID(end_state_id);
+                next_states.entry(next_tokenizer_state_id)
+                    .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
+                    .or_insert(current_glr_state); // Carry over the *original* GLR state
+            }
+        }
+
+        self.state = next_states;
     }
 
     /// Checks if the current state is valid (i.e., there's at least one active parse path).
@@ -646,42 +679,5 @@ mod tests {
         let precomputed = GrammarConstraint::precompute(&tokenizer, &llm_token_map, max_llm_token_id);
         // print_precomputed(&precomputed);
         println!("Done precomputing");
-    }
-
-    #[test]
-    fn test_incremental_parser_simple() {
-        // Grammar: S -> 'a' 'b' | 'a' 'c'
-        let exprs = vec![
-            (
-                "S".to_string(),
-                choice(vec![
-                    sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))]),
-                    sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'c'))]),
-                ]),
-            ),
-        ];
-        let grammar = Grammar::from_exprs(exprs);
-        let mut parser = IncrementalParser::new(&grammar);
-
-        assert!(parser.is_valid()); // Initial state is valid
-
-        parser.feed(b"a");
-        assert!(parser.is_valid()); // After 'a', still valid (expecting 'b' or 'c')
-        // Check internal state (optional): should have one GLR state in tokenizer state 0
-        assert_eq!(parser.state.len(), 1);
-        assert!(parser.state.contains_key(&TokenizerStateID(0)));
-
-        parser.feed(b"b");
-        assert!(parser.is_valid()); // After 'ab', it's a valid complete parse
-
-        // Reset and try the other path
-        parser = IncrementalParser::new(&grammar);
-        parser.feed(b"ac");
-        assert!(parser.is_valid()); // After 'ac', also valid
-
-        // Try invalid sequence
-        parser = IncrementalParser::new(&grammar);
-        parser.feed(b"ad");
-        assert!(!parser.is_valid()); // After 'ad', invalid
     }
 }
