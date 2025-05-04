@@ -308,10 +308,17 @@ if __name__ == "__main__":
 #     input_text = "5*6 + 7*2 = 5+5+5+"
 
     pre_input_text = ""
-    input_text = "hello="
+    input_text = "hello"
     expected_next_token = "world"
 
     # DEMO: Get the mask
+    mask = grammar_constraint_state.get_mask()
+    print("Got mask")
+    print(f"Mask: {mask}")
+    mask_ids = np.where(mask)[0].tolist()
+    mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
+    print(f"Mask Tokens: {mask_token_ids}")
+
     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
     tokens = tokenizer.encode(input_text, return_tensors="pt")
     tokens: list[int] = tokens.tolist()[0]
