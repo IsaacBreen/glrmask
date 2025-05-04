@@ -2093,3 +2093,130 @@ mod tests_nov_24 {
         assert_eq!(regex.dfa.states.len(), 2);
     }
 }
+
+#[cfg(test)]
+mod test_full_python_tokenizer_recognizes_name {
+    use super::*;
+    use crate::datastructures::u8set::U8Set; // Added for U8Set usage in new test
+    use crate::{choice, seq};
+
+    #[test]
+    fn test_full_python_tokenizer_recognizes_name() {
+        // --- Define basic character sets ---
+        let digit = Expr::U8Class(U8Set::from_range(b'0', b'9'));
+        let alph_lower = Expr::U8Class(U8Set::from_range(b'a', b'z'));
+        let alph_upper = Expr::U8Class(U8Set::from_range(b'A', b'Z'));
+        let name_start = choice![alph_lower.clone(), alph_upper.clone(), eat_u8(b'_')];
+        let name_middle = choice![name_start.clone(), digit.clone()];
+
+        // --- Define the ignore pattern ---
+        // Simplified ignore for testing: just space
+        // let ignore = rep(eat_u8(b' '));
+        // More complete ignore: space or # comment
+        let ignore = rep(choice![
+             eat_u8(b' '),
+             // Basic comment handling for the test
+             seq![eat_u8(b'#'), rep(Expr::U8Class(U8Set::all().remove(b'\n'))), opt(eat_u8(b'\n'))],
+             // Note: Real Python tokenizer handles more complex whitespace and line continuations
+         ]);
+
+        // --- Define token expressions (core logic) ---
+        // Based on python_grammar.py and python.gram literals
+        let tokens_core: BTreeMap<&str, Expr> = BTreeMap::from([
+            // Core Types
+            ("NAME", seq![name_start, rep(name_middle)]),
+            ("NUMBER", choice![
+                rep1(digit.clone()), // Integer
+                seq![rep1(digit.clone()), eat_u8(b'.'), rep(digit.clone())], // Float with digits before .
+                seq![eat_u8(b'.'), rep1(digit.clone())], // Float starting with .
+                // Simplified: Not including hex, oct, bin, complex for this test focus
+            ]),
+            ("STRING", choice![
+                seq![eat_u8(b'"'), rep(Expr::U8Class(U8Set::all().remove(b'"'))), eat_u8(b'"')],
+                seq![eat_u8(b'\''), rep(Expr::U8Class(U8Set::all().remove(b'\''))), eat_u8(b'\'')],
+                // Simplified: Not including triple quotes, prefixes like r"", f"", etc.
+            ]),
+            ("FSTRING_START", Expr::U8Seq(b"f'".to_vec())), // Example, needs more variants
+            ("FSTRING_END", Expr::U8Seq(b"'".to_vec())),    // Example
+            ("FSTRING_MIDDLE", rep1(Expr::U8Class(U8Set::all().difference(&U8Set::from_slice(&[b'{', b'}']))))), // Simplified
+            // Special Tokens (often handled by parser state, represented as eps here for DFA structure)
+            ("NEWLINE", eps()),
+            ("INDENT", eps()),
+            ("DEDENT", eps()),
+            ("TYPE_COMMENT", eps()),
+            ("ENDMARKER", eps()),
+            // Operators and Delimiters from python.gram
+            ("LPAREN", eat_u8(b'(')),
+            ("RPAREN", eat_u8(b')')),
+            ("LSQB", eat_u8(b'[')),
+            ("RSQB", eat_u8(b']')),
+            ("LBRACE", eat_u8(b'{')),
+            ("RBRACE", eat_u8(b'}')),
+            ("COMMA", eat_u8(b',')),
+            ("COLON", eat_u8(b':')),
+            ("DOT", eat_u8(b'.')),
+            ("SEMI", eat_u8(b';')),
+            ("PLUS", eat_u8(b'+')),
+            ("MINUS", eat_u8(b'-')),
+            ("STAR", eat_u8(b'*')),
+            ("SLASH", eat_u8(b'/')),
+            ("VBAR", eat_u8(b'|')),
+            ("AMPER", eat_u8(b'&')),
+            ("LESS", eat_u8(b'<')),
+            ("GREATER", eat_u8(b'>')),
+            ("EQUAL", eat_u8(b'=')),
+            ("PERCENT", eat_u8(b'%')),
+            ("CIRCUMFLEX", eat_u8(b'^')),
+            ("TILDE", eat_u8(b'~')),
+            ("AT", eat_u8(b'@')),
+            ("EXCLAMATION", eat_u8(b'!')), // For f-string conversion
+            // Compound Operators
+            ("DOUBLESTAR", Expr::U8Seq(b"**".to_vec())),
+            ("DOUBLESLASH", Expr::U8Seq(b"//".to_vec())),
+            ("LEFTSHIFT", Expr::U8Seq(b"<<".to_vec())),
+            ("RIGHTSHIFT", Expr::U8Seq(b">>".to_vec())),
+            ("EQEQUAL", Expr::U8Seq(b"==".to_vec())),
+            ("NOTEQUAL", Expr::U8Seq(b"!=".to_vec())),
+            ("LESSEQUAL", Expr::U8Seq(b"<=".to_vec())),
+            ("GREATEREQUAL", Expr::U8Seq(b">=".to_vec())),
+            ("ATEQUAL", Expr::U8Seq(b"@=".to_vec())),
+            ("PLUSEQUAL", Expr::U8Seq(b"+=".to_vec())),
+            ("MINEQUAL", Expr::U8Seq(b"-=".to_vec())),
+            ("STAREQUAL", Expr::U8Seq(b"*=".to_vec())),
+            ("SLASHEQUAL", Expr::U8Seq(b"/=".to_vec())),
+            ("PERCENTEQUAL", Expr::U8Seq(b"%=".to_vec())),
+            ("AMPEREQUAL", Expr::U8Seq(b"&=".to_vec())),
+            ("VBAREQUAL", Expr::U8Seq(b"|=".to_vec())),
+            ("CIRCUMFLEXEQUAL", Expr::U8Seq(b"^=".to_vec())),
+            ("LEFTSHIFTEQUAL", Expr::U8Seq(b"<<=".to_vec())),
+            ("RIGHTSHIFTEQUAL", Expr::U8Seq(b">>=".to_vec())),
+            ("DOUBLESTAREQUAL", Expr::U8Seq(b"**=".to_vec())),
+            ("DOUBLESLASHEQUAL", Expr::U8Seq(b"//=".to_vec())),
+            ("RARROW", Expr::U8Seq(b"->".to_vec())),
+            ("ELLIPSIS", Expr::U8Seq(b"...".to_vec())),
+            ("COLONEQUAL", Expr::U8Seq(b":=".to_vec())),
+        ]);
+
+        // --- Combine with ignore and create groups ---
+        let mut token_groups: Vec<ExprGroup> = Vec::new();
+        let mut token_name_to_id: BTreeMap<&str, GroupID> = BTreeMap::new();
+        for (name, core_expr) in tokens_core {
+            let group_id = token_groups.len();
+            token_name_to_id.insert(name, group_id);
+            // Use greedy groups by default for tokenizer behavior
+            token_groups.push(greedy_group(seq![ignore.clone(), core_expr]));
+        }
+
+        let expr_groups = groups(token_groups);
+        let regex = expr_groups.build();
+        // dbg!(®ex); // Uncomment for debugging DFA structure
+
+        let mut state = regex.init();
+        state.execute(b"hello");
+
+        assert!(state.definitely_matches(), "Tokenizer should match 'hello'");
+        let expected_match = Match { group_id: token_name_to_id["NAME"], position: 5 };
+        assert_eq!(state.get_greedy_match(), Some(expected_match), "Greedy match should be NAME token");
+        assert_eq!(state.position, 5);
+    }
+}
