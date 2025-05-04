@@ -91,7 +91,7 @@ def define_tokens() -> list[tuple[str, Any]]:
     def eat_u8_choice(s):
         return choice([eat_u8(ord(c)) for c in s])
 
-    def eat_u8_range(start: char, end: char) -> Regex:
+    def eat_range(start: char, end: char) -> Regex:
         return Regex.seq([Regex.eat_u8(ord(c)) for c in range(ord(start), ord(end) + 1)])
 
     # TODO: Use eat(s) instead of eg eat_u8(ord("a")). It's a bit more readable.
@@ -105,9 +105,9 @@ def define_tokens() -> list[tuple[str, Any]]:
         return ge.regex(seq([ignore, expr]))
 
     # TODO: uncomment this
-    digit = eat_u8_range('0', '9')
-    alph_lower = eat_u8_range('a', 'z')
-    alph_upper = eat_u8_range('A', 'Z')
+    digit = eat_range('0', '9')
+    alph_lower = eat_range('a', 'z')
+    alph_upper = eat_range('A', 'Z')
 # #     TODO: delete this
 #     digit = eat_u8(ord("1"))
 #     alph_lower = eat_u8(ord("a"))
