@@ -350,7 +350,7 @@ use crate::tokenizer::TokenizerStateID;
 pub struct IncrementalParser<'a> {
     grammar: &'a Grammar,
     // Maps current tokenizer state IDs to the GLR parser states reachable at that point.
-    state: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>>,
+    pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>>,
 }
 
 impl<'a> IncrementalParser<'a> {
@@ -364,40 +364,7 @@ impl<'a> IncrementalParser<'a> {
 
     /// Processes a chunk of input bytes, updating the internal state.
     pub fn feed(&mut self, bytes: &[u8]) {
-        let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>> = BTreeMap::new();
-        let current_states = std::mem::take(&mut self.state); // Take ownership
-
-        for (tokenizer_state_id, glr_state) in current_states {
-            // Only proceed if the GLR state is valid
-            if !glr_state.is_ok() { continue; }
-
-            let result = self.grammar.tokenizer.execute_from_state(bytes, tokenizer_state_id);
-
-            // Process complete matches
-            for token_match in result.matches {
-                let grammar_token_id = TerminalID(token_match.id); // Assuming GroupID maps directly
-                let mut stepped_glr_state = glr_state.clone(); // Clone for this path
-                stepped_glr_state.step(grammar_token_id);
-
-                if stepped_glr_state.is_ok() {
-                    // After a full match, tokenizer resets to state 0
-                    let target_tokenizer_state = self.grammar.tokenizer.initial_state_id();
-                    next_states.entry(target_tokenizer_state)
-                        .and_modify(|existing_state| existing_state.merge_with(stepped_glr_state.clone()))
-                        .or_insert(stepped_glr_state);
-                }
-            }
-
-            // Process partial match (if any)
-            if let Some(end_state) = result.end_state {
-                let target_tokenizer_state = TokenizerStateID(end_state);
-                // The GLR state doesn't change here, only the tokenizer state
-                next_states.entry(target_tokenizer_state)
-                    .and_modify(|existing_state| existing_state.merge_with(glr_state.clone()))
-                    .or_insert(glr_state); // Use the original glr_state
-            }
-        }
-        self.state = next_states;
+        todo!()
     }
 
     /// Checks if the current state is valid (i.e., there's at least one active parse path).

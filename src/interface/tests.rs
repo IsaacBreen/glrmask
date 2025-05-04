@@ -1,3 +1,5 @@
+use crate::interface::IncrementalParser;
+
 #[cfg(test)]
 mod tests {
     use crate::finite_automata::eat_u8;
@@ -41,17 +43,5 @@ mod tests {
         parser.feed(b"ad");
         dbg!(&parser.state.keys().collect::<Vec<_>>());
         assert!(!parser.is_valid()); // After 'ad', invalid
-    }
-}
-// This file can be used for tests specific to the interface module,
-// although many tests are currently within interface.rs itself.
-
-
-impl<'a> IncrementalParser<'a> {
-    /// Checks if the current state is valid (i.e., there's at least one active parse path).
-    /// A state is valid if the `state` map is not empty, meaning the input fed so far
-    /// corresponds to a valid prefix according to the grammar and tokenizer.
-    pub fn is_valid(&self) -> bool {
-        !self.state.is_empty()
     }
 }
