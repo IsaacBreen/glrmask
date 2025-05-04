@@ -164,9 +164,9 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
 #     exprs.append(("file", ge.sequence([ge.regex(eat("fk")), ge.regex(eat("ing"))])))
 
 #     # TODO: delete this
-    exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
-    SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g", "h"]
-    exprs.append(("file", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
+#     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
+#     SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g", "h"]
+#     exprs.append(("file", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
 
 #     # TODO: delete this
 #     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.regex(eat("hello"))])))
