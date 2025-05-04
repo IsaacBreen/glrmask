@@ -360,6 +360,13 @@ if __name__ == "__main__":
     mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
     print(f"Mask Tokens: {mask_token_ids}")
 
+    # DEMO: Incremental Parser
+    parser_state = PyIncrementalParser(grammar)
+    print(f"Initial valid: {parser_state.is_valid()}")
+    parser_state.feed(input_text)
+    print(f"After '{input_text}': valid={parser_state.is_valid()}")
+    print("--- End Incremental Parser Demo ---")
+
 #     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
 #     tokens = tokenizer.encode(input_text, return_tensors="pt")
 #     tokens: list[int] = tokens.tolist()[0]
