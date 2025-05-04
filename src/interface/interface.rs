@@ -299,10 +299,15 @@ impl Grammar {
             }
         }
 
-        let tokenizer_exprs_vec: Vec<ExprGroup> = tokens
-            .into_iter()
-            .map(|(_, expr)| greedy_group(expr))
-            .collect();
+        // let tokenizer_exprs_vec: Vec<ExprGroup> = tokens
+        //     .into_iter()
+        //     .map(|(_, expr)| greedy_group(expr))
+        //     .collect();
+        let mut tokenizer_exprs_vec: Vec<ExprGroup> = Vec::new();
+        for (i, (name, expr)) in tokens.into_iter().enumerate() {
+            assert_eq!(i, *terminal_name_to_group_id.get_by_left(&name).unwrap());
+            tokenizer_exprs_vec.push(greedy_group(expr));
+        }
         let tokenizer_expr_groups = groups(tokenizer_exprs_vec);
         debug!(2, "Building tokenizer");
         let tokenizer = tokenizer_expr_groups.clone().build();
