@@ -235,6 +235,7 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
         current_input_ids = input_ids.view(-1).tolist()
         print(f"Current input IDs: {current_input_ids}")
         new_token_ids = current_input_ids[len(self.seen_input_ids):]
+        print(f"New token IDs: {new_token_ids}")
 
         for token_id in new_token_ids:
             debug_print(f"Committing token: {self.llm_token_id_to_token.get(token_id)} (ID: {token_id})")
@@ -260,7 +261,6 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
 def generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text, max_new_tokens=50):
     # TODO: We want pre_input_text to be input to the LLM that isn't passed into the grammar constraint.
     input_ids = tokenizer.encode(input_text, return_tensors="pt")
-    grammar_processor.seen_input_ids = input_ids[0].tolist()
     output = model.generate(
         input_ids,
         max_new_tokens=max_new_tokens,
