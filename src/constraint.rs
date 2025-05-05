@@ -490,6 +490,7 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn step(&mut self, llm_tokens: &LLMTokenBV) {
+        crate::debug!(2, "Stepping grammar constraint state");
         let initial_nodes_and_values = self.prepare_initial_nodes_and_values_for_special_map(llm_tokens);
 
         self.state = BTreeMap::new();

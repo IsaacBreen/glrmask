@@ -393,7 +393,7 @@ if __name__ == "__main__":
         assert expected_next_token in mask_tokens, f"Expected '{expected_next_token}' in mask"
 
     # DEMO: Generate text.
-    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
-#     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
-    output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
-    print(output_text)
+#     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
+# #     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
+#     output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
+#     print(output_text)

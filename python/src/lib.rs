@@ -242,8 +242,8 @@ impl PyGrammarConstraint {
         // print_precomputed(&self.inner.precomputed);
         println!("Printing precomputed data is not implemented in this binding yet.");
     }
-    
-    
+
+
 }
 
 
@@ -289,8 +289,11 @@ impl PyGrammarConstraintState {
     }
 
     fn commit(&mut self, llm_token_id: usize) {
+        println!("Committing token {} to grammar constraint state", llm_token_id);
         self.inner.with_inner_mut(|state| {
+            println!("commit...");
             state.commit(LLMTokenID(llm_token_id));
+            println!("step...");
             state.step_with_all_llm_tokens();
         });
         
