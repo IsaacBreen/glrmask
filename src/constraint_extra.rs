@@ -87,10 +87,7 @@ impl GrammarConstraint {
         for (tokenizer_state_id, root_node_trie) in &self.precomputed {
             println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
 
-            // Need to wrap the root_node_trie (which is a Trie, not an Arc<Mutex<Trie>>)
-            // in an Arc<Mutex<>> to match the recursive function's expectation.
-            // This is slightly awkward but necessary for the shared recursive logic.
-            let root_node_arc = Arc::new(Mutex::new(root_node_trie.clone()));
+            let root_node_arc = root_node_trie.clone();
 
             let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
             dump_precompute_trie_recursive(&root_node_arc, "".to_string(), &mut visited);

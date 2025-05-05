@@ -180,7 +180,7 @@ impl GrammarConstraint {
 
         // Use FxHashMap for cache and VecDeque for queue
         let mut node_cache: FxHashMap<NodeKey, Arc<Mutex<PrecomputeNode>>> = FxHashMap::default();
-        let mut queue: VecDeque<(NodeKey, Arc<Mutex<PrecomputeNode>>>) = VecDeque::new();
+        let mut queue: VecDeque<(NodeKey, Arc<Mutex<PrecomputeNode>>)> = VecDeque::new();
 
         // Seed the queue with the roots.
         for tok_state in 0..tokenizer.max_state() {
@@ -265,7 +265,7 @@ impl GrammarConstraint {
                     .tokens_accessible_from_state(TokenizerStateID(end_state))
                     .into_iter()
                 {
-                    src_pc_node_mut.value.push_finalizer_info(
+                    src_pc_node.lock().unwrap().value.push_finalizer_info(
                         GrammarTokenID(grammar_token.0),
                         LLMTokenID(vocab_node.token_id()),
                         TokenizerStateID(end_state),
@@ -398,7 +398,7 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     fn prepare_initial_nodes_and_values_for_special_map(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a, LLMTokenInfo>)> {
-        let mut initial_nodes_and_values: Vec<(Arc<PrecomputeNode>, GLRParserState<'_, LLMTokenInfo>)> = Vec::new();
+        let mut initial_nodes_and_values: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'_, LLMTokenInfo>)> = Vec::new();
         let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, GLRParserState<'_, LLMTokenInfo>> = BTreeMap::new();
 
         for (tokenizer_state_id, state) in &self.state {
@@ -415,7 +415,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         for (tokenizer_state_id, state) in tokenizer_state_id_to_parse_states {
             let token_trie = self.parent.precomputed[&tokenizer_state_id].clone();
-            initial_nodes_and_values.push((token_trie, state));
+            initial_nodes_and_values.push((token_trie.clone(), state));
         }
         initial_nodes_and_values
     }
@@ -433,7 +433,7 @@ impl<'a> GrammarConstraintState<'a> {
             // Input: &GLRParserState<'_, LLMTokenInfo>, GrammarTokenID, &LLMTokenBV, &Arc<PrecomputeNode>
             // Output: Option<GLRParserState<'_, LLMTokenInfo>>
             |glr_parse_state, grammar_token_id, edge_llm_tokens, child_node| {
-                let node_ptr = Arc::as_ptr(child_node) as usize; // Use Arc::as_ptr
+                let node_ptr = std::ptr::addr_of!(*child_node) as usize; // Use Arc::as_ptr
                 crate::debug!(3, "Processing grammar node {} token {:?} with {} active states", node_ptr, grammar_token_id.map(|grammar_token_id| grammar_token_id.0), glr_parse_state.active_states.len());
                 let mut glr_parse_state = glr_parse_state.clone();
                 glr_parse_state.active_states.retain_mut(|parse_state| {
