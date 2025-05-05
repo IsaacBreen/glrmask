@@ -9,7 +9,7 @@ use bitvec::prelude::BitVec;
 use bitvec::prelude::*;
 use std::collections::{BTreeMap, VecDeque}; // Add VecDeque
 use std::ops::BitOr;
-use std::sync::{Arc}; // Removed Mutex, MutexGuard
+use std::sync::{Arc, Mutex}; // Removed Mutex, MutexGuard
 use rustc_hash::{FxHashMap}; // Added FxHashMap, FxHashSet is not needed now
 use bitvec::macros::internal::funty::Fundamental;
 use keyed_priority_queue::KeyedPriorityQueue;
@@ -249,7 +249,7 @@ impl GrammarConstraint {
 
                 // insert or merge the edge
                 // Need to get mutable access to the node contents
-                let mut src_pc_node_mut = Arc::try_unwrap(src_pc_node.clone()).unwrap_or_else(|arc| (*arc).clone()).into_inner();
+                let mut src_pc_node_mut: Arc<Mutex<PrecomputeNode>> = Arc::try_unwrap(src_pc_node.clone()).unwrap_or_else(|arc| (*arc).clone()).into_inner();
 
                 src_pc_node_mut.force_insert_to_node(
                     Some(g_token),
