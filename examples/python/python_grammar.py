@@ -175,17 +175,15 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
 #     SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g", "hello"]
 #     exprs.append(("start'''", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
 
-    def eat_range(start: char, end: char) -> Regex:
-        return Regex.choice([Regex.eat_u8(c) for c in range(ord(start), ord(end) + 1)])
-
-    digit = eat_range('0', '9')
-    alph_lower = eat_range('a', 'z')
-    alph_upper = eat_range('A', 'Z')
-
-#     exprs.append(("NUM", ge.regex(Regex.rep(digit))))
-    exprs.append(("NUM", ge.regex(Regex.seq([digit, digit, digit]))))
-
-    exprs.append(("file", ge.sequence([ge.ref("NUM"), ge.regex(eat("+")), ge.ref("NUM"), ge.regex(eat("+")), ge.ref("NUM")])))
+#     # TODO: delete this
+#     def eat_range(start: char, end: char) -> Regex:
+#         return Regex.choice([Regex.eat_u8(c) for c in range(ord(start), ord(end) + 1)])
+#     digit = eat_range('0', '9')
+#     alph_lower = eat_range('a', 'z')
+#     alph_upper = eat_range('A', 'Z')
+# #     exprs.append(("NUM", ge.regex(Regex.rep(digit))))
+#     exprs.append(("NUM", ge.regex(Regex.seq([digit, digit, digit]))))
+#     exprs.append(("file", ge.sequence([ge.ref("NUM"), ge.regex(eat("+")), ge.ref("NUM"), ge.regex(eat("+")), ge.ref("NUM")])))
 
     for rule in grammar.rules.values():
         memo[rule.name] = ge.ref(rule.name)
@@ -195,7 +193,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
         else:
             rhs = pegen_to_sep1_regex(rule.rhs, memo)
        # TODO: uncomment this
-#         exprs.append((rule.name, rhs))
+        exprs.append((rule.name, rhs))
 
 
     tokens = define_tokens()
@@ -398,7 +396,7 @@ if __name__ == "__main__":
         assert expected_next_token in mask_tokens, f"Expected '{expected_next_token}' in mask"
 
     # DEMO: Generate text.
-#     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
-# #     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
-#     output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
-#     print(output_text)
+    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
+#     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
+    output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
+    print(output_text)
