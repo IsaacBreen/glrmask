@@ -306,7 +306,7 @@ if __name__ == "__main__":
 #     tokenizer_vocab = {"hello": 0, "=": 1, "world": 2}
 
     # Set the vocab to digits and arithmetic operators
-    tokenizer_vocab = {k: v for k, v in tokenizer.get_vocab().items() if k.isdigit() or k in "+-*/"}
+#     tokenizer_vocab = {k: v for k, v in tokenizer.get_vocab().items() if k.isdigit() or k in "+-*/"}
 
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
@@ -361,7 +361,7 @@ if __name__ == "__main__":
 #     input_text = "hello="
 #     expected_next_token = "world"
 
-    pre_input_text = "from"
+    pre_input_text = "x"
     input_text = ""
     expected_next_token = ""
 
