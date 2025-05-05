@@ -233,9 +233,9 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
 
     def __call__(self, input_ids, scores):
         current_input_ids = input_ids.view(-1).tolist()
-        print(f"Current input IDs: {current_input_ids}")
         new_token_ids = current_input_ids[len(self.seen_input_ids):]
-        print(f"New token IDs: {new_token_ids}")
+#         print(f"Current input IDs: {current_input_ids}")
+#         print(f"New token IDs: {new_token_ids}")
 
         for token_id in new_token_ids:
             debug_print(f"Committing token: {self.llm_token_id_to_token.get(token_id)} (ID: {token_id})")
@@ -351,15 +351,19 @@ if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(model_name)
 
     print("Generating text...")
-    pre_input_text = ""
+#     pre_input_text = ""
 #     input_text = "i^10=i*"
 #     input_text = "5*6 + 7*2 = 5+5+5+"
-    input_text = "123+456+"
-    expected_next_token = "789"
+#     input_text = "123+456+"
+#     expected_next_token = "789"
 
 #     pre_input_text = ""
 #     input_text = "hello="
 #     expected_next_token = "world"
+
+    pre_input_text = ""
+    input_text = ""
+    expected_next_token = ""
 
     expected_next_token = tokenizer.decode([tokenizer.encode(expected_next_token)[0]])
 
