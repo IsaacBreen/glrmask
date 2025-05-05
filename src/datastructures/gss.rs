@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc};
 use std::fmt::{Debug, Write};
-use std::hash::BuildHasher;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GSSNode<T> {
@@ -272,10 +271,10 @@ impl<T: Clone + Ord> BulkMerge<T> for Vec<Arc<GSSNode<T>>> {
 
 
 // Helper function for prune_and_transform_roots
-pub fn prune_and_transform_recursive<T: Clone, H: BuildHasher>(
+pub fn prune_and_transform_recursive<T: Clone>(
     node_arc: &Arc<GSSNode<T>>,
     closure: &impl Fn(&T) -> Option<(T, bool)>, // Returns Option<(NewValue, ContinueRecursion)>
-    memo: &mut HashMap<*const GSSNode<T>, Option<Arc<GSSNode<T>>>, H>,
+    memo: &mut HashMap<*const GSSNode<T>, Option<Arc<GSSNode<T>>>>,
 ) -> Option<Arc<GSSNode<T>>> {
     // TODO: clean up
     let node_ptr = Arc::as_ptr(node_arc);
