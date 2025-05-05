@@ -286,6 +286,9 @@ if __name__ == "__main__":
 #     # Set the vocab to "hello" "=" "world"
 #     tokenizer_vocab = {"hello": 0, "=": 1, "world": 2}
 
+    # Set the vocab to digits and arithmetic operators
+    tokenizer_vocab = {k: v for k, v in tokenizer.get_vocab().items() if k.isdigit() or k in "+-*/"}
+
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
     tokenizer_vocab = {token: actual_vocab[token] for token in tokenizer_vocab}
@@ -349,6 +352,7 @@ if __name__ == "__main__":
 
     # DEMO: Get the mask
     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
+    mask = grammar_constraint_state.get_mask(tokenizer)
     print("Got mask")
     print(f"Mask: {mask}")
     mask_ids = np.where(mask)[0].tolist()
