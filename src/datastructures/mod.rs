@@ -4,3 +4,4 @@ pub mod gss;
 pub mod trie;
 pub mod u8set;
 pub mod vocab_prefix_tree;
+pub mod hybrid_bitset;
