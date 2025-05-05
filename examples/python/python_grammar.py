@@ -352,7 +352,7 @@ if __name__ == "__main__":
 
     # DEMO: Get the mask
     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
-    mask = grammar_constraint_state.get_mask(tokenizer)
+    mask = grammar_constraint_state.get_mask()
     print("Got mask")
     print(f"Mask: {mask}")
     mask_ids = np.where(mask)[0].tolist()
