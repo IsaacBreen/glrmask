@@ -541,8 +541,7 @@ impl BitOr for &HybridBitset {
                         upper_bound_count: exact_count,
                     }
                 };
-                // No need to check for sparse conversion, union usually grows.
-                // result.check_representation();
+                result.check_representation(); // Check if result should be Sparse (e.g., union of small dense sets)
                 result
             }
             // Mixed: Convert Sparse to Dense is usually required here
@@ -1173,12 +1172,10 @@ mod tests {
      #[test]
     fn test_equality_and_hash() {
         let set1_s = HybridBitset::from_iter(vec![1, 5, 10]); // Sparse
-        let mut set1_d_prep = HybridBitset::from_iter(vec![1, 5, 10]); // Start sparse
-        // Force set1_d to dense by adding and removing elements > threshold
-        for i in 0..SPARSE_TO_DENSE_THRESHOLD { set1_d_prep.insert(i + 200); }
-        for i in 0..SPARSE_TO_DENSE_THRESHOLD { set1_d_prep.remove(i + 200); }
-        // It should be dense now and contain only {1, 5, 10}
-        let set1_d = set1_d_prep;
+        // Create the same set and force it to be dense for comparison
+        let mut set1_d = HybridBitset::from_iter(vec![1, 5, 10]); // Start sparse
+        set1_d.ensure_dense(); // Force to dense representation
+
 
         let set2_s = HybridBitset::from_iter(vec![1, 5, 11]); // Sparse, different
         let mut set3_d_empty = HybridBitset::from_iter(0..SPARSE_TO_DENSE_THRESHOLD); // Dense
@@ -1186,7 +1183,7 @@ mod tests {
         set3_d_empty.ensure_dense(); // Force dense empty
 
         assert!(matches!(set1_s.inner, BitsetRepr::Sparse(_)));
-        // Check that set1_d actually became dense and has the right content
+        // Check that set1_d actually became dense
         assert!(matches!(set1_d.inner, BitsetRepr::Dense { .. }), "set1_d should be dense");
         assert_eq!(set1_d.iter().collect::<Vec<_>>(), vec![1, 5, 10]);
 
@@ -1247,8 +1244,8 @@ mod tests {
         set.insert(large_idx);
         set.insert(0);
 
-        // Should have converted to Dense due to large index forcing large BitVec
-        assert!(matches!(set.inner, BitsetRepr::Dense { .. }));
+        // Should still be Sparse because count (2) is less than SPARSE_TO_DENSE_THRESHOLD
+        assert!(matches!(set.inner, BitsetRepr::Sparse(_)), "Should remain Sparse based on count");
         assert_eq!(set.len(), 2);
         assert!(set.contains(0));
         assert!(set.contains(large_idx));
@@ -1256,16 +1253,17 @@ mod tests {
         assert!(!set.contains(large_idx - 1));
         if let BitsetRepr::Dense{ bits, ..} = &set.inner {
             assert!(bits.len() > large_idx); // Check bitvec was resized appropriately
-        }
+        } // This block won't be reached if Sparse, which is expected now
 
         // Check if it converts back to sparse if large index removed
+        // (It's already sparse, so this just removes the element)
         set.remove(large_idx);
         assert_eq!(set.len(), 1);
         assert!(set.contains(0));
         assert!(!set.contains(large_idx));
 
-        // It should convert back to sparse because count (1) < DENSE_TO_SPARSE_THRESHOLD
-        assert!(matches!(set.inner, BitsetRepr::Sparse(_)), "Should convert back to sparse");
+        // It should remain sparse
+        assert!(matches!(set.inner, BitsetRepr::Sparse(_)), "Should still be sparse");
     }
 
      #[test]
@@ -1302,12 +1300,10 @@ mod tests {
         let expected_and = (SPARSE_TO_DENSE_THRESHOLD/2..SPARSE_TO_DENSE_THRESHOLD).collect::<HashSet<_>>();
         set3 &= set4;
         assert_eq!(set3.iter().collect::<HashSet<_>>(), expected_and);
-        // Might become sparse or stay dense depending on overlap size vs threshold
-        if expected_and.len() < DENSE_TO_SPARSE_THRESHOLD {
-             assert!(matches!(set3.inner, BitsetRepr::Sparse { .. }));
-        } else {
-             assert!(matches!(set3.inner, BitsetRepr::Dense { .. }));
-        }
+        // The operation was Dense &= Sparse. The result size is 64.
+        // The Dense & Sparse path creates a Sparse result. check_representation checks
+        // if 64 >= SPARSE_TO_DENSE_THRESHOLD (128), which is false. So it stays Sparse.
+        assert!(matches!(set3.inner, BitsetRepr::Sparse { .. }), "Result of Dense &= Sparse with size 64 should be Sparse");
 
         // Xor Assign
         let mut set5 = HybridBitset::from_iter(vec![1, 2, 3]); // Sparse
@@ -1355,7 +1351,10 @@ mod tests {
 
         let union = &d4 | &d5; // {0..10}
         assert_eq!(union.iter().collect::<HashSet<_>>(), (0..10).collect::<HashSet<_>>());
-        assert!(matches!(union.inner, BitsetRepr::Sparse(_))); // Small result
+        // Dense | Dense now calls check_representation.
+        // Result count is 10. 10 < DENSE_TO_SPARSE_THRESHOLD (64).
+        // Should convert to Sparse.
+        assert!(matches!(union.inner, BitsetRepr::Sparse(_)), "Union result (size 10) should become Sparse");
 
         let diff = &d4 - &d5; // {0, 1, 2}
         assert_eq!(diff.iter().collect::<HashSet<_>>(), HashSet::from_iter(vec![0, 1, 2]));
