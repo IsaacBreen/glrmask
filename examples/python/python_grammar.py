@@ -362,7 +362,7 @@ if __name__ == "__main__":
 #     expected_next_token = "world"
 
     pre_input_text = ""
-    input_text = '""""'
+    input_text = '# This Python script'
     expected_next_token = ""
 
     if expected_next_token:
