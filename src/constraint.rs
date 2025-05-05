@@ -561,15 +561,15 @@ impl<'a> GrammarConstraintState<'a> {
                 // Handle finalizers
                 for (possible_final_grammar_token, precomputed_finalizer) in &node.value.finalizers {
                     // Ensure the final tokens parses
-                    let mut semi_final_glr_parse_state = glr_parse_state.clone();
+                    let mut possible_next_glr_parse_state = glr_parse_state.clone();
                     crate::debug!(3, "Stepping semi-final GLR parse state");
-                    semi_final_glr_parse_state.step(*possible_final_grammar_token);
-                    if semi_final_glr_parse_state.is_ok() {
+                    possible_next_glr_parse_state.step(*possible_final_grammar_token);
+                    if possible_next_glr_parse_state.is_ok() {
                         crate::debug!(3, "Semi-final GLR parse state is OK");
                         for (tokenizer_state_id, llm_tokens) in &precomputed_finalizer.content {
                             // Intersect *active* tokens with the finalizer's allowed tokens.
-                            let mut semi_final_glr_parse_state = semi_final_glr_parse_state.clone();
-                            semi_final_glr_parse_state.active_states.retain_mut(|parse_state| {
+                            let mut glr_parse_state_filtered = glr_parse_state.clone();
+                            glr_parse_state_filtered.active_states.retain_mut(|parse_state| {
                                 // Intersect the *active* tokens with the finalizer's allowed tokens. Intersection retains current active tokens.
                                 let current_active_tokens = parse_state.stack.value.t.active.clone();
                                 Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens;
@@ -578,12 +578,12 @@ impl<'a> GrammarConstraintState<'a> {
                                 !parse_state.stack.value.t.active.is_empty()
                             });
                             crate::debug!(3, "Processing finalizer");
-                            if semi_final_glr_parse_state.is_ok() {
+                            if glr_parse_state_filtered.is_ok() {
                                 crate::debug!(3, "Finalizer is compatible");
                                 if let Some(existing) = self.state.get_mut(tokenizer_state_id) {
-                                    existing.merge_with(semi_final_glr_parse_state.clone());
+                                    existing.merge_with(glr_parse_state_filtered.clone());
                                 } else {
-                                    self.state.insert(*tokenizer_state_id, semi_final_glr_parse_state.clone());
+                                    self.state.insert(*tokenizer_state_id, glr_parse_state_filtered.clone());
                                 }
                             }
                         }
