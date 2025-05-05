@@ -279,7 +279,7 @@ impl GrammarConstraint {
                     // Check whether there's already an edge from this node to a node in the queue.
                     crate::debug!(4, "Trying to push to existing precompute node");
                     for existing_precompute_node in existing_precompute_nodes {
-                        if let Some(existing_edge_llm_tokens) = precompute_node.get_edge_value_mut(&matched_token_id, existing_precompute_node) {
+                        if let Some(existing_edge_llm_tokens) = precompute_node.get_edge_value_mut(matched_token_id, existing_precompute_node) {
                             // Merge into the edge value.
                             crate::debug!(4, "Success! Merging into existing edge value");
                             *existing_edge_llm_tokens |= llm_tokens;
