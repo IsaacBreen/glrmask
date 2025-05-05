@@ -233,6 +233,7 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
 
     def __call__(self, input_ids, scores):
         current_input_ids = input_ids.view(-1).tolist()
+        print(f"Current input IDs: {current_input_ids}")
         new_token_ids = current_input_ids[len(self.seen_input_ids):]
 
         for token_id in new_token_ids:
