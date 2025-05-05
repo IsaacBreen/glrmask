@@ -384,6 +384,16 @@ if __name__ == "__main__":
         print(f"CALLING {grammar_constraint_state.commit}({token_id})")
         grammar_constraint_state.commit(token_id)
     print("--- End Committing Tokens ---")
+
+    print("Getting final mask")
+    mask = grammar_constraint_state.get_mask()
+    print("Got mask")
+    print(mask)
+    mask_ids = np.where(mask)[0].tolist()
+    mask_tokens = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
+    print(f"Mask Token IDs: {textwrap.shorten(str(mask_ids), width=100)}")
+    print(f"Mask Tokens: {textwrap.shorten(str(mask_tokens), width=100)}")
+
     if expected_next_token:
         assert expected_next_token in mask_tokens, f"Expected '{expected_next_token}' in mask"
 
