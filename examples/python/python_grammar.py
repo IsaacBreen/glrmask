@@ -355,6 +355,7 @@ if __name__ == "__main__":
 #     input_text = "hello="
 #     expected_next_token = "world"
 
+    expected_next_token = tokenizer.encode(tokenizer.decode([expected_next_token_id])[0])
 
     # DEMO: Incremental Parser
     parser_state = PyIncrementalParser(grammar) # Use the imported class
