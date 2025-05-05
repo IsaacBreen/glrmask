@@ -260,12 +260,16 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
 
 def generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text, max_new_tokens=50):
     # TODO: We want pre_input_text to be input to the LLM that isn't passed into the grammar constraint.
-    pre_input_ids = tokenizer.encode(pre_input_text, return_tensors="pt")
-    input_ids = tokenizer.encode(input_text, return_tensors="pt")
+    # .to(torch.int64) shouldn't be necessary here, but tokenizer.encode seems to return a torch.float32 tensor for 0-length inputs for some reason :')
+    pre_input_ids = tokenizer.encode(pre_input_text, return_tensors="pt").to(torch.int64)
+    input_ids = tokenizer.encode(input_text, return_tensors="pt").to(torch.int64)
+    print(f"pre_input_ids: {pre_input_ids}, dtype: {pre_input_ids.dtype}")
+    print(f"input_ids: {input_ids}, dtype: {input_ids.dtype}")
     full_input_ids = torch.cat([pre_input_ids, input_ids], dim=1)
+    print(f"full_input_ids after cat: {full_input_ids}, dtype: {full_input_ids.dtype}")
     grammar_processor.seen_input_ids = pre_input_ids[0].tolist()
     output = model.generate(
-        full_input_ids[0],
+        full_input_ids,
         max_new_tokens=max_new_tokens,
         logits_processor=[grammar_processor]
     )
