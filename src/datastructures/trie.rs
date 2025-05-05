@@ -670,6 +670,269 @@ pub(crate) fn dump_structure<EK: Debug + Ord, EV: Debug, T: Debug>(root: Arc<Mut
     }
 }
 
+/// A helper struct to facilitate chainable edge insertion attempts into a Trie.
+///
+/// It allows trying multiple potential destination nodes and provides fallback
+/// mechanisms to create a new node if no suitable existing destination is found
+/// or if insertion attempts fail (e.g., due to cycle detection).
+pub struct EdgeInserter<'a, EK: Ord + Clone, EV: Clone, T: Clone> {
+    source: &'a mut Trie<EK, EV, T>,
+    edge_key: EK,
+    edge_value: EV,
+    /// Stores the successfully found or created destination node.
+    result: Option<Arc<Mutex<Trie<EK, EV, T>>>>,
+}
+
+impl<'a, EK: Ord + Clone + Debug, EV: Clone, T: Clone> EdgeInserter<'a, EK, EV, T> {
+    /// Creates a new EdgeInserter to manage adding an edge from `source`.
+    ///
+    /// # Arguments
+    ///
+    /// * `source`: A mutable reference to the source Trie node from which the edge originates.
+    /// * `edge_key`: The key for the edge to be inserted.
+    /// * `edge_value`: The value associated with the edge.
+    pub fn new(
+        source: &'a mut Trie<EK, EV, T>,
+        edge_key: EK,
+        edge_value: EV,
+    ) -> Self {
+        EdgeInserter {
+            source,
+            edge_key,
+            edge_value,
+            result: None,
+        }
+    }
+
+    /// Attempts to insert an edge pointing to the specified `destination` node.
+    ///
+    /// This method uses the underlying `Trie::try_insert` function, which performs
+    /// cycle detection and updates node depths.
+    ///
+    /// If the insertion is successful (`Ok(())` from `try_insert`), this `EdgeInserter`
+    /// stores the `destination` and subsequent calls to `try_*` or `else_create*` methods
+    /// will have no effect.
+    ///
+    /// If the insertion fails (`Err(CycleDetectedError)`), this method has no effect,
+    /// allowing further attempts with other destinations or fallback creation methods.
+    ///
+    /// Returns `self` to enable method chaining.
+    pub fn try_insert(mut self, destination: &Arc<Mutex<Trie<EK, EV, T>>>) -> Self {
+        if self.result.is_none() {
+            // try_insert handles cycle detection.
+            // Clone edge_key and edge_value as try_insert takes ownership.
+            match self.source.try_insert(
+                self.edge_key.clone(),
+                self.edge_value.clone(),
+                destination.clone(),
+            ) {
+                Ok(_) => {
+                    // Insertion succeeded, store the destination.
+                    self.result = Some(destination.clone());
+                }
+                Err(CycleDetectedError) => {
+                    // Insertion failed (likely a cycle), do nothing.
+                    // The `result` remains None, allowing further attempts.
+                    crate::debug!(5, "EdgeInserter: try_insert failed (cycle detected) for key {:?}, dest {:p}", self.edge_key, Arc::as_ptr(destination));
+                }
+            }
+        }
+        self
+    }
+
+    /// Attempts to insert an edge to any node within the provided `destinations` slice.
+    ///
+    /// It iterates through the `destinations` and calls `try_insert` for each one.
+    /// If an insertion succeeds for any destination, that destination is stored,
+    /// and the iteration stops. Further calls to `try_*` or `else_create*` methods
+    /// will have no effect.
+    ///
+    /// Returns `self` to enable method chaining.
+    pub fn try_slice(mut self, destinations: &[Arc<Mutex<Trie<EK, EV, T>>>]) -> Self {
+        if self.result.is_none() {
+            for dest in destinations {
+                // Attempt insertion using the source node's try_insert method.
+                match self.source.try_insert(
+                    self.edge_key.clone(),
+                    self.edge_value.clone(),
+                    dest.clone(),
+                ) {
+                    Ok(_) => {
+                        // Success! Store the destination and stop trying others.
+                        self.result = Some(dest.clone());
+                        break;
+                    }
+                    Err(CycleDetectedError) => {
+                        // Failed (cycle), try the next destination in the slice.
+                        crate::debug!(5, "EdgeInserter: try_slice failed (cycle detected) for key {:?}, dest {:p}", self.edge_key, Arc::as_ptr(dest));
+                    }
+                }
+            }
+        }
+        self
+    }
+
+    /// Attempts to insert an edge pointing to any of the direct children of the `source` node.
+    ///
+    /// This method first collects all child `Arc`s of the `source` node across all edge keys.
+    /// Then, it calls `try_slice` with these collected children as potential destinations.
+    ///
+    /// **Warning:** Inserting an edge from a node to one of its direct children using
+    /// `try_insert` will almost always fail due to cycle detection. This method is provided
+    /// based on the request but may have limited practical use cases unless the Trie
+    /// structure guarantees such insertions are valid in specific contexts.
+    ///
+    /// Returns `self` to enable method chaining.
+    pub fn try_children(mut self) -> Self {
+        if self.result.is_none() {
+            // Collect all child Arcs first to avoid borrowing issues.
+            // Lock the source briefly to read its children.
+            let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = self.source.children()
+                .values()
+                .flat_map(|v| v.iter().map(|(_, arc)| arc.clone()))
+                .collect();
+
+            // Release the implicit borrow of source by ending the expression above.
+            // Now, call try_slice with the collected children.
+            // This re-borrows self mutably.
+            self = self.try_slice(&children_arcs);
+        }
+        self
+    }
+
+
+    /// Creates and inserts an edge to a new node if no destination has been set yet.
+    ///
+    /// This method acts as a fallback. If `try_insert` or `try_slice` have not
+    /// successfully set a destination (`self.result` is `None`), this method proceeds.
+    ///
+    /// It creates a new `Trie` node with a value obtained from `T::default()`.
+    /// Then, it attempts to insert the edge from the `source` to this new node using `try_insert`.
+    /// If the insertion to the new node succeeds, the new node is stored as the result.
+    /// If it fails (which is unexpected for a brand new node), an error is logged,
+    /// and the result remains `None`.
+    ///
+    /// Requires `T: Default`.
+    ///
+    /// Returns `self` to enable method chaining.
+    pub fn else_create(mut self) -> Self
+    where
+        T: Default,
+    {
+        if self.result.is_none() {
+            let new_node_value = T::default();
+            // Delegate to else_create_with_value
+            self = self.else_create_with_value(new_node_value);
+        }
+        self
+    }
+
+    /// Creates and inserts an edge to a new node using a creator function if no destination has been set yet.
+    ///
+    /// This method acts as a fallback, similar to `else_create`.
+    /// It creates a new `Trie` node with a value obtained by calling the `creator` function.
+    /// Then, it attempts to insert the edge from the `source` to this new node using `try_insert`.
+    /// Handles success and failure similarly to `else_create`.
+    ///
+    /// Returns `self` to enable method chaining.
+    pub fn else_create_with(mut self, creator: impl FnOnce() -> T) -> Self {
+        if self.result.is_none() {
+            let new_node_value = creator();
+            // Delegate to else_create_with_value
+            self = self.else_create_with_value(new_node_value);
+        }
+        self
+    }
+
+    /// Creates and inserts an edge to a new node with a specific value if no destination has been set yet.
+    ///
+    /// This method acts as a fallback, similar to `else_create`.
+    /// It creates a new `Trie` node with the provided `value`.
+    /// Then, it attempts to insert the edge from the `source` to this new node using `try_insert`.
+    /// If the insertion succeeds, the new node is stored as the result.
+    /// If it fails (unexpected for a new node), an error is logged, and the result remains `None`.
+    ///
+    /// Returns `self` to enable method chaining.
+    pub fn else_create_with_value(mut self, value: T) -> Self {
+        if self.result.is_none() {
+            let new_node = Arc::new(Mutex::new(Trie::new(value)));
+            // Use try_insert to add the edge. This handles depth updates correctly
+            // and should generally succeed for a new node.
+            match self.source.try_insert(
+                self.edge_key.clone(),
+                self.edge_value.clone(),
+                new_node.clone(),
+            ) {
+                Ok(_) => {
+                    // Store the newly created and successfully linked node.
+                    self.result = Some(new_node);
+                }
+                Err(e) => {
+                    // This is highly unexpected when inserting a brand new node.
+                    // Log an error, but don't panic. The result remains None.
+                    crate::error!("EdgeInserter: try_insert failed unexpectedly when creating new node with key {:?}: {:?}. Edge not added.", self.edge_key, e);
+                }
+            }
+        }
+        self
+    }
+
+    /// Returns the destination node that was successfully targeted or created.
+    ///
+    /// Consumes the `EdgeInserter`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no destination node was successfully found or created (i.e., if
+    /// no `try_*` method succeeded and no `else_create*` method was called or
+    /// if the `else_create*` method failed unexpectedly).
+    pub fn unwrap(self) -> Arc<Mutex<Trie<EK, EV, T>>> {
+        self.result.expect("EdgeInserter: unwrap called but no destination node was found or created")
+    }
+
+    /// Returns the destination node as an `Option`.
+    ///
+    /// Returns `Some(destination_node)` if a destination was successfully found or created.
+    /// Returns `None` otherwise.
+    /// Consumes the `EdgeInserter`.
+    pub fn get(self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
+        self.result
+    }
+}
+
+// Optional: Add a convenience method to Trie to create an EdgeInserter easily.
+impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
+    /// Creates an `EdgeInserter` to help add an edge starting from this node.
+    ///
+    /// This provides a convenient entry point for the chainable insertion pattern.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::sync::{Arc, Mutex};
+    /// use crate::datastructures::trie::Trie; // Assuming Trie is in this module
+    ///
+    /// #[derive(Debug, Clone, Default)] // Need Default for else_create
+    /// struct NodeValue { /* ... */ }
+    ///
+    /// // Assuming root_node is Arc<Mutex<Trie<String, i32, NodeValue>>>
+    /// let mut root_guard = root_node.lock().unwrap();
+    /// let new_or_existing_node = root_guard.insert_edge("key".to_string(), 123)
+    ///     .try_slice(&potential_destinations)
+    ///     .else_create() // Or else_create_with(...) or else_create_with_value(...)
+    ///     .unwrap();
+    /// // root_guard is still locked here if needed
+    /// ```
+    pub fn insert_edge<'a>(
+        &'a mut self,
+        edge_key: EK,
+        edge_value: EV,
+    ) -> EdgeInserter<'a, EK, EV, T> {
+        EdgeInserter::new(self, edge_key, edge_value)
+    }
+}
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // TESTS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1532,4 +1795,304 @@ mod tests {
     // doesn't attempt to re-insert an existing node in a way that would trigger
     // cycle detection based on the node itself being passed again. Cycle detection
     // relies on the try_insert call in Pass 3 when creating a *new* edge/node.
+
+    // --- Tests for EdgeInserter ---
+
+    #[test]
+    fn test_edge_inserter_try_insert_success() {
+        let mut root_node: TestTrieBasic = TestTrieBasic::new(0);
+        let child_node: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+
+        let result_node = root_node.insert_edge("key", "val")
+            .try_insert(&child_node)
+            .unwrap(); // Should succeed and unwrap
+
+        assert!(Arc::ptr_eq(&result_node, &child_node));
+        // Check edge was actually added to root
+        let root_children = root_node.children().get(&"key").unwrap();
+        assert_eq!(root_children.len(), 1);
+        assert!(Arc::ptr_eq(&root_children[0].1, &child_node));
+        assert_eq!(root_children[0].0, "val");
+    }
+
+    #[test]
+    fn test_edge_inserter_try_insert_cycle() {
+        let root_node: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
+        let child_node: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+
+        // Create an edge from root to child first
+        {
+            let mut r = root_node.lock().unwrap();
+            r.try_insert("r->c", "val1", child_node.clone()).unwrap();
+        }
+
+        // Now attempt to use EdgeInserter from child back to root (creates a cycle)
+        let mut child_guard = child_node.lock().unwrap();
+        let result_node_opt = child_guard.insert_edge("c->r", "val2")
+            .try_insert(&root_node) // This should fail due to cycle
+            .get(); // Get Option
+
+        assert!(result_node_opt.is_none(), "try_insert creating a cycle should return None from get()");
+
+        // Check the edge was NOT added
+        assert!(child_guard.children().get(&"c->r").is_none());
+    }
+
+
+    #[test]
+    fn test_edge_inserter_try_slice_success() {
+        let mut root_node: TestTrieBasic = TestTrieBasic::new(0);
+        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2))); // This one will succeed
+
+        let destinations = vec![
+             // Create a cycle attempt first
+            { let temp_root = Arc::new(Mutex::new(TestTrieBasic::new(99)));
+              root_node.try_insert("temp_edge", "temp_val", temp_root.clone()).unwrap();
+              temp_root // Inserting back to this will cause a cycle
+            },
+            child2.clone(), // This insertion should succeed
+        ];
+
+        let result_node = root_node.insert_edge("key", "val")
+            .try_slice(&destinations) // try inserting to cycle-node first, then child2
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&result_node, &child2), "try_slice should return the first successful node");
+
+        // Check edge was added to root for the successful destination
+        let root_children = root_node.children().get(&"key").unwrap();
+        assert_eq!(root_children.len(), 1); // Only one edge should be added
+        assert!(Arc::ptr_eq(&root_children[0].1, &child2));
+        assert_eq!(root_children[0].0, "val");
+    }
+
+
+    #[test]
+    fn test_edge_inserter_try_slice_all_fail_then_create() {
+        let mut root_node: TestTrieBasic = TestTrieBasic::new(0);
+        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+
+        // Make both insertions in the slice fail due to cycles
+        {
+            let mut r = root_node.lock().unwrap();
+             r.try_insert("r->c1", "v1", child1.clone()).unwrap();
+             r.try_insert("r->c2", "v2", child2.clone()).unwrap();
+        }
+        let destinations = vec![child1.clone(), child2.clone()];
+
+
+        let result_node = {
+            let mut root_guard = root_node.lock().unwrap();
+            root_guard.insert_edge("key", "val")
+                .try_slice(&destinations) // Both should fail
+                .else_create_with_value(99) // This should succeed
+                .unwrap()
+        };
+
+        // Check a *new* node was created
+        assert_eq!(result_node.lock().unwrap().value, 99);
+
+        // Check root now has a new child for "key"
+        let root_children = root_node.children().get(&"key").unwrap();
+        assert_eq!(root_children.len(), 1);
+        assert!(Arc::ptr_eq(&root_children[0].1, &result_node)); // Should point to the new node
+    }
+
+    #[test]
+    fn test_edge_inserter_else_create() {
+        #[derive(Clone, Default, Debug, PartialEq)] // Need Default for else_create
+        struct DefaultNodeValue { id: usize }
+
+        let mut root_node: Trie<&'static str, &'static str, DefaultNodeValue> = Trie::new(DefaultNodeValue { id: 0 });
+
+        // No try_* calls, so else_create will be called
+        let result_node = root_node.insert_edge("new_key", "new_val")
+            .else_create() // Create with Default value
+            .unwrap();
+
+        // Check a new node was created with default value
+        assert_eq!(result_node.lock().unwrap().value, DefaultNodeValue::default());
+
+        // Check edge was added
+        let root_children = root_node.children().get(&"new_key").unwrap();
+        assert_eq!(root_children.len(), 1);
+        assert!(Arc::ptr_eq(&root_children[0].1, &result_node));
+        assert_eq!(root_children[0].0, "new_val");
+    }
+
+    #[test]
+    fn test_edge_inserter_else_create_with() {
+        let mut root_node: TestTrieBasic = TestTrieBasic::new(0);
+
+        let result_node = root_node.insert_edge("new_key", "new_val")
+            .else_create_with(|| 105) // Create with value from closure
+            .unwrap();
+
+        // Check a new node was created with the correct value
+        assert_eq!(result_node.lock().unwrap().value, 105);
+
+        // Check edge was added
+        let root_children = root_node.children().get(&"new_key").unwrap();
+        assert_eq!(root_children.len(), 1);
+        assert!(Arc::ptr_eq(&root_children[0].1, &result_node));
+        assert_eq!(root_children[0].0, "new_val");
+    }
+
+     #[test]
+    fn test_edge_inserter_else_create_with_value() {
+        let mut root_node: TestTrieBasic = TestTrieBasic::new(0);
+
+        let result_node = root_node.insert_edge("new_key", "new_val")
+            .else_create_with_value(207) // Create with specific value
+            .unwrap();
+
+        // Check a new node was created with the correct value
+        assert_eq!(result_node.lock().unwrap().value, 207);
+
+        // Check edge was added
+        let root_children = root_node.children().get(&"new_key").unwrap();
+        assert_eq!(root_children.len(), 1);
+        assert!(Arc::ptr_eq(&root_children[0].1, &result_node));
+        assert_eq!(root_children[0].0, "new_val");
+    }
+
+    #[test]
+    #[should_panic(expected = "EdgeInserter: unwrap called but no destination node was found or created")]
+    fn test_edge_inserter_unwrap_panics_if_no_result() {
+        let mut root_node: TestTrieBasic = TestTrieBasic::new(0);
+        let child_node: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+
+        // Create a cycle to make try_insert fail
+        {
+             let temp_root = Arc::new(Mutex::new(TestTrieBasic::new(99)));
+             root_node.try_insert("temp_edge", "temp_val", temp_root.clone()).unwrap();
+             // Attempt to insert back to temp_root from root, will cause cycle
+             // This try_insert is outside the EdgeInserter but sets up the scenario
+             // for the EdgeInserter's try_insert to fail.
+             // We need a node that will cause a cycle *when inserted from root*.
+             // A simpler way: just create a standalone node that isn't part of anything,
+             // but root's try_insert attempts to link back to root itself.
+             // This is tricky with the Arc<Mutex<>> structure and try_insert signature.
+             // A better test is just having try_slice fail and no fallback.
+        }
+
+        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+
+        // Make insertions to child1 and child2 fail due to cycles
+        {
+            let mut r = root_node.lock().unwrap();
+             r.try_insert("r->c1", "v1", child1.clone()).unwrap();
+             r.try_insert("r->c2", "v2", child2.clone()).unwrap();
+        }
+        let destinations = vec![child1.clone(), child2.clone()]; // These will fail try_slice
+
+        // No fallback creation, so unwrap should panic
+        let _ = {
+            let mut root_guard = root_node.lock().unwrap();
+            root_guard.insert_edge("key", "val")
+                .try_slice(&destinations) // Both fail
+                .unwrap() // This should panic
+        };
+    }
+
+     #[test]
+    fn test_edge_inserter_get_returns_none_if_no_result() {
+        let mut root_node: TestTrieBasic = TestTrieBasic::new(0);
+        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+
+        // Make insertions to child1 and child2 fail due to cycles
+        {
+            let mut r = root_node.lock().unwrap();
+             r.try_insert("r->c1", "v1", child1.clone()).unwrap();
+             r.try_insert("r->c2", "v2", child2.clone()).unwrap();
+        }
+        let destinations = vec![child1.clone(), child2.clone()]; // These will fail try_slice
+
+        // No fallback creation, get should return None
+        let result_node_opt = {
+            let mut root_guard = root_node.lock().unwrap();
+            root_guard.insert_edge("key", "val")
+                .try_slice(&destinations) // Both fail
+                .get() // Get Option
+        };
+
+        assert!(result_node_opt.is_none());
+    }
+
+    #[test]
+    fn test_edge_inserter_chaining_stops_after_success() {
+        let mut root_node: TestTrieBasic = TestTrieBasic::new(0);
+        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1))); // This one succeeds
+        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+        let new_node_val_if_created = 999;
+
+        let destinations_for_slice = vec![child2.clone()];
+
+        let result_node = {
+            let mut root_guard = root_node.lock().unwrap();
+            root_guard.insert_edge("key", "val")
+                .try_insert(&child1) // This succeeds, result is set to child1
+                // try_slice, else_create_with_value should now have no effect
+                .try_slice(&destinations_for_slice) // Should be skipped
+                .else_create_with_value(new_node_val_if_created) // Should be skipped
+                .unwrap()
+        };
+
+        assert!(Arc::ptr_eq(&result_node, &child1), "Chain should stop after first success (try_insert)");
+
+        // Check only the edge to child1 was added
+        let root_children = root_node.children().get(&"key").unwrap();
+        assert_eq!(root_children.len(), 1);
+        assert!(Arc::ptr_eq(&root_children[0].1, &child1));
+        assert_eq!(root_children[0].0, "val");
+
+        // Ensure the value for the skipped else_create was not used
+        assert_ne!(result_node.lock().unwrap().value, new_node_val_if_created);
+    }
+
+     #[test]
+    fn test_edge_inserter_try_children() {
+        let mut root_node: TestTrieBasic = TestTrieBasic::new(0);
+        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+
+        // Add child1 and child2 as children of root
+        {
+            let mut r = root_node.lock().unwrap();
+            r.try_insert("edge_c1", "val1", child1.clone()).unwrap();
+            r.try_insert("edge_c2", "val2", child2.clone()).unwrap();
+        }
+
+        // Now use EdgeInserter to try inserting an edge *from root* to its *own children*
+        // This is expected to fail cycle detection when try_children internally calls try_slice/try_insert.
+        let result_node_opt = {
+            let mut root_guard = root_node.lock().unwrap();
+            root_guard.insert_edge("self_edge", "self_val")
+                .try_children() // Try inserting to child1 or child2
+                .get()
+        };
+
+        assert!(result_node_opt.is_none(), "Inserting an edge from a node to its existing child should fail cycle detection.");
+
+        // Check the "self_edge" was NOT added to root
+        assert!(root_node.children().get(&"self_edge").is_none());
+
+         // Test with fallback: Try children, then create a new node if that fails (it should)
+        let new_node_val_if_created = 888;
+         let result_node = {
+            let mut root_guard = root_node.lock().unwrap();
+            root_guard.insert_edge("self_edge_fallback", "self_val_fb")
+                .try_children() // Fails
+                .else_create_with_value(new_node_val_if_created) // Succeeds
+                .unwrap()
+         };
+        assert_eq!(result_node.lock().unwrap().value, new_node_val_if_created);
+         let root_children = root_node.children().get(&"self_edge_fallback").unwrap();
+         assert_eq!(root_children.len(), 1);
+         assert!(Arc::ptr_eq(&root_children[0].1, &result_node));
+    }
 }
