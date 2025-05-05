@@ -3,6 +3,7 @@ use std::error::Error;
 use std::fmt::{self, Debug};
 // Import TryLockError explicitly for matching
 use std::sync::{Arc, Mutex, TryLockError};
+use std::default::Default; // ADDED: Needed for EdgeInserter::else_create
 
 /// Error type indicating that a cycle was detected during an operation
 /// that updates graph structure or properties like max_depth.
@@ -33,6 +34,227 @@ pub struct Trie<EK: Ord, EV, T> {
     /// This value is set (or updated) when an edge is inserted.
     pub max_depth: usize,
 }
+
+
+/// Helper struct to manage trying multiple destinations for edge insertion/merging
+/// before potentially creating a new node. Designed for chainable usage.
+pub struct EdgeInserter<'a, EK, EV, T, FMergeEV>
+where
+    EK: Ord + Clone,
+    EV: Clone,
+    T: Clone, // Needed for else_create_with_value and potentially by Trie::new
+    FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+{
+    source: &'a mut Trie<EK, EV, T>,
+    edge_key: EK,
+    new_edge_value: EV,
+    merge_edge_value: FMergeEV,
+    // Stores the outcome: Error, Success(found_node), or NotFoundYet
+    outcome: Result<Option<Arc<Mutex<Trie<EK, EV, T>>>>, CycleDetectedError>,
+}
+
+impl<'a, EK, EV, T, FMergeEV> EdgeInserter<'a, EK, EV, T, FMergeEV>
+where
+    EK: Ord + Clone,
+    EV: Clone,
+    T: Clone, // May need Default bound later depending on usage
+    FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+{
+    /// Creates a new EdgeInserter.
+    ///
+    /// # Arguments
+    /// * `source` - A mutable reference to the source Trie node.
+    /// * `edge_key` - The key for the edge to be inserted/merged.
+    /// * `new_edge_value` - The value for the new edge, potentially merged with an existing one.
+    /// * `merge_edge_value` - A function to merge the `new_edge_value` into an existing edge value.
+    ///   Takes `(&existing_ev, new_ev)` and returns `Some(merged_ev)` or `None`.
+    pub fn new(
+        source: &'a mut Trie<EK, EV, T>,
+        edge_key: EK,
+        new_edge_value: EV,
+        merge_edge_value: FMergeEV,
+    ) -> Self {
+        EdgeInserter {
+            source,
+            edge_key,
+            new_edge_value,
+            merge_edge_value,
+            outcome: Ok(None), // Start with NotFoundYet
+        }
+    }
+
+    // --- Chainable Try Methods ---
+
+    /// Tries to establish an edge to the given destination node `dst`.
+    ///
+    /// If an edge `(edge_key, _, dst)` already exists:
+    ///   - Attempts to merge `new_edge_value` into the existing edge value using `merge_edge_value`.
+    ///   - If merge succeeds, updates the edge value.
+    ///   - Sets the outcome to `Ok(Some(dst))` regardless of merge success.
+    /// If no such edge exists:
+    ///   - Attempts `self.source.try_insert(edge_key, new_edge_value, dst)`.
+    ///   - If successful, sets the outcome to `Ok(Some(dst))`.
+    ///   - If `try_insert` returns `Err(CycleDetectedError)`, sets the outcome to `Err`.
+    ///
+    /// This method consumes and returns `self` for chaining.
+    pub fn try_candidate(mut self, dst: Arc<Mutex<Trie<EK, EV, T>>>) -> Self {
+        // Only proceed if no node found yet and no error occurred
+        if let Ok(None) = self.outcome {
+            // Check if edge (edge_key, _, dst) already exists using get_edge_value_mut
+            // This requires a mutable borrow of source, which is fine.
+            if let Some(existing_ev) = self.source.get_edge_value_mut(self.edge_key.clone(), &dst) {
+                // Edge exists, try merging
+                if let Some(merged_ev) = (self.merge_edge_value)(existing_ev, self.new_edge_value.clone()) {
+                    *existing_ev = merged_ev;
+                    // Merge successful
+                }
+                // Set outcome to found, regardless of merge success
+                self.outcome = Ok(Some(dst));
+            } else {
+                // Edge doesn't exist, try inserting
+                match self.source.try_insert(self.edge_key.clone(), self.new_edge_value.clone(), dst.clone()) {
+                    Ok(()) => {
+                        self.outcome = Ok(Some(dst)); // Insert successful, node found
+                    }
+                    Err(e @ CycleDetectedError) => {
+                        self.outcome = Err(e); // Cycle detected, store error
+                    }
+                }
+            }
+        }
+        self
+    }
+
+    /// Tries to establish an edge to one of the destination nodes in the slice `dsts`.
+    ///
+    /// Iterates through `dsts` and calls the logic of `try_candidate` for each.
+    /// Returns `self` immediately upon the first successful merge/insertion or upon encountering a `CycleDetectedError`.
+    /// If the loop completes without success or error, the outcome remains `Ok(None)`.
+    pub fn try_slice(mut self, dsts: &[Arc<Mutex<Trie<EK, EV, T>>>]) -> Self {
+        // Only proceed if no node found yet and no error occurred
+        if let Ok(None) = self.outcome {
+            for dst in dsts {
+                // Check if edge (edge_key, _, dst) already exists
+                // Need to re-check mutability here. get_edge_value_mut needs &mut self.source
+                if let Some(existing_ev) = self.source.get_edge_value_mut(self.edge_key.clone(), dst) {
+                    // Edge exists, try merging
+                    if let Some(merged_ev) = (self.merge_edge_value)(existing_ev, self.new_edge_value.clone()) {
+                        *existing_ev = merged_ev;
+                        // Merge successful
+                    }
+                    // Set outcome to found and return
+                    self.outcome = Ok(Some(dst.clone()));
+                    return self; // Found first match
+                } else {
+                    // Edge doesn't exist, try inserting
+                    match self.source.try_insert(self.edge_key.clone(), self.new_edge_value.clone(), dst.clone()) {
+                        Ok(()) => {
+                            self.outcome = Ok(Some(dst.clone())); // Insert successful
+                            return self; // Found first match
+                        }
+                        Err(e @ CycleDetectedError) => {
+                            self.outcome = Err(e); // Cycle detected
+                            return self; // Stop searching on error
+                        }
+                    }
+                }
+            }
+            // If loop finishes without finding/inserting or erroring, outcome remains Ok(None)
+        }
+        self
+    }
+
+    /// Tries to establish an edge to one of the existing children of the `source` node
+    /// under the `edge_key` specified during initialization.
+    ///
+    /// This is a convenience method that calls `try_slice` with the relevant children.
+    pub fn try_children(self) -> Self {
+        // Clone children arcs to avoid borrowing issues while calling try_slice
+        let children_arcs: Option<Vec<Arc<Mutex<Trie<EK, EV, T>>>>> = self.source
+            .children() // Immutable borrow ok here to get the arcs
+            .get(&self.edge_key)
+            .map(|vec_tuples| vec_tuples.iter().map(|(_, arc)| arc.clone()).collect());
+
+        if let Some(arcs) = children_arcs {
+             // Now call try_slice with the collected arcs.
+             // self is consumed and returned by try_slice.
+             self.try_slice(&arcs)
+        } else {
+            // No children for this key, outcome remains unchanged. Return self.
+            self
+        }
+    }
+
+    // --- Terminal Creation Methods ---
+
+    // Helper for creation methods. Consumes self.
+    fn create_and_insert(mut self, value: T) -> Result<Arc<Mutex<Trie<EK, EV, T>>>, CycleDetectedError> {
+         match self.outcome {
+            Ok(Some(node)) => Ok(node), // Node already found/inserted
+            Ok(None) => {
+                // No node found yet, create and insert
+                let new_node = Arc::new(Mutex::new(Trie::new(value)));
+                // Use the stored edge_key and new_edge_value
+                match self.source.try_insert(self.edge_key, self.new_edge_value, new_node.clone()) {
+                    Ok(()) => Ok(new_node),
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e), // Previous step resulted in an error
+        }
+    }
+
+    /// If no suitable destination node was found by previous `try_*` calls,
+    /// creates a new node with `T::default()`, inserts the edge to it,
+    /// and returns the new node.
+    ///
+    /// If a node was already found or an error occurred, returns that result directly.
+    /// Requires `T: Default`.
+    /// This method consumes the `EdgeInserter`.
+    pub fn else_create(self) -> Result<Arc<Mutex<Trie<EK, EV, T>>>, CycleDetectedError>
+    where
+        T: Default,
+    {
+        self.create_and_insert(T::default())
+    }
+
+    /// If no suitable destination node was found by previous `try_*` calls,
+    /// creates a new node using the provided `creator` function, inserts the edge to it,
+    /// and returns the new node.
+    ///
+    /// If a node was already found or an error occurred, returns that result directly.
+    /// This method consumes the `EdgeInserter`.
+    pub fn else_create_with<F>(self, creator: F) -> Result<Arc<Mutex<Trie<EK, EV, T>>>, CycleDetectedError>
+    where
+        F: FnOnce() -> T,
+    {
+        self.create_and_insert(creator())
+    }
+
+    /// If no suitable destination node was found by previous `try_*` calls,
+    /// creates a new node with the given `value`, inserts the edge to it,
+    /// and returns the new node.
+    ///
+    /// If a node was already found or an error occurred, returns that result directly.
+    /// This method consumes the `EdgeInserter`.
+    pub fn else_create_with_value(self, value: T) -> Result<Arc<Mutex<Trie<EK, EV, T>>>, CycleDetectedError> {
+        self.create_and_insert(value)
+    }
+
+    // --- Optional Finalizer ---
+
+    /// Returns the final outcome without forcing node creation.
+    ///
+    /// Returns `Ok(Some(node))` if a node was found/inserted successfully.
+    /// Returns `Ok(None)` if no suitable node was found and no `else_create*` method was called.
+    /// Returns `Err(CycleDetectedError)` if a cycle was detected at any point.
+    /// This method consumes the `EdgeInserter`.
+    #[allow(dead_code)] // Keep available for potential use cases
+    pub fn build(self) -> Result<Option<Arc<Mutex<Trie<EK, EV, T>>>>, CycleDetectedError> {
+        self.outcome
+    }
+}
+
 
 // Implementation block for core Trie functionality
 // Added Clone bound for EK needed in try_insert_or_merge_edge and others
@@ -330,6 +552,36 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
             // node lock is released here
         }
         result
+    }
+
+    // ADDED: Helper method to create an EdgeInserter for this node
+    /// Creates an `EdgeInserter` to help chain attempts to insert or merge an edge.
+    ///
+    /// # Arguments
+    /// * `edge_key` - The key for the edge.
+    /// * `new_edge_value` - The value for the new edge.
+    /// * `merge_edge_value` - A function defining how to merge `new_edge_value` into an existing edge's value.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut root_guard = root_node.lock().unwrap();
+    /// let merge_fn = |existing: &i32, new: i32| Some(existing + new);
+    /// let result_node = root_guard.edge_inserter("key", 10, merge_fn)
+    ///     .try_children()
+    ///     .try_candidate(some_other_node)
+    ///     .else_create_with_value(MyDefaultNodeValue);
+    /// // result_node is Result<Arc<Mutex<Trie<...>>>, CycleDetectedError>
+    /// ```
+    pub fn edge_inserter<'a, FMergeEV>(
+        &'a mut self,
+        edge_key: EK,
+        new_edge_value: EV,
+        merge_edge_value: FMergeEV,
+    ) -> EdgeInserter<'a, EK, EV, T, FMergeEV>
+    where
+        FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+    {
+        EdgeInserter::new(self, edge_key, new_edge_value, merge_edge_value)
     }
 }
 
