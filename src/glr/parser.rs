@@ -296,7 +296,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         const MAX: usize = 30;
         let roots: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
         let stats = gather_gss_stats(&roots);
-        crate::debug!(3, "{} (token {}, {}) – active: {}, nodes: {:?}",
+        crate::debug!(3, "{} - token {} ({:?}) - – active: {}, nodes: {:?}",
                       phase, token.0, self.parser.terminal_map.get_by_right(&token).unwrap().0, self.active_states.len(), stats);
 
         debug!(4, "{}", {
