@@ -365,21 +365,12 @@ if __name__ == "__main__":
 
     # DEMO: Get the mask
     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
-    mask = grammar_constraint_state.get_mask()
-    print("Got mask")
-    print(f"Mask: {mask}")
-    mask_ids = np.where(mask)[0].tolist()
-    mask_tokens = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
-    print(f"Mask Token IDs: {textwrap.shorten(str(mask_ids), width=100)}")
-    print(f"Mask Tokens: {textwrap.shorten(str(mask_tokens), width=100)}")
 
     tokens = tokenizer.encode(input_text, return_tensors="pt")
     tokens: list[int] = tokens.tolist()[0]
     print(f"Committing tokens: {tokens}")
     for i, token_id in enumerate(tokens):
-        print(f"--- Committing token {tokenizer.decode([token_id])!r} (id: {token_id}) ---")
-        print(f"CALLING {grammar_constraint_state.commit}({token_id})")
-        grammar_constraint_state.commit(token_id)
+        print(f"Ensuring token {tokenizer.decode([token_id])!r} (id: {token_id}) is in mask")
         mask = grammar_constraint_state.get_mask()
         print("Got mask")
         print(f"Mask: {mask}")
@@ -387,8 +378,10 @@ if __name__ == "__main__":
         mask_tokens = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
         print(f"Mask Token IDs: {textwrap.shorten(str(mask_ids), width=100)}")
         print(f"Mask Tokens: {textwrap.shorten(str(mask_tokens), width=100)}")
-        if i < len(tokens) - 1:
-            print(f"Is next token {tokens[i+1]} in mask? {tokens[i+1] in mask_ids}")
+        assert token_id in mask_ids, f"Expected token {tokenizer.decode([token_id])!r} (id: {token_id}) in mask"
+        print(f"--- Committing token {tokenizer.decode([token_id])!r} (id: {token_id}) ---")
+        print(f"CALLING {grammar_constraint_state.commit}({token_id})")
+        grammar_constraint_state.commit(token_id)
     print("--- End Committing Tokens ---")
     if expected_next_token:
         assert expected_next_token in mask_tokens, f"Expected '{expected_next_token}' in mask"
