@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use smallvec::smallvec;
 use std::cmp::Ordering;
 use crate::datastructures::trie::Trie;
@@ -11,10 +11,7 @@ use bitvec::prelude::BitVec;
 use bitvec::prelude::*;
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::BitOr;
-use std::cell::{RefCell, RefMut};
-use std::rc::Rc;
-use std::sync::Arc;
-use hashbrown::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use smallvec::SmallVec;
 use crate::constraint_extra::print_finalizer;
 use crate::datastructures::charmap::TrieMap;
@@ -138,7 +135,7 @@ impl PrecomputedNodeContents {
     }
 }
 
-pub type NodeRc    = Rc<RefCell<PrecomputeNode>>;
+pub type NodeRc    = Arc<Mutex<PrecomputeNode>>;
 pub type NodeVec   = SmallVec<NodeRc, 4>;
 
 impl GrammarConstraint {
@@ -158,26 +155,26 @@ impl GrammarConstraint {
         }
     }
 
-    pub fn precompute<'a>(
+    pub fn precompute(
         tokenizer: &Regex,
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         max_llm_token_id: usize,
     ) -> Precomputed {
         #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-        struct DottedVocabNode<'a> {
-            src: &'a VocabPrefixTreeNode,
-            dst: &'a VocabPrefixTreeNode,
-            bytes: &'a [u8],
+        struct DottedVocabNode {
+            src: &VocabPrefixTreeNode,
+            dst: &VocabPrefixTreeNode,
+            bytes: &[u8],
             offset: usize,
         }
-        impl<'a> Ord for DottedVocabNode<'a> {
+        impl Ord for DottedVocabNode {
             fn cmp(&self, other: &Self) -> Ordering {
                 let self_primary_key = self.src.prefix_length() + self.offset;
                 let other_primary_key = other.src.prefix_length() + other.offset;
                 (self_primary_key, self.src, self.bytes).cmp(&(other_primary_key, other.src, other.bytes))
             }
         }
-        impl<'a> PartialOrd for DottedVocabNode<'a> {
+        impl PartialOrd for DottedVocabNode {
             fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
                 Some(self.cmp(other))
             }
@@ -195,13 +192,12 @@ impl GrammarConstraint {
         // Create the roots.
         let mut precomputed_roots: BTreeMap<TokenizerStateID, NodeRc> = BTreeMap::new();
         for tokenizer_state_id in 0..tokenizer.max_state() {
-            let precompute_node = Rc::new(RefCell::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
+            let precompute_node = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
             precomputed_roots.insert(TokenizerStateID(tokenizer_state_id), precompute_node);
         }
 
         let mut seen : HashMap<(usize, usize, TokenizerStateID), NodeVec> = HashMap::new();
-        let mut work : VecDeque<(usize, usize, &'a VocabPrefixTreeNode, &'a [u8], TokenizerStateID, NodeVec)>
-                      = VecDeque::new();
+        let mut work: VecDeque<(usize, usize, &VocabPrefixTreeNode, &[u8], TokenizerStateID, NodeVec)> = VecDeque::new();
 
         // Initialize the queue with the roots.
         for (tokenizer_state_id, precompute_node) in &precomputed_roots {
@@ -259,7 +255,7 @@ impl GrammarConstraint {
             );
             let dst = src; // In the new model, we process bytes of the current vocab node 'src'. There's no 'dst' from the dotted node concept.
 
-            let mut node_addrs: SmallVec<usize, 4> = nodes.iter().map(|n| Rc::as_ptr(n) as usize).collect();
+            let mut node_addrs: SmallVec<usize, 4> = nodes.iter().map(|n| Arc::as_ptr(n) as usize).collect();
             node_addrs.sort_unstable(); // Sort for consistent key in merge_map
 
             if nodes.len() > 3 {
@@ -269,9 +265,9 @@ impl GrammarConstraint {
                     nodes = smallvec![existing.clone()];
                 } else {
                     crate::debug!(3, "Merging {} nodes. No existing merge", nodes.len());
-                    let new_precomputed_node = Rc::new(RefCell::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
+                    let new_precomputed_node = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
                     for precomputed_node_rc in nodes.iter() {
-                        new_precomputed_node.borrow_mut().force_insert_to_node(None, all_true.clone(), precomputed_node_rc);
+                        new_precomputed_node.lock().unwrap().force_insert_to_node(None, all_true.clone(), precomputed_node_rc);
                     }
                     merge_map.insert(node_addrs.clone(), new_precomputed_node.clone());
                     nodes = smallvec![new_precomputed_node.clone()];
@@ -288,25 +284,16 @@ impl GrammarConstraint {
 
                 let exec = tokenizer.execute_from_state(byte_slice, TokenizerStateID(cur_tokenizer_state));
 
-                if exec.consumed == 0 {
-                    // No progress made by the tokenizer with this byte/state combination.
-                    // This path is dead for this tokenizer state from this point on.
-                    // The loop will naturally break if exec.end_state is None or cur_tokenizer_state doesn't change.
-                    if exec.end_state.is_none() || exec.end_state == Some(cur_tokenizer_state) {
-                         break;
-                    }
-                }
-
-                let new_offset = idx + exec.consumed; // How far we've consumed *from the beginning of bytes* in this tokenizer step
-
                 for m in exec.matches {
+                    let new_offset = idx + m.width;
+
                     let grammar_id = GrammarTokenID(m.id);
                     let llm_tokens = reachable_tokens.clone();
 
                     let mut next_nodes: SmallVec<NodeRc, 4> = SmallVec::new();
 
                     for node_rc in &nodes {
-                        let mut node = node_rc.borrow_mut();
+                        let mut node = node_rc.lock().unwrap();
                         // Check if an edge with this grammar_id already exists and try to merge
                         let mut existing_edge_found = false;
                         if let Some(edges) = node.get_mut(&Some(grammar_id)) {
@@ -329,7 +316,7 @@ impl GrammarConstraint {
                     // If we have reached the end of the LLM token bytes, mark clean_end
                     if new_offset == bytes.len() {
                          for child_rc in &next_nodes {
-                             child_rc.borrow_mut().value.clean_end
+                             child_rc.lock().unwrap().value.clean_end
                                      .get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id+1))
                                      .set(src.token_id(), true);
                          }
@@ -370,7 +357,7 @@ impl GrammarConstraint {
 
                  for possible_final_grammar_token in final_tokens {
                      for node_rc in &nodes {
-                         node_rc.borrow_mut().value.push_finalizer_info(
+                         node_rc.lock().unwrap().value.push_finalizer_info(
                              possible_final_grammar_token,
                              LLMTokenID(src.token_id()), // The LLM token is the one associated with the src node
                              TokenizerStateID(end_state),
@@ -398,9 +385,9 @@ impl GrammarConstraint {
         }
 
 
-        // Pull the roots out of their Rc<RefCell<_>>
+        // Pull the roots out of their Arc<Mutex<<_>>
         let precomputed_roots = precomputed_roots.into_iter()
-                                                 .map(|(tokenizer_state_id, node)| (tokenizer_state_id, Rc::try_unwrap(node).unwrap().into_inner()))
+                                                 .map(|(tokenizer_state_id, node)| (tokenizer_state_id, node.lock().unwrap().clone()))
                                                  .collect();
         crate::debug!(2, "Done precomputing");
         precomputed_roots
@@ -514,13 +501,13 @@ impl<'a> GrammarConstraintState<'a> {
 
         for (tokenizer_state_id, state) in tokenizer_state_id_to_parse_states {
             let token_trie = self.parent.precomputed[&tokenizer_state_id].clone();
-            // Need to convert the cloned Trie back to Rc<RefCell<_>> for special_map
+            // Need to convert the cloned Trie back to Arc<Mutex<<_>> for special_map
             // This conversion might be tricky. The precomputed structure is owned Trie.
-            // special_map expects Arc<Mutex<_>> or Rc<RefCell<_>>.
+            // special_map expects Arc<Mutex<_>> or Arc<Mutex<<_>>.
             // Let's assume special_map is updated to work with owned Trie or provides a way to wrap.
             // For now, let's wrap the clone. This is inefficient but matches the required type.
             // A better approach would be for special_map to work with references or slices of Tries.
-            let token_trie_rc = Rc::new(RefCell::new(token_trie));
+            let token_trie_rc = Arc::new(Mutex::new(token_trie));
             initial_nodes_and_values.push((token_trie_rc, state));
         }
         initial_nodes_and_values
@@ -533,10 +520,10 @@ impl<'a> GrammarConstraintState<'a> {
         self.state = BTreeMap::new();
 
         Trie::special_map(
-            // Input: Vec<(Rc<RefCell<PrecomputeNode>>, GLRParserState<'_, LLMTokenInfo>)>
+            // Input: Vec<(Arc<Mutex<<PrecomputeNode>>, GLRParserState<'_, LLMTokenInfo>)>
             initial_nodes_and_values,
             // step
-            // Input: &GLRParserState<'_, LLMTokenInfo>, GrammarTokenID, &LLMTokenBV, &Rc<RefCell<PrecomputeNode>>
+            // Input: &GLRParserState<'_, LLMTokenInfo>, GrammarTokenID, &LLMTokenBV, &Arc<Mutex<<PrecomputeNode>>
             // Output: Option<GLRParserState<'_, LLMTokenInfo>>
             |glr_parse_state, grammar_token_id, edge_llm_tokens, child_node| {
                 let node_ptr = std::ptr::addr_of!(*child_node) as usize;
@@ -687,7 +674,7 @@ mod tests {
         dbg!(&parser);
 
         let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 2);
-        // constraint.dump_precomputed(); // dump_precomputed might need updates for Rc/RefCell
+        // constraint.dump_precomputed(); // dump_precomputed might need updates for Arc/Mutex
 
         let mut constraint_state = constraint.init();
 
@@ -751,7 +738,7 @@ mod tests {
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map); // Start production is index 6
         dbg!(&parser);
         let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 6);
-        // constraint.dump_precomputed(); // dump_precomputed might need updates for Rc/RefCell
+        // constraint.dump_precomputed(); // dump_precomputed might need updates for Arc/Mutex
 
         // Initial state and step
         let mut state = constraint.init();
