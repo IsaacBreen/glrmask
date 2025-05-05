@@ -53,25 +53,20 @@ mod tests {
         // Grammar: S -> NUM '+' NUM '+' NUM
         //          NUM -> digit+
         let digit_regex = eat_u8_range_fast(b'0', b'9');
+        let number_regex = repeat1_fast(digit_regex);
         let plus_regex = eat_u8_fast(b'+');
 
         let exprs = vec![
             (
                 "S".to_string(), // Start rule implicitly added by from_exprs
                 sequence(vec![
-                    regex(digit_regex.clone()), // Represent NUM directly for simplicity here
+                    regex(number_regex.clone()), // Represent NUM directly for simplicity here
                     regex(plus_regex.clone()),
-                    regex(digit_regex.clone()),
+                    regex(number_regex.clone()),
                     regex(plus_regex.clone()),
-                    regex(digit_regex.clone()),
+                    regex(number_regex.clone()),
                 ]),
             ),
-            // Note: A more robust grammar would use a non-terminal for NUM:
-            // ("S", sequence(vec![r#ref("NUM"), regex(plus_regex.clone()), r#ref("NUM"), regex(plus_regex.clone()), r#ref("NUM")])),
-            // ("NUM", regex(repeat1_fast(digit_regex))),
-            // But for this specific test, directly using the regex simplifies things
-            // as long as the tokenizer groups match the grammar terminals.
-            // Grammar::from_exprs handles mapping regex() calls to terminals.
         ];
 
         println!("Building grammar...");
@@ -115,6 +110,8 @@ mod tests {
 
         println!("Committing tokens...");
         for token_id in input_token_ids {
+            println!("Ensuring token ID {} is in mask...", token_id.0);
+            assert!(state.get_mask()[token_id.0], "Token ID {} not in mask", token_id.0);
             println!("Committing token ID: {}", token_id.0);
             state.commit(token_id);
             state.step_with_all_llm_tokens(); // Step after commit
