@@ -161,20 +161,20 @@ impl GrammarConstraint {
         max_llm_token_id: usize,
     ) -> Precomputed {
         #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-        struct DottedVocabNode {
-            src: &VocabPrefixTreeNode,
-            dst: &VocabPrefixTreeNode,
-            bytes: &[u8],
+        struct DottedVocabNode<'a> {
+            src: &'a VocabPrefixTreeNode,
+            dst: &'a VocabPrefixTreeNode,
+            bytes: &'a [u8],
             offset: usize,
         }
-        impl Ord for DottedVocabNode {
+        impl Ord for DottedVocabNode<'_> {
             fn cmp(&self, other: &Self) -> Ordering {
                 let self_primary_key = self.src.prefix_length() + self.offset;
                 let other_primary_key = other.src.prefix_length() + other.offset;
                 (self_primary_key, self.src, self.bytes).cmp(&(other_primary_key, other.src, other.bytes))
             }
         }
-        impl PartialOrd for DottedVocabNode {
+        impl PartialOrd for DottedVocabNode<'_> {
             fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
                 Some(self.cmp(other))
             }
