@@ -260,9 +260,12 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
 
 def generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text, max_new_tokens=50):
     # TODO: We want pre_input_text to be input to the LLM that isn't passed into the grammar constraint.
+    pre_input_ids = tokenizer.encode(pre_input_text, return_tensors="pt")
+    grammar_processor.seen_input_ids = pre_input_ids[0].tolist()
     input_ids = tokenizer.encode(input_text, return_tensors="pt")
+    full_input_ids = np.concatenate([pre_input_ids[0], input_ids[0]])
     output = model.generate(
-        input_ids,
+        full_input_ids,
         max_new_tokens=max_new_tokens,
         logits_processor=[grammar_processor]
     )
