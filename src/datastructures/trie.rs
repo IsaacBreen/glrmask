@@ -3,7 +3,6 @@ use std::error::Error;
 use std::fmt::{self, Debug};
 // Import TryLockError explicitly for matching
 use std::sync::{Arc, Mutex, TryLockError};
-use crate::constraint::NodeRc;
 
 /// Error type indicating that a cycle was detected during an operation
 /// that updates graph structure or properties like max_depth.
