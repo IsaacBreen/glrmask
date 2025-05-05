@@ -577,9 +577,9 @@ impl<'a> GrammarConstraintState<'a> {
                                 // Check if any active paths remain
                                 !parse_state.stack.value.t.active.is_empty()
                             });
-                            crate::debug!(3, "At finalizer state");
+                            crate::debug!(3, "Processing finalizer");
                             if semi_final_glr_parse_state.is_ok() {
-                                crate::debug!(3, "Semi-final GLR parse state at finalizer is OK");
+                                crate::debug!(3, "Finalizer is compatible");
                                 if let Some(existing) = self.state.get_mut(tokenizer_state_id) {
                                     existing.merge_with(semi_final_glr_parse_state.clone());
                                 } else {
