@@ -175,7 +175,13 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
 #     SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g", "hello"]
 #     exprs.append(("start'''", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
 
-    exprs.append(("file", ge.sequence([ge.ref("NUMBER"), ge.regex(eat("+")), ge.ref("NUMBER"), ge.regex(eat("+")), ge.ref("NUMBER")])))
+    digit = eat_range('0', '9')
+    alph_lower = eat_range('a', 'z')
+    alph_upper = eat_range('A', 'Z')
+
+    exprs.append(("NUM", ge.regex(Regex.rep(digit))))
+
+    exprs.append(("file", ge.sequence([ge.ref("NUM"), ge.regex(eat("+")), ge.ref("NUM"), ge.regex(eat("+")), ge.ref("NUM")])))
 
     for rule in grammar.rules.values():
         memo[rule.name] = ge.ref(rule.name)
