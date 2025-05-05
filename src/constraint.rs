@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+use smallvec::smallvec;
 use std::cmp::Ordering;
 use crate::datastructures::trie::Trie;
 use crate::finite_automata::Regex;
@@ -11,6 +13,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::ops::BitOr;
 use std::cell::{RefCell, RefMut};
 use std::rc::Rc;
+use std::sync::Arc;
 use hashbrown::{HashMap, HashSet};
 use smallvec::SmallVec;
 use crate::constraint_extra::print_finalizer;
@@ -136,7 +139,7 @@ impl PrecomputedNodeContents {
 }
 
 pub type NodeRc    = Rc<RefCell<PrecomputeNode>>;
-pub type NodeVec   = SmallVec<[NodeRc; 4]>;
+pub type NodeVec   = SmallVec<NodeRc, 4>;
 
 impl GrammarConstraint {
     pub fn new(
@@ -218,7 +221,7 @@ impl GrammarConstraint {
             }
         }
 
-        let mut merge_map: HashMap<SmallVec<[usize;4]>, NodeRc> = HashMap::new();
+        let mut merge_map: HashMap<SmallVec<usize, 4>, NodeRc> = HashMap::new();
 
         macro_rules! enqueue {
             (src = $src:expr, off = $offset:expr, nodes = $nodes:expr, tok_state = $tok_state:expr) => {
@@ -256,7 +259,7 @@ impl GrammarConstraint {
             );
             let dst = src; // In the new model, we process bytes of the current vocab node 'src'. There's no 'dst' from the dotted node concept.
 
-            let mut node_addrs: SmallVec<[usize; 4]> = nodes.iter().map(|n| Rc::as_ptr(n) as usize).collect();
+            let mut node_addrs: SmallVec<usize, 4> = nodes.iter().map(|n| Rc::as_ptr(n) as usize).collect();
             node_addrs.sort_unstable(); // Sort for consistent key in merge_map
 
             if nodes.len() > 3 {
@@ -300,7 +303,7 @@ impl GrammarConstraint {
                     let grammar_id = GrammarTokenID(m.id);
                     let llm_tokens = reachable_tokens.clone();
 
-                    let mut next_nodes: SmallVec<[NodeRc; 4]> = SmallVec::new();
+                    let mut next_nodes: SmallVec<NodeRc, 4> = SmallVec::new();
 
                     for node_rc in &nodes {
                         let mut node = node_rc.borrow_mut();
