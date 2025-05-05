@@ -41,7 +41,7 @@ pub(crate) struct PrecomputedNodeContents {
 }
 
 pub(crate) type PrecomputeNode = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
-pub(crate) type Precomputed = BTreeMap<TokenizerStateID, Arc<PrecomputeNode>>; // Arc directly, no Mutex
+pub(crate) type Precomputed = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>;
 
 /// Holds the set of active LLM tokens and the intersection of tokens
 /// guaranteed to be possible in all paths *below* this GSS node.
@@ -176,16 +176,15 @@ impl GrammarConstraint {
         crate::debug!(2, "Done building vocab prefix tree");
 
         // Create the roots.
-        let mut precomputed_roots: BTreeMap<TokenizerStateID, Arc<PrecomputeNode>> = BTreeMap::new();
+        let mut precomputed_roots: BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
 
         // Use FxHashMap for cache and VecDeque for queue
-        let mut node_cache: FxHashMap<NodeKey, Arc<PrecomputeNode>> = FxHashMap::default();
-        let mut queue: VecDeque<(NodeKey, Arc<PrecomputeNode>)> = VecDeque::new();
-
+        let mut node_cache: FxHashMap<NodeKey, Arc<Mutex<PrecomputeNode>>> = FxHashMap::default();
+        let mut queue: VecDeque<(NodeKey, Arc<Mutex<PrecomputeNode>>>) = VecDeque::new();
 
         // Seed the queue with the roots.
         for tok_state in 0..tokenizer.max_state() {
-            let root_pc_node = Arc::new(PrecomputeNode::new(PrecomputedNodeContents::default()));
+            let root_pc_node = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
 
             // one NodeKey per *child* of the root prefix-tree node
             for (bytes, child) in vocab_prefix_tree.root.iter_children() {
@@ -203,13 +202,13 @@ impl GrammarConstraint {
 
         // Helper: fetch or create the next PrecomputeNode
         let mut get_or_create = |key: NodeKey,
-                                 cache: &mut FxHashMap<NodeKey, Arc<PrecomputeNode>>,
-                                 q: &mut VecDeque<(NodeKey, Arc<PrecomputeNode>)>|
-        -> Arc<PrecomputeNode> {
+                                 cache: &mut FxHashMap<NodeKey, Arc<Mutex<PrecomputeNode>>>,
+                                 q: &mut VecDeque<(NodeKey, Arc<Mutex<PrecomputeNode>>)>|
+        -> Arc<Mutex<PrecomputeNode>> {
             if let Some(node) = cache.get(&key) {
                 node.clone()
             } else {
-                let new_node = Arc::new(PrecomputeNode::new(PrecomputedNodeContents::default()));
+                let new_node = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
                 cache.insert(key, new_node.clone());
                 q.push_back((key, new_node.clone()));
                 new_node
@@ -247,22 +246,21 @@ impl GrammarConstraint {
 
                 let dst_pc_node = get_or_create(dst_key, &mut node_cache, &mut queue);
 
-                // insert or merge the edge
-                // Need to get mutable access to the node contents
-                let mut src_pc_node_mut: Arc<Mutex<PrecomputeNode>> = Arc::try_unwrap(src_pc_node.clone()).unwrap_or_else(|arc| (*arc).clone()).into_inner();
-
-                src_pc_node_mut.force_insert_to_node(
+                // Lock the source node to modify its children
+                let mut src_pc_node_guard = src_pc_node.lock().expect("Mutex poisoned during precompute edge insertion");
+                src_pc_node_guard.force_insert_to_node(
                     Some(g_token),
                     edge_mask,
-                    &dst_pc_node,
+                    &dst_pc_node, // dst_pc_node is now Arc<Mutex<Trie>>
                 );
-                // src_pc_node_mut goes out of scope here, dropping the mutable access
+                // src_pc_node_guard lock released here
             }
 
             // partial match (tokenizer still wants more input)
             if let Some(end_state) = tk_results.end_state {
                 // record every grammar token still reachable from that FA state
-                let mut src_pc_node_mut = Arc::try_unwrap(src_pc_node.clone()).unwrap_or_else(|arc| (*arc).clone()).into_inner();
+                // Lock the source node to modify its value (finalizers)
+                let mut src_pc_node_guard = src_pc_node.lock().expect("Mutex poisoned during precompute finalizer update");
                 for grammar_token in tokenizer
                     .tokens_accessible_from_state(TokenizerStateID(end_state))
                     .into_iter()
@@ -274,7 +272,7 @@ impl GrammarConstraint {
                         max_llm_token_id,
                     );
                 }
-                // src_pc_node_mut goes out of scope here
+                // src_pc_node_guard lock released here
 
                 // enqueue all children of the current vocab-node
                 for (bytes2, child2) in vocab_node.iter_children() {
@@ -290,20 +288,20 @@ impl GrammarConstraint {
 
             // clean-end mark
             if key.offset == bytes.len() {
-                 let mut src_pc_node_mut = Arc::try_unwrap(src_pc_node.clone()).unwrap_or_else(|arc| (*arc).clone()).into_inner();
-                 src_pc_node_mut
+                 // Lock the source node to modify its value (clean_end)
+                 let mut src_pc_node_guard = src_pc_node.lock().expect("Mutex poisoned during precompute clean_end update");
+                 src_pc_node_guard
                     .value
                     .clean_end
                     .get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1))
                     .set(vocab_node.token_id(), true);
-                 // src_pc_node_mut goes out of scope here
+                 // src_pc_node_guard lock released here
             }
         }
 
-        // Pull the roots out of their Arc<_>
         let precomputed_roots: Precomputed = precomputed_roots
             .into_iter()
-            .map(|(id, arc)| (id, arc)) // The Arc is kept now
+            .map(|(id, arc_mutex)| (id, arc_mutex)) // Keep Arc<Mutex<Trie>>
             .collect();
         crate::debug!(2, "Done precomputing");
         precomputed_roots
@@ -399,7 +397,7 @@ impl<'a> GrammarConstraintState<'a> {
         }
     }
 
-    fn prepare_initial_nodes_and_values_for_special_map(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(Arc<PrecomputeNode>, GLRParserState<'a, LLMTokenInfo>)> {
+    fn prepare_initial_nodes_and_values_for_special_map(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a, LLMTokenInfo>)> {
         let mut initial_nodes_and_values: Vec<(Arc<PrecomputeNode>, GLRParserState<'_, LLMTokenInfo>)> = Vec::new();
         let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, GLRParserState<'_, LLMTokenInfo>> = BTreeMap::new();
 
@@ -430,7 +428,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         Trie::special_map(
             // Input: Vec<(Arc<PrecomputeNode>, GLRParserState<'_, LLMTokenInfo>)>
-            initial_nodes_and_values,
+            initial_nodes_and_values, // Now Vec<(Arc<Mutex<PrecomputeNode>>, ...)>
             // step
             // Input: &GLRParserState<'_, LLMTokenInfo>, GrammarTokenID, &LLMTokenBV, &Arc<PrecomputeNode>
             // Output: Option<GLRParserState<'_, LLMTokenInfo>>
