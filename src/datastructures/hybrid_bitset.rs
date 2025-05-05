@@ -446,8 +446,8 @@ impl BitAnd for &HybridBitset {
                 }
 
                 // Take a slice of the relevant parts and perform AND
-                let slice1 = &bits1[..min_len];
-                let slice2 = &bits2[..min_len];
+                let slice1: BitVec = bits1[..min_len].into();
+                let slice2: BitVec = bits2[..min_len].into();
                 let result_bits = slice1 & slice2; // This creates a new BitVec
 
                 let exact_count = result_bits.count_ones();
@@ -655,8 +655,7 @@ impl Sub for &HybridBitset {
                 let op_len = min(len1, len2);
                 if op_len > 0 {
                     // Create a temporary negated view/copy of bits2's prefix
-                    let mut negated_rhs_prefix = bits2[..op_len].to_bitvec(); // Copy slice
-                    negated_rhs_prefix.negate(); // Invert bits
+                    let mut negated_rhs_prefix = !bits2[..op_len].to_bitvec(); // Copy slice
 
                     // Apply the difference: result = result & !rhs_prefix
                     result_bits[..op_len] &= negated_rhs_prefix;
@@ -1182,7 +1181,7 @@ mod tests {
         let set1_d = set1_d_prep;
 
         let set2_s = HybridBitset::from_iter(vec![1, 5, 11]); // Sparse, different
-        let set3_d_empty = HybridBitset::from_iter(0..SPARSE_TO_DENSE_THRESHOLD); // Dense
+        let mut set3_d_empty = HybridBitset::from_iter(0..SPARSE_TO_DENSE_THRESHOLD); // Dense
         set3_d_empty.clear(); // Now sparse empty
         set3_d_empty.ensure_dense(); // Force dense empty
 
