@@ -376,7 +376,7 @@ if __name__ == "__main__":
     tokens: list[int] = tokens.tolist()[0]
     print(f"Committing tokens: {tokens}")
     for i, token_id in enumerate(tokens):
-        print("--- Committing token {} (id: {}) ---".format(tokenizer.decode([token_id]), token_id))
+        print(f"--- Committing token {tokenizer.decode([token_id])!r} (id: {token_id}) ---")
         grammar_constraint_state.commit(token_id)
         mask = grammar_constraint_state.get_mask()
         print("Got mask")
