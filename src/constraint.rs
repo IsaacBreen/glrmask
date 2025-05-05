@@ -562,8 +562,8 @@ impl<'a> GrammarConstraintState<'a> {
                 for (possible_final_grammar_token, precomputed_finalizer) in &node.value.finalizers {
                     // Ensure the final tokens parses
                     let mut semi_final_glr_parse_state = glr_parse_state.clone();
+                    crate::debug!(3, "Stepping semi-final GLR parse state");
                     semi_final_glr_parse_state.step(*possible_final_grammar_token);
-                    crate::debug!(3, "Stepped semi-final GLR parse state");
                     if semi_final_glr_parse_state.is_ok() {
                         crate::debug!(3, "Semi-final GLR parse state is OK");
                         for (tokenizer_state_id, llm_tokens) in &precomputed_finalizer.content {
