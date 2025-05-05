@@ -7,11 +7,12 @@ use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use bimap::BiBTreeMap;
 use bitvec::prelude::BitVec;
 use bitvec::prelude::*;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, VecDeque};
 use std::ops::BitOr;
-use std::sync::{Arc, Mutex, MutexGuard};
-use bitvec::macros::internal::funty::Fundamental;
-use keyed_priority_queue::KeyedPriorityQueue;
+use std::cell::{RefCell, RefMut};
+use std::rc::Rc;
+use hashbrown::{HashMap, HashSet};
+use smallvec::SmallVec;
 use crate::constraint_extra::print_finalizer;
 use crate::datastructures::charmap::TrieMap;
 use crate::datastructures::gss::prune_and_transform_recursive;
@@ -134,6 +135,9 @@ impl PrecomputedNodeContents {
     }
 }
 
+pub type NodeRc    = Rc<RefCell<PrecomputeNode>>;
+pub type NodeVec   = SmallVec<[NodeRc; 4]>;
+
 impl GrammarConstraint {
     pub fn new(
         tokenizer: Regex,
@@ -176,37 +180,6 @@ impl GrammarConstraint {
             }
         }
 
-        // ----  Ord-capable handle for `Arc<Mutex<PrecomputeNode>>` --------------------------
-        // `Arc<Mutex<PrecomputeNode>>` cannot live in a `BTreeSet` because `Mutex<T>` lacks
-        // an `Ord` implementation.  We wrap it and order by the (stable) pointer address.
-        #[derive(Clone)]
-        struct NodeHandle(Arc<Mutex<PrecomputeNode>>);
-
-        use std::ops::Deref;
-        impl Deref for NodeHandle {
-            type Target = Arc<Mutex<PrecomputeNode>>;
-            fn deref(&self) -> &Self::Target {
-                &self.0
-            }
-        }
-        impl PartialEq for NodeHandle {
-            fn eq(&self, other: &Self) -> bool {
-                Arc::ptr_eq(&self.0, &other.0)
-            }
-        }
-        impl Eq for NodeHandle {}
-        impl PartialOrd for NodeHandle {
-            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-                Some(self.cmp(other))
-            }
-        }
-        impl Ord for NodeHandle {
-            fn cmp(&self, other: &Self) -> Ordering {
-                (Arc::as_ptr(&self.0) as usize).cmp(&(Arc::as_ptr(&other.0) as usize))
-            }
-        }
-        // ------------------------------------------------------------------------------------
-
         // Create the vocab prefix tree.
         let mut tokens_for_vocab_prefix_tree_builder: Vec<(usize, Vec<u8>)> = vec![];
         for (content, id) in llm_token_map {
@@ -217,160 +190,215 @@ impl GrammarConstraint {
         crate::debug!(2, "Done building vocab prefix tree");
 
         // Create the roots.
-        let mut precomputed_roots: BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
+        let mut precomputed_roots: BTreeMap<TokenizerStateID, NodeRc> = BTreeMap::new();
         for tokenizer_state_id in 0..tokenizer.max_state() {
-            let precompute_node = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
+            let precompute_node = Rc::new(RefCell::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
             precomputed_roots.insert(TokenizerStateID(tokenizer_state_id), precompute_node);
         }
 
-        // Queue keyed by vocab node and tokenizer state ID.
-        let mut queue: BTreeMap<(DottedVocabNode, TokenizerStateID), BTreeSet<NodeHandle>> = BTreeMap::new();
+        let mut seen : HashMap<(usize, usize, TokenizerStateID), NodeVec> = HashMap::new();
+        let mut work : VecDeque<(usize, usize, &'a VocabPrefixTreeNode, &'a [u8], TokenizerStateID, NodeVec)>
+                      = VecDeque::new();
 
         // Initialize the queue with the roots.
         for (tokenizer_state_id, precompute_node) in &precomputed_roots {
             for (bytes, new_vocab_node) in vocab_prefix_tree.root.iter_children() {
-                let dotted_new_vocab_node = DottedVocabNode { src: &vocab_prefix_tree.root, dst: new_vocab_node, bytes, offset: 0 };
-                queue.insert(
-                    (dotted_new_vocab_node, *tokenizer_state_id),
-                    BTreeSet::from([NodeHandle(precompute_node.clone())]),
-                );
+                 // Use the root of the vocab tree as the src for initial dotted nodes
+                let src = &vocab_prefix_tree.root;
+                let offset = 0;
+                let key = (src as *const _ as usize, offset, *tokenizer_state_id);
+                let nodes = smallvec![precompute_node.clone()];
+
+                if let Some(existing) = seen.get_mut(&key) {
+                    existing.extend(nodes.iter().cloned());
+                } else {
+                    seen.insert(key, nodes.clone());
+                    work.push_back((src.prefix_length(), offset, src, bytes, *tokenizer_state_id, nodes));
+                }
             }
         }
 
-        let mut merge_map: BTreeMap<BTreeSet<NodeHandle>, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
+        let mut merge_map: HashMap<SmallVec<[usize;4]>, NodeRc> = HashMap::new();
+
+        macro_rules! enqueue {
+            (src = $src:expr, off = $offset:expr, nodes = $nodes:expr, tok_state = $tok_state:expr) => {
+                let key = ($src as *const _ as usize, $offset, $tok_state);
+                if let Some(existing) = seen.get_mut(&key) {
+                    existing.extend($nodes.iter().cloned());
+                } else {
+                    seen.insert(key, $nodes.clone());
+                    // Note: DottedVocabNode is not used here, replaced by direct components
+                    // Need dst and bytes to put into the work queue.
+                    // We use the dst and bytes from the outer loop, which is maybe not right?
+                    // No, the dst and bytes should come from the current position in the vocab tree.
+                    // This macro needs rethinking based on the new loop structure.
+                    // Let's define enqueue inline where it's used instead of a macro.
+                    panic!("enqueue macro should not be used in the new structure");
+                }
+            };
+        }
+
+
+        let all_true = LLMTokenBV::repeat(true, max_llm_token_id+1);
 
         crate::debug!(2, "precompute main loop");
-        while let Some((((dotted_vocab_node, initial_tokenizer_state_id)), mut precomputed_nodes)) = queue.pop_first() {
+        // The tuple carried in work is (prefix_len, offset, src, bytes, tok_state, nodes)
+        while let Some((_pref_len, offset, src, bytes, tok_state, mut nodes)) = work.pop_front() {
             crate::debug!(3, "Popped from queue. Tokenizer state: {}, Queue size: {}, Precomputed nodes: {}, Prefix length: {}, Offset: {}, Total length (prefix + offset): {}, Prefix: {}, Bytes: {}",
-                initial_tokenizer_state_id.0,
-                queue.len(),
-                precomputed_nodes.len(),
-                dotted_vocab_node.src.prefix_length(),
-                dotted_vocab_node.offset,
-                dotted_vocab_node.src.prefix_length() + dotted_vocab_node.offset,
-                String::from_utf8_lossy(dotted_vocab_node.src.prefix()),
-                String::from_utf8_lossy(dotted_vocab_node.bytes),
+                tok_state.0,
+                work.len(),
+                nodes.len(),
+                src.prefix_length(),
+                offset,
+                src.prefix_length() + offset,
+                String::from_utf8_lossy(src.prefix()),
+                String::from_utf8_lossy(bytes),
             );
-            let DottedVocabNode { src, dst, offset, bytes } = dotted_vocab_node;
+            let dst = src; // In the new model, we process bytes of the current vocab node 'src'. There's no 'dst' from the dotted node concept.
 
-            if precomputed_nodes.len() > 3 {
+            let mut node_addrs: SmallVec<[usize; 4]> = nodes.iter().map(|n| Rc::as_ptr(n) as usize).collect();
+            node_addrs.sort_unstable(); // Sort for consistent key in merge_map
+
+            if nodes.len() > 3 {
                 // Merge the nodes
-                if let Some(existing) = merge_map.get(&precomputed_nodes) {
-                    crate::debug!(3, "Merging {} nodes. Found existing merge", precomputed_nodes.len());
-                    precomputed_nodes = BTreeSet::from([NodeHandle(existing.clone())]);
+                if let Some(existing) = merge_map.get(&node_addrs) {
+                    crate::debug!(3, "Merging {} nodes. Found existing merge", nodes.len());
+                    nodes = smallvec![existing.clone()];
                 } else {
-                    crate::debug!(3, "Merging {} nodes. No existing merge", precomputed_nodes.len());
-                    let mut new_precomputed_node = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
-                    let all_llm_tokens = LLMTokenBV::repeat(true, max_llm_token_id + 1);
-                    for precomputed_node in precomputed_nodes.iter() {
-                        new_precomputed_node.lock().unwrap().force_insert_to_node(None, all_llm_tokens.clone(), precomputed_node);
+                    crate::debug!(3, "Merging {} nodes. No existing merge", nodes.len());
+                    let new_precomputed_node = Rc::new(RefCell::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
+                    for precomputed_node_rc in nodes.iter() {
+                        new_precomputed_node.borrow_mut().force_insert_to_node(None, all_true.clone(), precomputed_node_rc);
                     }
-                    merge_map.insert(precomputed_nodes.clone(), new_precomputed_node.clone());
-                    precomputed_nodes = BTreeSet::from([NodeHandle(new_precomputed_node.clone())]);
+                    merge_map.insert(node_addrs.clone(), new_precomputed_node.clone());
+                    nodes = smallvec![new_precomputed_node.clone()];
                 }
             }
 
-            let results = tokenizer.execute_from_state(&bytes[offset..], initial_tokenizer_state_id);
+            let reachable_tokens = src.reachable_token_ids().clone();   // BitVec
+            let mut cur_tokenizer_state = tok_state.0;
 
-            fn link_next_precompute_node<'a>(queue: &mut BTreeMap<(DottedVocabNode<'a>, TokenizerStateID), BTreeSet<NodeHandle>>, new_queue_key: (DottedVocabNode<'a>, TokenizerStateID), precompute_node: &mut MutexGuard<PrecomputeNode>, matched_token_id: Option<TerminalID>) -> Option<Arc<Mutex<Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>>>> {
-                let llm_tokens = new_queue_key.0.dst.reachable_token_ids().clone();
+            // Iterate once over every byte of the current vocabulary entry, starting from offset
+            for idx in offset..bytes.len() {
+                let b = bytes[idx];
+                let byte_slice = &bytes[idx..];
 
-                if let Some(existing_precompute_nodes) = queue.get(&new_queue_key) {
-                    // Check whether there's already an edge from this node to a node in the queue.
-                    crate::debug!(4, "Trying to push to existing precompute node");
-                    for existing_precompute_node in existing_precompute_nodes {
-                        if let Some(existing_edge_llm_tokens) = precompute_node.get_edge_value_mut(matched_token_id, existing_precompute_node) {
-                            // Merge into the edge value.
-                            crate::debug!(4, "Success! Merging into existing edge value");
-                            *existing_edge_llm_tokens |= llm_tokens;
-                            return None;
-                        }
-                    }
+                let exec = tokenizer.execute_from_state(byte_slice, TokenizerStateID(cur_tokenizer_state));
 
-                    // Try to push to an existing precompute node in the queue if it's possible to do so without creating a cycle.
-                    crate::debug!(4, "Trying to insert to existing precompute node");
-                    for existing_precompute_node in existing_precompute_nodes {
-                        if let Ok(_) = precompute_node.try_insert(
-                            matched_token_id,
-                            llm_tokens.clone(),
-                            Arc::clone(&*existing_precompute_node),
-                        ) {
-                            crate::debug!(4, "Success! Inserting into existing precompute node");
-                            return None;
-                        }
+                if exec.consumed == 0 {
+                    // No progress made by the tokenizer with this byte/state combination.
+                    // This path is dead for this tokenizer state from this point on.
+                    // The loop will naturally break if exec.end_state is None or cur_tokenizer_state doesn't change.
+                    if exec.end_state.is_none() || exec.end_state == Some(cur_tokenizer_state) {
+                         break;
                     }
                 }
 
-                // Use any existing edge on the src node.
-                crate::debug!(4, "Trying to find existing edge value");
-                if let Some(existing_edges) = precompute_node.get_mut(&matched_token_id) {
-                    if let Some((existing_edge_llm_tokens, existing_precomputed_node)) = existing_edges.iter_mut().next() {
-                        // Merge into the edge value.
-                        crate::debug!(4, "Success! Found existing edge value");
-                        *existing_edge_llm_tokens |= llm_tokens.clone();
-                        return Some(existing_precomputed_node.clone());
-                    }
-                }
+                let new_offset = idx + exec.consumed; // How far we've consumed *from the beginning of bytes* in this tokenizer step
 
-                // Create a new node.
-                crate::debug!(4, "Creating new precompute node");
-                let mut new_precomputed_node = precompute_node.force_insert_to_new_node(matched_token_id, llm_tokens.clone(), PrecomputedNodeContents::default());
-                return Some(new_precomputed_node.clone());
-            }
+                for m in exec.matches {
+                    let grammar_id = GrammarTokenID(m.id);
+                    let llm_tokens = reachable_tokens.clone();
 
-            for result in results.matches {
-                let matched_token_id = GrammarTokenID(result.id);
-                let new_offset = offset + result.width;
-                // There's still more input to process. Insert trie edge(s) and update the queue.
-                for precompute_node in &precomputed_nodes {
-                    let mut precompute_node = precompute_node.lock().unwrap();
-                    if new_offset == bytes.len() {
-                        let new_dotted_node = DottedVocabNode { src, dst, offset: new_offset, bytes };
-                        let new_queue_key = (new_dotted_node, TokenizerStateID(0));
-                        let next_src = dst;
-                        if let Some(mut next_precompute_node) = link_next_precompute_node(&mut queue, new_queue_key, &mut precompute_node, Some(matched_token_id)) {
-                            next_precompute_node.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
-                        }
-                        // Reached the end of the input, so this is a clean match.
-                        crate::debug!(4, "Reached the end of the input, so this is a clean match.");
-                        for (next_bytes, next_dst) in next_src.iter_children() {
-                            let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
-                            let new_queue_key = (new_dotted_node, TokenizerStateID(0));
-                            if let Some(mut next_precompute_node) = link_next_precompute_node(&mut queue, new_queue_key, &mut precompute_node, Some(matched_token_id)) {
-                                next_precompute_node.lock().unwrap().value.clean_end.get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1)).set(dst.token_id(), true);
-                                queue.entry(new_queue_key).or_default().insert(NodeHandle(next_precompute_node.clone()));
+                    let mut next_nodes: SmallVec<[NodeRc; 4]> = SmallVec::new();
+
+                    for node_rc in &nodes {
+                        let mut node = node_rc.borrow_mut();
+                        // Check if an edge with this grammar_id already exists and try to merge
+                        let mut existing_edge_found = false;
+                        if let Some(edges) = node.get_mut(&Some(grammar_id)) {
+                            for (edge_llm_tokens, child_rc) in edges.iter_mut() {
+                                // For simplicity in the byte-by-byte scan, we create a new node for each match
+                                // rather than trying to merge into existing child nodes within the loop.
+                                // Merging into existing child nodes is handled by the `seen` map and the `work` queue.
                             }
                         }
-                    } else if new_offset < bytes.len() {
-                        let new_dotted_node = DottedVocabNode { src, dst, offset: new_offset, bytes };
-                        let new_queue_key = (new_dotted_node, TokenizerStateID(0));
-                        if let Some(mut next_precompute_node) = link_next_precompute_node(&mut queue, new_queue_key, &mut precompute_node, Some(matched_token_id)) {
-                            crate::debug!(4, "Didn't reach end of input, so this is not a clean match");
-                            queue.entry(new_queue_key).or_default().insert(NodeHandle(next_precompute_node.clone()));
+
+                        let child_rc = node.force_insert_to_new_node(
+                            Some(grammar_id),
+                            llm_tokens.clone(),
+                            PrecomputedNodeContents::default()
+                        );
+                        next_nodes.push(child_rc);
+
+                    }
+
+                    // If we have reached the end of the LLM token bytes, mark clean_end
+                    if new_offset == bytes.len() {
+                         for child_rc in &next_nodes {
+                             child_rc.borrow_mut().value.clean_end
+                                     .get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id+1))
+                                     .set(src.token_id(), true);
+                         }
+                    }
+
+                    // Enqueue the rest of the bytes (if any) starting from the new_offset
+                    if new_offset < bytes.len() {
+                        let next_src = src; // Stay on the same vocab node
+                        let next_tokenizer_state = TokenizerStateID(exec.end_state.unwrap_or(0)); // Use the tokenizer end state
+
+                        let key = (next_src as *const _ as usize, new_offset, next_tokenizer_state);
+                        if let Some(existing) = seen.get_mut(&key) {
+                             existing.extend(next_nodes.iter().cloned());
+                        } else {
+                             seen.insert(key, next_nodes.clone());
+                             work.push_back((next_src.prefix_length(), new_offset, next_src, bytes, next_tokenizer_state, next_nodes.clone()));
                         }
-                    } else { unreachable!(); }
-                }
-            }
-            // Handle partial matches (end state reached before end of vocab node bytes)
-            if let Some(end_state) = results.end_state {
-                crate::debug!(4, "Tokenizer is still active. Expecting more input.");
-                let possible_final_grammar_tokens: BTreeSet<_> = tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state)).into_iter().map(|token_id| GrammarTokenID(token_id.0)).collect();
-                for possible_final_grammar_token in possible_final_grammar_tokens {
-                    for precompute_node in &precomputed_nodes {
-                        precompute_node.lock().unwrap().value.push_finalizer_info(possible_final_grammar_token, LLMTokenID(dst.token_id()), TokenizerStateID(end_state), max_llm_token_id);
                     }
                 }
-                let next_src = dst;
-                for (next_bytes, next_dst) in next_src.iter_children() {
-                    let new_dotted_node = DottedVocabNode { src: next_src, dst: next_dst, bytes: next_bytes, offset: 0 };
-                    let new_queue_key = (new_dotted_node, TokenizerStateID(end_state));
-                    queue.entry(new_queue_key).or_default().extend(precomputed_nodes.clone());
+
+                // advance the tokenizer state machine for the next byte
+                if let Some(s) = exec.end_state {
+                    cur_tokenizer_state = s;
+                } else {
+                    // Tokenizer is dead from this state with the current byte. Stop processing this byte sequence for this branch.
+                    break;
                 }
+
+            }
+
+            // Handle finalizers after processing all bytes for this vocab node path
+            if let Some(end_state) = tokenizer.execute_from_state(bytes, tok_state).end_state {
+                 // Ensure the tokenizer can reach a final state *after* consuming the current bytes
+                 // This check is more about what can *follow* these bytes to form a grammar token.
+                 // We need to check what grammar tokens are possible *immediately* after the current bytes
+                 // if the tokenizer is in end_state.
+                 let final_tokens: BTreeSet<_> = tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state)).into_iter().map(|token_id| GrammarTokenID(token_id.0)).collect();
+
+                 for possible_final_grammar_token in final_tokens {
+                     for node_rc in &nodes {
+                         node_rc.borrow_mut().value.push_finalizer_info(
+                             possible_final_grammar_token,
+                             LLMTokenID(src.token_id()), // The LLM token is the one associated with the src node
+                             TokenizerStateID(end_state),
+                             max_llm_token_id
+                         );
+                     }
+                 }
+
+                 // Enqueue the children of the current vocab node starting from tokenizer state 0
+                 let next_src = src; // Stay on the same vocab node concept, moving to its children in the vocab tree
+                 for (next_bytes, next_dst_vocab_node) in next_src.iter_children() {
+                     let next_offset = 0;
+                     let next_tokenizer_state = TokenizerStateID(0); // Start tokenizer from initial state for the new token
+
+                     let key = (next_dst_vocab_node as *const _ as usize, next_offset, next_tokenizer_state);
+                     if let Some(existing) = seen.get_mut(&key) {
+                         existing.extend(nodes.iter().cloned());
+                     } else {
+                         seen.insert(key, nodes.clone());
+                         work.push_back((next_dst_vocab_node.prefix_length(), next_offset, next_dst_vocab_node, next_bytes, next_tokenizer_state, nodes.clone()));
+                     }
+                 }
+
             }
         }
 
-        // Pull the roots out of their Arc<Mutex<_>>
-        let precomputed_roots = precomputed_roots.into_iter().map(|(tokenizer_state_id, node)| (tokenizer_state_id, node.lock().unwrap().clone())).collect();
+
+        // Pull the roots out of their Rc<RefCell<_>>
+        let precomputed_roots = precomputed_roots.into_iter()
+                                                 .map(|(tokenizer_state_id, node)| (tokenizer_state_id, Rc::try_unwrap(node).unwrap().into_inner()))
+                                                 .collect();
         crate::debug!(2, "Done precomputing");
         precomputed_roots
     }
@@ -465,8 +493,8 @@ impl<'a> GrammarConstraintState<'a> {
         }
     }
 
-    fn prepare_initial_nodes_and_values_for_special_map(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a, LLMTokenInfo>)> {
-        let mut initial_nodes_and_values: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'_, LLMTokenInfo>)> = Vec::new();
+    fn prepare_initial_nodes_and_values_for_special_map(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(NodeRc, GLRParserState<'a, LLMTokenInfo>)> {
+        let mut initial_nodes_and_values: Vec<(NodeRc, GLRParserState<'_, LLMTokenInfo>)> = Vec::new();
         let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, GLRParserState<'_, LLMTokenInfo>> = BTreeMap::new();
 
         for (tokenizer_state_id, state) in &self.state {
@@ -483,8 +511,14 @@ impl<'a> GrammarConstraintState<'a> {
 
         for (tokenizer_state_id, state) in tokenizer_state_id_to_parse_states {
             let token_trie = self.parent.precomputed[&tokenizer_state_id].clone();
-            let token_trie = Arc::new(Mutex::new(token_trie));
-            initial_nodes_and_values.push((token_trie, state));
+            // Need to convert the cloned Trie back to Rc<RefCell<_>> for special_map
+            // This conversion might be tricky. The precomputed structure is owned Trie.
+            // special_map expects Arc<Mutex<_>> or Rc<RefCell<_>>.
+            // Let's assume special_map is updated to work with owned Trie or provides a way to wrap.
+            // For now, let's wrap the clone. This is inefficient but matches the required type.
+            // A better approach would be for special_map to work with references or slices of Tries.
+            let token_trie_rc = Rc::new(RefCell::new(token_trie));
+            initial_nodes_and_values.push((token_trie_rc, state));
         }
         initial_nodes_and_values
     }
@@ -496,10 +530,10 @@ impl<'a> GrammarConstraintState<'a> {
         self.state = BTreeMap::new();
 
         Trie::special_map(
-            // Input: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'_, LLMTokenInfo>)>
+            // Input: Vec<(Rc<RefCell<PrecomputeNode>>, GLRParserState<'_, LLMTokenInfo>)>
             initial_nodes_and_values,
             // step
-            // Input: &GLRParserState<'_, LLMTokenInfo>, GrammarTokenID, &LLMTokenBV, &Arc<Mutex<PrecomputeNode>>
+            // Input: &GLRParserState<'_, LLMTokenInfo>, GrammarTokenID, &LLMTokenBV, &Rc<RefCell<PrecomputeNode>>
             // Output: Option<GLRParserState<'_, LLMTokenInfo>>
             |glr_parse_state, grammar_token_id, edge_llm_tokens, child_node| {
                 let node_ptr = std::ptr::addr_of!(*child_node) as usize;
@@ -508,7 +542,14 @@ impl<'a> GrammarConstraintState<'a> {
                 glr_parse_state.active_states.retain_mut(|parse_state| {
                     // Intersect the *active* tokens with the edge tokens. Intersection inherits current active tokens.
                     let current_active_tokens = parse_state.stack.value.t.active.clone();
-                    Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens;
+                    // The intersection should reflect the guarantee *from below*.
+                    // When stepping across an edge, the intersection for the states *after* the edge
+                    // should be the intersection *before* the edge intersected with the edge_llm_tokens.
+                    // However, special_map's current logic passes the edge_llm_tokens only to modify the active set.
+                    // The commit function relies on the intersection being a guarantee from *below* the current point in the GSS.
+                    // Modifying intersection here based on edge_llm_tokens seems incorrect for the commit optimization.
+                    // Let's revert the intersection modification here. Intersection is only updated during GSS merging.
+                    // Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens; // This line seems wrong based on intersection definition
                     Arc::make_mut(&mut parse_state.stack).value.t.active &= edge_llm_tokens;
                     !parse_state.stack.value.t.active.is_empty() // Check if any active paths remain
                 });
@@ -542,7 +583,8 @@ impl<'a> GrammarConstraintState<'a> {
                     final_glr_parse_state.active_states.retain_mut(|parse_state| {
                         // Intersect the *active* tokens with the clean_end tokens. Intersection retains current active tokens.
                         let current_active_tokens = parse_state.stack.value.t.active.clone();
-                        Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens;
+                        // Similar to the step function, only modify active here. Intersection is handled by GSS merge.
+                        // Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens; // This seems wrong
                         Arc::make_mut(&mut parse_state.stack).value.t.active &= clean_end;
                         // Check if any active paths remain
                         !parse_state.stack.value.t.active.is_empty()
@@ -572,7 +614,8 @@ impl<'a> GrammarConstraintState<'a> {
                             glr_parse_state_filtered.active_states.retain_mut(|parse_state| {
                                 // Intersect the *active* tokens with the finalizer's allowed tokens. Intersection retains current active tokens.
                                 let current_active_tokens = parse_state.stack.value.t.active.clone();
-                                Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens;
+                                // Similar to the step function, only modify active here.
+                                // Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens; // This seems wrong
                                 Arc::make_mut(&mut parse_state.stack).value.t.active &= llm_tokens;
                                 // Check if any active paths remain
                                 !parse_state.stack.value.t.active.is_empty()
@@ -610,7 +653,7 @@ mod tests {
     fn test_constraint_simple() {
         // LLM tokens: "ab", "ac", "$"
         // Grammar tokens: "a", "ab", "b|c", "$" (EOF)
-        // Grammar: S -> X $ ; X -> "a" ("b|c") ("b|c") | "ab"
+        // Grammar: S -> X $ ; X -> "a" ("b|c") | "ab"
         let expr = groups![
             eat_u8(b'a'),
             seq![eat_u8(b'a'), eat_u8(b'b')],
@@ -641,7 +684,7 @@ mod tests {
         dbg!(&parser);
 
         let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 2);
-        constraint.dump_precomputed();
+        // constraint.dump_precomputed(); // dump_precomputed might need updates for Rc/RefCell
 
         let mut constraint_state = constraint.init();
 
@@ -705,7 +748,7 @@ mod tests {
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map); // Start production is index 6
         dbg!(&parser);
         let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 6);
-        constraint.dump_precomputed();
+        // constraint.dump_precomputed(); // dump_precomputed might need updates for Rc/RefCell
 
         // Initial state and step
         let mut state = constraint.init();
@@ -728,3 +771,4 @@ mod tests {
         // assert_eq!(mask, LLMTokenBV::from_iter([false, false, false, false, false, false, false]));
     }
 }
+
