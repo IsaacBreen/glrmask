@@ -369,8 +369,9 @@ if __name__ == "__main__":
     print("Got mask")
     print(f"Mask: {mask}")
     mask_ids = np.where(mask)[0].tolist()
-    mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
-    print(f"Mask Tokens: {textwrap.shorten(str(mask_token_ids), width=100)}")
+    mask_tokens = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
+    print(f"Mask Token IDs: {textwrap.shorten(str(mask_ids), width=100)}")
+    print(f"Mask Tokens: {textwrap.shorten(str(mask_tokens), width=100)}")
 
     tokens = tokenizer.encode(input_text, return_tensors="pt")
     tokens: list[int] = tokens.tolist()[0]
@@ -382,13 +383,14 @@ if __name__ == "__main__":
         print("Got mask")
         print(f"Mask: {mask}")
         mask_ids = np.where(mask)[0].tolist()
-        mask_token_ids = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
-        print(f"Mask Tokens: {textwrap.shorten(str(mask_token_ids), width=100)}")
+        mask_tokens = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
+        print(f"Mask Token IDs: {textwrap.shorten(str(mask_ids), width=100)}")
+        print(f"Mask Tokens: {textwrap.shorten(str(mask_tokens), width=100)}")
         if i < len(tokens) - 1:
             print(f"Is next token {tokens[i+1]} in mask? {tokens[i+1] in mask_ids}")
     print("--- End Committing Tokens ---")
     if expected_next_token:
-        assert expected_next_token in mask_token_ids, f"Expected '{expected_next_token}' in mask"
+        assert expected_next_token in mask_tokens, f"Expected '{expected_next_token}' in mask"
 
     # DEMO: Generate text.
     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
