@@ -182,7 +182,8 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
     alph_lower = eat_range('a', 'z')
     alph_upper = eat_range('A', 'Z')
 
-    exprs.append(("NUM", ge.regex(Regex.rep(digit))))
+#     exprs.append(("NUM", ge.regex(Regex.rep(digit))))
+    exprs.append(("NUM", ge.regex(Regex.seq([digit, digit, digit]))))
 
     exprs.append(("file", ge.sequence([ge.ref("NUM"), ge.regex(eat("+")), ge.ref("NUM"), ge.regex(eat("+")), ge.ref("NUM")])))
 
