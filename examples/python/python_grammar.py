@@ -263,7 +263,7 @@ def generate_text(model, tokenizer, grammar_processor, pre_input_text, input_tex
     pre_input_ids = tokenizer.encode(pre_input_text, return_tensors="pt")
     grammar_processor.seen_input_ids = pre_input_ids[0].tolist()
     input_ids = tokenizer.encode(input_text, return_tensors="pt")
-    full_input_ids = np.concatenate([pre_input_ids[0], input_ids[0]])
+    full_input_ids = torch.cat([pre_input_ids, input_ids], dim=1)
     output = model.generate(
         full_input_ids,
         max_new_tokens=max_new_tokens,
