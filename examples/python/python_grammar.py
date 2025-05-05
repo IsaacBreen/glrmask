@@ -175,6 +175,8 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
 #     SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g", "hello"]
 #     exprs.append(("start'''", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
 
+    exprs.append(("file", ge.sequence([ge.ref("NUMBER"), ge.regex(eat("+")), ge.ref("NUMBER"), ge.regex(eat("+")), ge.ref("NUMBER")])))
+
     for rule in grammar.rules.values():
         memo[rule.name] = ge.ref(rule.name)
         if not rule_name_is_valid(rule.name):
@@ -183,7 +185,8 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
         else:
             rhs = pegen_to_sep1_regex(rule.rhs, memo)
        # TODO: uncomment this
-        exprs.append((rule.name, rhs))
+#         exprs.append((rule.name, rhs))
+
 
     tokens = define_tokens()
     exprs.extend(tokens)
