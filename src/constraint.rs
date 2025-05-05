@@ -547,7 +547,9 @@ impl<'a> GrammarConstraintState<'a> {
                         // Check if any active paths remain
                         !parse_state.stack.value.t.active.is_empty()
                     });
+                    crate::debug!(3, "At clean end state");
                     if final_glr_parse_state.is_ok() {
+                        crate::debug!(3, "GLR parse state at clean end is OK");
                         if let Some(existing) = self.state.get_mut(&TokenizerStateID(0)) {
                             existing.merge_with(final_glr_parse_state.clone());
                         } else {
@@ -561,7 +563,9 @@ impl<'a> GrammarConstraintState<'a> {
                     // Ensure the final tokens parses
                     let mut semi_final_glr_parse_state = glr_parse_state.clone();
                     semi_final_glr_parse_state.step(*possible_final_grammar_token);
+                    crate::debug!(3, "Stepped semi-final GLR parse state");
                     if semi_final_glr_parse_state.is_ok() {
+                        crate::debug!(3, "Semi-final GLR parse state is OK");
                         for (tokenizer_state_id, llm_tokens) in &precomputed_finalizer.content {
                             // Intersect *active* tokens with the finalizer's allowed tokens.
                             let mut semi_final_glr_parse_state = semi_final_glr_parse_state.clone();
@@ -573,7 +577,9 @@ impl<'a> GrammarConstraintState<'a> {
                                 // Check if any active paths remain
                                 !parse_state.stack.value.t.active.is_empty()
                             });
+                            crate::debug!(3, "At finalizer state");
                             if semi_final_glr_parse_state.is_ok() {
+                                crate::debug!(3, "Semi-final GLR parse state at finalizer is OK");
                                 if let Some(existing) = self.state.get_mut(tokenizer_state_id) {
                                     existing.merge_with(semi_final_glr_parse_state.clone());
                                 } else {
