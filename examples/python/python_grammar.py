@@ -361,8 +361,8 @@ if __name__ == "__main__":
 #     input_text = "hello="
 #     expected_next_token = "world"
 
-    pre_input_text = "x"
-    input_text = ""
+    pre_input_text = ""
+    input_text = '""""'
     expected_next_token = ""
 
     if expected_next_token:
