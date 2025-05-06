@@ -18,6 +18,7 @@ use crate::datastructures::gss::prune_and_transform_recursive;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::datastructures::trie::EdgeInserter;
+use indicatif::{ProgressBar, ProgressStyle};
 
 
 pub type LLMTokenBV = BitVec;
@@ -158,6 +159,16 @@ impl GrammarConstraint {
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         max_llm_token_id: usize,
     ) -> Precomputed {
+        // ---- Helper function to count nodes in VocabPrefixTree ----
+        fn count_vocab_nodes(node: &VocabPrefixTreeNode) -> u64 {
+            let mut count = 1u64; // Count this node
+            for child_node in node.children().values() {
+                count += count_vocab_nodes(child_node);
+            }
+            count
+        }
+        // -----------------------------------------------------------
+
         // ----  Ord-capable handle for `Arc<Mutex<PrecomputeNode>>` --------------------------
         // `Arc<Mutex<PrecomputeNode>>` cannot live in a `BTreeSet` because `Mutex<T>` lacks
         // an `Ord` implementation.  We wrap it and order by the (stable) pointer address.
@@ -198,6 +209,19 @@ impl GrammarConstraint {
         let vocab_prefix_tree = VocabPrefixTree::build(&tokens_for_vocab_prefix_tree_builder);
         crate::debug!(2, "Done building vocab prefix tree");
 
+        // --- Count nodes for progress bar ---
+        let total_vocab_nodes = count_vocab_nodes(&vocab_prefix_tree.root);
+        crate::debug!(2, "Total vocab nodes to process: {}", total_vocab_nodes);
+
+        // --- Initialize Progress Bar ---
+        let pb = ProgressBar::new(total_vocab_nodes);
+        pb.set_style(ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+            .expect("Failed to set progress bar template")
+            .progress_chars("#>-"));
+        pb.set_message("Precomputing constraints...");
+
+
         // Create the roots.
         let mut precomputed_roots: BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
         for tokenizer_state_id in 0..tokenizer.max_state() {
@@ -205,16 +229,17 @@ impl GrammarConstraint {
             precomputed_roots.insert(TokenizerStateID(tokenizer_state_id), precompute_node);
         }
 
-        // For the outer BFS traversal of the VocabPrefixTree
+        // Struct for DFS item
         struct VocabProcessingItem<'a> {
             vocab_node: &'a VocabPrefixTreeNode,
             // Maps TokenizerStateID (at this vocab_node) to a SET of PrecomputeNode handles that represent paths ending at (vocab_node, TokenizerStateID)
             associated_pc_nodes_by_state: BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>>,
         }
 
-        let mut bfs_vocab_queue: VecDeque<VocabProcessingItem> = VecDeque::new();
+        // --- Use a Vec as a stack for DFS ---
+        let mut dfs_vocab_stack: Vec<VocabProcessingItem> = Vec::new();
 
-        // Initialize the BFS queue with the root of the VocabPrefixTree
+        // Initialize the DFS stack with the root of the VocabPrefixTree
         let mut initial_associations_at_vocab_root = BTreeMap::new();
         for (tokenizer_id, pc_root_arc) in &precomputed_roots {
             let mut set_for_state = BTreeSet::new();
@@ -222,7 +247,8 @@ impl GrammarConstraint {
             initial_associations_at_vocab_root.insert(*tokenizer_id, set_for_state);
         }
 
-        bfs_vocab_queue.push_back(VocabProcessingItem {
+        // --- Push root onto the DFS stack ---
+        dfs_vocab_stack.push(VocabProcessingItem {
             vocab_node: &vocab_prefix_tree.root,
             associated_pc_nodes_by_state: initial_associations_at_vocab_root,
         });
@@ -232,8 +258,12 @@ impl GrammarConstraint {
         let all_llm_tokens_for_merge_edge = LLMTokenBV::repeat(true, max_llm_token_id + 1);
 
 
-        crate::debug!(2, "Starting precompute main BFS loop over VocabPrefixTree");
-        while let Some(processing_item) = bfs_vocab_queue.pop_front() {
+        crate::debug!(2, "Starting precompute main DFS loop over VocabPrefixTree");
+        // --- Main DFS loop ---
+        while let Some(processing_item) = dfs_vocab_stack.pop() {
+            // --- Increment progress bar ---
+            pb.inc(1);
+
             crate::debug!(3, "Processing VocabPrefixTreeNode ({} children), prefix: '{}'",
                 processing_item.vocab_node.iter_children().count(),
                 String::from_utf8_lossy(processing_item.vocab_node.prefix())
@@ -268,14 +298,18 @@ impl GrammarConstraint {
             }
 
             // Step 2: Iterate over children of current_vocab_node in the VocabPrefixTree
-            for (bytes_segment, child_vocab_node) in processing_item.vocab_node.iter_children() {
+            // --- Collect children to process in reverse order for DFS ---
+            let mut children_to_process: Vec<(&Vec<u8>, &VocabPrefixTreeNode)> = processing_item.vocab_node.iter_children().collect();
+            children_to_process.reverse(); // Process in reverse order for DFS
+
+            for (bytes_segment, child_vocab_node) in children_to_process {
                 crate::debug!(3, "  Transitioning via segment: '{}' to child_vocab_node (prefix: '{}')",
                     String::from_utf8_lossy(bytes_segment),
                     String::from_utf8_lossy(child_vocab_node.prefix())
                 );
 
                 // This map will collect PrecomputeNodes formed at the *end* of processing bytes_segment,
-                // to be associated with child_vocab_node for the next BFS level.
+                // to be associated with child_vocab_node for the next DFS level.
                 // Key: TokenizerStateID at child_vocab_node. Value: Set of PrecomputeNode handles.
                 let mut next_level_associations_for_child: BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>> = BTreeMap::new();
 
@@ -403,17 +437,20 @@ impl GrammarConstraint {
                     }
                 } // End while segment_processing_q not empty
 
-                // After processing bytes_segment, add child_vocab_node to the main BFS queue.
-                bfs_vocab_queue.push_back(VocabProcessingItem {
+                // --- Push child onto the main DFS stack ---
+                dfs_vocab_stack.push(VocabProcessingItem {
                     vocab_node: child_vocab_node,
                     associated_pc_nodes_by_state: next_level_associations_for_child,
                 });
             } // End for each child_vocab_node of current_vocab_node
-        } // End while bfs_vocab_queue not empty
-        crate::debug!(2, "Done precomputing main BFS loop.");
+        } // End while dfs_vocab_stack not empty
+
+        // --- Finish progress bar ---
+        pb.finish_with_message("Precomputation complete");
+        crate::debug!(2, "Done precomputing main DFS loop.");
 
 
-        // Pull the roots out of their Arc<Mutex<_>>
+        // Pull the roots out of their Arc<Mutex<_>> (Unchanged logic)
         let final_precomputed = precomputed_roots.into_iter().map(|(id, arc_mutex_node)| {
             // Ensure the Arc has only one strong reference before trying to unwrap.
             // If other parts of the graph still hold Arcs to these root nodes (e.g. due to cycles back to roots),
@@ -447,6 +484,18 @@ impl GrammarConstraint {
         GrammarConstraintState {
             parent: self,
             state,
+        }
+    }
+
+    // Helper function for tests to dump the precomputed structure
+    #[cfg(test)]
+    fn dump_precomputed(&self) {
+        crate::debug!(1, "Dumping Precomputed Structure:");
+        for (tokenizer_state_id, precompute_node) in &self.precomputed {
+            crate::debug!(1, "  Tokenizer State ID: {:?}", tokenizer_state_id);
+            // Wrap the node in an Arc<Mutex> for dumping
+            let root_arc = Arc::new(Mutex::new(precompute_node.clone()));
+            crate::datastructures::trie::dump_structure(root_arc);
         }
     }
 }
@@ -488,7 +537,9 @@ impl<'a> GrammarConstraintState<'a> {
         let closure = |content: &ParseStateNodeContent<LLMTokenInfo>| -> Option<(ParseStateNodeContent<LLMTokenInfo>, bool)> {
             if content.t.active[llm_token_id.0] {
                 // If the intersection already guarantees this token, we can stop early.
-                if content.t.intersection.all() {
+                // The optimization check should be `content.t.intersection[llm_token_id.0]`
+                // If the specific committed token is in the intersection, propagation can stop.
+                if content.t.intersection[llm_token_id.0] {
                      Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, false)) // Stop recursion
                 } else {
                      Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, true)) // Continue recursion
@@ -542,6 +593,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         for (tokenizer_state_id, state) in tokenizer_state_id_to_parse_states {
             let token_trie = self.parent.precomputed[&tokenizer_state_id].clone();
+            // Need to wrap the cloned node in an Arc<Mutex> for special_map
             let token_trie = Arc::new(Mutex::new(token_trie));
             initial_nodes_and_values.push((token_trie, state));
         }
@@ -562,7 +614,7 @@ impl<'a> GrammarConstraintState<'a> {
             // Output: Option<GLRParserState<'_, LLMTokenInfo>>
             |glr_parse_state, grammar_token_id, edge_llm_tokens, child_node| {
                 let node_ptr = std::ptr::addr_of!(*child_node) as usize;
-                crate::debug!(3, "Processing grammar node {:p} token {:?} with {} active states", child_node, grammar_token_id.map(|grammar_token_id| grammar_token_id.0), glr_parse_state.active_states.len());
+                crate::debug!(3, "Processing grammar node {:p} token {:?} with {} active states", node_ptr as *const (), grammar_token_id.map(|grammar_token_id| grammar_token_id.0), glr_parse_state.active_states.len());
                 let mut glr_parse_state = glr_parse_state.clone();
                 glr_parse_state.active_states.retain_mut(|parse_state| {
                     // Intersect the *active* tokens with the edge tokens. Intersection inherits current active tokens.
@@ -601,7 +653,10 @@ impl<'a> GrammarConstraintState<'a> {
                     final_glr_parse_state.active_states.retain_mut(|parse_state| {
                         // Intersect the *active* tokens with the clean_end tokens. Intersection retains current active tokens.
                         let current_active_tokens = parse_state.stack.value.t.active.clone();
-                        Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens;
+                        // This intersection logic might be wrong. The intersection should be what *all* paths guarantee.
+                        // However, for clean_end, we are checking if the final GLR state *can* accept the LLM token.
+                        // Let's keep the current logic for `active` and re-evaluate `intersection`.
+                        Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens; // This line might need adjustment based on intended meaning of intersection
                         Arc::make_mut(&mut parse_state.stack).value.t.active &= clean_end;
                         // Check if any active paths remain
                         !parse_state.stack.value.t.active.is_empty()
@@ -631,7 +686,8 @@ impl<'a> GrammarConstraintState<'a> {
                             glr_parse_state_filtered.active_states.retain_mut(|parse_state| {
                                 // Intersect the *active* tokens with the finalizer's allowed tokens. Intersection retains current active tokens.
                                 let current_active_tokens = parse_state.stack.value.t.active.clone();
-                                Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens;
+                                // Similar to clean_end, reconsider intersection logic here.
+                                Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens; // This line might need adjustment
                                 Arc::make_mut(&mut parse_state.stack).value.t.active &= llm_tokens;
                                 // Check if any active paths remain
                                 !parse_state.stack.value.t.active.is_empty()
@@ -700,7 +756,7 @@ mod tests {
         dbg!(&parser);
 
         let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 2);
-        constraint.dump_precomputed();
+        // constraint.dump_precomputed(); // Uncomment to see the precomputed structure
 
         let mut constraint_state = constraint.init();
 
@@ -764,7 +820,7 @@ mod tests {
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map); // Start production is index 6
         dbg!(&parser);
         let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 6);
-        constraint.dump_precomputed();
+        // constraint.dump_precomputed(); // Uncomment to see the precomputed structure
 
         // Initial state and step
         let mut state = constraint.init();
@@ -779,11 +835,6 @@ mod tests {
         let mask = state.get_mask();
         // Now expect '+', '*', ')', '+i' => IDs 1,2,4,6
         assert_eq!(mask, LLMTokenBV::from_iter([false, true, true, false, true, false, true]));
-
-        // // Commit "(i"
-        // state.commit(LLMTokenID(5));
-        // state.step_with_all_llm_tokens();
-        // let mask = state.get_mask();
-        // assert_eq!(mask, LLMTokenBV::from_iter([false, false, false, false, false, false, false]));
     }
 }
+
