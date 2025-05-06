@@ -755,7 +755,7 @@ where
                 }
             }
         }
-        // Lock is dropped here
+        drop(source);
         self
     }
 
@@ -818,7 +818,7 @@ where
                 // result remains None
             }
         }
-        // Lock is dropped here
+        drop(source);
         self
     }
 
@@ -913,7 +913,7 @@ impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
     where
          FMergeEV: FnMut(&EV, EV) -> Option<EV>,
     {
-        EdgeInserter::new(self.clone(), edge_key, edge_value, merge_edge_value)
+        EdgeInserter::new(Arc::new(Mutex::new(self.clone())), edge_key, edge_value, merge_edge_value)
     }
 }
 
@@ -1850,7 +1850,7 @@ mod tests {
         let s = source.lock().unwrap();
         let children = s.get(&"key").unwrap();
         assert_eq!(children.len(), 1);
-        assert_eq!(children[0].0, vec![]); // Original value remains
+        assert_eq!(children[0].0, vec![] as Vec<i32>); // Original value remains
         assert!(Arc::ptr_eq(&children[0].1, &dest));
     }
 
@@ -1896,287 +1896,286 @@ mod tests {
         assert!(Arc::ptr_eq(&children[0].1, &dest1));
     }
 
-         #[test]
-        fn test_ei_try_slice_success_later() {
-            let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-            let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-            let dest2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest2".to_string())));
-            let dest3: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest3".to_string())));
+    #[test]
+    fn test_ei_try_slice_success_later() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
+        let dest2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest2".to_string())));
+        let dest3: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest3".to_string())));
 
-            // Setup: dest1 -> source creates a cycle if we try source -> dest1
-            dest1.lock().unwrap().force_insert_to_node("d1->s", vec![], &source);
+        // Setup: dest1 -> source creates a cycle if we try source -> dest1
+        dest1.lock().unwrap().force_insert_to_node("d1->s", vec![], &source);
 
-            let destinations = [dest1.clone(), dest2.clone(), dest3.clone()];
+        let destinations = [dest1.clone(), dest2.clone(), dest3.clone()];
 
-            let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-            // try(dest1) -> Cycle Error
-            // try(dest2) -> OK
-            // try(dest3) -> Skipped
-            let result_node = inserter.try_slice(&destinations).unwrap();
+        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        // try(dest1) -> Cycle Error
+        // try(dest2) -> OK
+        // try(dest3) -> Skipped
+        let result_node = inserter.try_slice(&destinations).unwrap();
 
-            assert!(Arc::ptr_eq(&result_node, &dest2)); // Should succeed with dest2
-            let s = source.lock().unwrap();
-            let children = s.get(&"key").unwrap();
-            assert_eq!(children.len(), 1);
-            assert!(Arc::ptr_eq(&children[0].1, &dest2));
-        }
-
-        #[test]
-        fn test_ei_try_slice_fail_all() {
-            let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-            let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-            let dest2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest2".to_string())));
-
-            // Setup: Both destinations cause cycles
-            dest1.lock().unwrap().force_insert_to_node("d1->s", vec![], &source);
-            dest2.lock().unwrap().force_insert_to_node("d2->s", vec![], &source);
-
-            let destinations = [dest1.clone(), dest2.clone()];
-
-            let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-            let result_opt = inserter.try_slice(&destinations).get();
-
-            assert!(result_opt.is_none()); // All attempts failed
-            assert!(source.lock().unwrap().get(&"key").is_none()); // No edge added
-        }
-
-        #[test]
-        fn test_ei_try_children_success_merge() {
-            let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-            let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string())));
-            let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
-
-            // Pre-insert edges with the target key
-            {
-                let mut s = source.lock().unwrap();
-                s.try_insert("key", vec![10], child1.clone()).unwrap();
-                s.try_insert("key", vec![20], child2.clone()).unwrap();
-            }
-
-            let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-            // Should try child1, merge succeeds. Should not try child2.
-            let result_node = inserter.try_children().unwrap();
-
-            assert!(Arc::ptr_eq(&result_node, &child1)); // Merged with child1
-            let s = source.lock().unwrap();
-            let children = s.get(&"key").unwrap();
-            assert_eq!(children.len(), 2); // Still two children
-
-            let edge1 = children.iter().find(|(_, arc)| Arc::ptr_eq(arc, &child1)).unwrap();
-            assert_eq!(edge1.0, vec![10, 1]); // Merged value
-
-            let edge2 = children.iter().find(|(_, arc)| Arc::ptr_eq(arc, &child2)).unwrap();
-            assert_eq!(edge2.0, vec![20]); // Unchanged
-        }
-
-        #[test]
-        fn test_ei_else_create_with_value() {
-            let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-
-            let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-            // No try calls, should go straight to else_create
-            let result_node = inserter.else_create_with_value("created".to_string()).unwrap();
-
-            assert_eq!(result_node.lock().unwrap().value, "created");
-            assert_eq!(result_node.lock().unwrap().max_depth, 1); // Depth updated
-            let s = source.lock().unwrap();
-            let children = s.get(&"key").unwrap();
-            assert_eq!(children.len(), 1);
-            assert_eq!(children[0].0, vec![1]);
-            assert!(Arc::ptr_eq(&children[0].1, &result_node));
-        }
-
-        #[test]
-        fn test_ei_else_create_with() {
-            let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-            let created_flag = Arc::new(AtomicUsize::new(0));
-
-            let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-            let flag_clone = created_flag.clone();
-            let result_node = inserter.else_create_with(|| {
-                flag_clone.fetch_add(1, Ordering::SeqCst);
-                "created_via_fn".to_string()
-            }).unwrap();
-
-            assert_eq!(created_flag.load(Ordering::SeqCst), 1); // Closure was called
-            assert_eq!(result_node.lock().unwrap().value, "created_via_fn");
-            assert_eq!(result_node.lock().unwrap().max_depth, 1);
-        }
-
-        #[test]
-        fn test_ei_else_create_default() {
-            let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-
-            let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-            // String::default() is ""
-            let result_node = inserter.else_create().unwrap();
-
-            assert_eq!(result_node.lock().unwrap().value, ""); // Default value
-            assert_eq!(result_node.lock().unwrap().max_depth, 1);
-        }
-
-        #[test]
-        fn test_ei_chaining_try_then_else() {
-            let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-            let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-
-            // Setup: dest1 causes cycle
-            dest1.lock().unwrap().force_insert_to_node("d1->s", vec![], &source);
-
-            let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-            let result_node = inserter
-                .try_destination(dest1.clone()) // Fails (cycle)
-                .else_create_with_value("fallback".to_string()) // Executes
-                .unwrap();
-
-            assert_eq!(result_node.lock().unwrap().value, "fallback"); // Fallback was created
-            assert!(!Arc::ptr_eq(&result_node, &dest1));
-            let s = source.lock().unwrap();
-            let children = s.get(&"key").unwrap();
-            assert_eq!(children.len(), 1);
-            assert!(Arc::ptr_eq(&children[0].1, &result_node));
-        }
-
-        #[test]
-        fn test_ei_chaining_try_success_skips_else() {
-            let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-            let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-
-            let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-            let result_node = inserter
-                .try_destination(dest1.clone()) // Succeeds
-                .else_create_with_value("fallback".to_string()) // Should be skipped
-                .unwrap();
-
-            assert!(Arc::ptr_eq(&result_node, &dest1)); // Original dest1 was used
-            assert_eq!(result_node.lock().unwrap().value, "dest1");
-            let s = source.lock().unwrap();
-            let children = s.get(&"key").unwrap();
-            assert_eq!(children.len(), 1);
-            assert!(Arc::ptr_eq(&children[0].1, &dest1));
-        }
-
-        #[test]
-        #[should_panic(expected = "EdgeInserter::unwrap() called but no destination was found or created")]
-        fn test_ei_unwrap_panic() {
-            let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-            let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-            // Setup: dest1 causes cycle
-            dest1.lock().unwrap().force_insert_to_node("d1->s", vec![], &source);
-
-            let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-            // Try fails, no else_create called
-            inserter.try_destination(dest1.clone()).unwrap(); // Panic here
-        }
-
-        #[test]
-        fn test_ei_get() {
-            let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-            let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-            // Setup: dest1 causes cycle
-            dest1.lock().unwrap().force_insert_to_node("d1->s", vec![], &source);
-
-            let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-
-            // Try fails
-            let inserter_after_try = inserter.try_destination(dest1.clone());
-            assert!(inserter_after_try.get().is_none());
-
-            // Now use else_create
-            let inserter_after_else = inserter_after_try.else_create_with_value("fallback".to_string());
-            let result_opt = inserter_after_else.get();
-            assert!(result_opt.is_some());
-            assert_eq!(result_opt.unwrap().lock().unwrap().value, "fallback");
-        }
-
-        #[test]
-        fn test_ei_chaining_stops_after_success() {
-            let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-            let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string()))); // This one succeeds
-            let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
-            let new_node_val_if_created = "new_node_val".to_string();
-
-            let destinations_for_slice = vec![child2.clone()];
-
-            let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-            let result_node = inserter
-                .try_destination(child1.clone()) // This succeeds, result is set to child1
-                // try_slice, else_create_with_value should now have no effect
-                .try_slice(&destinations_for_slice) // Should be skipped
-                .else_create_with_value(new_node_val_if_created.clone()) // Should be skipped
-                .unwrap();
-
-            assert!(Arc::ptr_eq(&result_node, &child1), "Chain should stop after first success (try_insert)");
-
-            // Check only the edge to child1 was added
-            let s = source.lock().unwrap();
-            let children = s.get(&"key").unwrap();
-            assert_eq!(children.len(), 1);
-            assert!(Arc::ptr_eq(&children[0].1, &child1));
-            assert_eq!(children[0].0, vec![1]);
-
-            // Ensure the value for the skipped else_create was not used
-            assert_ne!(result_node.lock().unwrap().value, new_node_val_if_created);
-        }
-
-         #[test]
-        fn test_ei_try_children() {
-            let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-            let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string())));
-            let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
-
-            // Add child1 and child2 as children of source under different keys initially
-            {
-                let mut s = source.lock().unwrap();
-                s.try_insert("other_key_c1", vec![10], child1.clone()).unwrap();
-                s.try_insert("other_key_c2", vec![20], child2.clone()).unwrap();
-            }
-
-            // Now use EdgeInserter from source to try inserting an edge *to* its *existing children* under a NEW key
-            let inserter = EdgeInserter::new(source.clone(), "new_edge_key", vec![1], merge_vec_append);
-            // try_children will look for existing children of 'source' under 'new_edge_key', find none, then try
-            // inserting to child1 and child2 using try_slice. Assuming no cycles exist *now* to child1 or child2
-            // via the new 'new_edge_key', the first attempt (to child1) should succeed.
-            let result_node = inserter.try_children().unwrap();
-
-            assert!(Arc::ptr_eq(&result_node, &child1), "try_children should succeed with the first child it tries if no cycle");
-
-            // Check the new edge was added to source, pointing to child1
-            let s = source.lock().unwrap();
-            let children_new_key = s.get(&"new_edge_key").unwrap();
-            assert_eq!(children_new_key.len(), 1);
-            assert!(Arc::ptr_eq(&children_new_key[0].1, &child1));
-            assert_eq!(children_new_key[0].0, vec![1]);
-
-            // Check original edges are still there
-            assert_eq!(s.get(&"other_key_c1").unwrap().len(), 1);
-             assert_eq!(s.get(&"other_key_c2").unwrap().len(), 1);
-
-            // Test with fallback: Try children (should fail if cycles exist), then create a new node
-             let source_for_fb: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source_fb".to_string())));
-             let child1_fb: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1_fb".to_string())));
-             let child2_fb: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2_fb".to_string())));
-
-             // Make try_children fail by creating cycles
-             {
-                let mut s = source_for_fb.lock().unwrap();
-                s.try_insert("fb_key_c1", vec![10], child1_fb.clone()).unwrap(); // Link source -> child1
-                child1_fb.lock().unwrap().force_insert_to_node("c1->s", vec![], &source_for_fb); // Link child1 -> source (cycle)
-
-                s.try_insert("fb_key_c2", vec![20], child2_fb.clone()).unwrap(); // Link source -> child2
-                child2_fb.lock().unwrap().force_insert_to_node("c2->s", vec![], &source_for_fb); // Link child2 -> source (cycle)
-             }
-
-            let new_node_val_if_created = "fallback_node".to_string();
-             let inserter_fb = EdgeInserter::new(source_for_fb.clone(), "fallback_key", vec![99], merge_vec_append);
-             let result_node_fb = inserter_fb
-                .try_children() // Try inserting to child1_fb or child2_fb, both should fail cycle detection
-                .else_create_with_value(new_node_val_if_created.clone()) // Succeeds
-                .unwrap();
-
-            assert_eq!(result_node_fb.lock().unwrap().value, new_node_val_if_created); // Fallback node was created
-            assert!(source_for_fb.lock().unwrap().get(&"fallback_key").unwrap().len() == 1); // New edge created
-            assert!(Arc::ptr_eq(&source_for_fb.lock().unwrap().get(&"fallback_key").unwrap()[0].1, &result_node_fb)); // Edge points to new node
-         }
+        assert!(Arc::ptr_eq(&result_node, &dest2)); // Should succeed with dest2
+        let s = source.lock().unwrap();
+        let children = s.get(&"key").unwrap();
+        assert_eq!(children.len(), 1);
+        assert!(Arc::ptr_eq(&children[0].1, &dest2));
     }
+
+    #[test]
+    fn test_ei_try_slice_fail_all() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
+        let dest2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest2".to_string())));
+
+        // Setup: Both destinations cause cycles
+        dest1.lock().unwrap().force_insert_to_node("d1->s", vec![], &source);
+        dest2.lock().unwrap().force_insert_to_node("d2->s", vec![], &source);
+
+        let destinations = [dest1.clone(), dest2.clone()];
+
+        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        let result_opt = inserter.try_slice(&destinations).get();
+
+        assert!(result_opt.is_none()); // All attempts failed
+        assert!(source.lock().unwrap().get(&"key").is_none()); // No edge added
+    }
+
+    #[test]
+    fn test_ei_try_children_success_merge() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string())));
+        let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
+
+        // Pre-insert edges with the target key
+        {
+            let mut s = source.lock().unwrap();
+            s.try_insert("key", vec![10], child1.clone()).unwrap();
+            s.try_insert("key", vec![20], child2.clone()).unwrap();
+        }
+
+        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        // Should try child1, merge succeeds. Should not try child2.
+        let result_node = inserter.try_children().unwrap();
+
+        assert!(Arc::ptr_eq(&result_node, &child1)); // Merged with child1
+        let s = source.lock().unwrap();
+        let children = s.get(&"key").unwrap();
+        assert_eq!(children.len(), 2); // Still two children
+
+        let edge1 = children.iter().find(|(_, arc)| Arc::ptr_eq(arc, &child1)).unwrap();
+        assert_eq!(edge1.0, vec![10, 1]); // Merged value
+
+        let edge2 = children.iter().find(|(_, arc)| Arc::ptr_eq(arc, &child2)).unwrap();
+        assert_eq!(edge2.0, vec![20]); // Unchanged
+    }
+
+    #[test]
+    fn test_ei_else_create_with_value() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+
+        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        // No try calls, should go straight to else_create
+        let result_node = inserter.else_create_with_value("created".to_string()).unwrap();
+
+        assert_eq!(result_node.lock().unwrap().value, "created");
+        assert_eq!(result_node.lock().unwrap().max_depth, 1); // Depth updated
+        let s = source.lock().unwrap();
+        let children = s.get(&"key").unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].0, vec![1]);
+        assert!(Arc::ptr_eq(&children[0].1, &result_node));
+    }
+
+    #[test]
+    fn test_ei_else_create_with() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let created_flag = Arc::new(AtomicUsize::new(0));
+
+        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        let flag_clone = created_flag.clone();
+        let result_node = inserter.else_create_with(|| {
+            flag_clone.fetch_add(1, Ordering::SeqCst);
+            "created_via_fn".to_string()
+        }).unwrap();
+
+        assert_eq!(created_flag.load(Ordering::SeqCst), 1); // Closure was called
+        assert_eq!(result_node.lock().unwrap().value, "created_via_fn");
+        assert_eq!(result_node.lock().unwrap().max_depth, 1);
+    }
+
+    #[test]
+    fn test_ei_else_create_default() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+
+        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        // String::default() is ""
+        let result_node = inserter.else_create().unwrap();
+
+        assert_eq!(result_node.lock().unwrap().value, ""); // Default value
+        assert_eq!(result_node.lock().unwrap().max_depth, 1);
+    }
+
+    #[test]
+    fn test_ei_chaining_try_then_else() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
+
+        // Setup: dest1 causes cycle
+        dest1.lock().unwrap().force_insert_to_node("d1->s", vec![], &source);
+
+        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        let result_node = inserter
+            .try_destination(dest1.clone()) // Fails (cycle)
+            .else_create_with_value("fallback".to_string()) // Executes
+            .unwrap();
+
+        assert_eq!(result_node.lock().unwrap().value, "fallback"); // Fallback was created
+        assert!(!Arc::ptr_eq(&result_node, &dest1));
+        let s = source.lock().unwrap();
+        let children = s.get(&"key").unwrap();
+        assert_eq!(children.len(), 1);
+        assert!(Arc::ptr_eq(&children[0].1, &result_node));
+    }
+
+    #[test]
+    fn test_ei_chaining_try_success_skips_else() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
+
+        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        let result_node = inserter
+            .try_destination(dest1.clone()) // Succeeds
+            .else_create_with_value("fallback".to_string()) // Should be skipped
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&result_node, &dest1)); // Original dest1 was used
+        assert_eq!(result_node.lock().unwrap().value, "dest1");
+        let s = source.lock().unwrap();
+        let children = s.get(&"key").unwrap();
+        assert_eq!(children.len(), 1);
+        assert!(Arc::ptr_eq(&children[0].1, &dest1));
+    }
+
+    #[test]
+    #[should_panic(expected = "EdgeInserter::unwrap() called but no destination was found or created")]
+    fn test_ei_unwrap_panic() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
+        // Setup: dest1 causes cycle
+        dest1.lock().unwrap().force_insert_to_node("d1->s", vec![], &source);
+
+        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        // Try fails, no else_create called
+        inserter.try_destination(dest1.clone()).unwrap(); // Panic here
+    }
+
+    #[test]
+    fn test_ei_get() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
+        // Setup: dest1 causes cycle
+        dest1.lock().unwrap().force_insert_to_node("d1->s", vec![], &source);
+
+        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+
+        // Try fails
+        let inserter_after_try = inserter.try_destination(dest1.clone());
+        assert!(inserter_after_try.get().is_none());
+
+        // Now use else_create
+        let inserter_after_else = inserter_after_try.else_create_with_value("fallback".to_string());
+        let result_opt = inserter_after_else.get();
+        assert!(result_opt.is_some());
+        assert_eq!(result_opt.unwrap().lock().unwrap().value, "fallback");
+    }
+
+    #[test]
+    fn test_ei_chaining_stops_after_success() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string()))); // This one succeeds
+        let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
+        let new_node_val_if_created = "new_node_val".to_string();
+
+        let destinations_for_slice = vec![child2.clone()];
+
+        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        let result_node = inserter
+            .try_destination(child1.clone()) // This succeeds, result is set to child1
+            // try_slice, else_create_with_value should now have no effect
+            .try_slice(&destinations_for_slice) // Should be skipped
+            .else_create_with_value(new_node_val_if_created.clone()) // Should be skipped
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&result_node, &child1), "Chain should stop after first success (try_insert)");
+
+        // Check only the edge to child1 was added
+        let s = source.lock().unwrap();
+        let children = s.get(&"key").unwrap();
+        assert_eq!(children.len(), 1);
+        assert!(Arc::ptr_eq(&children[0].1, &child1));
+        assert_eq!(children[0].0, vec![1]);
+
+        // Ensure the value for the skipped else_create was not used
+        assert_ne!(result_node.lock().unwrap().value, new_node_val_if_created);
+    }
+
+     #[test]
+    fn test_ei_try_children() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string())));
+        let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
+
+        // Add child1 and child2 as children of source under different keys initially
+        {
+            let mut s = source.lock().unwrap();
+            s.try_insert("other_key_c1", vec![10], child1.clone()).unwrap();
+            s.try_insert("other_key_c2", vec![20], child2.clone()).unwrap();
+        }
+
+        // Now use EdgeInserter from source to try inserting an edge *to* its *existing children* under a NEW key
+        let inserter = EdgeInserter::new(source.clone(), "new_edge_key", vec![1], merge_vec_append);
+        // try_children will look for existing children of 'source' under 'new_edge_key', find none, then try
+        // inserting to child1 and child2 using try_slice. Assuming no cycles exist *now* to child1 or child2
+        // via the new 'new_edge_key', the first attempt (to child1) should succeed.
+        let result_node = inserter.try_children().unwrap();
+
+        assert!(Arc::ptr_eq(&result_node, &child1), "try_children should succeed with the first child it tries if no cycle");
+
+        // Check the new edge was added to source, pointing to child1
+        let s = source.lock().unwrap();
+        let children_new_key = s.get(&"new_edge_key").unwrap();
+        assert_eq!(children_new_key.len(), 1);
+        assert!(Arc::ptr_eq(&children_new_key[0].1, &child1));
+        assert_eq!(children_new_key[0].0, vec![1]);
+
+        // Check original edges are still there
+        assert_eq!(s.get(&"other_key_c1").unwrap().len(), 1);
+         assert_eq!(s.get(&"other_key_c2").unwrap().len(), 1);
+
+        // Test with fallback: Try children (should fail if cycles exist), then create a new node
+         let source_for_fb: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source_fb".to_string())));
+         let child1_fb: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1_fb".to_string())));
+         let child2_fb: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2_fb".to_string())));
+
+         // Make try_children fail by creating cycles
+         {
+            let mut s = source_for_fb.lock().unwrap();
+            s.try_insert("fb_key_c1", vec![10], child1_fb.clone()).unwrap(); // Link source -> child1
+            child1_fb.lock().unwrap().force_insert_to_node("c1->s", vec![], &source_for_fb); // Link child1 -> source (cycle)
+
+            s.try_insert("fb_key_c2", vec![20], child2_fb.clone()).unwrap(); // Link source -> child2
+            child2_fb.lock().unwrap().force_insert_to_node("c2->s", vec![], &source_for_fb); // Link child2 -> source (cycle)
+         }
+
+        let new_node_val_if_created = "fallback_node".to_string();
+         let inserter_fb = EdgeInserter::new(source_for_fb.clone(), "fallback_key", vec![99], merge_vec_append);
+         let result_node_fb = inserter_fb
+            .try_children() // Try inserting to child1_fb or child2_fb, both should fail cycle detection
+            .else_create_with_value(new_node_val_if_created.clone()) // Succeeds
+            .unwrap();
+
+        assert_eq!(result_node_fb.lock().unwrap().value, new_node_val_if_created); // Fallback node was created
+        assert!(source_for_fb.lock().unwrap().get(&"fallback_key").unwrap().len() == 1); // New edge created
+        assert!(Arc::ptr_eq(&source_for_fb.lock().unwrap().get(&"fallback_key").unwrap()[0].1, &result_node_fb)); // Edge points to new node
+     }
 }
