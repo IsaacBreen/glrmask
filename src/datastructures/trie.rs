@@ -789,7 +789,7 @@ where
     ///
     /// Iterates through `destinations` and calls `try_destination` for each until one succeeds.
     /// Returns `self` to allow chaining.
-    pub fn try_slice(mut self, destinations: &[Arc<Mutex<Trie<EK, EV, T>>>]) -> Self {
+    pub fn try_destinations(mut self, destinations: &[Arc<Mutex<Trie<EK, EV, T>>>]) -> Self {
         for destination in destinations {
             if self.result.is_some() {
                 break; // Stop trying once a destination is found
@@ -825,7 +825,7 @@ where
         }; // Lock is dropped here
 
         // Call try_slice with the collected children
-        self.try_slice(&all_children_arcs)
+        self.try_destinations(&all_children_arcs)
     }
 
 
@@ -833,7 +833,7 @@ where
     /// inserts an edge to it from the source, and sets it as the result.
     ///
     /// Returns `self` to allow chaining.
-    pub fn else_create_with_value(mut self, value: T) -> Self {
+    pub fn else_create_destination_with_value(mut self, value: T) -> Self {
         if self.result.is_some() {
             return self;
         }
@@ -859,11 +859,11 @@ where
     /// inserts an edge to it from the source, and sets it as the result.
     ///
     /// Returns `self` to allow chaining.
-    pub fn else_create_with(self, value_fn: impl FnOnce() -> T) -> Self {
+    pub fn else_create_destination_with(self, value_fn: impl FnOnce() -> T) -> Self {
         if self.result.is_some() {
             return self;
         }
-        self.else_create_with_value(value_fn())
+        self.else_create_destination_with_value(value_fn())
     }
 
     /// If no destination has been found yet, creates a new node with the default value (`T::default()`),
@@ -871,14 +871,14 @@ where
     ///
     /// Requires `T: Default`.
     /// Returns `self` to allow chaining.
-    pub fn else_create(self) -> Self
+    pub fn else_create_destination(self) -> Self
     where
         T: Default,
     {
         if self.result.is_some() {
             return self;
         }
-        self.else_create_with_value(T::default())
+        self.else_create_destination_with_value(T::default())
     }
 
 
@@ -1934,7 +1934,7 @@ mod tests {
         // try(dest1) -> OK
         // try(dest2) -> Cycle Error (skipped because dest1 succeeded)
         // try(dest3) -> Skipped
-        let result_node = inserter.try_slice(&destinations).unwrap();
+        let result_node = inserter.try_destinations(&destinations).unwrap();
 
         assert!(Arc::ptr_eq(&result_node, &dest1)); // Should succeed with dest1
         let s = source.lock().unwrap();
@@ -1959,7 +1959,7 @@ mod tests {
         // try(dest1) -> Cycle Error
         // try(dest2) -> OK
         // try(dest3) -> Skipped
-        let result_node = inserter.try_slice(&destinations).unwrap();
+        let result_node = inserter.try_destinations(&destinations).unwrap();
 
         assert!(Arc::ptr_eq(&result_node, &dest2)); // Should succeed with dest2
         let s = source.lock().unwrap();
@@ -1981,7 +1981,7 @@ mod tests {
         let destinations = [dest1.clone(), dest2.clone()];
 
         let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-        let result_opt = inserter.try_slice(&destinations).into_option();
+        let result_opt = inserter.try_destinations(&destinations).into_option();
 
         assert!(result_opt.is_none()); // All attempts failed
         assert!(source.lock().unwrap().get(&"key").is_none()); // No edge added
@@ -2022,7 +2022,7 @@ mod tests {
 
         let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
         // No try calls, should go straight to else_create
-        let result_node = inserter.else_create_with_value("created".to_string()).unwrap();
+        let result_node = inserter.else_create_destination_with_value("created".to_string()).unwrap();
 
         assert_eq!(result_node.lock().unwrap().value, "created");
         assert_eq!(result_node.lock().unwrap().max_depth, 1); // Depth updated
@@ -2040,7 +2040,7 @@ mod tests {
 
         let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
         let flag_clone = created_flag.clone();
-        let result_node = inserter.else_create_with(|| {
+        let result_node = inserter.else_create_destination_with(|| {
             flag_clone.fetch_add(1, Ordering::SeqCst);
             "created_via_fn".to_string()
         }).unwrap();
@@ -2056,7 +2056,7 @@ mod tests {
 
         let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
         // String::default() is ""
-        let result_node = inserter.else_create().unwrap();
+        let result_node = inserter.else_create_destination().unwrap();
 
         assert_eq!(result_node.lock().unwrap().value, ""); // Default value
         assert_eq!(result_node.lock().unwrap().max_depth, 1);
@@ -2073,7 +2073,7 @@ mod tests {
         let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
         let result_node = inserter
             .try_destination(dest1.clone()) // Fails (cycle)
-            .else_create_with_value("fallback".to_string()) // Executes
+            .else_create_destination_with_value("fallback".to_string()) // Executes
             .unwrap();
 
         assert_eq!(result_node.lock().unwrap().value, "fallback"); // Fallback was created
@@ -2092,7 +2092,7 @@ mod tests {
         let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
         let result_node = inserter
             .try_destination(dest1.clone()) // Succeeds
-            .else_create_with_value("fallback".to_string()) // Should be skipped
+            .else_create_destination_with_value("fallback".to_string()) // Should be skipped
             .unwrap();
 
         assert!(Arc::ptr_eq(&result_node, &dest1)); // Original dest1 was used
@@ -2130,7 +2130,7 @@ mod tests {
         assert!(inserter_after_try.into_option().is_none());
 
         // Now use else_create
-        let inserter_after_else = inserter_after_try.else_create_with_value("fallback".to_string());
+        let inserter_after_else = inserter_after_try.else_create_destination_with_value("fallback".to_string());
         let result_opt = inserter_after_else.into_option();
         assert!(result_opt.is_some());
         assert_eq!(result_opt.unwrap().lock().unwrap().value, "fallback");
@@ -2149,8 +2149,8 @@ mod tests {
         let result_node = inserter
             .try_destination(child1.clone()) // This succeeds, result is set to child1
             // try_slice, else_create_with_value should now have no effect
-            .try_slice(&destinations_for_slice) // Should be skipped
-            .else_create_with_value(new_node_val_if_created.clone()) // Should be skipped
+            .try_destinations(&destinations_for_slice) // Should be skipped
+            .else_create_destination_with_value(new_node_val_if_created.clone()) // Should be skipped
             .unwrap();
 
         assert!(Arc::ptr_eq(&result_node, &child1), "Chain should stop after first success (try_insert)");
@@ -2218,7 +2218,7 @@ mod tests {
          let inserter_fb = EdgeInserter::new(source_for_fb.clone(), "fallback_key", vec![99], merge_vec_append);
          let result_node_fb = inserter_fb
             .try_children() // Try inserting to child1_fb or child2_fb, both should fail cycle detection
-            .else_create_with_value(new_node_val_if_created.clone()) // Succeeds
+            .else_create_destination_with_value(new_node_val_if_created.clone()) // Succeeds
             .unwrap();
 
         assert_eq!(result_node_fb.lock().unwrap().value, new_node_val_if_created); // Fallback node was created
