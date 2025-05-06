@@ -800,6 +800,28 @@ where
         self
     }
 
+    pub fn try_destinations_iter(mut self, destinations: impl Iterator<Item = Arc<Mutex<Trie<EK, EV, T>>>>) -> Self {
+        for destination in destinations {
+            if self.result.is_some() {
+                break; // Stop trying once a destination is found
+            }
+            // Need to consume and reassign self because try_destination takes self
+            self = self.try_destination(destination.clone());
+        }
+        self
+    }
+
+    pub fn try_destinations_iter_with<F, R>(mut self, destinations: F) -> Self
+    where
+        F: Fn() -> R,
+        R: Iterator<Item = Arc<Mutex<Trie<EK, EV, T>>>>,
+    {
+        for destination in destinations() {
+            self = self.try_destination(destination.clone());
+        }
+        self
+    }
+
     /// Tries to establish an edge to any existing child node of the source node,
     /// regardless of the edge key under which the child was originally added.
     ///
