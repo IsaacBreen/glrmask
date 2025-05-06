@@ -564,73 +564,99 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         mut merge_edge_value: FMergeEV, // FnMut(&EV, EV) -> Option<EV> (existing, new)
         mut merge_node_value: FMergeNV, // FnMut(&T, T) -> Option<T> (existing, new)
     ) -> Result<Arc<Mutex<Trie<EK, EV, T>>>, CycleDetectedError>
+
     where
         FMergeEV: FnMut(&EV, EV) -> Option<EV>,
         FMergeNV: FnMut(&T, T) -> Option<T>,
         EV: Clone,
         T: Clone,
     {
-        // --- Check Phase (Immutable Borrow) ---
-        // Find the first index `i` and the corresponding Arc `node_arc` where node merge succeeds.
-        let node_merge_candidate: Option<(usize, T, Arc<Mutex<Trie<EK, EV, T>>>)> =
+        // --- Check Phase 1: Node Merge Possibility ---
+        // Find the first index `i` and the corresponding Arc `node_arc` where node merge IS POSSIBLE.
+        let node_merge_target: Option<(usize, Arc<Mutex<Trie<EK, EV, T>>>)> =
             if let Some(children_vec) = self.children.get(&edge_key) {
                 children_vec.iter().enumerate().find_map(|(i, (_ev, node_arc))| {
-                    let merged_val_opt = {
+                    let can_merge = {
                         let node_guard = node_arc.lock().expect("Lock failed during node merge check");
-                        merge_node_value(&node_guard.value, new_node_value.clone())
+                        // Check if merge IS POSSIBLE without calculating the value yet
+                        merge_node_value(&node_guard.value, new_node_value.clone()).is_some()
                     };
-                    merged_val_opt.map(|merged_val| (i, merged_val, node_arc.clone()))
+                    if can_merge {
+                        Some((i, node_arc.clone()))
+                    } else {
+                        None
+                    }
                 })
             } else {
                 None
             };
 
         // --- Apply Phase 1: Node Merge ---
-        if let Some((idx, merged_node_val, node_arc)) = node_merge_candidate {
-            // Update node value
+        if let Some((idx, node_arc)) = node_merge_target {
+            // Re-calculate merged value and update node
             {
                 let mut node_guard = node_arc.lock().expect("Lock failed for node update");
-                node_guard.value = merged_node_val;
-            }
+                // Calculate the merged value NOW and update
+                // Pass the original new_node_value by value, consuming it here.
+                if let Some(merged_val) = merge_node_value(&node_guard.value, new_node_value) {
+                     node_guard.value = merged_val;
+                } else {
+                    // This should not happen if the check phase logic is correct and merge_node_value is deterministic
+                    panic!("Node merge check succeeded but merge failed during apply phase");
+                }
+            } // Lock released
+
             // Try update edge value for the found index `idx`
             let children_vec_mut = self.children.get_mut(&edge_key)
                 .expect("Children vec disappeared between check and apply");
             // Pass the NEW edge value (edge_value) for merging
+            // Pass the original edge_value by value, consuming it here if merge succeeds.
             if let Some(merged_ev) = merge_edge_value(&children_vec_mut[idx].0, edge_value) {
                  children_vec_mut[idx].0 = merged_ev;
             }
             // Return the Arc corresponding to the merged node
             return Ok(node_arc);
         }
+        // Note: new_node_value and edge_value are potentially consumed above if Phase 1 runs.
+        // If Phase 1 did not run, they are still available for Phase 2/3.
 
-        // --- Check Phase 2: Edge Merge (Only if Node Merge failed) ---
-        // Find the first index `i` and the corresponding Arc `node_arc` where edge merge succeeds.
-        let edge_merge_candidate: Option<(usize, EV, Arc<Mutex<Trie<EK, EV, T>>>)> =
+        // --- Check Phase 2: Edge Merge Possibility ---
+        let edge_merge_target: Option<(usize, Arc<Mutex<Trie<EK, EV, T>>>)> =
             if let Some(children_vec) = self.children.get(&edge_key) {
                  children_vec.iter().enumerate().find_map(|(i, (ev, node_arc))| {
-                    // Pass the NEW edge value (edge_value) for merging check
-                    merge_edge_value(ev, edge_value.clone())
-                        .map(|merged_ev| (i, merged_ev, node_arc.clone()))
+                    // Check if merge IS POSSIBLE
+                    if merge_edge_value(ev, edge_value.clone()).is_some() { // Clone edge_value for check
+                        Some((i, node_arc.clone()))
+                    } else {
+                        None
+                    }
                  })
             } else {
                 None
             };
 
         // --- Apply Phase 2: Edge Merge ---
-        if let Some((idx, merged_edge_val, node_arc)) = edge_merge_candidate {
+        if let Some((idx, node_arc)) = edge_merge_target {
             let children_vec_mut = self.children.get_mut(&edge_key)
                 .expect("Children vec disappeared between check and apply");
-            children_vec_mut[idx].0 = merged_edge_val; // Update edge value with the merged value
+            // Re-calculate merged edge value and update
+            // Pass the original edge_value by value, consuming it here.
+            if let Some(merged_ev) = merge_edge_value(&children_vec_mut[idx].0, edge_value) {
+                 children_vec_mut[idx].0 = merged_ev;
+            } else {
+                 // This should not happen if the check phase logic is correct and merge_edge_value is deterministic
+                 panic!("Edge merge check succeeded but merge failed during apply phase");
+            }
             // Return the Arc corresponding to the existing node with the merged edge
             return Ok(node_arc);
         }
 
         // --- Apply Phase 3: Create New Node and Edge ---
         // No suitable node/edge found for merging.
-        let new_node = Arc::new(Mutex::new(Trie::new(new_node_value)));
+        // Use the original new_node_value and edge_value (which were not consumed if Phase 1/2 didn't run)
+        let new_node = Arc::new(Mutex::new(Trie::new(new_node_value))); // Consumes new_node_value
         // Use try_insert which handles adding to children vec (creating if needed) and cycle checks/depth updates
-        // Pass the original NEW edge_value
-        self.try_insert(edge_key, edge_value, new_node.clone())?;
+        self.try_insert(edge_key, edge_value, new_node.clone())?; // Consumes edge_value
         Ok(new_node)
     }
 }
@@ -774,21 +800,28 @@ where
         self
     }
 
-    /// Tries to establish an edge to any existing child node under the `edge_key`.
+    /// Tries to establish an edge to any existing child node of the source node,
+    /// regardless of the edge key under which the child was originally added.
     ///
-    /// Retrieves all children associated with `self.edge_key` in the source node
-    /// and calls `try_slice` with them.
+    /// Iterates through *all* children of the source node. For each child, it calls
+    /// `try_destination` to attempt adding the new edge (`self.edge_key`, `self.edge_value`)
+    /// pointing to that child. The first successful attempt (either merging an existing
+    /// edge with the same key to that child, or inserting a new edge if no cycle occurs)
+    /// sets the result and stops further attempts.
+    ///
     /// Returns `self` to allow chaining.
     pub fn try_children(mut self) -> Self {
         if self.result.is_some() {
             return self;
         }
 
-        let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
+        // Collect ALL children arcs, regardless of the edge key they are under.
+        let all_children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
             let source = self.source_arc.lock().expect("Mutex poisoned while locking source in try_children");
-            source.get(&self.edge_key)
-                .map(|vec| vec.iter().map(|(_, arc)| arc.clone()).collect())
-                .unwrap_or_default()
+            source.children
+                .values() // Iterate over Vecs for each key
+                .flat_map(|vec_of_tuples| vec_of_tuples.iter().map(|(_, arc)| arc.clone())) // Extract Arcs
+                .collect()
         }; // Lock is dropped here
 
         // Call try_slice with the collected children
