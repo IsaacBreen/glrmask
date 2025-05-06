@@ -883,7 +883,7 @@ where
 
 
     /// Returns the resulting destination node, if one was found or created.
-    pub fn get(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
+    pub fn into_option(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
         self.result.clone() // Clone the Arc if present
     }
 
@@ -1877,7 +1877,7 @@ mod tests {
         source.lock().unwrap().try_insert("key", vec![], dest.clone()).unwrap();
 
         let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-        let result_opt = inserter.try_destination(dest.clone()).get(); // Use get()
+        let result_opt = inserter.try_destination(dest.clone()).into_option(); // Use get()
 
         assert!(result_opt.is_none()); // Merge failed, no result yet
         let s = source.lock().unwrap();
@@ -1898,7 +1898,7 @@ mod tests {
         // Now try inserting source -> dest again using EdgeInserter
         let inserter = EdgeInserter::new(source.clone(), "src_to_dest", vec![1], merge_vec_append);
         // This will call try_insert which should detect the cycle
-        let result_opt = inserter.try_destination(dest.clone()).get();
+        let result_opt = inserter.try_destination(dest.clone()).into_option();
 
         assert!(result_opt.is_none()); // Cycle detected, insert failed
     }
@@ -1967,7 +1967,7 @@ mod tests {
         let destinations = [dest1.clone(), dest2.clone()];
 
         let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-        let result_opt = inserter.try_slice(&destinations).get();
+        let result_opt = inserter.try_slice(&destinations).into_option();
 
         assert!(result_opt.is_none()); // All attempts failed
         assert!(source.lock().unwrap().get(&"key").is_none()); // No edge added
@@ -2113,11 +2113,11 @@ mod tests {
 
         // Try fails
         let inserter_after_try = inserter.try_destination(dest1.clone());
-        assert!(inserter_after_try.get().is_none());
+        assert!(inserter_after_try.into_option().is_none());
 
         // Now use else_create
         let inserter_after_else = inserter_after_try.else_create_with_value("fallback".to_string());
-        let result_opt = inserter_after_else.get();
+        let result_opt = inserter_after_else.into_option();
         assert!(result_opt.is_some());
         assert_eq!(result_opt.unwrap().lock().unwrap().value, "fallback");
     }
