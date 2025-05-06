@@ -461,7 +461,7 @@ impl GrammarConstraint {
                 Err(arc_still_owned) => {
                     // This case means a root node is also a child in the graph, or there's a bug.
                     // We'll clone the inner Trie data if we can't unwrap the Arc.
-                    crate::debug!(1, "Warning: Precomputed root for TokenizerStateID {:?} still has multiple owners. Cloning inner Trie.", id);
+                    crate::debug!(4, "Warning: Precomputed root for TokenizerStateID {:?} still has multiple owners. Cloning inner Trie.", id);
                     (id, arc_still_owned.lock().unwrap().clone())
                 }
             }
