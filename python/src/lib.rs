@@ -283,7 +283,7 @@ impl PyGrammarConstraintState {
 
     fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
         let bitset = self.inner.with_inner_mut(|state| state.get_mask());
-        let bools: Vec<bool> = bitset.iter().map(|bit_ref| *bit_ref).collect();
+        let bools: Vec<bool> = bitset.iter_bools().map(|bit_ref| bit_ref).collect();
         let array = bools.into_pyarray_bound(py);
         Ok(array)
     }

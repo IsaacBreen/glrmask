@@ -491,8 +491,7 @@ impl<'a> Iterator for BoolIter<'a> {
                     Some(val_to_yield)
                 }
             }
-            BoolIterInner::Dense(iter) => iter.next(), // bitvec::slice::Iter yields bool directly
-        }
+            BoolIterInner::Dense(iter) => iter.next().map(|bit_ref| *bit_ref),        }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
