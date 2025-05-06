@@ -247,6 +247,50 @@ impl HybridBitset {
         }
     }
 
+    /// Returns an iterator over booleans, indicating for each index from 0
+    /// up to a certain limit whether it's set or not.
+    /// For a Dense set, the limit is its current capacity (`bits.len() - 1`),
+    /// meaning it yields `bits.len()` booleans.
+    /// For a Sparse set, the limit is the largest index present in the set.
+    /// If the set is empty (either Sparse or Dense), the iterator is empty.
+    pub fn iter_bools(&self) -> BoolIter<'_> {
+        match &self.inner {
+            BitsetRepr::Sparse(set) => {
+                if set.is_empty() {
+                    // For an empty set, create an iterator that yields nothing.
+                    // current_idx starts beyond max_idx_to_iterate.
+                    BoolIter {
+                        inner: BoolIterInner::Sparse {
+                            set,
+                            current_idx: 1,
+                            max_idx_to_iterate: 0,
+                        }
+                    }
+                } else {
+                    // Find the maximum element to define the iteration range.
+                    // BTreeSet is sorted, so last() is efficient.
+                    // unwrap() is safe here because we've checked is_empty().
+                    let max_val_in_set = set.last().copied().unwrap();
+                    BoolIter {
+                        inner: BoolIterInner::Sparse {
+                            set,
+                            current_idx: 0,
+                            max_idx_to_iterate: max_val_in_set,
+                        }
+                    }
+                }
+            }
+            BitsetRepr::Dense { bits, .. } => {
+                // bits.iter() yields bool values for each position in the bitvector.
+                // The length of this iterator is bits.len().
+                BoolIter {
+                    inner: BoolIterInner::Dense(bits.iter()),
+                }
+            }
+        }
+    }
+
+
     // --- Helper: Force conversion to Dense ---
     fn ensure_dense(&mut self) {
         if matches!(self.inner, BitsetRepr::Sparse(_)) {
@@ -416,6 +460,58 @@ impl IntoIterator for HybridBitset {
          collected.into_iter()
      }
 }
+
+// --- Boolean Iterator ---
+
+enum BoolIterInner<'a> {
+    Sparse {
+        set: &'a BTreeSet<usize>,
+        current_idx: usize,
+        // The iterator will yield values for indices from 0 up to max_idx_to_iterate (inclusive).
+        max_idx_to_iterate: usize,
+    },
+    Dense(bitvec::slice::Iter<'a, usize, Lsb0>), // This iterator from bitvec yields bool
+}
+
+pub struct BoolIter<'a> {
+    inner: BoolIterInner<'a>,
+}
+
+impl<'a> Iterator for BoolIter<'a> {
+    type Item = bool;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.inner {
+            BoolIterInner::Sparse { set, current_idx, max_idx_to_iterate } => {
+                if *current_idx > *max_idx_to_iterate {
+                    None
+                } else {
+                    let val_to_yield = set.contains(current_idx);
+                    *current_idx += 1;
+                    Some(val_to_yield)
+                }
+            }
+            BoolIterInner::Dense(iter) => iter.next(), // bitvec::slice::Iter yields bool directly
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match &self.inner {
+            BoolIterInner::Sparse { current_idx, max_idx_to_iterate, .. } => {
+                let remaining = if *current_idx > *max_idx_to_iterate {
+                    0
+                } else {
+                    (*max_idx_to_iterate - *current_idx) + 1
+                };
+                (remaining, Some(remaining))
+            }
+            BoolIterInner::Dense(iter) => iter.size_hint(), // bitvec::slice::Iter provides exact size hint
+        }
+    }
+}
+
+impl<'a> std::iter::ExactSizeIterator for BoolIter<'a> {}
+
 
 // Implement FromIterator for HybridBitset
 impl FromIterator<usize> for HybridBitset {
@@ -1543,4 +1639,53 @@ mod tests {
     //         set
     //     }
     // }
+
+    #[test]
+    fn test_iter_bools() {
+        // Test with an empty set (starts sparse)
+        let empty_set = HybridBitset::new();
+        assert_eq!(empty_set.iter_bools().collect::<Vec<bool>>(), Vec::<bool>::new());
+        assert_eq!(empty_set.iter_bools().len(), 0);
+
+        // Test with a sparse set
+        let sparse_set = HybridBitset::from_iter(vec![1, 3]); // Max index is 3
+        // Expected: [false (for 0), true (for 1), false (for 2), true (for 3)]
+        let expected_sparse_bools = vec![false, true, false, true];
+        assert_eq!(sparse_set.iter_bools().collect::<Vec<bool>>(), expected_sparse_bools);
+        assert_eq!(sparse_set.iter_bools().len(), expected_sparse_bools.len());
+
+        // Test with a dense set
+        let mut dense_set_forced = HybridBitset::new();
+        for i in 0..5 { // Small range, will be sparse initially
+            if i == 1 || i == 3 {
+                dense_set_forced.insert(i);
+            }
+        }
+        // Manually convert to dense for this test case, assuming it has some internal length.
+        // If we want to test the dense path of iter_bools, we need a dense set.
+        // Let's assume convert_to_dense works and use it.
+        dense_set_forced.convert_to_dense(); // Now it's dense. Max index is 3, length might be 4 or more.
+                                             // If it was {1,3}, after convert_to_dense, bits might be [0,1,0,1] (len 4)
+
+        // Let's re-evaluate the dense test for iter_bools.
+        // The iter_bools for dense iterates up to bits.len().
+        // If we have a dense set with bits representing [false, true, false, true] (len 4)
+        // then iter_bools should yield exactly that.
+
+        let mut test_dense = HybridBitset::new();
+        test_dense.insert(1);
+        test_dense.insert(3); // sparse: {1, 3}
+        test_dense.convert_to_dense(); // dense: bits for [0,1,0,1], len=4
+                                       // lower_bound_count=2, upper_bound_count=2
+
+        let expected_dense_bools = vec![false, true, false, true];
+        assert_eq!(test_dense.iter_bools().collect::<Vec<bool>>(), expected_dense_bools);
+        assert_eq!(test_dense.iter_bools().len(), expected_dense_bools.len());
+
+        // Test with an empty dense set
+        let mut empty_dense_set = HybridBitset::new();
+        empty_dense_set.convert_to_dense(); // Becomes Dense { bits: [], ... }
+        assert_eq!(empty_dense_set.iter_bools().collect::<Vec<bool>>(), Vec::<bool>::new());
+        assert_eq!(empty_dense_set.iter_bools().len(), 0);
+    }
 }
