@@ -571,73 +571,99 @@ local_system:
               mut merge_edge_value: FMergeEV, // FnMut(&EV, EV) -> Option<EV> (existing, new)
               mut merge_node_value: FMergeNV, // FnMut(&T, T) -> Option<T> (existing, new)
           ) -> Result<Arc<Mutex<Trie<EK, EV, T>>>, CycleDetectedError>
+
           where
               FMergeEV: FnMut(&EV, EV) -> Option<EV>,
               FMergeNV: FnMut(&T, T) -> Option<T>,
               EV: Clone,
               T: Clone,
           {
-              // --- Check Phase (Immutable Borrow) ---
-              // Find the first index `i` and the corresponding Arc `node_arc` where node merge succeeds.
-              let node_merge_candidate: Option<(usize, T, Arc<Mutex<Trie<EK, EV, T>>>)> =
+              // --- Check Phase 1: Node Merge Possibility ---
+              // Find the first index `i` and the corresponding Arc `node_arc` where node merge IS POSSIBLE.
+              let node_merge_target: Option<(usize, Arc<Mutex<Trie<EK, EV, T>>>)> =
                   if let Some(children_vec) = self.children.get(&edge_key) {
                       children_vec.iter().enumerate().find_map(|(i, (_ev, node_arc))| {
-                          let merged_val_opt = {
+                          let can_merge = {
                               let node_guard = node_arc.lock().expect("Lock failed during node merge check");
-                              merge_node_value(&node_guard.value, new_node_value.clone())
+                              // Check if merge IS POSSIBLE without calculating the value yet
+                              merge_node_value(&node_guard.value, new_node_value.clone()).is_some()
                           };
-                          merged_val_opt.map(|merged_val| (i, merged_val, node_arc.clone()))
+                          if can_merge {
+                              Some((i, node_arc.clone()))
+                          } else {
+                              None
+                          }
                       })
                   } else {
                       None
                   };
 
               // --- Apply Phase 1: Node Merge ---
-              if let Some((idx, merged_node_val, node_arc)) = node_merge_candidate {
-                  // Update node value
+              if let Some((idx, node_arc)) = node_merge_target {
+                  // Re-calculate merged value and update node
                   {
                       let mut node_guard = node_arc.lock().expect("Lock failed for node update");
-                      node_guard.value = merged_node_val;
-                  }
+                      // Calculate the merged value NOW and update
+                      // Pass the original new_node_value by value, consuming it here.
+                      if let Some(merged_val) = merge_node_value(&node_guard.value, new_node_value) {
+                           node_guard.value = merged_val;
+                      } else {
+                          // This should not happen if the check phase logic is correct and merge_node_value is deterministic
+                          panic!("Node merge check succeeded but merge failed during apply phase");
+                      }
+                  } // Lock released
+
                   // Try update edge value for the found index `idx`
                   let children_vec_mut = self.children.get_mut(&edge_key)
                       .expect("Children vec disappeared between check and apply");
                   // Pass the NEW edge value (edge_value) for merging
+                  // Pass the original edge_value by value, consuming it here if merge succeeds.
                   if let Some(merged_ev) = merge_edge_value(&children_vec_mut[idx].0, edge_value) {
                        children_vec_mut[idx].0 = merged_ev;
                   }
                   // Return the Arc corresponding to the merged node
                   return Ok(node_arc);
               }
+              // Note: new_node_value and edge_value are potentially consumed above if Phase 1 runs.
+              // If Phase 1 did not run, they are still available for Phase 2/3.
 
-              // --- Check Phase 2: Edge Merge (Only if Node Merge failed) ---
-              // Find the first index `i` and the corresponding Arc `node_arc` where edge merge succeeds.
-              let edge_merge_candidate: Option<(usize, EV, Arc<Mutex<Trie<EK, EV, T>>>)> =
+              // --- Check Phase 2: Edge Merge Possibility ---
+              let edge_merge_target: Option<(usize, Arc<Mutex<Trie<EK, EV, T>>>)> =
                   if let Some(children_vec) = self.children.get(&edge_key) {
                        children_vec.iter().enumerate().find_map(|(i, (ev, node_arc))| {
-                          // Pass the NEW edge value (edge_value) for merging check
-                          merge_edge_value(ev, edge_value.clone())
-                              .map(|merged_ev| (i, merged_ev, node_arc.clone()))
+                          // Check if merge IS POSSIBLE
+                          if merge_edge_value(ev, edge_value.clone()).is_some() { // Clone edge_value for check
+                              Some((i, node_arc.clone()))
+                          } else {
+                              None
+                          }
                        })
                   } else {
                       None
                   };
 
               // --- Apply Phase 2: Edge Merge ---
-              if let Some((idx, merged_edge_val, node_arc)) = edge_merge_candidate {
+              if let Some((idx, node_arc)) = edge_merge_target {
                   let children_vec_mut = self.children.get_mut(&edge_key)
                       .expect("Children vec disappeared between check and apply");
-                  children_vec_mut[idx].0 = merged_edge_val; // Update edge value with the merged value
+                  // Re-calculate merged edge value and update
+                  // Pass the original edge_value by value, consuming it here.
+                  if let Some(merged_ev) = merge_edge_value(&children_vec_mut[idx].0, edge_value) {
+                       children_vec_mut[idx].0 = merged_ev;
+                  } else {
+                       // This should not happen if the check phase logic is correct and merge_edge_value is deterministic
+                       panic!("Edge merge check succeeded but merge failed during apply phase");
+                  }
                   // Return the Arc corresponding to the existing node with the merged edge
                   return Ok(node_arc);
               }
 
               // --- Apply Phase 3: Create New Node and Edge ---
               // No suitable node/edge found for merging.
-              let new_node = Arc::new(Mutex::new(Trie::new(new_node_value)));
+              // Use the original new_node_value and edge_value (which were not consumed if Phase 1/2 didn't run)
+              let new_node = Arc::new(Mutex::new(Trie::new(new_node_value))); // Consumes new_node_value
               // Use try_insert which handles adding to children vec (creating if needed) and cycle checks/depth updates
-              // Pass the original NEW edge_value
-              self.try_insert(edge_key, edge_value, new_node.clone())?;
+              self.try_insert(edge_key, edge_value, new_node.clone())?; // Consumes edge_value
               Ok(new_node)
           }
       }
@@ -781,25 +807,32 @@ local_system:
               self
           }
 
-          /// Tries to establish an edge to any existing child node under the `edge_key`.
+          /// Tries to establish an edge to any existing child node of the source node,
+          /// regardless of the edge key under which the child was originally added.
           ///
-          /// Retrieves all children associated with `self.edge_key` in the source node
-          /// and calls `try_slice` with them.
+          /// Iterates through *all* children of the source node. For each child, it calls
+          /// `try_destination` to attempt adding the new edge (`self.edge_key`, `self.edge_value`)
+          /// pointing to that child. The first successful attempt (either merging an existing
+          /// edge with the same key to that child, or inserting a new edge if no cycle occurs)
+          /// sets the result and stops further attempts.
+          ///
           /// Returns `self` to allow chaining.
           pub fn try_children(mut self) -> Self {
               if self.result.is_some() {
                   return self;
               }
 
-              let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
+              // Collect ALL children arcs, regardless of the edge key they are under.
+              let all_children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
                   let source = self.source_arc.lock().expect("Mutex poisoned while locking source in try_children");
-                  source.get(&self.edge_key)
-                      .map(|vec| vec.iter().map(|(_, arc)| arc.clone()).collect())
-                      .unwrap_or_default()
+                  source.children
+                      .values() // Iterate over Vecs for each key
+                      .flat_map(|vec_of_tuples| vec_of_tuples.iter().map(|(_, arc)| arc.clone())) // Extract Arcs
+                      .collect()
               }; // Lock is dropped here
 
               // Call try_slice with the collected children
-              self.try_slice(&children_arcs)
+              self.try_slice(&all_children_arcs)
           }
 
 
@@ -857,7 +890,7 @@ local_system:
 
 
           /// Returns the resulting destination node, if one was found or created.
-          pub fn get(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
+          pub fn into_option(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
               self.result.clone() // Clone the Arc if present
           }
 
@@ -1851,7 +1884,7 @@ local_system:
               source.lock().unwrap().try_insert("key", vec![], dest.clone()).unwrap();
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-              let result_opt = inserter.try_destination(dest.clone()).get(); // Use get()
+              let result_opt = inserter.try_destination(dest.clone()).into_option(); // Use get()
 
               assert!(result_opt.is_none()); // Merge failed, no result yet
               let s = source.lock().unwrap();
@@ -1872,7 +1905,7 @@ local_system:
               // Now try inserting source -> dest again using EdgeInserter
               let inserter = EdgeInserter::new(source.clone(), "src_to_dest", vec![1], merge_vec_append);
               // This will call try_insert which should detect the cycle
-              let result_opt = inserter.try_destination(dest.clone()).get();
+              let result_opt = inserter.try_destination(dest.clone()).into_option();
 
               assert!(result_opt.is_none()); // Cycle detected, insert failed
           }
@@ -1941,7 +1974,7 @@ local_system:
               let destinations = [dest1.clone(), dest2.clone()];
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-              let result_opt = inserter.try_slice(&destinations).get();
+              let result_opt = inserter.try_slice(&destinations).into_option();
 
               assert!(result_opt.is_none()); // All attempts failed
               assert!(source.lock().unwrap().get(&"key").is_none()); // No edge added
@@ -2087,11 +2120,11 @@ local_system:
 
               // Try fails
               let inserter_after_try = inserter.try_destination(dest1.clone());
-              assert!(inserter_after_try.get().is_none());
+              assert!(inserter_after_try.into_option().is_none());
 
               // Now use else_create
               let inserter_after_else = inserter_after_try.else_create_with_value("fallback".to_string());
-              let result_opt = inserter_after_else.get();
+              let result_opt = inserter_after_else.into_option();
               assert!(result_opt.is_some());
               assert_eq!(result_opt.unwrap().lock().unwrap().value, "fallback");
           }
@@ -2754,73 +2787,99 @@ local_system:
               mut merge_edge_value: FMergeEV, // FnMut(&EV, EV) -> Option<EV> (existing, new)
               mut merge_node_value: FMergeNV, // FnMut(&T, T) -> Option<T> (existing, new)
           ) -> Result<Arc<Mutex<Trie<EK, EV, T>>>, CycleDetectedError>
+
           where
               FMergeEV: FnMut(&EV, EV) -> Option<EV>,
               FMergeNV: FnMut(&T, T) -> Option<T>,
               EV: Clone,
               T: Clone,
           {
-              // --- Check Phase (Immutable Borrow) ---
-              // Find the first index `i` and the corresponding Arc `node_arc` where node merge succeeds.
-              let node_merge_candidate: Option<(usize, T, Arc<Mutex<Trie<EK, EV, T>>>)> =
+              // --- Check Phase 1: Node Merge Possibility ---
+              // Find the first index `i` and the corresponding Arc `node_arc` where node merge IS POSSIBLE.
+              let node_merge_target: Option<(usize, Arc<Mutex<Trie<EK, EV, T>>>)> =
                   if let Some(children_vec) = self.children.get(&edge_key) {
                       children_vec.iter().enumerate().find_map(|(i, (_ev, node_arc))| {
-                          let merged_val_opt = {
+                          let can_merge = {
                               let node_guard = node_arc.lock().expect("Lock failed during node merge check");
-                              merge_node_value(&node_guard.value, new_node_value.clone())
+                              // Check if merge IS POSSIBLE without calculating the value yet
+                              merge_node_value(&node_guard.value, new_node_value.clone()).is_some()
                           };
-                          merged_val_opt.map(|merged_val| (i, merged_val, node_arc.clone()))
+                          if can_merge {
+                              Some((i, node_arc.clone()))
+                          } else {
+                              None
+                          }
                       })
                   } else {
                       None
                   };
 
               // --- Apply Phase 1: Node Merge ---
-              if let Some((idx, merged_node_val, node_arc)) = node_merge_candidate {
-                  // Update node value
+              if let Some((idx, node_arc)) = node_merge_target {
+                  // Re-calculate merged value and update node
                   {
                       let mut node_guard = node_arc.lock().expect("Lock failed for node update");
-                      node_guard.value = merged_node_val;
-                  }
+                      // Calculate the merged value NOW and update
+                      // Pass the original new_node_value by value, consuming it here.
+                      if let Some(merged_val) = merge_node_value(&node_guard.value, new_node_value) {
+                           node_guard.value = merged_val;
+                      } else {
+                          // This should not happen if the check phase logic is correct and merge_node_value is deterministic
+                          panic!("Node merge check succeeded but merge failed during apply phase");
+                      }
+                  } // Lock released
+
                   // Try update edge value for the found index `idx`
                   let children_vec_mut = self.children.get_mut(&edge_key)
                       .expect("Children vec disappeared between check and apply");
                   // Pass the NEW edge value (edge_value) for merging
+                  // Pass the original edge_value by value, consuming it here if merge succeeds.
                   if let Some(merged_ev) = merge_edge_value(&children_vec_mut[idx].0, edge_value) {
                        children_vec_mut[idx].0 = merged_ev;
                   }
                   // Return the Arc corresponding to the merged node
                   return Ok(node_arc);
               }
+              // Note: new_node_value and edge_value are potentially consumed above if Phase 1 runs.
+              // If Phase 1 did not run, they are still available for Phase 2/3.
 
-              // --- Check Phase 2: Edge Merge (Only if Node Merge failed) ---
-              // Find the first index `i` and the corresponding Arc `node_arc` where edge merge succeeds.
-              let edge_merge_candidate: Option<(usize, EV, Arc<Mutex<Trie<EK, EV, T>>>)> =
+              // --- Check Phase 2: Edge Merge Possibility ---
+              let edge_merge_target: Option<(usize, Arc<Mutex<Trie<EK, EV, T>>>)> =
                   if let Some(children_vec) = self.children.get(&edge_key) {
                        children_vec.iter().enumerate().find_map(|(i, (ev, node_arc))| {
-                          // Pass the NEW edge value (edge_value) for merging check
-                          merge_edge_value(ev, edge_value.clone())
-                              .map(|merged_ev| (i, merged_ev, node_arc.clone()))
+                          // Check if merge IS POSSIBLE
+                          if merge_edge_value(ev, edge_value.clone()).is_some() { // Clone edge_value for check
+                              Some((i, node_arc.clone()))
+                          } else {
+                              None
+                          }
                        })
                   } else {
                       None
                   };
 
               // --- Apply Phase 2: Edge Merge ---
-              if let Some((idx, merged_edge_val, node_arc)) = edge_merge_candidate {
+              if let Some((idx, node_arc)) = edge_merge_target {
                   let children_vec_mut = self.children.get_mut(&edge_key)
                       .expect("Children vec disappeared between check and apply");
-                  children_vec_mut[idx].0 = merged_edge_val; // Update edge value with the merged value
+                  // Re-calculate merged edge value and update
+                  // Pass the original edge_value by value, consuming it here.
+                  if let Some(merged_ev) = merge_edge_value(&children_vec_mut[idx].0, edge_value) {
+                       children_vec_mut[idx].0 = merged_ev;
+                  } else {
+                       // This should not happen if the check phase logic is correct and merge_edge_value is deterministic
+                       panic!("Edge merge check succeeded but merge failed during apply phase");
+                  }
                   // Return the Arc corresponding to the existing node with the merged edge
                   return Ok(node_arc);
               }
 
               // --- Apply Phase 3: Create New Node and Edge ---
               // No suitable node/edge found for merging.
-              let new_node = Arc::new(Mutex::new(Trie::new(new_node_value)));
+              // Use the original new_node_value and edge_value (which were not consumed if Phase 1/2 didn't run)
+              let new_node = Arc::new(Mutex::new(Trie::new(new_node_value))); // Consumes new_node_value
               // Use try_insert which handles adding to children vec (creating if needed) and cycle checks/depth updates
-              // Pass the original NEW edge_value
-              self.try_insert(edge_key, edge_value, new_node.clone())?;
+              self.try_insert(edge_key, edge_value, new_node.clone())?; // Consumes edge_value
               Ok(new_node)
           }
       }
@@ -2964,25 +3023,32 @@ local_system:
               self
           }
 
-          /// Tries to establish an edge to any existing child node under the `edge_key`.
+          /// Tries to establish an edge to any existing child node of the source node,
+          /// regardless of the edge key under which the child was originally added.
           ///
-          /// Retrieves all children associated with `self.edge_key` in the source node
-          /// and calls `try_slice` with them.
+          /// Iterates through *all* children of the source node. For each child, it calls
+          /// `try_destination` to attempt adding the new edge (`self.edge_key`, `self.edge_value`)
+          /// pointing to that child. The first successful attempt (either merging an existing
+          /// edge with the same key to that child, or inserting a new edge if no cycle occurs)
+          /// sets the result and stops further attempts.
+          ///
           /// Returns `self` to allow chaining.
           pub fn try_children(mut self) -> Self {
               if self.result.is_some() {
                   return self;
               }
 
-              let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
+              // Collect ALL children arcs, regardless of the edge key they are under.
+              let all_children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
                   let source = self.source_arc.lock().expect("Mutex poisoned while locking source in try_children");
-                  source.get(&self.edge_key)
-                      .map(|vec| vec.iter().map(|(_, arc)| arc.clone()).collect())
-                      .unwrap_or_default()
+                  source.children
+                      .values() // Iterate over Vecs for each key
+                      .flat_map(|vec_of_tuples| vec_of_tuples.iter().map(|(_, arc)| arc.clone())) // Extract Arcs
+                      .collect()
               }; // Lock is dropped here
 
               // Call try_slice with the collected children
-              self.try_slice(&children_arcs)
+              self.try_slice(&all_children_arcs)
           }
 
 
@@ -3040,7 +3106,7 @@ local_system:
 
 
           /// Returns the resulting destination node, if one was found or created.
-          pub fn get(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
+          pub fn into_option(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
               self.result.clone() // Clone the Arc if present
           }
 
@@ -4034,7 +4100,7 @@ local_system:
               source.lock().unwrap().try_insert("key", vec![], dest.clone()).unwrap();
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-              let result_opt = inserter.try_destination(dest.clone()).get(); // Use get()
+              let result_opt = inserter.try_destination(dest.clone()).into_option(); // Use get()
 
               assert!(result_opt.is_none()); // Merge failed, no result yet
               let s = source.lock().unwrap();
@@ -4055,7 +4121,7 @@ local_system:
               // Now try inserting source -> dest again using EdgeInserter
               let inserter = EdgeInserter::new(source.clone(), "src_to_dest", vec![1], merge_vec_append);
               // This will call try_insert which should detect the cycle
-              let result_opt = inserter.try_destination(dest.clone()).get();
+              let result_opt = inserter.try_destination(dest.clone()).into_option();
 
               assert!(result_opt.is_none()); // Cycle detected, insert failed
           }
@@ -4124,7 +4190,7 @@ local_system:
               let destinations = [dest1.clone(), dest2.clone()];
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-              let result_opt = inserter.try_slice(&destinations).get();
+              let result_opt = inserter.try_slice(&destinations).into_option();
 
               assert!(result_opt.is_none()); // All attempts failed
               assert!(source.lock().unwrap().get(&"key").is_none()); // No edge added
@@ -4270,11 +4336,11 @@ local_system:
 
               // Try fails
               let inserter_after_try = inserter.try_destination(dest1.clone());
-              assert!(inserter_after_try.get().is_none());
+              assert!(inserter_after_try.into_option().is_none());
 
               // Now use else_create
               let inserter_after_else = inserter_after_try.else_create_with_value("fallback".to_string());
-              let result_opt = inserter_after_else.get();
+              let result_opt = inserter_after_else.into_option();
               assert!(result_opt.is_some());
               assert_eq!(result_opt.unwrap().lock().unwrap().value, "fallback");
           }
@@ -4383,7 +4449,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - copy-one/paste
+    - o4-mini
   code_completion_model:
     - gemini/gemini-2.5-flash-preview-04-17
   commit_message_model:
@@ -4960,73 +5026,99 @@ messages:
               mut merge_edge_value: FMergeEV, // FnMut(&EV, EV) -> Option<EV> (existing, new)
               mut merge_node_value: FMergeNV, // FnMut(&T, T) -> Option<T> (existing, new)
           ) -> Result<Arc<Mutex<Trie<EK, EV, T>>>, CycleDetectedError>
+
           where
               FMergeEV: FnMut(&EV, EV) -> Option<EV>,
               FMergeNV: FnMut(&T, T) -> Option<T>,
               EV: Clone,
               T: Clone,
           {
-              // --- Check Phase (Immutable Borrow) ---
-              // Find the first index `i` and the corresponding Arc `node_arc` where node merge succeeds.
-              let node_merge_candidate: Option<(usize, T, Arc<Mutex<Trie<EK, EV, T>>>)> =
+              // --- Check Phase 1: Node Merge Possibility ---
+              // Find the first index `i` and the corresponding Arc `node_arc` where node merge IS POSSIBLE.
+              let node_merge_target: Option<(usize, Arc<Mutex<Trie<EK, EV, T>>>)> =
                   if let Some(children_vec) = self.children.get(&edge_key) {
                       children_vec.iter().enumerate().find_map(|(i, (_ev, node_arc))| {
-                          let merged_val_opt = {
+                          let can_merge = {
                               let node_guard = node_arc.lock().expect("Lock failed during node merge check");
-                              merge_node_value(&node_guard.value, new_node_value.clone())
+                              // Check if merge IS POSSIBLE without calculating the value yet
+                              merge_node_value(&node_guard.value, new_node_value.clone()).is_some()
                           };
-                          merged_val_opt.map(|merged_val| (i, merged_val, node_arc.clone()))
+                          if can_merge {
+                              Some((i, node_arc.clone()))
+                          } else {
+                              None
+                          }
                       })
                   } else {
                       None
                   };
 
               // --- Apply Phase 1: Node Merge ---
-              if let Some((idx, merged_node_val, node_arc)) = node_merge_candidate {
-                  // Update node value
+              if let Some((idx, node_arc)) = node_merge_target {
+                  // Re-calculate merged value and update node
                   {
                       let mut node_guard = node_arc.lock().expect("Lock failed for node update");
-                      node_guard.value = merged_node_val;
-                  }
+                      // Calculate the merged value NOW and update
+                      // Pass the original new_node_value by value, consuming it here.
+                      if let Some(merged_val) = merge_node_value(&node_guard.value, new_node_value) {
+                           node_guard.value = merged_val;
+                      } else {
+                          // This should not happen if the check phase logic is correct and merge_node_value is deterministic
+                          panic!("Node merge check succeeded but merge failed during apply phase");
+                      }
+                  } // Lock released
+
                   // Try update edge value for the found index `idx`
                   let children_vec_mut = self.children.get_mut(&edge_key)
                       .expect("Children vec disappeared between check and apply");
                   // Pass the NEW edge value (edge_value) for merging
+                  // Pass the original edge_value by value, consuming it here if merge succeeds.
                   if let Some(merged_ev) = merge_edge_value(&children_vec_mut[idx].0, edge_value) {
                        children_vec_mut[idx].0 = merged_ev;
                   }
                   // Return the Arc corresponding to the merged node
                   return Ok(node_arc);
               }
+              // Note: new_node_value and edge_value are potentially consumed above if Phase 1 runs.
+              // If Phase 1 did not run, they are still available for Phase 2/3.
 
-              // --- Check Phase 2: Edge Merge (Only if Node Merge failed) ---
-              // Find the first index `i` and the corresponding Arc `node_arc` where edge merge succeeds.
-              let edge_merge_candidate: Option<(usize, EV, Arc<Mutex<Trie<EK, EV, T>>>)> =
+              // --- Check Phase 2: Edge Merge Possibility ---
+              let edge_merge_target: Option<(usize, Arc<Mutex<Trie<EK, EV, T>>>)> =
                   if let Some(children_vec) = self.children.get(&edge_key) {
                        children_vec.iter().enumerate().find_map(|(i, (ev, node_arc))| {
-                          // Pass the NEW edge value (edge_value) for merging check
-                          merge_edge_value(ev, edge_value.clone())
-                              .map(|merged_ev| (i, merged_ev, node_arc.clone()))
+                          // Check if merge IS POSSIBLE
+                          if merge_edge_value(ev, edge_value.clone()).is_some() { // Clone edge_value for check
+                              Some((i, node_arc.clone()))
+                          } else {
+                              None
+                          }
                        })
                   } else {
                       None
                   };
 
               // --- Apply Phase 2: Edge Merge ---
-              if let Some((idx, merged_edge_val, node_arc)) = edge_merge_candidate {
+              if let Some((idx, node_arc)) = edge_merge_target {
                   let children_vec_mut = self.children.get_mut(&edge_key)
                       .expect("Children vec disappeared between check and apply");
-                  children_vec_mut[idx].0 = merged_edge_val; // Update edge value with the merged value
+                  // Re-calculate merged edge value and update
+                  // Pass the original edge_value by value, consuming it here.
+                  if let Some(merged_ev) = merge_edge_value(&children_vec_mut[idx].0, edge_value) {
+                       children_vec_mut[idx].0 = merged_ev;
+                  } else {
+                       // This should not happen if the check phase logic is correct and merge_edge_value is deterministic
+                       panic!("Edge merge check succeeded but merge failed during apply phase");
+                  }
                   // Return the Arc corresponding to the existing node with the merged edge
                   return Ok(node_arc);
               }
 
               // --- Apply Phase 3: Create New Node and Edge ---
               // No suitable node/edge found for merging.
-              let new_node = Arc::new(Mutex::new(Trie::new(new_node_value)));
+              // Use the original new_node_value and edge_value (which were not consumed if Phase 1/2 didn't run)
+              let new_node = Arc::new(Mutex::new(Trie::new(new_node_value))); // Consumes new_node_value
               // Use try_insert which handles adding to children vec (creating if needed) and cycle checks/depth updates
-              // Pass the original NEW edge_value
-              self.try_insert(edge_key, edge_value, new_node.clone())?;
+              self.try_insert(edge_key, edge_value, new_node.clone())?; // Consumes edge_value
               Ok(new_node)
           }
       }
@@ -5170,25 +5262,32 @@ messages:
               self
           }
 
-          /// Tries to establish an edge to any existing child node under the `edge_key`.
+          /// Tries to establish an edge to any existing child node of the source node,
+          /// regardless of the edge key under which the child was originally added.
           ///
-          /// Retrieves all children associated with `self.edge_key` in the source node
-          /// and calls `try_slice` with them.
+          /// Iterates through *all* children of the source node. For each child, it calls
+          /// `try_destination` to attempt adding the new edge (`self.edge_key`, `self.edge_value`)
+          /// pointing to that child. The first successful attempt (either merging an existing
+          /// edge with the same key to that child, or inserting a new edge if no cycle occurs)
+          /// sets the result and stops further attempts.
+          ///
           /// Returns `self` to allow chaining.
           pub fn try_children(mut self) -> Self {
               if self.result.is_some() {
                   return self;
               }
 
-              let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
+              // Collect ALL children arcs, regardless of the edge key they are under.
+              let all_children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
                   let source = self.source_arc.lock().expect("Mutex poisoned while locking source in try_children");
-                  source.get(&self.edge_key)
-                      .map(|vec| vec.iter().map(|(_, arc)| arc.clone()).collect())
-                      .unwrap_or_default()
+                  source.children
+                      .values() // Iterate over Vecs for each key
+                      .flat_map(|vec_of_tuples| vec_of_tuples.iter().map(|(_, arc)| arc.clone())) // Extract Arcs
+                      .collect()
               }; // Lock is dropped here
 
               // Call try_slice with the collected children
-              self.try_slice(&children_arcs)
+              self.try_slice(&all_children_arcs)
           }
 
 
@@ -5246,7 +5345,7 @@ messages:
 
 
           /// Returns the resulting destination node, if one was found or created.
-          pub fn get(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
+          pub fn into_option(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
               self.result.clone() // Clone the Arc if present
           }
 
@@ -6240,7 +6339,7 @@ messages:
               source.lock().unwrap().try_insert("key", vec![], dest.clone()).unwrap();
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-              let result_opt = inserter.try_destination(dest.clone()).get(); // Use get()
+              let result_opt = inserter.try_destination(dest.clone()).into_option(); // Use get()
 
               assert!(result_opt.is_none()); // Merge failed, no result yet
               let s = source.lock().unwrap();
@@ -6261,7 +6360,7 @@ messages:
               // Now try inserting source -> dest again using EdgeInserter
               let inserter = EdgeInserter::new(source.clone(), "src_to_dest", vec![1], merge_vec_append);
               // This will call try_insert which should detect the cycle
-              let result_opt = inserter.try_destination(dest.clone()).get();
+              let result_opt = inserter.try_destination(dest.clone()).into_option();
 
               assert!(result_opt.is_none()); // Cycle detected, insert failed
           }
@@ -6330,7 +6429,7 @@ messages:
               let destinations = [dest1.clone(), dest2.clone()];
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-              let result_opt = inserter.try_slice(&destinations).get();
+              let result_opt = inserter.try_slice(&destinations).into_option();
 
               assert!(result_opt.is_none()); // All attempts failed
               assert!(source.lock().unwrap().get(&"key").is_none()); // No edge added
@@ -6476,11 +6575,11 @@ messages:
 
               // Try fails
               let inserter_after_try = inserter.try_destination(dest1.clone());
-              assert!(inserter_after_try.get().is_none());
+              assert!(inserter_after_try.into_option().is_none());
 
               // Now use else_create
               let inserter_after_else = inserter_after_try.else_create_with_value("fallback".to_string());
-              let result_opt = inserter_after_else.get();
+              let result_opt = inserter_after_else.into_option();
               assert!(result_opt.is_some());
               assert_eq!(result_opt.unwrap().lock().unwrap().value, "fallback");
           }
@@ -6581,34 +6680,7 @@ messages:
       filename: src/datastructures/trie.rs
   - user: |2+
 
-      EdgeInserter::unwrap() called but no destination was found or created
-      thread 'datastructures::trie::tests::test_ei_try_children' panicked at src/datastructures/trie.rs:859:21:
-      EdgeInserter::unwrap() called but no destination was found or created
-      stack backtrace:
-         0: rust_begin_unwind
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/std/src/panicking.rs:695:5
-         1: core::panicking::panic_fmt
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/panicking.rs:75:14
-         2: core::panicking::panic_display
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/panicking.rs:261:5
-         3: core::option::expect_failed
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/option.rs:2024:5
-         4: core::option::Option<T>::expect
-                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:933:21
-         5: sep1::datastructures::trie::EdgeInserter<EK,EV,T,FMergeEV>::unwrap
-                   at ./src/datastructures/trie.rs:859:9
-         6: sep1::datastructures::trie::tests::test_ei_try_children
-                   at ./src/datastructures/trie.rs:2140:27
-         7: sep1::datastructures::trie::tests::test_ei_try_children::{{closure}}
-                   at ./src/datastructures/trie.rs:2123:30
-         8: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
-         9: core::ops::function::FnOnce::call_once
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/ops/function.rs:250:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-
-      thread 'datastructures::trie::tests::test_ei_unwrap_panic' panicked at src/datastructures/trie.rs:859:21:
+      thread 'datastructures::trie::tests::test_ei_unwrap_panic' panicked at src/datastructures/trie.rs:899:21:
       EdgeInserter::unwrap() called but no destination was found or created
       stack backtrace:
          0: rust_begin_unwind
@@ -6622,11 +6694,11 @@ messages:
          4: core::option::Option<T>::expect
                    at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:933:21
          5: sep1::datastructures::trie::EdgeInserter<EK,EV,T,FMergeEV>::unwrap
-                   at ./src/datastructures/trie.rs:859:9
+                   at ./src/datastructures/trie.rs:899:9
          6: sep1::datastructures::trie::tests::test_ei_unwrap_panic
-                   at ./src/datastructures/trie.rs:2069:9
+                   at ./src/datastructures/trie.rs:2109:9
          7: sep1::datastructures::trie::tests::test_ei_unwrap_panic::{{closure}}
-                   at ./src/datastructures/trie.rs:2061:30
+                   at ./src/datastructures/trie.rs:2101:30
          8: core::ops::function::FnOnce::call_once
                    at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
          9: core::ops::function::FnOnce::call_once
@@ -6634,7 +6706,7 @@ messages:
       note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
 
       assertion failed: !Arc::ptr_eq(&returned_node, &existing_node)
-      thread 'datastructures::trie::tests::test_insert_or_merge_both_merge_fail_creates_new' panicked at src/datastructures/trie.rs:1709:9:
+      thread 'datastructures::trie::tests::test_insert_or_merge_both_merge_fail_creates_new' panicked at src/datastructures/trie.rs:1749:9:
       assertion failed: !Arc::ptr_eq(&returned_node, &existing_node)
       stack backtrace:
          0: rust_begin_unwind
@@ -6644,9 +6716,9 @@ messages:
          2: core::panicking::panic
                    at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/panicking.rs:145:5
          3: sep1::datastructures::trie::tests::test_insert_or_merge_both_merge_fail_creates_new
-                   at ./src/datastructures/trie.rs:1709:9
+                   at ./src/datastructures/trie.rs:1749:9
          4: sep1::datastructures::trie::tests::test_insert_or_merge_both_merge_fail_creates_new::{{closure}}
-                   at ./src/datastructures/trie.rs:1680:58
+                   at ./src/datastructures/trie.rs:1720:58
          5: core::ops::function::FnOnce::call_once
                    at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
          6: core::ops::function::FnOnce::call_once
@@ -6655,7 +6727,7 @@ messages:
 
 
       Returned node should be node2
-      thread 'datastructures::trie::tests::test_insert_or_merge_multiple_edges_picks_first_match' panicked at src/datastructures/trie.rs:1763:9:
+      thread 'datastructures::trie::tests::test_insert_or_merge_multiple_edges_picks_first_match' panicked at src/datastructures/trie.rs:1803:9:
       Returned node should be node2
       stack backtrace:
          0: rust_begin_unwind
@@ -6663,9 +6735,9 @@ messages:
          1: core::panicking::panic_fmt
                    at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/panicking.rs:75:14
          2: sep1::datastructures::trie::tests::test_insert_or_merge_multiple_edges_picks_first_match
-                   at ./src/datastructures/trie.rs:1763:9
+                   at ./src/datastructures/trie.rs:1803:9
          3: sep1::datastructures::trie::tests::test_insert_or_merge_multiple_edges_picks_first_match::{{closure}}
-                   at ./src/datastructures/trie.rs:1729:63
+                   at ./src/datastructures/trie.rs:1769:63
          4: core::ops::function::FnOnce::call_once
                    at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
          5: core::ops::function::FnOnce::call_once
@@ -6681,7 +6753,7 @@ messages:
       Right: child_not_mergeable
       <Click to see difference>
 
-      thread 'datastructures::trie::tests::test_insert_or_merge_node_merge_fail_edge_merge_success' panicked at src/datastructures/trie.rs:1669:9:
+      thread 'datastructures::trie::tests::test_insert_or_merge_node_merge_fail_edge_merge_success' panicked at src/datastructures/trie.rs:1709:9:
       assertion `left == right` failed
         left: "child_not_mergeable|data"
        right: "child_not_mergeable"
@@ -6694,9 +6766,9 @@ messages:
          3: core::panicking::assert_failed
                    at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:380:5
          4: sep1::datastructures::trie::tests::test_insert_or_merge_node_merge_fail_edge_merge_success
-                   at ./src/datastructures/trie.rs:1669:9
+                   at ./src/datastructures/trie.rs:1709:9
          5: sep1::datastructures::trie::tests::test_insert_or_merge_node_merge_fail_edge_merge_success::{{closure}}
-                   at ./src/datastructures/trie.rs:1641:65
+                   at ./src/datastructures/trie.rs:1681:65
          6: core::ops::function::FnOnce::call_once
                    at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
          7: core::ops::function::FnOnce::call_once
@@ -6707,177 +6779,38 @@ messages:
   - user: Fix this.
     metadata:
   - assistant: |-
-      Okay, it looks like there are a few issues in the tests and the logic they are testing, particularly around `try_insert_or_merge_edge` and `EdgeInserter::try_children`.
-
-      1.  **`try_insert_or_merge_edge` Failures:** The tests `test_insert_or_merge_node_merge_fail_edge_merge_success`, `test_insert_or_merge_multiple_edges_picks_first_match`, and `test_insert_or_merge_both_merge_fail_creates_new` seem to indicate that the node/edge merge logic isn't behaving as expected. Specifically, it seems Phase 1 (Node Merge) might be succeeding/failing incorrectly, leading to unexpected node value changes or the wrong node being returned. Let's refactor `try_insert_or_merge_edge` slightly to separate the *check* for merge possibility from the *application* of the merge, which might clarify the logic and potentially fix the issue. We'll check if a merge is possible first, and only if it is, proceed to lock, re-calculate the merged value, and apply it.
-
-      2.  **`EdgeInserter::try_children` Failure:** The test `test_ei_try_children` is panicking because `unwrap()` is called when `result` is `None`. Looking at the implementation of `try_children`, it currently gets children *only* under `self.edge_key`. If none exist, it does nothing, leaving `result` as `None`. The test's *intent* (based on the setup and the name "try_children") seems to be to try inserting the new edge to *any* existing child of the source node, regardless of the key under which the child exists. Let's modify `try_children` to match this intent: fetch *all* child Arcs from the source and then use `try_slice` to attempt insertion to each.
-
-      Here are the patches:
-
       ```diff
-      --- a/src/datastructures/trie.rs
-      +++ b/src/datastructures/trie.rs
-      @@ -518,6 +518,7 @@
-               mut merge_edge_value: FMergeEV, // FnMut(&EV, EV) -> Option<EV> (existing, new)
-               mut merge_node_value: FMergeNV, // FnMut(&T, T) -> Option<T> (existing, new)
-           ) -> Result<Arc<Mutex<Trie<EK, EV, T>>>, CycleDetectedError>
-      +
-           where
-               FMergeEV: FnMut(&EV, EV) -> Option<EV>,
-               FMergeNV: FnMut(&T, T) -> Option<T>,
-      @@ -525,58 +526,68 @@
-               T: Clone,
-           {
-               // --- Check Phase 1: Node Merge Possibility ---
-      -        // Find the first index `i` and the corresponding Arc `node_arc` where node merge succeeds.
-      -        let node_merge_candidate: Option<(usize, T, Arc<Mutex<Trie<EK, EV, T>>>)> =
-      +        // Find the first index `i` and the corresponding Arc `node_arc` where node merge IS POSSIBLE.
-      +        let node_merge_target: Option<(usize, Arc<Mutex<Trie<EK, EV, T>>>)> =
-                   if let Some(children_vec) = self.children.get(&edge_key) {
-                       children_vec.iter().enumerate().find_map(|(i, (_ev, node_arc))| {
-      -                    let merged_val_opt = {
-      +                    let can_merge = {
-                               let node_guard = node_arc.lock().expect("Lock failed during node merge check");
-      -                        merge_node_value(&node_guard.value, new_node_value.clone())
-      +                        // Check if merge IS POSSIBLE without calculating the value yet
-      +                        merge_node_value(&node_guard.value, new_node_value.clone()).is_some()
-                           };
-      -                    merged_val_opt.map(|merged_val| (i, merged_val, node_arc.clone()))
-      +                    if can_merge {
-      +                        Some((i, node_arc.clone()))
-      +                    } else {
-      +                        None
-      +                    }
-                       })
-                   } else {
-                       None
-                   };
-       
-               // --- Apply Phase 1: Node Merge ---
-      -        if let Some((idx, merged_node_val, node_arc)) = node_merge_candidate {
-      -            // Update node value
-      +        if let Some((idx, node_arc)) = node_merge_target {
-      +            // Re-calculate merged value and update node
-                   {
-                       let mut node_guard = node_arc.lock().expect("Lock failed for node update");
-      -                node_guard.value = merged_node_val;
-      -            }
-      +                // Calculate the merged value NOW and update
-      +                // Pass the original new_node_value by value, consuming it here.
-      +                if let Some(merged_val) = merge_node_value(&node_guard.value, new_node_value) {
-      +                     node_guard.value = merged_val;
-      +                } else {
-      +                    // This should not happen if the check phase logic is correct and merge_node_value is deterministic
-      +                    panic!("Node merge check succeeded but merge failed during apply phase");
-      +                }
-      +            } // Lock released
-      +
-                   // Try update edge value for the found index `idx`
-                   let children_vec_mut = self.children.get_mut(&edge_key)
-                       .expect("Children vec disappeared between check and apply");
-                   // Pass the NEW edge value (edge_value) for merging
-      +            // Pass the original edge_value by value, consuming it here if merge succeeds.
-                   if let Some(merged_ev) = merge_edge_value(&children_vec_mut[idx].0, edge_value) {
-                        children_vec_mut[idx].0 = merged_ev;
-                   }
-                   // Return the Arc corresponding to the merged node
-                   return Ok(node_arc);
-               }
-      -
-      -        // --- Check Phase 2: Edge Merge (Only if Node Merge failed) ---
-      -        // Find the first index `i` and the corresponding Arc `node_arc` where edge merge succeeds.
-      -        let edge_merge_candidate: Option<(usize, EV, Arc<Mutex<Trie<EK, EV, T>>>)> =
-      +        // Note: new_node_value and edge_value are potentially consumed above if Phase 1 runs.
-      +        // If Phase 1 did not run, they are still available for Phase 2/3.
-      +
-      +        // --- Check Phase 2: Edge Merge Possibility ---
-      +        let edge_merge_target: Option<(usize, Arc<Mutex<Trie<EK, EV, T>>>)> =
-                   if let Some(children_vec) = self.children.get(&edge_key) {
-                        children_vec.iter().enumerate().find_map(|(i, (ev, node_arc))| {
-      -                    // Pass the NEW edge value (edge_value) for merging check
-      -                    merge_edge_value(ev, edge_value.clone())
-      -                        .map(|merged_ev| (i, merged_ev, node_arc.clone()))
-      +                    // Check if merge IS POSSIBLE
-      +                    if merge_edge_value(ev, edge_value.clone()).is_some() { // Clone edge_value for check
-      +                        Some((i, node_arc.clone()))
-      +                    } else {
-      +                        None
-      +                    }
-                        })
-                   } else {
-                       None
-                   };
-       
-               // --- Apply Phase 2: Edge Merge ---
-      -        if let Some((idx, merged_edge_val, node_arc)) = edge_merge_candidate {
-      +        if let Some((idx, node_arc)) = edge_merge_target {
-                   let children_vec_mut = self.children.get_mut(&edge_key)
-                       .expect("Children vec disappeared between check and apply");
-      -            children_vec_mut[idx].0 = merged_edge_val; // Update edge value with the merged value
-      +            // Re-calculate merged edge value and update
-      +            // Pass the original edge_value by value, consuming it here.
-      +            if let Some(merged_ev) = merge_edge_value(&children_vec_mut[idx].0, edge_value) {
-      +                 children_vec_mut[idx].0 = merged_ev;
-      +            } else {
-      +                 // This should not happen if the check phase logic is correct and merge_edge_value is deterministic
-      +                 panic!("Edge merge check succeeded but merge failed during apply phase");
-      +            }
-                   // Return the Arc corresponding to the existing node with the merged edge
-                   return Ok(node_arc);
-               }
-       
-               // --- Apply Phase 3: Create New Node and Edge ---
-               // No suitable node/edge found for merging.
-      -        let new_node = Arc::new(Mutex::new(Trie::new(new_node_value)));
-      +        // Use the original new_node_value and edge_value (which were not consumed if Phase 1/2 didn't run)
-      +        let new_node = Arc::new(Mutex::new(Trie::new(new_node_value))); // Consumes new_node_value
-               // Use try_insert which handles adding to children vec (creating if needed) and cycle checks/depth updates
-      -        // Pass the original NEW edge_value
-      -        self.try_insert(edge_key, edge_value, new_node.clone())?;
-      +        self.try_insert(edge_key, edge_value, new_node.clone())?; // Consumes edge_value
-               Ok(new_node)
+      diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
+      @@
+           // Merge node value (String): Append new string if existing contains "mergeable"
+      -    fn merge_nv_append_if_flag(existing_nv: &String, new_nv: String) -> Option<String> {
+      -        if existing_nv.contains("mergeable") {
+      -            Some(format!("{}|{}", existing_nv, new_nv))
+      -        } else {
+      -            None
+      -        }
+      +    //
+      +    // NOTE:
+      +    // The sentinel strings used throughout the tests include both
+      +    // “…_mergeable” (should merge)  and “…_not_mergeable” (should NOT merge).
+      +    // The original helper simply checked `contains("mergeable")`, which means
+      +    // `"child_not_mergeable"` was (incorrectly) considered merge-able because
+      +    // it still contains the substring `"mergeable"`.
+      +    //
+      +    // To align the helper’s behaviour with the test‐case expectations we now:
+      +    //   1. Require that the value contains `"mergeable"`, *and*
+      +    //   2. Explicitly reject any value that contains `"not_mergeable"`.
+      +    //
+      +    // This makes values like `"child_mergeable"` merge, while
+      +    // `"child_not_mergeable"` (and similar) do NOT merge.
+      +    fn merge_nv_append_if_flag(existing_nv: &String, new_nv: String) -> Option<String> {
+      +        if existing_nv.contains("mergeable") && !existing_nv.contains("not_mergeable") {
+      +            Some(format!("{}|{}", existing_nv, new_nv))
+      +        } else {
+      +            None
+      +        }
            }
-       }
-      @@ -768,19 +779,26 @@
-               self
-           }
-       
-      -    /// Tries to establish an edge to any existing child node under the `edge_key`.
-      +    /// Tries to establish an edge to any existing child node of the source node,
-      +    /// regardless of the edge key under which the child was originally added.
-           ///
-      -    /// Retrieves all children associated with `self.edge_key` in the source node
-      -    /// and calls `try_slice` with them.
-      +    /// Iterates through *all* children of the source node. For each child, it calls
-      +    /// `try_destination` to attempt adding the new edge (`self.edge_key`, `self.edge_value`)
-      +    /// pointing to that child. The first successful attempt (either merging an existing
-      +    /// edge with the same key to that child, or inserting a new edge if no cycle occurs)
-      +    /// sets the result and stops further attempts.
-      +    ///
-           /// Returns `self` to allow chaining.
-           pub fn try_children(mut self) -> Self {
-               if self.result.is_some() {
-                   return self;
-               }
-       
-      -        let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
-      +        // Collect ALL children arcs, regardless of the edge key they are under.
-      +        let all_children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
-                   let source = self.source_arc.lock().expect("Mutex poisoned while locking source in try_children");
-      -            source.get(&self.edge_key)
-      -                .map(|vec| vec.iter().map(|(_, arc)| arc.clone()).collect())
-      -                .unwrap_or_default()
-      +            source.children
-      +                .values() // Iterate over Vecs for each key
-      +                .flat_map(|vec_of_tuples| vec_of_tuples.iter().map(|(_, arc)| arc.clone())) // Extract Arcs
-      +                .collect()
-               }; // Lock is dropped here
-       
-               // Call try_slice with the collected children
       ```
-
-      These changes refactor `try_insert_or_merge_edge` to potentially avoid the subtle bugs causing the test failures and modify `try_children` to match the behavior expected by the failing test `test_ei_try_children`. After applying these patches, please re-run your tests. The `test_ei_unwrap_panic` test is expected to panic, so that specific panic is not an error.
     metadata:
   - user: |
       Git apply result:

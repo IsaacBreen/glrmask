@@ -1551,8 +1551,22 @@ mod tests {
     }
 
     // Merge node value (String): Append new string if existing contains "mergeable"
+    //
+    // NOTE:
+    // The sentinel strings used throughout the tests include both
+    // “…_mergeable” (should merge)  and “…_not_mergeable” (should NOT merge).
+    // The original helper simply checked `contains("mergeable")`, which means
+    // `"child_not_mergeable"` was (incorrectly) considered merge-able because
+    // it still contains the substring `"mergeable"`.
+    //
+    // To align the helper’s behaviour with the test‐case expectations we now:
+    //   1. Require that the value contains `"mergeable"`, *and*
+    //   2. Explicitly reject any value that contains `"not_mergeable"`.
+    //
+    // This makes values like `"child_mergeable"` merge, while
+    // `"child_not_mergeable"` (and similar) do NOT merge.
     fn merge_nv_append_if_flag(existing_nv: &String, new_nv: String) -> Option<String> {
-        if existing_nv.contains("mergeable") {
+        if existing_nv.contains("mergeable") && !existing_nv.contains("not_mergeable") {
             Some(format!("{}|{}", existing_nv, new_nv))
         } else {
             None
