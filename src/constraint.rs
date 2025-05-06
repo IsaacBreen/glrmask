@@ -369,8 +369,7 @@ impl GrammarConstraint {
                                     .or_default()
                                     .insert(NodeHandle(target_pc_node_arc.clone()));
 
-                                let mut target_guard = target_pc_node_arc.lock().unwrap();
-                                target_guard.value.clean_end
+                                target_pc_node_arc.lock().unwrap().value.clean_end
                                     .get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1))
                                     .set(child_vocab_node.token_id(), true);
                             } else { // Still more bytes in this LLM token segment
