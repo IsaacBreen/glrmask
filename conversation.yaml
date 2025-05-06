@@ -796,7 +796,7 @@ local_system:
           ///
           /// Iterates through `destinations` and calls `try_destination` for each until one succeeds.
           /// Returns `self` to allow chaining.
-          pub fn try_slice(mut self, destinations: &[Arc<Mutex<Trie<EK, EV, T>>>]) -> Self {
+          pub fn try_destinations(mut self, destinations: &[Arc<Mutex<Trie<EK, EV, T>>>]) -> Self {
               for destination in destinations {
                   if self.result.is_some() {
                       break; // Stop trying once a destination is found
@@ -832,7 +832,7 @@ local_system:
               }; // Lock is dropped here
 
               // Call try_slice with the collected children
-              self.try_slice(&all_children_arcs)
+              self.try_destinations(&all_children_arcs)
           }
 
 
@@ -840,7 +840,7 @@ local_system:
           /// inserts an edge to it from the source, and sets it as the result.
           ///
           /// Returns `self` to allow chaining.
-          pub fn else_create_with_value(mut self, value: T) -> Self {
+          pub fn else_create_destination_with_value(mut self, value: T) -> Self {
               if self.result.is_some() {
                   return self;
               }
@@ -866,11 +866,11 @@ local_system:
           /// inserts an edge to it from the source, and sets it as the result.
           ///
           /// Returns `self` to allow chaining.
-          pub fn else_create_with(self, value_fn: impl FnOnce() -> T) -> Self {
+          pub fn else_create_destination_with(self, value_fn: impl FnOnce() -> T) -> Self {
               if self.result.is_some() {
                   return self;
               }
-              self.else_create_with_value(value_fn())
+              self.else_create_destination_with_value(value_fn())
           }
 
           /// If no destination has been found yet, creates a new node with the default value (`T::default()`),
@@ -878,20 +878,24 @@ local_system:
           ///
           /// Requires `T: Default`.
           /// Returns `self` to allow chaining.
-          pub fn else_create(self) -> Self
+          pub fn else_create_destination(self) -> Self
           where
               T: Default,
           {
               if self.result.is_some() {
                   return self;
               }
-              self.else_create_with_value(T::default())
+              self.else_create_destination_with_value(T::default())
           }
 
 
           /// Returns the resulting destination node, if one was found or created.
-          pub fn into_option(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
-              self.result.clone() // Clone the Arc if present
+          pub fn into_option(self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
+              self.result
+          }
+
+          pub fn clone_into_option(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
+              self.result.clone()
           }
 
           /// Returns the resulting destination node, panicking if none was found or created.
@@ -1558,8 +1562,22 @@ local_system:
           }
 
           // Merge node value (String): Append new string if existing contains "mergeable"
+          //
+          // NOTE:
+          // The sentinel strings used throughout the tests include both
+          // “…_mergeable” (should merge)  and “…_not_mergeable” (should NOT merge).
+          // The original helper simply checked `contains("mergeable")`, which means
+          // `"child_not_mergeable"` was (incorrectly) considered merge-able because
+          // it still contains the substring `"mergeable"`.
+          //
+          // To align the helper’s behaviour with the test‐case expectations we now:
+          //   1. Require that the value contains `"mergeable"`, *and*
+          //   2. Explicitly reject any value that contains `"not_mergeable"`.
+          //
+          // This makes values like `"child_mergeable"` merge, while
+          // `"child_not_mergeable"` (and similar) do NOT merge.
           fn merge_nv_append_if_flag(existing_nv: &String, new_nv: String) -> Option<String> {
-              if existing_nv.contains("mergeable") {
+              if existing_nv.contains("mergeable") && !existing_nv.contains("not_mergeable") {
                   Some(format!("{}|{}", existing_nv, new_nv))
               } else {
                   None
@@ -1927,7 +1945,7 @@ local_system:
               // try(dest1) -> OK
               // try(dest2) -> Cycle Error (skipped because dest1 succeeded)
               // try(dest3) -> Skipped
-              let result_node = inserter.try_slice(&destinations).unwrap();
+              let result_node = inserter.try_destinations(&destinations).unwrap();
 
               assert!(Arc::ptr_eq(&result_node, &dest1)); // Should succeed with dest1
               let s = source.lock().unwrap();
@@ -1952,7 +1970,7 @@ local_system:
               // try(dest1) -> Cycle Error
               // try(dest2) -> OK
               // try(dest3) -> Skipped
-              let result_node = inserter.try_slice(&destinations).unwrap();
+              let result_node = inserter.try_destinations(&destinations).unwrap();
 
               assert!(Arc::ptr_eq(&result_node, &dest2)); // Should succeed with dest2
               let s = source.lock().unwrap();
@@ -1974,7 +1992,7 @@ local_system:
               let destinations = [dest1.clone(), dest2.clone()];
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-              let result_opt = inserter.try_slice(&destinations).into_option();
+              let result_opt = inserter.try_destinations(&destinations).into_option();
 
               assert!(result_opt.is_none()); // All attempts failed
               assert!(source.lock().unwrap().get(&"key").is_none()); // No edge added
@@ -2015,7 +2033,7 @@ local_system:
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
               // No try calls, should go straight to else_create
-              let result_node = inserter.else_create_with_value("created".to_string()).unwrap();
+              let result_node = inserter.else_create_destination_with_value("created".to_string()).unwrap();
 
               assert_eq!(result_node.lock().unwrap().value, "created");
               assert_eq!(result_node.lock().unwrap().max_depth, 1); // Depth updated
@@ -2033,7 +2051,7 @@ local_system:
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
               let flag_clone = created_flag.clone();
-              let result_node = inserter.else_create_with(|| {
+              let result_node = inserter.else_create_destination_with(|| {
                   flag_clone.fetch_add(1, Ordering::SeqCst);
                   "created_via_fn".to_string()
               }).unwrap();
@@ -2049,7 +2067,7 @@ local_system:
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
               // String::default() is ""
-              let result_node = inserter.else_create().unwrap();
+              let result_node = inserter.else_create_destination().unwrap();
 
               assert_eq!(result_node.lock().unwrap().value, ""); // Default value
               assert_eq!(result_node.lock().unwrap().max_depth, 1);
@@ -2066,7 +2084,7 @@ local_system:
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
               let result_node = inserter
                   .try_destination(dest1.clone()) // Fails (cycle)
-                  .else_create_with_value("fallback".to_string()) // Executes
+                  .else_create_destination_with_value("fallback".to_string()) // Executes
                   .unwrap();
 
               assert_eq!(result_node.lock().unwrap().value, "fallback"); // Fallback was created
@@ -2085,7 +2103,7 @@ local_system:
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
               let result_node = inserter
                   .try_destination(dest1.clone()) // Succeeds
-                  .else_create_with_value("fallback".to_string()) // Should be skipped
+                  .else_create_destination_with_value("fallback".to_string()) // Should be skipped
                   .unwrap();
 
               assert!(Arc::ptr_eq(&result_node, &dest1)); // Original dest1 was used
@@ -2120,10 +2138,10 @@ local_system:
 
               // Try fails
               let inserter_after_try = inserter.try_destination(dest1.clone());
-              assert!(inserter_after_try.into_option().is_none());
+              assert!(inserter_after_try.clone_into_option().is_none());
 
               // Now use else_create
-              let inserter_after_else = inserter_after_try.else_create_with_value("fallback".to_string());
+              let inserter_after_else = inserter_after_try.else_create_destination_with_value("fallback".to_string());
               let result_opt = inserter_after_else.into_option();
               assert!(result_opt.is_some());
               assert_eq!(result_opt.unwrap().lock().unwrap().value, "fallback");
@@ -2142,8 +2160,8 @@ local_system:
               let result_node = inserter
                   .try_destination(child1.clone()) // This succeeds, result is set to child1
                   // try_slice, else_create_with_value should now have no effect
-                  .try_slice(&destinations_for_slice) // Should be skipped
-                  .else_create_with_value(new_node_val_if_created.clone()) // Should be skipped
+                  .try_destinations(&destinations_for_slice) // Should be skipped
+                  .else_create_destination_with_value(new_node_val_if_created.clone()) // Should be skipped
                   .unwrap();
 
               assert!(Arc::ptr_eq(&result_node, &child1), "Chain should stop after first success (try_insert)");
@@ -2211,7 +2229,7 @@ local_system:
                let inserter_fb = EdgeInserter::new(source_for_fb.clone(), "fallback_key", vec![99], merge_vec_append);
                let result_node_fb = inserter_fb
                   .try_children() // Try inserting to child1_fb or child2_fb, both should fail cycle detection
-                  .else_create_with_value(new_node_val_if_created.clone()) // Succeeds
+                  .else_create_destination_with_value(new_node_val_if_created.clone()) // Succeeds
                   .unwrap();
 
               assert_eq!(result_node_fb.lock().unwrap().value, new_node_val_if_created); // Fallback node was created
@@ -3012,7 +3030,7 @@ local_system:
           ///
           /// Iterates through `destinations` and calls `try_destination` for each until one succeeds.
           /// Returns `self` to allow chaining.
-          pub fn try_slice(mut self, destinations: &[Arc<Mutex<Trie<EK, EV, T>>>]) -> Self {
+          pub fn try_destinations(mut self, destinations: &[Arc<Mutex<Trie<EK, EV, T>>>]) -> Self {
               for destination in destinations {
                   if self.result.is_some() {
                       break; // Stop trying once a destination is found
@@ -3048,7 +3066,7 @@ local_system:
               }; // Lock is dropped here
 
               // Call try_slice with the collected children
-              self.try_slice(&all_children_arcs)
+              self.try_destinations(&all_children_arcs)
           }
 
 
@@ -3056,7 +3074,7 @@ local_system:
           /// inserts an edge to it from the source, and sets it as the result.
           ///
           /// Returns `self` to allow chaining.
-          pub fn else_create_with_value(mut self, value: T) -> Self {
+          pub fn else_create_destination_with_value(mut self, value: T) -> Self {
               if self.result.is_some() {
                   return self;
               }
@@ -3082,11 +3100,11 @@ local_system:
           /// inserts an edge to it from the source, and sets it as the result.
           ///
           /// Returns `self` to allow chaining.
-          pub fn else_create_with(self, value_fn: impl FnOnce() -> T) -> Self {
+          pub fn else_create_destination_with(self, value_fn: impl FnOnce() -> T) -> Self {
               if self.result.is_some() {
                   return self;
               }
-              self.else_create_with_value(value_fn())
+              self.else_create_destination_with_value(value_fn())
           }
 
           /// If no destination has been found yet, creates a new node with the default value (`T::default()`),
@@ -3094,20 +3112,24 @@ local_system:
           ///
           /// Requires `T: Default`.
           /// Returns `self` to allow chaining.
-          pub fn else_create(self) -> Self
+          pub fn else_create_destination(self) -> Self
           where
               T: Default,
           {
               if self.result.is_some() {
                   return self;
               }
-              self.else_create_with_value(T::default())
+              self.else_create_destination_with_value(T::default())
           }
 
 
           /// Returns the resulting destination node, if one was found or created.
-          pub fn into_option(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
-              self.result.clone() // Clone the Arc if present
+          pub fn into_option(self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
+              self.result
+          }
+
+          pub fn clone_into_option(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
+              self.result.clone()
           }
 
           /// Returns the resulting destination node, panicking if none was found or created.
@@ -3774,8 +3796,22 @@ local_system:
           }
 
           // Merge node value (String): Append new string if existing contains "mergeable"
+          //
+          // NOTE:
+          // The sentinel strings used throughout the tests include both
+          // “…_mergeable” (should merge)  and “…_not_mergeable” (should NOT merge).
+          // The original helper simply checked `contains("mergeable")`, which means
+          // `"child_not_mergeable"` was (incorrectly) considered merge-able because
+          // it still contains the substring `"mergeable"`.
+          //
+          // To align the helper’s behaviour with the test‐case expectations we now:
+          //   1. Require that the value contains `"mergeable"`, *and*
+          //   2. Explicitly reject any value that contains `"not_mergeable"`.
+          //
+          // This makes values like `"child_mergeable"` merge, while
+          // `"child_not_mergeable"` (and similar) do NOT merge.
           fn merge_nv_append_if_flag(existing_nv: &String, new_nv: String) -> Option<String> {
-              if existing_nv.contains("mergeable") {
+              if existing_nv.contains("mergeable") && !existing_nv.contains("not_mergeable") {
                   Some(format!("{}|{}", existing_nv, new_nv))
               } else {
                   None
@@ -4143,7 +4179,7 @@ local_system:
               // try(dest1) -> OK
               // try(dest2) -> Cycle Error (skipped because dest1 succeeded)
               // try(dest3) -> Skipped
-              let result_node = inserter.try_slice(&destinations).unwrap();
+              let result_node = inserter.try_destinations(&destinations).unwrap();
 
               assert!(Arc::ptr_eq(&result_node, &dest1)); // Should succeed with dest1
               let s = source.lock().unwrap();
@@ -4168,7 +4204,7 @@ local_system:
               // try(dest1) -> Cycle Error
               // try(dest2) -> OK
               // try(dest3) -> Skipped
-              let result_node = inserter.try_slice(&destinations).unwrap();
+              let result_node = inserter.try_destinations(&destinations).unwrap();
 
               assert!(Arc::ptr_eq(&result_node, &dest2)); // Should succeed with dest2
               let s = source.lock().unwrap();
@@ -4190,7 +4226,7 @@ local_system:
               let destinations = [dest1.clone(), dest2.clone()];
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-              let result_opt = inserter.try_slice(&destinations).into_option();
+              let result_opt = inserter.try_destinations(&destinations).into_option();
 
               assert!(result_opt.is_none()); // All attempts failed
               assert!(source.lock().unwrap().get(&"key").is_none()); // No edge added
@@ -4231,7 +4267,7 @@ local_system:
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
               // No try calls, should go straight to else_create
-              let result_node = inserter.else_create_with_value("created".to_string()).unwrap();
+              let result_node = inserter.else_create_destination_with_value("created".to_string()).unwrap();
 
               assert_eq!(result_node.lock().unwrap().value, "created");
               assert_eq!(result_node.lock().unwrap().max_depth, 1); // Depth updated
@@ -4249,7 +4285,7 @@ local_system:
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
               let flag_clone = created_flag.clone();
-              let result_node = inserter.else_create_with(|| {
+              let result_node = inserter.else_create_destination_with(|| {
                   flag_clone.fetch_add(1, Ordering::SeqCst);
                   "created_via_fn".to_string()
               }).unwrap();
@@ -4265,7 +4301,7 @@ local_system:
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
               // String::default() is ""
-              let result_node = inserter.else_create().unwrap();
+              let result_node = inserter.else_create_destination().unwrap();
 
               assert_eq!(result_node.lock().unwrap().value, ""); // Default value
               assert_eq!(result_node.lock().unwrap().max_depth, 1);
@@ -4282,7 +4318,7 @@ local_system:
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
               let result_node = inserter
                   .try_destination(dest1.clone()) // Fails (cycle)
-                  .else_create_with_value("fallback".to_string()) // Executes
+                  .else_create_destination_with_value("fallback".to_string()) // Executes
                   .unwrap();
 
               assert_eq!(result_node.lock().unwrap().value, "fallback"); // Fallback was created
@@ -4301,7 +4337,7 @@ local_system:
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
               let result_node = inserter
                   .try_destination(dest1.clone()) // Succeeds
-                  .else_create_with_value("fallback".to_string()) // Should be skipped
+                  .else_create_destination_with_value("fallback".to_string()) // Should be skipped
                   .unwrap();
 
               assert!(Arc::ptr_eq(&result_node, &dest1)); // Original dest1 was used
@@ -4336,10 +4372,10 @@ local_system:
 
               // Try fails
               let inserter_after_try = inserter.try_destination(dest1.clone());
-              assert!(inserter_after_try.into_option().is_none());
+              assert!(inserter_after_try.clone_into_option().is_none());
 
               // Now use else_create
-              let inserter_after_else = inserter_after_try.else_create_with_value("fallback".to_string());
+              let inserter_after_else = inserter_after_try.else_create_destination_with_value("fallback".to_string());
               let result_opt = inserter_after_else.into_option();
               assert!(result_opt.is_some());
               assert_eq!(result_opt.unwrap().lock().unwrap().value, "fallback");
@@ -4358,8 +4394,8 @@ local_system:
               let result_node = inserter
                   .try_destination(child1.clone()) // This succeeds, result is set to child1
                   // try_slice, else_create_with_value should now have no effect
-                  .try_slice(&destinations_for_slice) // Should be skipped
-                  .else_create_with_value(new_node_val_if_created.clone()) // Should be skipped
+                  .try_destinations(&destinations_for_slice) // Should be skipped
+                  .else_create_destination_with_value(new_node_val_if_created.clone()) // Should be skipped
                   .unwrap();
 
               assert!(Arc::ptr_eq(&result_node, &child1), "Chain should stop after first success (try_insert)");
@@ -4427,7 +4463,7 @@ local_system:
                let inserter_fb = EdgeInserter::new(source_for_fb.clone(), "fallback_key", vec![99], merge_vec_append);
                let result_node_fb = inserter_fb
                   .try_children() // Try inserting to child1_fb or child2_fb, both should fail cycle detection
-                  .else_create_with_value(new_node_val_if_created.clone()) // Succeeds
+                  .else_create_destination_with_value(new_node_val_if_created.clone()) // Succeeds
                   .unwrap();
 
               assert_eq!(result_node_fb.lock().unwrap().value, new_node_val_if_created); // Fallback node was created
@@ -5251,7 +5287,7 @@ messages:
           ///
           /// Iterates through `destinations` and calls `try_destination` for each until one succeeds.
           /// Returns `self` to allow chaining.
-          pub fn try_slice(mut self, destinations: &[Arc<Mutex<Trie<EK, EV, T>>>]) -> Self {
+          pub fn try_destinations(mut self, destinations: &[Arc<Mutex<Trie<EK, EV, T>>>]) -> Self {
               for destination in destinations {
                   if self.result.is_some() {
                       break; // Stop trying once a destination is found
@@ -5287,7 +5323,7 @@ messages:
               }; // Lock is dropped here
 
               // Call try_slice with the collected children
-              self.try_slice(&all_children_arcs)
+              self.try_destinations(&all_children_arcs)
           }
 
 
@@ -5295,7 +5331,7 @@ messages:
           /// inserts an edge to it from the source, and sets it as the result.
           ///
           /// Returns `self` to allow chaining.
-          pub fn else_create_with_value(mut self, value: T) -> Self {
+          pub fn else_create_destination_with_value(mut self, value: T) -> Self {
               if self.result.is_some() {
                   return self;
               }
@@ -5321,11 +5357,11 @@ messages:
           /// inserts an edge to it from the source, and sets it as the result.
           ///
           /// Returns `self` to allow chaining.
-          pub fn else_create_with(self, value_fn: impl FnOnce() -> T) -> Self {
+          pub fn else_create_destination_with(self, value_fn: impl FnOnce() -> T) -> Self {
               if self.result.is_some() {
                   return self;
               }
-              self.else_create_with_value(value_fn())
+              self.else_create_destination_with_value(value_fn())
           }
 
           /// If no destination has been found yet, creates a new node with the default value (`T::default()`),
@@ -5333,20 +5369,24 @@ messages:
           ///
           /// Requires `T: Default`.
           /// Returns `self` to allow chaining.
-          pub fn else_create(self) -> Self
+          pub fn else_create_destination(self) -> Self
           where
               T: Default,
           {
               if self.result.is_some() {
                   return self;
               }
-              self.else_create_with_value(T::default())
+              self.else_create_destination_with_value(T::default())
           }
 
 
           /// Returns the resulting destination node, if one was found or created.
-          pub fn into_option(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
-              self.result.clone() // Clone the Arc if present
+          pub fn into_option(self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
+              self.result
+          }
+
+          pub fn clone_into_option(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
+              self.result.clone()
           }
 
           /// Returns the resulting destination node, panicking if none was found or created.
@@ -6013,8 +6053,22 @@ messages:
           }
 
           // Merge node value (String): Append new string if existing contains "mergeable"
+          //
+          // NOTE:
+          // The sentinel strings used throughout the tests include both
+          // “…_mergeable” (should merge)  and “…_not_mergeable” (should NOT merge).
+          // The original helper simply checked `contains("mergeable")`, which means
+          // `"child_not_mergeable"` was (incorrectly) considered merge-able because
+          // it still contains the substring `"mergeable"`.
+          //
+          // To align the helper’s behaviour with the test‐case expectations we now:
+          //   1. Require that the value contains `"mergeable"`, *and*
+          //   2. Explicitly reject any value that contains `"not_mergeable"`.
+          //
+          // This makes values like `"child_mergeable"` merge, while
+          // `"child_not_mergeable"` (and similar) do NOT merge.
           fn merge_nv_append_if_flag(existing_nv: &String, new_nv: String) -> Option<String> {
-              if existing_nv.contains("mergeable") {
+              if existing_nv.contains("mergeable") && !existing_nv.contains("not_mergeable") {
                   Some(format!("{}|{}", existing_nv, new_nv))
               } else {
                   None
@@ -6382,7 +6436,7 @@ messages:
               // try(dest1) -> OK
               // try(dest2) -> Cycle Error (skipped because dest1 succeeded)
               // try(dest3) -> Skipped
-              let result_node = inserter.try_slice(&destinations).unwrap();
+              let result_node = inserter.try_destinations(&destinations).unwrap();
 
               assert!(Arc::ptr_eq(&result_node, &dest1)); // Should succeed with dest1
               let s = source.lock().unwrap();
@@ -6407,7 +6461,7 @@ messages:
               // try(dest1) -> Cycle Error
               // try(dest2) -> OK
               // try(dest3) -> Skipped
-              let result_node = inserter.try_slice(&destinations).unwrap();
+              let result_node = inserter.try_destinations(&destinations).unwrap();
 
               assert!(Arc::ptr_eq(&result_node, &dest2)); // Should succeed with dest2
               let s = source.lock().unwrap();
@@ -6429,7 +6483,7 @@ messages:
               let destinations = [dest1.clone(), dest2.clone()];
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-              let result_opt = inserter.try_slice(&destinations).into_option();
+              let result_opt = inserter.try_destinations(&destinations).into_option();
 
               assert!(result_opt.is_none()); // All attempts failed
               assert!(source.lock().unwrap().get(&"key").is_none()); // No edge added
@@ -6470,7 +6524,7 @@ messages:
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
               // No try calls, should go straight to else_create
-              let result_node = inserter.else_create_with_value("created".to_string()).unwrap();
+              let result_node = inserter.else_create_destination_with_value("created".to_string()).unwrap();
 
               assert_eq!(result_node.lock().unwrap().value, "created");
               assert_eq!(result_node.lock().unwrap().max_depth, 1); // Depth updated
@@ -6488,7 +6542,7 @@ messages:
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
               let flag_clone = created_flag.clone();
-              let result_node = inserter.else_create_with(|| {
+              let result_node = inserter.else_create_destination_with(|| {
                   flag_clone.fetch_add(1, Ordering::SeqCst);
                   "created_via_fn".to_string()
               }).unwrap();
@@ -6504,7 +6558,7 @@ messages:
 
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
               // String::default() is ""
-              let result_node = inserter.else_create().unwrap();
+              let result_node = inserter.else_create_destination().unwrap();
 
               assert_eq!(result_node.lock().unwrap().value, ""); // Default value
               assert_eq!(result_node.lock().unwrap().max_depth, 1);
@@ -6521,7 +6575,7 @@ messages:
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
               let result_node = inserter
                   .try_destination(dest1.clone()) // Fails (cycle)
-                  .else_create_with_value("fallback".to_string()) // Executes
+                  .else_create_destination_with_value("fallback".to_string()) // Executes
                   .unwrap();
 
               assert_eq!(result_node.lock().unwrap().value, "fallback"); // Fallback was created
@@ -6540,7 +6594,7 @@ messages:
               let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
               let result_node = inserter
                   .try_destination(dest1.clone()) // Succeeds
-                  .else_create_with_value("fallback".to_string()) // Should be skipped
+                  .else_create_destination_with_value("fallback".to_string()) // Should be skipped
                   .unwrap();
 
               assert!(Arc::ptr_eq(&result_node, &dest1)); // Original dest1 was used
@@ -6575,10 +6629,10 @@ messages:
 
               // Try fails
               let inserter_after_try = inserter.try_destination(dest1.clone());
-              assert!(inserter_after_try.into_option().is_none());
+              assert!(inserter_after_try.clone_into_option().is_none());
 
               // Now use else_create
-              let inserter_after_else = inserter_after_try.else_create_with_value("fallback".to_string());
+              let inserter_after_else = inserter_after_try.else_create_destination_with_value("fallback".to_string());
               let result_opt = inserter_after_else.into_option();
               assert!(result_opt.is_some());
               assert_eq!(result_opt.unwrap().lock().unwrap().value, "fallback");
@@ -6597,8 +6651,8 @@ messages:
               let result_node = inserter
                   .try_destination(child1.clone()) // This succeeds, result is set to child1
                   // try_slice, else_create_with_value should now have no effect
-                  .try_slice(&destinations_for_slice) // Should be skipped
-                  .else_create_with_value(new_node_val_if_created.clone()) // Should be skipped
+                  .try_destinations(&destinations_for_slice) // Should be skipped
+                  .else_create_destination_with_value(new_node_val_if_created.clone()) // Should be skipped
                   .unwrap();
 
               assert!(Arc::ptr_eq(&result_node, &child1), "Chain should stop after first success (try_insert)");
@@ -6666,7 +6720,7 @@ messages:
                let inserter_fb = EdgeInserter::new(source_for_fb.clone(), "fallback_key", vec![99], merge_vec_append);
                let result_node_fb = inserter_fb
                   .try_children() // Try inserting to child1_fb or child2_fb, both should fail cycle detection
-                  .else_create_with_value(new_node_val_if_created.clone()) // Succeeds
+                  .else_create_destination_with_value(new_node_val_if_created.clone()) // Succeeds
                   .unwrap();
 
               assert_eq!(result_node_fb.lock().unwrap().value, new_node_val_if_created); // Fallback node was created
@@ -6678,138 +6732,228 @@ messages:
       ```
     metadata:
       filename: src/datastructures/trie.rs
-  - user: |2+
-
-      thread 'datastructures::trie::tests::test_ei_unwrap_panic' panicked at src/datastructures/trie.rs:899:21:
-      EdgeInserter::unwrap() called but no destination was found or created
-      stack backtrace:
-         0: rust_begin_unwind
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/std/src/panicking.rs:695:5
-         1: core::panicking::panic_fmt
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/panicking.rs:75:14
-         2: core::panicking::panic_display
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/panicking.rs:261:5
-         3: core::option::expect_failed
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/option.rs:2024:5
-         4: core::option::Option<T>::expect
-                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:933:21
-         5: sep1::datastructures::trie::EdgeInserter<EK,EV,T,FMergeEV>::unwrap
-                   at ./src/datastructures/trie.rs:899:9
-         6: sep1::datastructures::trie::tests::test_ei_unwrap_panic
-                   at ./src/datastructures/trie.rs:2109:9
-         7: sep1::datastructures::trie::tests::test_ei_unwrap_panic::{{closure}}
-                   at ./src/datastructures/trie.rs:2101:30
-         8: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
-         9: core::ops::function::FnOnce::call_once
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/ops/function.rs:250:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-      assertion failed: !Arc::ptr_eq(&returned_node, &existing_node)
-      thread 'datastructures::trie::tests::test_insert_or_merge_both_merge_fail_creates_new' panicked at src/datastructures/trie.rs:1749:9:
-      assertion failed: !Arc::ptr_eq(&returned_node, &existing_node)
-      stack backtrace:
-         0: rust_begin_unwind
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/std/src/panicking.rs:695:5
-         1: core::panicking::panic_fmt
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/panicking.rs:75:14
-         2: core::panicking::panic
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/panicking.rs:145:5
-         3: sep1::datastructures::trie::tests::test_insert_or_merge_both_merge_fail_creates_new
-                   at ./src/datastructures/trie.rs:1749:9
-         4: sep1::datastructures::trie::tests::test_insert_or_merge_both_merge_fail_creates_new::{{closure}}
-                   at ./src/datastructures/trie.rs:1720:58
-         5: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
-         6: core::ops::function::FnOnce::call_once
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/ops/function.rs:250:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-
-      Returned node should be node2
-      thread 'datastructures::trie::tests::test_insert_or_merge_multiple_edges_picks_first_match' panicked at src/datastructures/trie.rs:1803:9:
-      Returned node should be node2
-      stack backtrace:
-         0: rust_begin_unwind
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/std/src/panicking.rs:695:5
-         1: core::panicking::panic_fmt
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/panicking.rs:75:14
-         2: sep1::datastructures::trie::tests::test_insert_or_merge_multiple_edges_picks_first_match
-                   at ./src/datastructures/trie.rs:1803:9
-         3: sep1::datastructures::trie::tests::test_insert_or_merge_multiple_edges_picks_first_match::{{closure}}
-                   at ./src/datastructures/trie.rs:1769:63
-         4: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
-         5: core::ops::function::FnOnce::call_once
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/ops/function.rs:250:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-
-      assertion `left == right` failed
-        left: "child_not_mergeable|data"
-       right: "child_not_mergeable"
-
-      Left:  child_not_mergeable|data
-      Right: child_not_mergeable
-      <Click to see difference>
-
-      thread 'datastructures::trie::tests::test_insert_or_merge_node_merge_fail_edge_merge_success' panicked at src/datastructures/trie.rs:1709:9:
-      assertion `left == right` failed
-        left: "child_not_mergeable|data"
-       right: "child_not_mergeable"
-      stack backtrace:
-         0: rust_begin_unwind
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/std/src/panicking.rs:695:5
-         1: core::panicking::panic_fmt
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/panicking.rs:75:14
-         2: core::panicking::assert_failed_inner
-         3: core::panicking::assert_failed
-                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:380:5
-         4: sep1::datastructures::trie::tests::test_insert_or_merge_node_merge_fail_edge_merge_success
-                   at ./src/datastructures/trie.rs:1709:9
-         5: sep1::datastructures::trie::tests::test_insert_or_merge_node_merge_fail_edge_merge_success::{{closure}}
-                   at ./src/datastructures/trie.rs:1681:65
-         6: core::ops::function::FnOnce::call_once
-                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
-         7: core::ops::function::FnOnce::call_once
-                   at /rustc/05f9846f893b09a1be1fc8560e33fc3c815cfecb/library/core/src/ops/function.rs:250:5
-      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-
-    metadata:
-  - user: Fix this.
+  - user: Add functions try_destination and try_destination_with.
     metadata:
   - assistant: |-
       ```diff
       diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
+      index e3f1b2a..abcdef0 100644
+      --- a/src/datastructures/trie.rs
+      +++ b/src/datastructures/trie.rs
       @@
-           // Merge node value (String): Append new string if existing contains "mergeable"
-      -    fn merge_nv_append_if_flag(existing_nv: &String, new_nv: String) -> Option<String> {
-      -        if existing_nv.contains("mergeable") {
-      -            Some(format!("{}|{}", existing_nv, new_nv))
-      -        } else {
-      -            None
-      -        }
-      +    //
-      +    // NOTE:
-      +    // The sentinel strings used throughout the tests include both
-      +    // “…_mergeable” (should merge)  and “…_not_mergeable” (should NOT merge).
-      +    // The original helper simply checked `contains("mergeable")`, which means
-      +    // `"child_not_mergeable"` was (incorrectly) considered merge-able because
-      +    // it still contains the substring `"mergeable"`.
-      +    //
-      +    // To align the helper’s behaviour with the test‐case expectations we now:
-      +    //   1. Require that the value contains `"mergeable"`, *and*
-      +    //   2. Explicitly reject any value that contains `"not_mergeable"`.
-      +    //
-      +    // This makes values like `"child_mergeable"` merge, while
-      +    // `"child_not_mergeable"` (and similar) do NOT merge.
-      +    fn merge_nv_append_if_flag(existing_nv: &String, new_nv: String) -> Option<String> {
-      +        if existing_nv.contains("mergeable") && !existing_nv.contains("not_mergeable") {
-      +            Some(format!("{}|{}", existing_nv, new_nv))
-      +        } else {
-      +            None
-      +        }
+      // Optional: Add a convenience method to Trie to create an EdgeInserter easily.
+       impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
+           /// Creates an `EdgeInserter` to help add an edge starting from this node.
+      @@
+               EdgeInserter::new(Arc::new(Mutex::new(self.clone())), edge_key, edge_value, merge_edge_value)
            }
+       }
+      +
+      +/// Attempts to establish an edge from `source` to a single `destination`,
+      +/// optionally merging edge values if an edge already exists.
+      +/// Returns `Some(Arc<Mutex<Trie<...>>>)` if merge or insert succeeded,
+      +/// or `None` if merge failed or a cycle was detected.
+      +pub fn try_destination<EK, EV, T, FMergeEV>(
+      +    source: Arc<Mutex<Trie<EK, EV, T>>>,
+      +    edge_key: EK,
+      +    edge_value: EV,
+      +    destination: Arc<Mutex<Trie<EK, EV, T>>>,
+      +    merge_edge_value: FMergeEV,
+      +) -> Option<Arc<Mutex<Trie<EK, EV, T>>>>
+      +where
+      +    EK: Ord + Clone + Debug,
+      +    EV: Clone,
+      +    T: Clone,
+      +    FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+      +{
+      +    EdgeInserter::new(source, edge_key, edge_value, merge_edge_value)
+      +        .try_destination(destination)
+      +        .into_option()
+      +}
+      +
+      +/// Attempts to establish an edge from `source` to any of the provided `destinations`,
+      +/// returning the first successful one (merge or insert), or `None` if all attempts failed.
+      +pub fn try_destination_with<EK, EV, T, FMergeEV>(
+      +    source: Arc<Mutex<Trie<EK, EV, T>>>,
+      +    edge_key: EK,
+      +    edge_value: EV,
+      +    destinations: &[Arc<Mutex<Trie<EK, EV, T>>>],
+      +    merge_edge_value: FMergeEV,
+      +) -> Option<Arc<Mutex<Trie<EK, EV, T>>>>
+      +where
+      +    EK: Ord + Clone + Debug,
+      +    EV: Clone,
+      +    T: Clone,
+      +    FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+      +{
+      +    EdgeInserter::new(source, edge_key, edge_value, merge_edge_value)
+      +        .try_destinations(destinations)
+      +        .into_option()
+      +}
+      +
+       #[cfg(test)]
+       mod tests {
+           use super::*;
+      ```
+    metadata:
+  - user: |
+      Git apply result:
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/trie.rs
+      Applying patch to 'src/datastructures/trie.rs' using custom patcher...
+      Error applying patch to src/datastructures/trie.rs:
+      Hunk #2 (header: @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+              EdgeInserter::new(Arc::new(Mutex::new(self.clone())), edge_key, edge_value, merge_edge_value)
+          }
+      }
+      #[cfg(test)]
+      mod tests {
+          use super::*
+      --- Expected Context (from patch, after normalization): ---
+      EdgeInserter::new(Arc::new(Mutex::new(self.clone())), edge_key, edge_value, merge_edge_value)
+      }
+      }
+
+      mod tests {
+      use super::*;
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 951 with ratio 0.67 (4/6 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      + FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+      + {
+        EdgeInserter::new(Arc::new(Mutex::new(self.clone())), edge_key, edge_value, merge_edge_value)
+        }
+        }
+        
+      - mod tests {
+      - use super::*;
+      Problematic diff content:
+      ---
+      diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
+      index e3f1b2a..abcdef0 100644
+      --- a/src/datastructures/trie.rs
+      +++ b/src/datastructures/trie.rs
+      @@
+      // Optional: Add a convenience method to Trie to create an EdgeInserter easily.
+       impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
+           /// Creates an `EdgeInserter` to help add an edge starting from this node.
+      @@
+               EdgeInserter::new(Arc::new(Mutex::new(self.clone())), edge_key, edge_value, merge_edge_value)
+           }
+       }
+      +
+      +/// Attempts to establish an edge from `source` to a single `destination`,
+      +/// optionally merging edge values if an edge already exists.
+      +/// Returns `Some(Arc<Mutex<Trie<...>>>)` if merge or insert succeeded,
+      +/// or `None` if merge failed or a cycle was detected.
+      +pub fn try_destination<EK, EV, T, FMergeEV>(
+      +    source: Arc<Mutex<Trie<EK, EV, T>>>,
+      +    edge_key: EK,
+      +    edge_value: EV,
+      +    destination: Arc<Mutex<Trie<EK, EV, T>>>,
+      +    merge_edge_value: FMergeEV,
+      +) -> Option<Arc<Mutex<Trie<EK, EV, T>>>>
+      +where
+      +    EK: Ord + Clone + Debug,
+      +    EV: Clone,
+      +    T: Clone,
+      +    FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+      +{
+      +    EdgeInserter::new(source, edge_key, edge_value, merge_edge_value)
+      +        .try_destination(destination)
+      +        .into_option()
+      +}
+      +
+      +/// Attempts to establish an edge from `source` to any of the provided `destinations`,
+      +/// returning the first successful one (merge or insert), or `None` if all attempts failed.
+      +pub fn try_destination_with<EK, EV, T, FMergeEV>(
+      +    source: Arc<Mutex<Trie<EK, EV, T>>>,
+      +    edge_key: EK,
+      +    edge_value: EV,
+      +    destinations: &[Arc<Mutex<Trie<EK, EV, T>>>],
+      +    merge_edge_value: FMergeEV,
+      +) -> Option<Arc<Mutex<Trie<EK, EV, T>>>>
+      +where
+      +    EK: Ord + Clone + Debug,
+      +    EV: Clone,
+      +    T: Clone,
+      +    FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+      +{
+      +    EdgeInserter::new(source, edge_key, edge_value, merge_edge_value)
+      +        .try_destinations(destinations)
+      +        .into_option()
+      +}
+      +
+       #[cfg(test)]
+       mod tests {
+           use super::*;
+      ---
+    metadata:
+  - user: There was an error applying the git patch. Please review the errors above
+      and provide a corrected patch or instructions.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
+      index e3f1b2a..abcdef0 100644
+      --- a/src/datastructures/trie.rs
+      +++ b/src/datastructures/trie.rs
+      @@
+                   EdgeInserter::new(Arc::new(Mutex::new(self.clone())), edge_key, edge_value, merge_edge_value)
+               }
+           }
+      +
+      +/// Attempts to establish an edge from `source` to a single `destination`,
+      +/// optionally merging edge values if an edge already exists.
+      +/// Returns `Some(Arc<Mutex<Trie<...>>>)` if merge or insert succeeded,
+      +/// or `None` if merge failed or a cycle was detected.
+      +pub fn try_destination<EK, EV, T, FMergeEV>(
+      +    source: Arc<Mutex<Trie<EK, EV, T>>>,
+      +    edge_key: EK,
+      +    edge_value: EV,
+      +    destination: Arc<Mutex<Trie<EK, EV, T>>>,
+      +    merge_edge_value: FMergeEV,
+      +) -> Option<Arc<Mutex<Trie<EK, EV, T>>>>
+      +where
+      +    EK: Ord + Clone + Debug,
+      +    EV: Clone,
+      +    T: Clone,
+      +    FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+      +{
+      +    EdgeInserter::new(source, edge_key, edge_value, merge_edge_value)
+      +        .try_destination(destination)
+      +        .into_option()
+      +}
+      +
+      +/// Attempts to establish an edge from `source` to any of the provided `destinations`,
+      +/// returning the first successful one (merge or insert), or `None` if all attempts failed.
+      +pub fn try_destination_with<EK, EV, T, FMergeEV>(
+      +    source: Arc<Mutex<Trie<EK, EV, T>>>,
+      +    edge_key: EK,
+      +    edge_value: EV,
+      +    destinations: &[Arc<Mutex<Trie<EK, EV, T>>>],
+      +    merge_edge_value: FMergeEV,
+      +) -> Option<Arc<Mutex<Trie<EK, EV, T>>>>
+      +where
+      +    EK: Ord + Clone + Debug,
+      +    EV: Clone,
+      +    T: Clone,
+      +    FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+      +{
+      +    EdgeInserter::new(source, edge_key, edge_value, merge_edge_value)
+      +        .try_destinations(destinations)
+      +        .into_option()
+      +}
       ```
     metadata:
   - user: |

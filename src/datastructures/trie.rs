@@ -950,8 +950,50 @@ impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
     where
          FMergeEV: FnMut(&EV, EV) -> Option<EV>,
     {
-        EdgeInserter::new(Arc::new(Mutex::new(self.clone())), edge_key, edge_value, merge_edge_value)
+            EdgeInserter::new(Arc::new(Mutex::new(self.clone())), edge_key, edge_value, merge_edge_value)
+        }
     }
+
+/// Attempts to establish an edge from `source` to a single `destination`,
+/// optionally merging edge values if an edge already exists.
+/// Returns `Some(Arc<Mutex<Trie<...>>>)` if merge or insert succeeded,
+/// or `None` if merge failed or a cycle was detected.
+pub fn try_destination<EK, EV, T, FMergeEV>(
+    source: Arc<Mutex<Trie<EK, EV, T>>>,
+    edge_key: EK,
+    edge_value: EV,
+    destination: Arc<Mutex<Trie<EK, EV, T>>>,
+    merge_edge_value: FMergeEV,
+) -> Option<Arc<Mutex<Trie<EK, EV, T>>>>
+where
+    EK: Ord + Clone + Debug,
+    EV: Clone,
+    T: Clone,
+    FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+{
+    EdgeInserter::new(source, edge_key, edge_value, merge_edge_value)
+        .try_destination(destination)
+        .into_option()
+}
+
+/// Attempts to establish an edge from `source` to any of the provided `destinations`,
+/// returning the first successful one (merge or insert), or `None` if all attempts failed.
+pub fn try_destination_with<EK, EV, T, FMergeEV>(
+    source: Arc<Mutex<Trie<EK, EV, T>>>,
+    edge_key: EK,
+    edge_value: EV,
+    destinations: &[Arc<Mutex<Trie<EK, EV, T>>>],
+    merge_edge_value: FMergeEV,
+) -> Option<Arc<Mutex<Trie<EK, EV, T>>>>
+where
+    EK: Ord + Clone + Debug,
+    EV: Clone,
+    T: Clone,
+    FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+{
+    EdgeInserter::new(source, edge_key, edge_value, merge_edge_value)
+        .try_destinations(destinations)
+        .into_option()
 }
 
 
