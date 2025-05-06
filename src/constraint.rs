@@ -363,20 +363,20 @@ impl GrammarConstraint {
 
                             // --- Use EdgeInserter to find/create target_pc_node_arc ---
                             let mut potential_targets: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
-                            // // Potential targets from segment_processing_q (if match doesn't end segment)
-                            // if match_end_offset < bytes_segment.len() {
-                            //     if let Some(map_at_offset) = segment_processing_q.get(&match_end_offset) {
-                            //         if let Some(set_at_state0) = map_at_offset.get(&TokenizerStateID(0)) {
-                            //             potential_targets.extend(set_at_state0.iter().map(|h| h.0.clone()));
-                            //         }
-                            //     }
-                            // }
-                            // // Potential targets from next_level_associations_for_child (if match ends segment)
-                            // if match_end_offset == bytes_segment.len() {
-                            //      if let Some(set_at_state0) = next_level_associations_for_child.get(&TokenizerStateID(0)) {
-                            //         potential_targets.extend(set_at_state0.iter().map(|h| h.0.clone()));
-                            //     }
-                            // }
+                            // Potential targets from segment_processing_q (if match doesn't end segment)
+                            if match_end_offset < bytes_segment.len() {
+                                if let Some(map_at_offset) = segment_processing_q.get(&match_end_offset) {
+                                    if let Some(set_at_state0) = map_at_offset.get(&TokenizerStateID(0)) {
+                                        potential_targets.extend(set_at_state0.iter().map(|h| h.0.clone()));
+                                    }
+                                }
+                            }
+                            // Potential targets from next_level_associations_for_child (if match ends segment)
+                            if match_end_offset == bytes_segment.len() {
+                                 if let Some(set_at_state0) = next_level_associations_for_child.get(&TokenizerStateID(0)) {
+                                    potential_targets.extend(set_at_state0.iter().map(|h| h.0.clone()));
+                                }
+                            }
                             
                             let target_pc_node_arc = EdgeInserter::new(
                                     segment_source_pc_handle.0.clone(),
