@@ -825,7 +825,7 @@ where
         }; // Lock is dropped here
 
         // Call try_slice with the collected children
-        self.try_slice(&children_arcs)
+        self.try_slice(&all_children_arcs)
     }
 
 
