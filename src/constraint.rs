@@ -212,7 +212,7 @@ impl GrammarConstraint {
             associated_pc_nodes_by_state: BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>>,
         }
 
-        let mut bfs_vocab_queue: VecDeque<VocabProcessingItem<'a>> = VecDeque::new();
+        let mut bfs_vocab_queue: VecDeque<VocabProcessingItem> = VecDeque::new();
         let mut visited_vocab_nodes: HashSet<*const VocabPrefixTreeNode> = HashSet::new();
 
         // Initialize the BFS queue with the root of the VocabPrefixTree
@@ -239,10 +239,9 @@ impl GrammarConstraint {
             let current_vocab_node = processing_item.vocab_node;
             let incoming_associations_by_state = processing_item.associated_pc_nodes_by_state;
 
-            crate::debug!(3, "Processing VocabPrefixTreeNode ({} children), prefix: '{}', is_word_end: {}",
+            crate::debug!(3, "Processing VocabPrefixTreeNode ({} children), prefix: '{}'",
                 current_vocab_node.iter_children().count(),
-                String::from_utf8_lossy(current_vocab_node.prefix()),
-                current_vocab_node.is_word_end()
+                String::from_utf8_lossy(current_vocab_node.prefix())
             );
 
             // Step 1: For each TokenizerStateID, merge the set of incoming PrecomputeNode handles into a single handle.
@@ -360,7 +359,7 @@ impl GrammarConstraint {
                                     segment_source_pc_handle.0.clone(),
                                     Some(grammar_token_id),
                                     edge_llm_tokens.clone(),
-                                    |ev_exist, ev_new| Some(ev_exist | ev_new) // MergeFn for LLMTokenBV
+                                    |ev_exist, ev_new| Some(ev_exist.clone() | ev_new) // MergeFn for LLMTokenBV
                                 )
                                 .try_destinations(&potential_targets) // Tries all collected potential targets
                                 .else_create_destination_with_value(PrecomputedNodeContents::default())
@@ -373,12 +372,10 @@ impl GrammarConstraint {
                                     .or_default()
                                     .insert(NodeHandle(target_pc_node_arc.clone()));
 
-                                if child_vocab_node.is_word_end() { // Current segment completes an LLM token
-                                    let mut target_guard = target_pc_node_arc.lock().unwrap();
-                                    target_guard.value.clean_end
-                                        .get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1))
-                                        .set(child_vocab_node.token_id(), true);
-                                }
+                                let mut target_guard = target_pc_node_arc.lock().unwrap();
+                                target_guard.value.clean_end
+                                    .get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1))
+                                    .set(child_vocab_node.token_id(), true);
                             } else { // Still more bytes in this LLM token segment
                                 segment_processing_q.entry(match_end_offset)
                                     .or_default()
@@ -409,7 +406,7 @@ impl GrammarConstraint {
                                     segment_source_pc_handle.0.clone(),
                                     None, // No full grammar token matched
                                     edge_llm_tokens.clone(),
-                                    |ev_exist, ev_new| Some(ev_exist | ev_new)
+                                    |ev_exist, ev_new| Some(ev_exist.clone() | ev_new)
                                 )
                                 .try_destinations(&potential_targets_partial)
                                 .else_create_destination_with_value(PrecomputedNodeContents::default())
@@ -421,17 +418,15 @@ impl GrammarConstraint {
                                 .insert(NodeHandle(target_pc_node_arc_partial.clone()));
 
                             // Add finalizer info to segment_source_pc_handle's value (node *before* this partial consumption)
-                             if child_vocab_node.is_word_end() { // Current segment completes an LLM token
-                                let possible_final_grammar_tokens = tokenizer.tokens_accessible_from_state(final_tokenizer_state_id);
-                                let mut segment_source_guard = segment_source_pc_handle.0.lock().unwrap();
-                                for gtid in possible_final_grammar_tokens {
-                                    segment_source_guard.value.push_finalizer_info(
-                                        gtid, // GrammarTokenID
-                                        LLMTokenID(child_vocab_node.token_id()),
-                                        final_tokenizer_state_id,
-                                        max_llm_token_id
-                                    );
-                                }
+                            let possible_final_grammar_tokens = tokenizer.tokens_accessible_from_state(final_tokenizer_state_id);
+                            let mut segment_source_guard = segment_source_pc_handle.0.lock().unwrap();
+                            for gtid in possible_final_grammar_tokens {
+                                segment_source_guard.value.push_finalizer_info(
+                                    gtid, // GrammarTokenID
+                                    LLMTokenID(child_vocab_node.token_id()),
+                                    final_tokenizer_state_id,
+                                    max_llm_token_id
+                                );
                             }
                         }
                     }
@@ -479,19 +474,6 @@ impl GrammarConstraint {
         }).collect();
 
         final_precomputed
-    }
-
-    // Add a helper method to dump the precomputed trie structure for debugging
-    #[allow(dead_code)]
-    fn dump_precomputed(&self) {
-        crate::debug!(1, "Dumping Precomputed Graph:");
-        for (tokenizer_state_id, root_node) in &self.precomputed {
-            crate::debug!(1, "  Root for TokenizerStateID: {:?}", tokenizer_state_id);
-             // Create a temporary Arc<Mutex> for dumping
-            let temp_arc = Arc::new(Mutex::new(root_node.clone()));
-            crate::datastructures::trie::dump_structure(temp_arc);
-            crate::debug!(1, "---");
-        }
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
