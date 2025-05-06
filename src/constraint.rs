@@ -363,27 +363,21 @@ impl GrammarConstraint {
 
                             // --- Use EdgeInserter to find/create target_pc_node_arc ---
                             let mut potential_targets: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
-                            // Potential targets from segment_processing_q (if match doesn't end segment)
-                            if match_end_offset < bytes_segment.len() {
-                                if let Some(map_at_offset) = segment_processing_q.get(&match_end_offset) {
-                                    if let Some(set_at_state0) = map_at_offset.get(&TokenizerStateID(0)) {
-                                        potential_targets.extend(set_at_state0.iter().map(|h| h.0.clone()));
-                                    }
-                                }
-                            }
-                            // Potential targets from next_level_associations_for_child (if match ends segment)
-                            if match_end_offset == bytes_segment.len() {
-                                 if let Some(set_at_state0) = next_level_associations_for_child.get(&TokenizerStateID(0)) {
-                                    potential_targets.extend(set_at_state0.iter().map(|h| h.0.clone()));
-                                }
-                            }
-                            // Potential targets from existing children of segment_source_pc_handle
-                            let existing_children_of_source = segment_source_pc_handle.0.lock().unwrap()
-                                .get(&Some(grammar_token_id))
-                                .map_or(Vec::new(), |v| v.iter().map(|(_, arc)| arc.clone()).collect());
-                            potential_targets.extend(existing_children_of_source);
-
-
+                            // // Potential targets from segment_processing_q (if match doesn't end segment)
+                            // if match_end_offset < bytes_segment.len() {
+                            //     if let Some(map_at_offset) = segment_processing_q.get(&match_end_offset) {
+                            //         if let Some(set_at_state0) = map_at_offset.get(&TokenizerStateID(0)) {
+                            //             potential_targets.extend(set_at_state0.iter().map(|h| h.0.clone()));
+                            //         }
+                            //     }
+                            // }
+                            // // Potential targets from next_level_associations_for_child (if match ends segment)
+                            // if match_end_offset == bytes_segment.len() {
+                            //      if let Some(set_at_state0) = next_level_associations_for_child.get(&TokenizerStateID(0)) {
+                            //         potential_targets.extend(set_at_state0.iter().map(|h| h.0.clone()));
+                            //     }
+                            // }
+                            
                             let target_pc_node_arc = EdgeInserter::new(
                                     segment_source_pc_handle.0.clone(),
                                     Some(grammar_token_id),
@@ -391,6 +385,7 @@ impl GrammarConstraint {
                                     |ev_exist, ev_new| Some(ev_exist.clone() | ev_new) // MergeFn for LLMTokenBV
                                 )
                                 .try_destinations(&potential_targets) // Tries all collected potential targets
+                                .try_children()
                                 .else_create_destination_with_value(PrecomputedNodeContents::default())
                                 .unwrap();
 
