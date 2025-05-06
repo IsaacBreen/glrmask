@@ -2,14 +2,16 @@ use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode, Precompu
 use crate::datastructures::trie::{Trie, node_ptr};
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
 use crate::types::TerminalID as GrammarTokenID; // Corrected import path
-use crate::constraint::LLMTokenBV;
+use crate::constraint::LLMTokenBV; // This now refers to HybridBitset
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
-use bitvec::prelude::BitVec;
+use bitvec::prelude::BitVec; // Keep BitVec if needed elsewhere, but LLMTokenBV is HybridBitset now
+use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
 
-/// Helper function to print the indices of set bits in a BitVec.
+
+/// Helper function to print the indices of set bits in a HybridBitset.
 fn format_bv_indices(bv: &LLMTokenBV) -> String {
-    let indices: Vec<String> = bv.iter_ones().map(|i| i.to_string()).collect();
+    let indices: Vec<String> = bv.iter().map(|i| i.to_string()).collect();
     if indices.len() > 10 {
         format!("[{} indices starting with {}...]", indices.len(), indices[0..5].join(", "))
     } else if indices.is_empty() {
@@ -37,13 +39,13 @@ fn dump_precompute_trie_recursive(
 ) {
     let node_ptr_val = node_ptr(node_arc);
     if !visited.insert(node_ptr_val) {
-        println!("{}-> Ref {:?} (already printed)", indent, node_ptr_val);
+        println!("{}-> Ref {:p} (already printed)", indent, node_ptr_val);
         return;
     }
 
     let node = node_arc.lock().expect("Mutex poisoned during dump");
 
-    println!("{}-> Node {:?} (MaxDepth: {})", indent, node_ptr_val, node.max_depth);
+    println!("{}-> Node {:p} (MaxDepth: {})", indent, node_ptr_val, node.max_depth);
 
     // Print Node Value (Finalizers)
     if !node.value.finalizers().is_empty() {
@@ -65,7 +67,7 @@ fn dump_precompute_trie_recursive(
         for (edge_key, children_vec) in node.children() {
             for (edge_val_bv, child_arc) in children_vec {
                 println!(
-                    "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Ptr: {:?}",
+                    "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Ptr: {:p}",
                     indent,
                     edge_key.map(|grammar_token_id| grammar_token_id.0),
                     format_bv_indices(edge_val_bv),
@@ -110,38 +112,34 @@ mod tests {
     use crate::types::TerminalID;
     use bimap::BiBTreeMap;
     use super::*;
-    use bitvec::prelude::*;
+    use bitvec::prelude::*; // Still needed for macro use probably, but LLMTokenBV is HybridBitset
     use crate::seq;
+    use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
 
     #[test]
     fn test_format_bv_indices_empty() {
-        let bv = bitvec![usize, Lsb0;];
+        let bv = HybridBitset::new();
         assert_eq!(format_bv_indices(&bv), "[]");
 
-        let bv = bitvec![usize, Lsb0; 0, 0, 0];
+        let bv = HybridBitset::new();
         assert_eq!(format_bv_indices(&bv), "[]");
     }
 
     #[test]
     fn test_format_bv_indices_single() {
-        let mut bv = bitvec![usize, Lsb0; 0; 5];
-        bv.set(3, true);
+        let bv = HybridBitset::from_iter(vec![3]);
         assert_eq!(format_bv_indices(&bv), "[3]");
     }
 
     #[test]
     fn test_format_bv_indices_multiple_few() {
-        let mut bv = bitvec![usize, Lsb0; 0; 10];
-        bv.set(1, true);
-        bv.set(5, true);
-        bv.set(8, true);
+        let bv = HybridBitset::from_iter(vec![1, 5, 8]);
         assert_eq!(format_bv_indices(&bv), "[1, 5, 8]");
     }
 
     #[test]
     fn test_format_bv_indices_multiple_many() {
-        let mut bv = bitvec![usize, Lsb0; 0; 20];
-        for i in 0..15 { bv.set(i, true); }
+        let bv = HybridBitset::from_iter(0..15);
         assert_eq!(format_bv_indices(&bv), "[15 indices starting with 0, 1, 2, 3, 4...]");
     }
 

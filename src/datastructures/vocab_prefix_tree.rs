@@ -3,7 +3,8 @@ use std::fmt;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use bitvec::prelude::*;
+use bitvec::prelude::*; // Keep for macros or other uses if needed
+use crate::datastructures::hybrid_bitset::HybridBitset;
 
 // Represents a node in the VocabPrefixTree
 #[derive(PartialEq)] // Keep derived PartialEq for structural comparison in tests
@@ -20,7 +21,7 @@ pub struct VocabPrefixTreeNode {
     children: BTreeMap<Vec<u8>, VocabPrefixTreeNode>,
     /// Bit vector indicating all token IDs reachable from or including this node.
     /// The length is max_token_id + 1.
-    reachable_token_ids: BitVec,
+    reachable_token_ids: HybridBitset,
 }
 
 impl VocabPrefixTreeNode {
@@ -33,7 +34,7 @@ impl VocabPrefixTreeNode {
             prefix_length,
             children: BTreeMap::new(),
             // Initialize empty; will be computed after tree structure is built.
-            reachable_token_ids: BitVec::new(),
+            reachable_token_ids: HybridBitset::new(),
         }
     }
 
@@ -46,7 +47,7 @@ impl VocabPrefixTreeNode {
     pub fn prefix_length(&self) -> usize {
         self.prefix_length
     }
-    
+
     /// Returns the prefix byte sequence for this node.
     pub fn prefix(&self) -> &[u8] {
         &self.prefix
@@ -62,8 +63,8 @@ impl VocabPrefixTreeNode {
         self.children.iter()
     }
 
-    /// Returns a bitvec representing the set of token IDs reachable from this node.
-    pub fn reachable_token_ids(&self) -> &BitVec {
+    /// Returns a bitset representing the set of token IDs reachable from this node.
+    pub fn reachable_token_ids(&self) -> &HybridBitset {
         &self.reachable_token_ids
     }
 }
@@ -88,9 +89,8 @@ impl fmt::Debug for VocabPrefixTreeNode {
 
         // Summarize reachable_token_ids for brevity
         let reachable_summary = format!(
-            "{} set bits (len {})",
-            self.reachable_token_ids.count_ones(),
-            self.reachable_token_ids.len()
+            "{} set bits",
+            self.reachable_token_ids.len() // Use len() for count
         );
         debug_struct.field("reachable_token_ids", &reachable_summary);
 
@@ -178,8 +178,9 @@ impl VocabPrefixTree {
         crate::debug!(2, "Done computing reachable IDs");
 
         // 4. Adjust root's reachable IDs if its ID 0 is just the convention.
-        if !tree.has_empty_string_token && tree.root.token_id == 0 && tree.max_token_id >= 0 && !tree.root.reachable_token_ids.is_empty() {
-            tree.root.reachable_token_ids.set(0, false);
+        // Check max_token_id >= 0 is redundant as it's usize.
+        if !tree.has_empty_string_token && tree.root.token_id == 0 && !tree.root.reachable_token_ids.is_empty() {
+            tree.root.reachable_token_ids.remove(0);
         }
 
         tree
@@ -251,15 +252,16 @@ impl VocabPrefixTree {
 
     /// Recursively computes the `reachable_token_ids` for each node.
     /// This should be called after the tree structure is finalized by `merge_nodes`.
-    /// Uses HashSet internally for efficient merging and converts to BitVec at the end.
+    /// Uses HashSet internally for efficient merging and converts to HybridBitset at the end.
     fn compute_reachable_ids_recursive(node: &mut VocabPrefixTreeNode, max_token_id: usize) -> HashSet<usize> {
         // Initialize a HashSet to store reachable IDs for the current node.
         let mut current_node_ids_set = HashSet::new();
 
         // Add the node's own token ID to the set.
-        if node.token_id <= max_token_id {
-            current_node_ids_set.insert(node.token_id);
-        }
+        // max_token_id check is implicitly handled by HybridBitset if needed,
+        // but inserting is harmless even if it's larger than expected max.
+        current_node_ids_set.insert(node.token_id);
+
 
         // Recursively call on children and merge their results.
         for child_node in node.children.values_mut() {
@@ -269,10 +271,11 @@ impl VocabPrefixTree {
             current_node_ids_set.extend(child_ids_set);
         }
 
-        // Convert the final HashSet to a BitVec and store it in the node.
-        let mut final_bitvec = bitvec![0; max_token_id + 1];
+        // Convert the final HashSet to a HybridBitset and store it in the node.
+        let mut final_bitvec = HybridBitset::new(); // Create empty HybridBitset
         for token_id in &current_node_ids_set {
-            final_bitvec.set(*token_id, true);
+            // Check bounds implicitly handled by HybridBitset's potential conversion
+            final_bitvec.insert(*token_id);
         }
         node.reachable_token_ids = final_bitvec;
 
@@ -373,7 +376,11 @@ impl Ord for VocabPrefixTreeNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitvec::prelude::*;
+    use bitvec::prelude::*; // Still needed for macro use perhaps?
+    use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
+    use std::collections::HashSet;
+    use std::iter::FromIterator;
+
 
     // Helper to create byte vecs from strings for tests.
     fn b(s: &str) -> Vec<u8> {
@@ -392,7 +399,7 @@ mod tests {
         assert_eq!(tree.find_token(b"a"), None);
         assert_eq!(tree.find_token(b""), None); // Empty query returns None (flag is false)
         // Root's reachable IDs should be empty (bit 0 removed as it's conventional)
-        assert!(tree.root.reachable_token_ids.not_any());
+        assert!(tree.root.reachable_token_ids.is_empty());
     }
 
     #[test]
@@ -412,7 +419,7 @@ mod tests {
         assert_eq!(node.prefix_length, 5); // "hello" has length 5
         assert!(node.children.is_empty());
         // Node "hello" should only have its own ID reachable
-        let expected_node_bits = bitvec![0, 1]; // Size max_id + 1 = 2
+        let expected_node_bits = HybridBitset::from_iter(vec![1]);
         assert_eq!(node.reachable_token_ids, expected_node_bits);
 
         assert_eq!(tree.find_token(&b("hello")), Some(1));
@@ -421,7 +428,7 @@ mod tests {
         assert_eq!(tree.find_token(b""), None); // Flag is false
 
         // Root's reachable IDs should contain only ID 1 (ID 0 is conventional)
-        let expected_root_bits = bitvec![0, 1]; // Size max_id + 1 = 2
+        let expected_root_bits = HybridBitset::from_iter(vec![1]);
         assert_eq!(tree.root.reachable_token_ids, expected_root_bits);
     }
 
@@ -441,17 +448,14 @@ mod tests {
         let node_a = tree.root.children.get(&b("a")).unwrap();
         assert_eq!(node_a.token_id, 1);
         // Node "a" should only have its own ID reachable
-        let mut expected_node_a_bits = bitvec![0; 100]; // Size max_id + 1 = 100
-        expected_node_a_bits.set(1, true);
+        let expected_node_a_bits = HybridBitset::from_iter(vec![1]);
         assert_eq!(node_a.reachable_token_ids, expected_node_a_bits);
 
         assert_eq!(tree.find_token(&b("")), Some(99)); // Query for "" returns its ID (flag is true)
         assert_eq!(tree.find_token(&b("a")), Some(1));
 
         // Root's reachable IDs should contain 1 (from child) and 99 (itself)
-        let mut expected_root_bits = bitvec![0; 100];
-        expected_root_bits.set(1, true);
-        expected_root_bits.set(99, true);
+        let expected_root_bits = HybridBitset::from_iter(vec![1, 99]);
         assert_eq!(tree.root.reachable_token_ids, expected_root_bits);
     }
 
@@ -471,16 +475,14 @@ mod tests {
         let node_a = tree.root.children.get(&b("a")).unwrap();
         assert_eq!(node_a.token_id, 1);
         // Node "a" should only have its own ID reachable
-        let expected_node_a_bits = bitvec![0, 1]; // Size max_id + 1 = 2
+        let expected_node_a_bits = HybridBitset::from_iter(vec![1]);
         assert_eq!(node_a.reachable_token_ids, expected_node_a_bits);
 
         assert_eq!(tree.find_token(&b("")), Some(0)); // Query for "" returns its ID 0 (flag is true)
         assert_eq!(tree.find_token(&b("a")), Some(1));
 
         // Root's reachable IDs should contain 1 (from child) and 0 (itself, as it's explicit)
-        let mut expected_root_bits = bitvec![0; 2];
-        expected_root_bits.set(0, true);
-        expected_root_bits.set(1, true);
+        let expected_root_bits = HybridBitset::from_iter(vec![0, 1]);
         assert_eq!(tree.root.reachable_token_ids, expected_root_bits);
     }
 
@@ -509,11 +511,11 @@ mod tests {
         assert_eq!(node_ab.token_id, 2);
         assert!(node_ab.children.is_empty());
         // Node "ab" reachable IDs: {2}
-        let expected_ab_bits = bitvec![0, 0, 1]; // Size 3
+        let expected_ab_bits = HybridBitset::from_iter(vec![2]);
         assert_eq!(node_ab.reachable_token_ids, expected_ab_bits);
 
         // Node "a" reachable IDs: {1, 2}
-        let expected_a_bits = bitvec![0, 1, 1]; // Size 3
+        let expected_a_bits = HybridBitset::from_iter(vec![1, 2]);
         assert_eq!(node_a.reachable_token_ids, expected_a_bits);
 
         assert_eq!(tree.find_token(&b("a")), Some(1));
@@ -552,15 +554,15 @@ mod tests {
         assert_eq!(node_abc.token_id, 3);
         assert!(node_abc.children.is_empty());
         // Node "abc" reachable: {3}
-        let expected_abc_bits = bitvec![0, 0, 0, 1]; // Size 4
+        let expected_abc_bits = HybridBitset::from_iter(vec![3]);
         assert_eq!(node_abc.reachable_token_ids, expected_abc_bits);
 
         // Node "ab" reachable: {2, 3}
-        let expected_ab_bits = bitvec![0, 0, 1, 1]; // Size 4
+        let expected_ab_bits = HybridBitset::from_iter(vec![2, 3]);
         assert_eq!(node_ab.reachable_token_ids, expected_ab_bits);
 
         // Node "a" reachable: {1, 2, 3}
-        let expected_a_bits = bitvec![0, 1, 1, 1]; // Size 4
+        let expected_a_bits = HybridBitset::from_iter(vec![1, 2, 3]);
         assert_eq!(node_a.reachable_token_ids, expected_a_bits);
 
         assert_eq!(tree.find_token(&b("a")), Some(1));
@@ -597,8 +599,7 @@ mod tests {
         assert_eq!(node_apple.prefix_length, 5); // "apple" length 5
         assert!(node_apple.children.is_empty());
         // Node "apple" reachable: {10}
-        let mut expected_apple_bits = bitvec![0; 21];
-        expected_apple_bits.set(10, true);
+        let expected_apple_bits = HybridBitset::from_iter(vec![10]);
         assert_eq!(node_apple.reachable_token_ids, expected_apple_bits);
 
         assert!(node_app.children.contains_key(&b("ly")));
@@ -607,15 +608,11 @@ mod tests {
         assert_eq!(node_apply.token_id, 20);
         assert!(node_apply.children.is_empty());
         // Node "apply" reachable: {20}
-        let mut expected_apply_bits = bitvec![0; 21];
-        expected_apply_bits.set(20, true);
+        let expected_apply_bits = HybridBitset::from_iter(vec![20]);
         assert_eq!(node_apply.reachable_token_ids, expected_apply_bits);
 
         // Node "app" reachable: {5, 10, 20}
-        let mut expected_app_bits = bitvec![0; 21];
-        expected_app_bits.set(5, true);
-        expected_app_bits.set(10, true);
-        expected_app_bits.set(20, true);
+        let expected_app_bits = HybridBitset::from_iter(vec![5, 10, 20]);
         assert_eq!(node_app.reachable_token_ids, expected_app_bits);
 
         assert_eq!(tree_with_prefix.find_token(&b("app")), Some(5));
@@ -646,8 +643,7 @@ mod tests {
         assert_eq!(node_apple.token_id, 10);
         assert!(node_apple.children.is_empty());
         // Node "apple" reachable: {10}
-        let mut expected_apple_bits = bitvec![0; 21];
-        expected_apple_bits.set(10, true);
+        let expected_apple_bits = HybridBitset::from_iter(vec![10]);
         assert_eq!(node_apple.reachable_token_ids, expected_apple_bits);
 
         let node_apply = tree.root.children.get(&b("apply")).unwrap();
@@ -655,8 +651,7 @@ mod tests {
         assert_eq!(node_apply.token_id, 20);
         assert!(node_apply.children.is_empty());
         // Node "apply" reachable: {20}
-        let mut expected_apply_bits = bitvec![0; 21];
-        expected_apply_bits.set(20, true);
+        let expected_apply_bits = HybridBitset::from_iter(vec![20]);
         assert_eq!(node_apply.reachable_token_ids, expected_apply_bits);
 
         assert_eq!(tree.find_token(&b("apple")), Some(10));
@@ -665,9 +660,7 @@ mod tests {
         assert_eq!(tree.find_token(&b("appl")), None);
 
         // Root reachable: {10, 20}
-        let mut expected_root_bits = bitvec![0; 21];
-        expected_root_bits.set(10, true);
-        expected_root_bits.set(20, true);
+        let expected_root_bits = HybridBitset::from_iter(vec![10, 20]);
         assert_eq!(tree.root.reachable_token_ids, expected_root_bits);
         assert_eq!(tree.find_token(b""), None); // Flag is false
     }
@@ -717,11 +710,7 @@ mod tests {
         assert_eq!(node_apply.prefix_length, 5); // "apply"
 
         // Node "a" reachable: {1, 10, 11, 12}
-        let mut expected_a_bits = bitvec![0; 100];
-        expected_a_bits.set(1, true);
-        expected_a_bits.set(10, true);
-        expected_a_bits.set(11, true);
-        expected_a_bits.set(12, true);
+        let expected_a_bits = HybridBitset::from_iter(vec![1, 10, 11, 12]);
         assert_eq!(node_a.reachable_token_ids, expected_a_bits);
 
 
@@ -736,9 +725,7 @@ mod tests {
         assert_eq!(node_banana.prefix_length, 6); // "banana"
 
         // Node "b" reachable: {2, 20}
-        let mut expected_b_bits = bitvec![0; 100];
-        expected_b_bits.set(2, true);
-        expected_b_bits.set(20, true);
+        let expected_b_bits = HybridBitset::from_iter(vec![2, 20]);
         assert_eq!(node_b.reachable_token_ids, expected_b_bits);
 
         // Test lookups
@@ -753,14 +740,8 @@ mod tests {
         assert_eq!(tree.find_token(&b("c")), None);
 
         // Root reachable: {1, 2, 10, 11, 12, 20, 99}
-        let mut expected_root_bits = bitvec![0; 100];
-        expected_root_bits.set(1, true);
-        expected_root_bits.set(2, true);
-        expected_root_bits.set(10, true);
-        expected_root_bits.set(11, true);
-        expected_root_bits.set(12, true);
-        expected_root_bits.set(20, true);
-        expected_root_bits.set(99, true);
+        let expected_root_bits = HybridBitset::from_iter(vec![1, 2, 10, 11, 12, 20, 99]);
+        assert_eq!(tree.root.reachable_token_ids, expected_root_bits);
         assert_eq!(tree.find_token(b""), Some(99)); // Query for "" returns its ID (flag is true)
     }
 
@@ -787,11 +768,11 @@ mod tests {
         assert_eq!(node_ab.token_id, 2);
         assert!(node_ab.children.is_empty());
         // Node "ab" reachable: {2}
-        let expected_ab_bits = bitvec![0, 0, 1, 0]; // Size 4
+        let expected_ab_bits = HybridBitset::from_iter(vec![2]);
         assert_eq!(node_ab.reachable_token_ids, expected_ab_bits);
 
         // Node "a" reachable: {2, 3} (ID 1 was overwritten)
-        let expected_a_bits = bitvec![0, 0, 1, 1]; // Size 4
+        let expected_a_bits = HybridBitset::from_iter(vec![2, 3]);
         assert_eq!(node_a.reachable_token_ids, expected_a_bits);
 
         assert_eq!(tree.find_token(&b("a")), Some(3));
@@ -843,4 +824,3 @@ mod tests {
         assert!(node_b_children_iter.next().is_none());
     }
 }
-

@@ -5,8 +5,8 @@ use crate::glr::parser::ParseStateNodeContent;
 use crate::glr::parser::{MergeAndIntersect, GLRParser, GLRParserState, ParseState, ParseStateKey};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use bimap::BiBTreeMap;
-use bitvec::prelude::BitVec;
 use bitvec::prelude::*;
+use bitvec::prelude::*; // Keep for macros or other uses if needed
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque, HashSet};
 use std::ops::BitOr;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -19,10 +19,11 @@ use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeN
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::datastructures::trie::EdgeInserter;
 use indicatif::{ProgressBar, ProgressStyle};
+use crate::datastructures::hybrid_bitset::HybridBitset;
 
 
-pub type LLMTokenBV = BitVec;
-pub type GrammarTokenBV = BitVec;
+pub type LLMTokenBV = HybridBitset;
+pub type GrammarTokenBV = BitVec; // Assuming GrammarTokenBV remains BitVec
 
 #[derive(Default, Debug, Clone)]
 pub struct PrecomputedFinalizer {
@@ -67,7 +68,7 @@ impl std::fmt::Debug for LLMTokenInfo {
         const MAX_ITEMS: usize = 10;
 
         let format_bv = |bv: &LLMTokenBV| -> String {
-            let ids: Vec<_> = bv.iter_ones().collect();
+            let ids: Vec<_> = bv.iter().collect();
             if ids.len() > MAX_ITEMS {
                 format!("[{:?}... ({} total)]", &ids[..MAX_ITEMS], ids.len())
             } else {
@@ -105,15 +106,15 @@ impl MergeAndIntersect for LLMTokenInfo {
     fn merge(&self, other: &Self) -> Self {
         // Merge: Active tokens are unioned, Intersection tokens are intersected.
         Self {
-            active: self.active.clone() | other.active.clone(),
-            intersection: self.intersection.clone() & other.intersection.clone(),
+            active: &self.active | &other.active, // Use reference for ops
+            intersection: &self.intersection & &other.intersection, // Use reference for ops
         }
     }
     fn intersect(&self, other: &Self) -> Self {
         // Intersect: Active tokens are intersected, Intersection is also intersected.
         Self {
-            active: self.active.clone() & other.active.clone(),
-            intersection: self.intersection.clone() & other.intersection.clone(),
+            active: &self.active & &other.active, // Use reference for ops
+            intersection: &self.intersection & &other.intersection, // Use reference for ops
         }
     }
 }
@@ -124,12 +125,14 @@ impl PrecomputedNodeContents {
     /// Adds information about a final state reachable via a specific grammar token.
     /// If an entry for the grammar token already exists, it merges the information.
     pub fn push_finalizer_info(&mut self, possible_final_grammar_token: GrammarTokenID, llm_token_id: LLMTokenID, tokenizer_state_id: TokenizerStateID, max_llm_token_id: usize) {
-        let mut current_compatible_llm_tokens = LLMTokenBV::repeat(false, max_llm_token_id + 1);
-        current_compatible_llm_tokens.set(llm_token_id.0, true);
+        // max_llm_token_id is no longer needed here, HybridBitset handles size dynamically
+        let mut current_compatible_llm_tokens = HybridBitset::new();
+        current_compatible_llm_tokens.insert(llm_token_id.0);
 
         self.finalizers.entry(possible_final_grammar_token)
             .and_modify(|existing_finalizer| {
                 existing_finalizer.content.entry(tokenizer_state_id).and_modify(|existing_llm_tokens| {
+                    // Use BitOrAssign<&HybridBitset>
                     *existing_llm_tokens |= &current_compatible_llm_tokens;
                 }).or_insert(current_compatible_llm_tokens.clone());
             })
@@ -255,7 +258,8 @@ impl GrammarConstraint {
 
         // merge_map for deduplicating PrecomputeNode structures resulting from merged paths
         let mut merge_map: BTreeMap<BTreeSet<NodeHandle>, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
-        let all_llm_tokens_for_merge_edge = LLMTokenBV::repeat(true, max_llm_token_id + 1);
+        // Create a set representing all possible tokens [0..=max_llm_token_id]
+        let all_llm_tokens_for_merge_edge: LLMTokenBV = (0..=max_llm_token_id).collect();
 
 
         crate::debug!(2, "Starting precompute main DFS loop over VocabPrefixTree");
@@ -285,9 +289,7 @@ impl GrammarConstraint {
                         let new_merged_pc_node_arc = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
                         {
                             let mut new_merged_pc_node_guard = new_merged_pc_node_arc.lock().unwrap();
-                            for handle in &set_of_handles {
-                                // Edge from new_merged_pc_node to original nodes in the set.
-                                // Key is None (structural merge), Value is all tokens (pass-through).
+                            for handle in &set_of_segment_source_handles { // Use set_of_segment_source_handles here
                                 new_merged_pc_node_guard.force_insert_to_node(None, all_llm_tokens_for_merge_edge.clone(), &handle.0);
                             }
                         }
@@ -377,12 +379,13 @@ impl GrammarConstraint {
                                     potential_targets.extend(set_at_state0.iter().map(|h| h.0.clone()));
                                 }
                             }
-                            
+
                             let target_pc_node_arc = EdgeInserter::new(
                                     segment_source_pc_handle.0.clone(),
                                     Some(grammar_token_id),
-                                    edge_llm_tokens.clone(),
-                                    |ev_exist, ev_new| Some(ev_exist.clone() | ev_new) // MergeFn for LLMTokenBV
+                                    edge_llm_tokens.clone(), // edge_llm_tokens is HybridBitset now
+                                    // MergeFn for HybridBitset: &HybridBitset | &HybridBitset -> HybridBitset
+                                    |ev_exist: &HybridBitset, ev_new: HybridBitset| Some(ev_exist | &ev_new)
                                 )
                                 .try_destinations(&potential_targets) // Tries all collected potential targets
                                 .try_children()
@@ -397,8 +400,8 @@ impl GrammarConstraint {
                                     .insert(NodeHandle(target_pc_node_arc.clone()));
 
                                 target_pc_node_arc.lock().unwrap().value.clean_end
-                                    .get_or_insert_with(|| LLMTokenBV::repeat(false, max_llm_token_id + 1))
-                                    .set(child_vocab_node.token_id(), true);
+                                     .get_or_insert_with(HybridBitset::new) // Create empty set
+                                     .insert(child_vocab_node.token_id()); // Insert the token ID
                             } else { // Still more bytes in this LLM token segment
                                 segment_processing_q.entry(match_end_offset)
                                     .or_default()
@@ -420,6 +423,7 @@ impl GrammarConstraint {
                             // Add finalizer info to segment_source_pc_handle's value (node *before* this partial consumption)
                             let possible_final_grammar_tokens = tokenizer.tokens_accessible_from_state(final_tokenizer_state_id);
                             let mut segment_source_guard = segment_source_pc_handle.0.lock().unwrap();
+                            // Pass max_llm_token_id only because push_finalizer_info still expects it, though it doesn't use it now.
                             for gtid in possible_final_grammar_tokens {
                                 segment_source_guard.value.push_finalizer_info(
                                     gtid, // GrammarTokenID
@@ -468,9 +472,9 @@ impl GrammarConstraint {
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
         let initial_token_info = LLMTokenInfo {
-            active: LLMTokenBV::repeat(true, self.max_llm_token_id + 1),
+            active: (0..=self.max_llm_token_id).collect(), // Create set [0..=max_id]
             // Initially, the intersection must also be all true, as no constraints have been applied.
-            intersection: LLMTokenBV::repeat(true, self.max_llm_token_id + 1),
+            intersection: (0..=self.max_llm_token_id).collect(), // Create set [0..=max_id]
         };
         let mut state = BTreeMap::new();
         let initial_glr_parser_state: GLRParserState<'_, LLMTokenInfo> = self.parser.init_glr_parser_with_t(initial_token_info);
@@ -485,32 +489,36 @@ impl GrammarConstraint {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&mut self) -> LLMTokenBV {
-        let mut mask = LLMTokenBV::repeat(false, self.parent.max_llm_token_id + 1);
+        let mut mask = HybridBitset::new();
         for (_, state) in &self.state {
             for active_state in &state.active_states {
-                mask |= active_state.stack.peek().t.active.clone();
+                // Use BitOrAssign<&HybridBitset>
+                mask |= &active_state.stack.peek().t.active;
             }
         }
         mask
     }
 
     pub fn step_with_all_llm_tokens(&mut self) {
-        let all_llm_tokens = LLMTokenBV::repeat(true, self.parent.max_llm_token_id + 1);
+        let all_llm_tokens: LLMTokenBV = (0..=self.parent.max_llm_token_id).collect();
         self.step(&all_llm_tokens);
     }
 
     pub fn step_with_llm_token(&mut self, llm_token_id: LLMTokenID) {
-        let mut llm_tokens = LLMTokenBV::repeat(false, self.parent.max_llm_token_id + 1);
-        llm_tokens.set(llm_token_id.0, true);
+        let mut llm_tokens = HybridBitset::new();
+        llm_tokens.insert(llm_token_id.0);
         self.step(&llm_tokens);
     }
 
     /// Prunes the GSS based on the committed token and resets the active token sets.
     pub fn commit(&mut self, llm_token_id: LLMTokenID) {
         let all_true_token_info = LLMTokenInfo {
-            active: LLMTokenBV::repeat(true, self.parent.max_llm_token_id + 1),
-            intersection: LLMTokenBV::repeat(true, self.parent.max_llm_token_id + 1),
+            active: (0..=self.parent.max_llm_token_id).collect(),
+            intersection: (0..=self.parent.max_llm_token_id).collect(),
         };
+        // Clone the intersection part for comparison inside the closure
+        let all_true_intersection = all_true_token_info.intersection.clone();
+
 
         // Closure for GSS transformation:
         // - Prune if token not present in 'active'.
@@ -518,9 +526,10 @@ impl<'a> GrammarConstraintState<'a> {
         //   - Reset 't' to 'all_true_token_info'.
         //   - Stop recursion if token is present in 'intersection' (optimization).
         let closure = |content: &ParseStateNodeContent<LLMTokenInfo>| -> Option<(ParseStateNodeContent<LLMTokenInfo>, bool)> {
-            if content.t.active[llm_token_id.0] {
+            if content.t.active.contains(llm_token_id.0) {
                 // If the intersection already guarantees this token, we can stop early.
-                if content.t.intersection.all() {
+                // Check if intersection contains all possible tokens
+                if content.t.intersection == all_true_intersection {
                      Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, false)) // Stop recursion
                 } else {
                      Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, true)) // Continue recursion
@@ -566,6 +575,7 @@ impl<'a> GrammarConstraintState<'a> {
                 // Only update the *active* tokens at the *top* of the stack.
                 // The intersection remains unchanged, and deeper nodes are untouched.
                 // The special_map logic will handle intersecting with edge_llm_tokens.
+                // Use BitAndAssign<&HybridBitset>
                 Arc::make_mut(&mut parse_state.stack).value.t.active &= llm_tokens;
                 // Intersection is NOT modified here. It reflects the guarantee from *below*.
             }
@@ -600,11 +610,12 @@ impl<'a> GrammarConstraintState<'a> {
                 glr_parse_state.active_states.retain_mut(|parse_state| {
                     // Intersect the *active* tokens with the edge tokens. Intersection inherits current active tokens.
                     let current_active_tokens = parse_state.stack.value.t.active.clone();
-                    Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens;
+                    // Use BitAndAssign<&HybridBitset>
+                    Arc::make_mut(&mut parse_state.stack).value.t.intersection &= &current_active_tokens;
                     Arc::make_mut(&mut parse_state.stack).value.t.active &= edge_llm_tokens;
                     !parse_state.stack.value.t.active.is_empty() // Check if any active paths remain
                 });
-                grammar_token_id.map(|grammar_token_id| glr_parse_state.step(grammar_token_id));
+                grammar_token_id.map(|grammar_token_id| glr_parse_state.step(*grammar_token_id));
                 if glr_parse_state.active_states.is_empty() {
                     crate::debug!(3, "No active states after processing grammar token {:?}", grammar_token_id.map(|grammar_token_id| grammar_token_id.0));
                     return None;
@@ -623,18 +634,20 @@ impl<'a> GrammarConstraintState<'a> {
             // Output: bool (continue?)
             |node, glr_parse_state| {
                 glr_parse_state.merge_active_states();
-                let mut active_llm_tokens = LLMTokenBV::repeat(false, self.parent.max_llm_token_id + 1);
+                let mut active_llm_tokens = HybridBitset::new();
                 for parse_state in &glr_parse_state.active_states {
-                    active_llm_tokens |= parse_state.stack.value.t.active.clone();
+                    // Use BitOrAssign<&HybridBitset>
+                    active_llm_tokens |= &parse_state.stack.value.t.active;
                 }
-                crate::debug!(3, "Processing node with {} active states, {} LLM tokens, {} finalizers", glr_parse_state.active_states.len(), active_llm_tokens.count_ones(), node.value.finalizers.len());
+                crate::debug!(3, "Processing node with {} active states, {} LLM tokens, {} finalizers", glr_parse_state.active_states.len(), active_llm_tokens.len(), node.value.finalizers.len());
                 // Handle clean end
                 if let Some(clean_end) = &node.value.clean_end {
                     let mut final_glr_parse_state = glr_parse_state.clone();
                     final_glr_parse_state.active_states.retain_mut(|parse_state| {
                         // Intersect the *active* tokens with the clean_end tokens. Intersection retains current active tokens.
                         let current_active_tokens = parse_state.stack.value.t.active.clone();
-                        Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens;
+                        // Use BitAndAssign<&HybridBitset>
+                        Arc::make_mut(&mut parse_state.stack).value.t.intersection &= &current_active_tokens;
                         Arc::make_mut(&mut parse_state.stack).value.t.active &= clean_end;
                         // Check if any active paths remain
                         !parse_state.stack.value.t.active.is_empty()
@@ -664,7 +677,8 @@ impl<'a> GrammarConstraintState<'a> {
                             glr_parse_state_filtered.active_states.retain_mut(|parse_state| {
                                 // Intersect the *active* tokens with the finalizer's allowed tokens. Intersection retains current active tokens.
                                 let current_active_tokens = parse_state.stack.value.t.active.clone();
-                                Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens;
+                                // Use BitAndAssign<&HybridBitset>
+                                Arc::make_mut(&mut parse_state.stack).value.t.intersection &= &current_active_tokens;
                                 Arc::make_mut(&mut parse_state.stack).value.t.active &= llm_tokens;
                                 // Check if any active paths remain
                                 !parse_state.stack.value.t.active.is_empty()
@@ -697,6 +711,7 @@ mod tests {
     use crate::glr::grammar::{nt, prod, t, NonTerminal, Terminal};
     use crate::glr::table::{generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
     use super::*;
+    use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
 
     #[test]
     fn test_constraint_simple() {
@@ -743,13 +758,13 @@ mod tests {
         // "a" leads to expecting "b" or "c".
         // "ab" leads to expecting "$".
         let mask = constraint_state.get_mask();
-        assert_eq!(mask, LLMTokenBV::from_iter([true, true, false])); // Expect "ab" or "ac"
+        assert_eq!(mask, HybridBitset::from_iter(vec![0, 1])); // Expect "ab" or "ac"
 
         // Commit "ab" (LLMTokenID 0)
         constraint_state.commit(LLMTokenID(0));
         constraint_state.step_with_all_llm_tokens();
         let mask = constraint_state.get_mask();
-        assert_eq!(mask, LLMTokenBV::from_iter([false, false, true])); // Expect "$" (EOF)
+        assert_eq!(mask, HybridBitset::from_iter(vec![2])); // Expect "$" (EOF)
     }
 
     #[test]
@@ -804,14 +819,14 @@ mod tests {
         state.step_with_all_llm_tokens();
         let mask = state.get_mask();
         // Expect LLM tokens that can start an expression: i (0), '(' (3), "(i" (5)
-        assert_eq!(mask, LLMTokenBV::from_iter([true, false, false, true, false, true, false]));
+        assert_eq!(mask, HybridBitset::from_iter(vec![0, 3, 5]));
 
         // Commit "(i"
         state.commit(LLMTokenID(5));
         state.step_with_all_llm_tokens();
         let mask = state.get_mask();
         // Now expect '+', '*', ')', '+i' => IDs 1,2,4,6
-        assert_eq!(mask, LLMTokenBV::from_iter([false, true, true, false, true, false, true]));
+        assert_eq!(mask, HybridBitset::from_iter(vec![1, 2, 4, 6]));
 
         // // Commit "(i"
         // state.commit(LLMTokenID(5));

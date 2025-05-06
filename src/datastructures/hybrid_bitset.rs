@@ -412,6 +412,18 @@ impl IntoIterator for HybridBitset {
      }
 }
 
+// Implement FromIterator for HybridBitset
+impl FromIterator<usize> for HybridBitset {
+    fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
+        let mut set = HybridBitset::new();
+        for i in iter {
+            set.insert(i);
+        }
+            set
+        }
+    }
+
+
 // --- Bitwise Operations (Creating New Sets) ---
 
 impl BitAnd for &HybridBitset {
@@ -554,8 +566,7 @@ impl BitOr for &HybridBitset {
             }
             (BitsetRepr::Dense { .. }, BitsetRepr::Sparse(_)) => {
                 let mut rhs_clone = rhs.clone();
-                rhs_clone.ensure_dense(); // Convert rhs to Dense
-                 // Now it's Dense | Dense
+                rhs_clone.ensure_dense();
                 self | &rhs_clone
             }
         }
@@ -734,7 +745,7 @@ impl BitOrAssign for HybridBitset {
         match (&mut self.inner, &rhs.inner) {
             (BitsetRepr::Dense { bits, lower_bound_count, upper_bound_count }, BitsetRepr::Sparse(set2)) => {
                 let mut new_bits_set = 0;
-                let original_len = bits.len();
+                // let original_len = bits.len(); // Not needed for logic
                 for &index in set2 {
                     if index >= bits.len() {
                         bits.resize(index + 1, false);
@@ -798,6 +809,86 @@ impl SubAssign for HybridBitset {
     }
 }
 
+// --- In-place Bitwise Operations with References ---
+
+impl BitAndAssign<&HybridBitset> for HybridBitset {
+    fn bitand_assign(&mut self, rhs: &HybridBitset) {
+        // Easiest is often to calculate the result and assign back.
+        *self = &*self & rhs; // Use the non-assign version with references
+    }
+}
+
+impl BitOrAssign<&HybridBitset> for HybridBitset {
+     fn bitor_assign(&mut self, rhs: &HybridBitset) {
+        // Optimization: If self is Dense, rhs is Sparse, can be faster
+        match (&mut self.inner, &rhs.inner) {
+            (BitsetRepr::Dense { bits, lower_bound_count, upper_bound_count }, BitsetRepr::Sparse(set2)) => {
+                let mut new_bits_set = 0;
+                // let original_len = bits.len(); // Not needed for logic
+                for &index in set2 {
+                    if index >= bits.len() {
+                        bits.resize(index + 1, false);
+                    }
+                    if !bits[index] { // Check before setting
+                        bits.set(index, true);
+                        new_bits_set += 1;
+                    }
+                }
+                if new_bits_set > 0 {
+                    // Bounds updated approximately
+                    *lower_bound_count = lower_bound_count.saturating_add(new_bits_set);
+                    *upper_bound_count = upper_bound_count.saturating_add(new_bits_set);
+                    // If resize happened, upper bound might be too low, recalculate?
+                    // For simplicity, let's assume len() will fix it later if needed.
+                }
+                // No representation check needed (usually grows)
+                return; // Done with optimized path
+            }
+            _ => {
+                 // Fallback to default implementation
+                 *self = &*self | rhs;
+            }
+        }
+    }
+}
+
+impl BitXorAssign<&HybridBitset> for HybridBitset {
+    fn bitxor_assign(&mut self, rhs: &HybridBitset) {
+        *self = &*self ^ rhs;
+    }
+}
+
+impl SubAssign<&HybridBitset> for HybridBitset {
+    fn sub_assign(&mut self, rhs: &HybridBitset) {
+         // Optimization: If self is Dense, rhs is Sparse, can be faster
+        match (&mut self.inner, &rhs.inner) {
+            (BitsetRepr::Dense { bits, lower_bound_count, upper_bound_count }, BitsetRepr::Sparse(set2)) => {
+                let mut bits_cleared = 0;
+                for &index in set2 {
+                    if index < bits.len() {
+                        if bits.replace(index, false) { // Returns previous value
+                            bits_cleared += 1;
+                        }
+                    }
+                }
+                if bits_cleared > 0 {
+                    // Update bounds approximately
+                    *lower_bound_count = lower_bound_count.saturating_sub(bits_cleared);
+                    *upper_bound_count = upper_bound_count.saturating_sub(bits_cleared);
+                    // Check representation
+                    self.check_representation();
+                }
+                return; // Done with optimized path
+            }
+             _ => {
+                 // Fallback to default implementation
+                 *self = &*self - rhs;
+            }
+        }
+    }
+}
+
+
 // --- Equality and Hashing ---
 // Note: Equality must be independent of the internal representation.
 
@@ -819,7 +910,7 @@ impl PartialEq for HybridBitset {
                 let min_len = min(len1, len2);
 
                 // Compare the common prefix
-                if b1[..min_len] != b2[..min_len] {
+                if min_len > 0 && b1[..min_len] != b2[..min_len] {
                     return false;
                 }
 
@@ -1251,9 +1342,11 @@ mod tests {
         assert!(set.contains(large_idx));
         assert!(!set.contains(1));
         assert!(!set.contains(large_idx - 1));
-        if let BitsetRepr::Dense{ bits, ..} = &set.inner {
-            assert!(bits.len() > large_idx); // Check bitvec was resized appropriately
-        } // This block won't be reached if Sparse, which is expected now
+        // This block won't be reached if Sparse, which is expected now
+        // if let BitsetRepr::Dense{ bits, ..} = &set.inner {
+        // assert!(bits.len() > large_idx); // Check bitvec was resized appropriately
+        // }
+
 
         // Check if it converts back to sparse if large index removed
         // (It's already sparse, so this just removes the element)
@@ -1321,6 +1414,38 @@ mod tests {
     }
 
     #[test]
+    fn test_assign_ops_ref() {
+         // Or Assign Ref
+        let mut set1 = HybridBitset::from_iter(vec![1, 2, 10]); // Sparse
+        let set2 = HybridBitset::from_iter(vec![2, 3, 20]); // Sparse
+        set1 |= &set2;
+        assert_eq!(set1.iter().collect::<HashSet<_>>(), HashSet::from_iter(vec![1, 2, 3, 10, 20]));
+        assert!(matches!(set1.inner, BitsetRepr::Sparse(_))); // Still sparse
+
+        // And Assign Ref
+        let mut set3 = HybridBitset::from_iter(0..SPARSE_TO_DENSE_THRESHOLD); // Dense
+        let set4 = HybridBitset::from_iter( (SPARSE_TO_DENSE_THRESHOLD/2)..SPARSE_TO_DENSE_THRESHOLD + 10); // Dense overlap
+        let expected_and = (SPARSE_TO_DENSE_THRESHOLD/2..SPARSE_TO_DENSE_THRESHOLD).collect::<HashSet<_>>();
+        set3 &= &set4;
+        assert_eq!(set3.iter().collect::<HashSet<_>>(), expected_and);
+        assert!(matches!(set3.inner, BitsetRepr::Sparse { .. }), "Result of Dense &= Sparse with size 64 should be Sparse");
+
+        // Xor Assign Ref
+        let mut set5 = HybridBitset::from_iter(vec![1, 2, 3]); // Sparse
+        let set6 = HybridBitset::from_iter(vec![3, 4, 5]); // Sparse
+        set5 ^= &set6;
+        assert_eq!(set5.iter().collect::<HashSet<_>>(), HashSet::from_iter(vec![1, 2, 4, 5]));
+        assert!(matches!(set5.inner, BitsetRepr::Sparse(_)));
+
+        // Sub Assign Ref
+        let mut set7 = HybridBitset::from_iter(vec![1, 2, 3, 4, 5]); // Sparse
+        let set8 = HybridBitset::from_iter(vec![2, 4, 6]); // Sparse
+        set7 -= &set8;
+        assert_eq!(set7.iter().collect::<HashSet<_>>(), HashSet::from_iter(vec![1, 3, 5]));
+        assert!(matches!(set7.inner, BitsetRepr::Sparse(_)));
+    }
+
+    #[test]
     fn test_dense_dense_edge_cases() {
         // Empty sets
         let mut d1 = HybridBitset::new(); d1.ensure_dense();
@@ -1375,14 +1500,14 @@ mod tests {
         assert!(matches!(set.inner, BitsetRepr::Sparse(_)));
     }
 
-    // Implement FromIterator for HybridBitset
-    impl FromIterator<usize> for HybridBitset {
-        fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
-            let mut set = HybridBitset::new();
-            for i in iter {
-                set.insert(i);
-            }
-            set
-        }
-    }
+    // Implement FromIterator for HybridBitset - Already implemented above the test module
+    // impl FromIterator<usize> for HybridBitset {
+    //     fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
+    //         let mut set = HybridBitset::new();
+    //         for i in iter {
+    //             set.insert(i);
+    //         }
+    //         set
+    //     }
+    // }
 }

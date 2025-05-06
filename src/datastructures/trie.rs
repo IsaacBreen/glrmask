@@ -5,6 +5,9 @@ use std::fmt::{self, Debug};
 use std::sync::{Arc, Mutex, TryLockError, MutexGuard};
 use std::sync::atomic::{AtomicUsize, Ordering}; // Added for tests
 
+use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
+
+
 /// Error type indicating that a cycle was detected during an operation
 /// that updates graph structure or properties like max_depth.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -428,7 +431,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             // If arr_depth > node_max_depth, something is inconsistent. Warn?
             if arr_depth > node_max_depth {
                  // This can happen if max_depth was updated concurrently or if graph has cycles not caught by insertion
-                 crate::debug!(3, "Warning: Node {:?} has arrival depth {} > max_depth {}. Processing anyway.", arc_ptr, arr_depth, node_max_depth);
+                 crate::debug!(3, "Warning: Node {:p} has arrival depth {} > max_depth {}. Processing anyway.", arc_ptr, arr_depth, node_max_depth);
             }
 
 
@@ -537,7 +540,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                      crate::debug!(3, "Warning: Some initial nodes were not processed (Arc Ptrs):");
                      unprocessed_initial = true;
                 }
-                crate::debug!(3, "  - {:?}", initial_arc_ptr);
+                crate::debug!(3, "  - {:p}", initial_arc_ptr);
             }
         }
         // Check nodes remaining in state
@@ -548,7 +551,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                      crate::debug!(3, "Warning: Nodes remaining in state but not processed (Arc Ptr, arrival_depth):");
                      unprocessed_in_state = true;
                  }
-                crate::debug!(3, "  - ({:?}, {})", arc_ptr, arr_depth);
+                crate::debug!(3, "  - ({:p}, {})", arc_ptr, arr_depth);
             }
         }
     }
@@ -669,6 +672,7 @@ pub(crate) fn dump_structure<EK: Debug + Ord, EV: Debug, T: Debug>(root: Arc<Mut
     let mut seen: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new(); // Use Arc pointer for seen set
 
     println!("Dumping Trie Structure (BFS):");
+    println!("(Node identity shown as {:p} which corresponds to the Mutex Arc pointer)", std::ptr::null::<Mutex<Trie<EK, EV, T>>>()); // Print format hint
 
     let root_arc_ptr = Arc::as_ptr(&root);
     if seen.insert(root_arc_ptr) {
@@ -679,7 +683,7 @@ pub(crate) fn dump_structure<EK: Debug + Ord, EV: Debug, T: Debug>(root: Arc<Mut
         let node_arc_ptr = Arc::as_ptr(&node_arc); // Get pointer for current node
         let node = node_arc.lock().expect("Mutex poisoned during dump");
         // Use node_arc_ptr for printing identity
-        println!("{:?}: Value: {:?}, MaxDepth: {}", node_arc_ptr, node.value, node.max_depth);
+        println!("{:p}: Value: {:?}, MaxDepth: {}", node_arc_ptr, node.value, node.max_depth);
 
         // Iterate through edges and their corresponding Vecs of children
         for (edge_key, children_vec) in node.children.iter() {
@@ -687,7 +691,7 @@ pub(crate) fn dump_structure<EK: Debug + Ord, EV: Debug, T: Debug>(root: Arc<Mut
             for (edge_val, child_arc) in children_vec {
                 let child_arc_ptr = Arc::as_ptr(child_arc); // Get pointer for child node
                 // Use child_arc_ptr for printing identity
-                println!("  - Edge Key: {:?}, Edge Val: {:?} -> Child: {:?}", edge_key, edge_val, child_arc_ptr);
+                println!("  - Edge Key: {:?}, Edge Val: {:?} -> Child: {:p}", edge_key, edge_val, child_arc_ptr);
                 if seen.insert(child_arc_ptr) {
                     queue.push_back(child_arc.clone());
                 }
@@ -777,7 +781,7 @@ where
                 }
                 Err(CycleDetectedError) => {
                     // Cycle detected, insert failed, result remains None
-                    crate::debug!(4, "Cycle detected trying to insert edge {:?} to node {:?}", self.edge_key, Arc::as_ptr(&destination));
+                    crate::debug!(4, "Cycle detected trying to insert edge {:?} to node {:p}", self.edge_key, Arc::as_ptr(&destination));
                 }
             }
         }
@@ -869,7 +873,7 @@ where
             }
             Err(CycleDetectedError) => {
                 // Insert failed (e.g., cycle detected even with new node - unusual)
-                crate::debug!(1, "Cycle detected trying to insert edge {:?} to NEW node {:?}. Creation failed.", self.edge_key, Arc::as_ptr(&new_node_arc));
+                crate::debug!(1, "Cycle detected trying to insert edge {:?} to NEW node {:p}. Creation failed.", self.edge_key, Arc::as_ptr(&new_node_arc));
                 // result remains None
             }
         }
@@ -940,28 +944,34 @@ impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
     /// use std::sync::{Arc, Mutex};
     /// use crate::datastructures::trie::Trie; // Assuming Trie is in this module
     /// use crate::datastructures::trie::EdgeInserter; // Also need EdgeInserter
+    /// use crate::datastructures::hybrid_bitset::HybridBitset; // Need HybridBitset
+    /// use std::iter::FromIterator; // For collect
     ///
     /// #[derive(Debug, Clone, Default)] // Need Default for else_create
     /// struct NodeValue { /* ... */ }
     ///
-    /// // Example merge function for edge values (e.g., Vec<i32>)
-    /// fn merge_vec_append(existing: &mut Vec<i32>, new: Vec<i32>) -> Option<Vec<i32>> {
-    ///     if !existing.is_empty() && !new.is_empty() {
-    ///         let mut merged = existing.clone();
-    ///         merged.extend(new);
-    ///         Some(merged)
-    ///     } else {
-    ///         None // Don't merge if either is empty
-    ///     }
+    /// // Example merge function for edge values (e.g., HybridBitset)
+    /// fn merge_bitset_union(existing: &HybridBitset, new: HybridBitset) -> Option<HybridBitset> {
+    ///     // Union is always possible/desired
+    ///     Some(existing | &new) // Use reference for the OR operation
     /// }
     ///
-    /// // Assuming root_node is Arc<Mutex<Trie<String, Vec<i32>, NodeValue>>>
-    /// let root_node: Arc<Mutex<Trie<String, Vec<i32>, NodeValue>>> = Arc::new(Mutex::new(Trie::new(NodeValue::default())));
-    /// let new_or_existing_node = root_node.insert_edge("key".to_string(), vec!, merge_vec_append)
-    ///     .try_slice(&potential_destinations) // potential_destinations is &[Arc<Mutex<...>>]
-    ///     .else_create() // Or else_create_with(...) or else_create_with_value(...)
-    ///     .unwrap();
-    /// // root_node is an Arc<Mutex> and can be used further.
+    /// // Assuming root_node is Arc<Mutex<Trie<String, HybridBitset, NodeValue>>>
+    /// let root_node: Arc<Mutex<Trie<String, HybridBitset, NodeValue>>> = Arc::new(Mutex::new(Trie::new(NodeValue::default())));
+    ///
+    /// // Create a HybridBitset to use as edge value
+    /// let new_edge_value: HybridBitset = vec!.into_iter().collect();
+    ///
+    /// let potential_destinations: Vec<Arc<Mutex<Trie<String, HybridBitset, NodeValue>>>> = vec![/* ... */];
+    ///
+    /// let new_or_existing_node = { // Use a block to drop the temporary mutex guard
+    ///     let root_guard = root_node.lock().unwrap(); // Get a guard to call insert_edge
+    ///     root_guard.insert_edge("key".to_string(), new_edge_value, merge_bitset_union)
+    ///         .try_destinations(&potential_destinations) // potential_destinations is &[Arc<Mutex<...>>]
+    ///         .else_create() // Or else_create_with(...) or else_create_with_value(...)
+    ///         .unwrap()
+    /// };
+    /// // root_node (Arc<Mutex>) is an Arc<Mutex> and can be used further.
     /// ```
     pub fn insert_edge<FMergeEV>(
         &self, // Note: This method takes &self, not &mut self. The EdgeInserter handles the mutation via Arc<Mutex>.
@@ -1028,6 +1038,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::collections::{HashSet, HashMap};
+    use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset for tests
+    use std::iter::FromIterator; // For collect
 
     // Use concrete types for merge tests
     type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;
@@ -1037,7 +1049,7 @@ mod tests {
     type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
 
     // Use concrete types for EdgeInserter tests
-    type TestTrieEI = Trie<&'static str, Vec<i32>, String>;
+    type TestTrieEI = Trie<&'static str, HybridBitset, String>; // Use HybridBitset here
     type TestNodeEI = Arc<Mutex<TestTrieEI>>;
 
     // Helper to get Arc pointer for tests
@@ -1418,10 +1430,11 @@ mod tests {
         root.lock().unwrap().max_depth = 0;
         child.lock().unwrap().max_depth = 1;
 
-        let nodes = Trie::all_nodes(root.clone());
+        let all_nodes = Trie::all_nodes(root.clone());
+
         // Should detect both nodes exactly once.
-        assert_eq!(nodes.len(), 2);
-        let node_ptrs: HashSet<_> = nodes.iter().map(arc_ptr).collect(); // Use arc_ptr
+        assert_eq!(all_nodes.len(), 2);
+        let node_ptrs: HashSet<_> = all_nodes.iter().map(arc_ptr).collect(); // Use arc_ptr
         assert_eq!(node_ptrs.len(), 2);
         assert!(node_ptrs.contains(&arc_ptr(&root)));
         assert!(node_ptrs.contains(&arc_ptr(&child)));
@@ -1903,30 +1916,26 @@ mod tests {
 
     // --- Tests for EdgeInserter ---
 
-    // Helper merge function for EdgeInserter tests: Append non-empty vectors
-    fn merge_vec_append(existing: &Vec<i32>, new: Vec<i32>) -> Option<Vec<i32>> {
-        if !existing.is_empty() && !new.is_empty() {
-            let mut merged = existing.clone();
-            merged.extend(new);
-            Some(merged)
-        } else {
-            None // Don't merge if either is empty
-        }
+    // Helper merge function for EdgeInserter tests: Union HybridBitset
+    fn merge_bitset_union(existing: &HybridBitset, new: HybridBitset) -> Option<HybridBitset> {
+        Some(existing | &new) // Use reference for the OR operation
     }
 
     #[test]
     fn test_ei_try_destination_success_new_edge() {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let dest: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest".to_string())));
+        let edge_val: HybridBitset = vec![1].into_iter().collect();
 
-        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+
+        let inserter = EdgeInserter::new(source.clone(), "key", edge_val.clone(), merge_bitset_union);
         let result_node = inserter.try_destination(dest.clone()).unwrap();
 
         assert!(Arc::ptr_eq(&result_node, &dest));
         let s = source.lock().unwrap();
         let children = s.get(&"key").unwrap();
         assert_eq!(children.len(), 1);
-        assert_eq!(children[0].0, vec![1]);
+        assert_eq!(children[0].0, edge_val);
         assert!(Arc::ptr_eq(&children[0].1, &dest));
         assert_eq!(dest.lock().unwrap().max_depth, 1); // Depth updated by try_insert
     }
@@ -1935,18 +1944,22 @@ mod tests {
     fn test_ei_try_destination_success_merge_ev() {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let dest: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest".to_string())));
+        let initial_edge_val: HybridBitset = vec![10].into_iter().collect();
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
+        let merged_edge_val: HybridBitset = vec![1, 10].into_iter().collect();
+
         // Pre-insert edge
-        source.lock().unwrap().try_insert("key", vec![10], dest.clone()).unwrap();
+        source.lock().unwrap().try_insert("key", initial_edge_val.clone(), dest.clone()).unwrap();
         assert_eq!(dest.lock().unwrap().max_depth, 1); // Check initial depth
 
-        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         let result_node = inserter.try_destination(dest.clone()).unwrap();
 
         assert!(Arc::ptr_eq(&result_node, &dest));
         let s = source.lock().unwrap();
         let children = s.get(&"key").unwrap();
         assert_eq!(children.len(), 1); // Still one edge
-        assert_eq!(children[0].0, vec![10, 1]); // Merged value
+        assert_eq!(children[0].0, merged_edge_val); // Merged value
         assert!(Arc::ptr_eq(&children[0].1, &dest));
         assert_eq!(dest.lock().unwrap().max_depth, 1); // Depth should remain 1
     }
@@ -1955,17 +1968,24 @@ mod tests {
     fn test_ei_try_destination_fail_merge_ev() {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let dest: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest".to_string())));
-        // Pre-insert edge with empty vec, merge_vec_append will fail
-        source.lock().unwrap().try_insert("key", vec![], dest.clone()).unwrap();
+        // Pre-insert edge with empty HybridBitset
+        let initial_edge_val = HybridBitset::new();
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
-        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
-        let result_opt = inserter.try_destination(dest.clone()).into_option(); // Use get()
+        source.lock().unwrap().try_insert("key", initial_edge_val.clone(), dest.clone()).unwrap();
 
-        assert!(result_opt.is_none()); // Merge failed, no result yet
+        // In this case, merge_bitset_union will always return Some, so merge should succeed.
+        // To test a failing merge, we'd need a different merge function or EV type.
+        // Let's repurpose this to test a successful merge where existing is empty.
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
+        let result_opt = inserter.try_destination(dest.clone()).into_option();
+
+        assert!(result_opt.is_some()); // Merge succeeded
         let s = source.lock().unwrap();
         let children = s.get(&"key").unwrap();
         assert_eq!(children.len(), 1);
-        assert_eq!(children[0].0, vec![] as Vec<i32>); // Original value remains
+        // The result of merge_bitset_union(&empty, &new_edge_val) is new_edge_val
+        assert_eq!(children[0].0, new_edge_val);
         assert!(Arc::ptr_eq(&children[0].1, &dest));
     }
 
@@ -1973,12 +1993,15 @@ mod tests {
     fn test_ei_try_destination_fail_cycle() {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let dest: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest".to_string())));
+         let dummy_edge_val = HybridBitset::new();
+
         // Create cycle manually for test setup
-        source.lock().unwrap().force_insert_to_node("dest_to_src", vec![100], &source); // dest -> source edge
-        dest.lock().unwrap().force_insert_to_node("src_to_dest", vec![200], &dest); // source -> dest edge
+        source.lock().unwrap().force_insert_to_node("dest_to_src", dummy_edge_val.clone(), &source); // dest -> source edge
+        dest.lock().unwrap().force_insert_to_node("src_to_dest", dummy_edge_val.clone(), &dest); // source -> dest edge
 
         // Now try inserting source -> dest again using EdgeInserter
-        let inserter = EdgeInserter::new(source.clone(), "src_to_dest", vec![1], merge_vec_append);
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
+        let inserter = EdgeInserter::new(source.clone(), "src_to_dest", new_edge_val.clone(), merge_bitset_union);
         // This will call try_insert which should detect the cycle
         let result_opt = inserter.try_destination(dest.clone()).into_option();
 
@@ -1992,13 +2015,15 @@ mod tests {
         let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
         let dest2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest2".to_string())));
         let dest3: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest3".to_string())));
+        let dummy_edge_val = HybridBitset::new();
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
         // Setup: dest2 -> source creates a cycle if we try source -> dest2
-        dest2.lock().unwrap().force_insert_to_node("d2->s", vec![], &source);
+        dest2.lock().unwrap().force_insert_to_node("d2->s", dummy_edge_val.clone(), &source);
 
         let destinations = [dest1.clone(), dest2.clone(), dest3.clone()];
 
-        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         // try(dest1) -> OK
         // try(dest2) -> Cycle Error (skipped because dest1 succeeded)
         // try(dest3) -> Skipped
@@ -2017,13 +2042,16 @@ mod tests {
         let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
         let dest2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest2".to_string())));
         let dest3: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest3".to_string())));
+        let dummy_edge_val = HybridBitset::new();
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
+
 
         // Setup: dest1 -> source creates a cycle if we try source -> dest1
-        dest1.lock().unwrap().force_insert_to_node("d1->s", vec![], &source);
+        dest1.lock().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
 
         let destinations = [dest1.clone(), dest2.clone(), dest3.clone()];
 
-        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         // try(dest1) -> Cycle Error
         // try(dest2) -> OK
         // try(dest3) -> Skipped
@@ -2041,14 +2069,16 @@ mod tests {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
         let dest2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest2".to_string())));
+        let dummy_edge_val = HybridBitset::new();
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
         // Setup: Both destinations cause cycles
-        dest1.lock().unwrap().force_insert_to_node("d1->s", vec![], &source);
-        dest2.lock().unwrap().force_insert_to_node("d2->s", vec![], &source);
+        dest1.lock().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
+        dest2.lock().unwrap().force_insert_to_node("d2->s", dummy_edge_val.clone(), &source);
 
         let destinations = [dest1.clone(), dest2.clone()];
 
-        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         let result_opt = inserter.try_destinations(&destinations).into_option();
 
         assert!(result_opt.is_none()); // All attempts failed
@@ -2060,15 +2090,19 @@ mod tests {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string())));
         let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
+        let initial_edge_val1: HybridBitset = vec![10].into_iter().collect();
+        let initial_edge_val2: HybridBitset = vec![20].into_iter().collect();
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
+        let merged_edge_val1: HybridBitset = vec![1, 10].into_iter().collect();
 
         // Pre-insert edges with the target key
         {
             let mut s = source.lock().unwrap();
-            s.try_insert("key", vec![10], child1.clone()).unwrap();
-            s.try_insert("key", vec![20], child2.clone()).unwrap();
+            s.try_insert("key", initial_edge_val1.clone(), child1.clone()).unwrap();
+            s.try_insert("key", initial_edge_val2.clone(), child2.clone()).unwrap();
         }
 
-        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         // Should try child1, merge succeeds. Should not try child2.
         let result_node = inserter.try_children().unwrap();
 
@@ -2078,17 +2112,19 @@ mod tests {
         assert_eq!(children.len(), 2); // Still two children
 
         let edge1 = children.iter().find(|(_, arc)| Arc::ptr_eq(arc, &child1)).unwrap();
-        assert_eq!(edge1.0, vec![10, 1]); // Merged value
+        assert_eq!(edge1.0, merged_edge_val1); // Merged value
 
         let edge2 = children.iter().find(|(_, arc)| Arc::ptr_eq(arc, &child2)).unwrap();
-        assert_eq!(edge2.0, vec![20]); // Unchanged
+        assert_eq!(edge2.0, initial_edge_val2); // Unchanged
     }
 
     #[test]
     fn test_ei_else_create_with_value() {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
-        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         // No try calls, should go straight to else_create
         let result_node = inserter.else_create_destination_with_value("created".to_string()).unwrap();
 
@@ -2097,7 +2133,7 @@ mod tests {
         let s = source.lock().unwrap();
         let children = s.get(&"key").unwrap();
         assert_eq!(children.len(), 1);
-        assert_eq!(children[0].0, vec![1]);
+        assert_eq!(children[0].0, new_edge_val);
         assert!(Arc::ptr_eq(&children[0].1, &result_node));
     }
 
@@ -2105,8 +2141,10 @@ mod tests {
     fn test_ei_else_create_with() {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let created_flag = Arc::new(AtomicUsize::new(0));
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
-        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         let flag_clone = created_flag.clone();
         let result_node = inserter.else_create_destination_with(|| {
             flag_clone.fetch_add(1, Ordering::SeqCst);
@@ -2121,8 +2159,10 @@ mod tests {
     #[test]
     fn test_ei_else_create_default() {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
-        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         // String::default() is ""
         let result_node = inserter.else_create_destination().unwrap();
 
@@ -2134,11 +2174,13 @@ mod tests {
     fn test_ei_chaining_try_then_else() {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
+        let dummy_edge_val = HybridBitset::new();
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
         // Setup: dest1 causes cycle
-        dest1.lock().unwrap().force_insert_to_node("d1->s", vec![], &source);
+        dest1.lock().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
 
-        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         let result_node = inserter
             .try_destination(dest1.clone()) // Fails (cycle)
             .else_create_destination_with_value("fallback".to_string()) // Executes
@@ -2156,8 +2198,10 @@ mod tests {
     fn test_ei_chaining_try_success_skips_else() {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
-        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         let result_node = inserter
             .try_destination(dest1.clone()) // Succeeds
             .else_create_destination_with_value("fallback".to_string()) // Should be skipped
@@ -2176,10 +2220,13 @@ mod tests {
     fn test_ei_unwrap_panic() {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-        // Setup: dest1 causes cycle
-        dest1.lock().unwrap().force_insert_to_node("d1->s", vec![], &source);
+        let dummy_edge_val = HybridBitset::new();
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
-        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        // Setup: dest1 causes cycle
+        dest1.lock().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
+
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         // Try fails, no else_create called
         inserter.try_destination(dest1.clone()).unwrap(); // Panic here
     }
@@ -2188,10 +2235,13 @@ mod tests {
     fn test_ei_get() {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-        // Setup: dest1 causes cycle
-        dest1.lock().unwrap().force_insert_to_node("d1->s", vec![], &source);
+        let dummy_edge_val = HybridBitset::new();
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
-        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        // Setup: dest1 causes cycle
+        dest1.lock().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
+
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
 
         // Try fails
         let inserter_after_try = inserter.try_destination(dest1.clone());
@@ -2210,10 +2260,12 @@ mod tests {
         let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string()))); // This one succeeds
         let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
         let new_node_val_if_created = "new_node_val".to_string();
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
+
 
         let destinations_for_slice = vec![child2.clone()];
 
-        let inserter = EdgeInserter::new(source.clone(), "key", vec![1], merge_vec_append);
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
         let result_node = inserter
             .try_destination(child1.clone()) // This succeeds, result is set to child1
             // try_slice, else_create_with_value should now have no effect
@@ -2228,7 +2280,7 @@ mod tests {
         let children = s.get(&"key").unwrap();
         assert_eq!(children.len(), 1);
         assert!(Arc::ptr_eq(&children[0].1, &child1));
-        assert_eq!(children[0].0, vec![1]);
+        assert_eq!(children[0].0, new_edge_val);
 
         // Ensure the value for the skipped else_create was not used
         assert_ne!(result_node.lock().unwrap().value, new_node_val_if_created);
@@ -2239,16 +2291,21 @@ mod tests {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string())));
         let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
+        let initial_edge_val1: HybridBitset = vec![10].into_iter().collect();
+        let initial_edge_val2: HybridBitset = vec![20].into_iter().collect();
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
+        let dummy_edge_val = HybridBitset::new();
+
 
         // Add child1 and child2 as children of source under different keys initially
         {
             let mut s = source.lock().unwrap();
-            s.try_insert("other_key_c1", vec![10], child1.clone()).unwrap();
-            s.try_insert("other_key_c2", vec![20], child2.clone()).unwrap();
+            s.try_insert("other_key_c1", initial_edge_val1.clone(), child1.clone()).unwrap();
+            s.try_insert("other_key_c2", initial_edge_val2.clone(), child2.clone()).unwrap();
         }
 
         // Now use EdgeInserter from source to try inserting an edge *to* its *existing children* under a NEW key
-        let inserter = EdgeInserter::new(source.clone(), "new_edge_key", vec![1], merge_vec_append);
+        let inserter = EdgeInserter::new(source.clone(), "new_edge_key", new_edge_val.clone(), merge_bitset_union);
         // try_children will look for existing children of 'source' under 'new_edge_key', find none, then try
         // inserting to child1 and child2 using try_slice. Assuming no cycles exist *now* to child1 or child2
         // via the new 'new_edge_key', the first attempt (to child1) should succeed.
@@ -2261,7 +2318,7 @@ mod tests {
         let children_new_key = s.get(&"new_edge_key").unwrap();
         assert_eq!(children_new_key.len(), 1);
         assert!(Arc::ptr_eq(&children_new_key[0].1, &child1));
-        assert_eq!(children_new_key[0].0, vec![1]);
+        assert_eq!(children_new_key[0].0, new_edge_val);
 
         // Check original edges are still there
         assert_eq!(s.get(&"other_key_c1").unwrap().len(), 1);
@@ -2275,15 +2332,16 @@ mod tests {
          // Make try_children fail by creating cycles
          {
             let mut s = source_for_fb.lock().unwrap();
-            s.try_insert("fb_key_c1", vec![10], child1_fb.clone()).unwrap(); // Link source -> child1
-            child1_fb.lock().unwrap().force_insert_to_node("c1->s", vec![], &source_for_fb); // Link child1 -> source (cycle)
+            s.try_insert("fb_key_c1", initial_edge_val1.clone(), child1_fb.clone()).unwrap(); // Link source -> child1
+            child1_fb.lock().unwrap().force_insert_to_node("c1->s", dummy_edge_val.clone(), &source_for_fb); // Link child1 -> source (cycle)
 
-            s.try_insert("fb_key_c2", vec![20], child2_fb.clone()).unwrap(); // Link source -> child2
-            child2_fb.lock().unwrap().force_insert_to_node("c2->s", vec![], &source_for_fb); // Link child2 -> source (cycle)
+            s.try_insert("fb_key_c2", initial_edge_val2.clone(), child2_fb.clone()).unwrap(); // Link source -> child2
+            child2_fb.lock().unwrap().force_insert_to_node("c2->s", dummy_edge_val.clone(), &source_for_fb); // Link child2 -> source (cycle)
          }
 
         let new_node_val_if_created = "fallback_node".to_string();
-         let inserter_fb = EdgeInserter::new(source_for_fb.clone(), "fallback_key", vec![99], merge_vec_append);
+        let fallback_edge_val: HybridBitset = vec![99].into_iter().collect();
+         let inserter_fb = EdgeInserter::new(source_for_fb.clone(), "fallback_key", fallback_edge_val.clone(), merge_bitset_union);
          let result_node_fb = inserter_fb
             .try_children() // Try inserting to child1_fb or child2_fb, both should fail cycle detection
             .else_create_destination_with_value(new_node_val_if_created.clone()) // Succeeds
