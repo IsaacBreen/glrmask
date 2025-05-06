@@ -289,7 +289,7 @@ impl GrammarConstraint {
                         let new_merged_pc_node_arc = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
                         {
                             let mut new_merged_pc_node_guard = new_merged_pc_node_arc.lock().unwrap();
-                            for handle in &set_of_segment_source_handles { // Use set_of_segment_source_handles here
+                            for handle in &set_of_handles { // Use set_of_segment_source_handles here
                                 new_merged_pc_node_guard.force_insert_to_node(None, all_llm_tokens_for_merge_edge.clone(), &handle.0);
                             }
                         }
@@ -615,7 +615,7 @@ impl<'a> GrammarConstraintState<'a> {
                     Arc::make_mut(&mut parse_state.stack).value.t.active &= edge_llm_tokens;
                     !parse_state.stack.value.t.active.is_empty() // Check if any active paths remain
                 });
-                grammar_token_id.map(|grammar_token_id| glr_parse_state.step(*grammar_token_id));
+                grammar_token_id.map(|grammar_token_id| glr_parse_state.step(grammar_token_id));
                 if glr_parse_state.active_states.is_empty() {
                     crate::debug!(3, "No active states after processing grammar token {:?}", grammar_token_id.map(|grammar_token_id| grammar_token_id.0));
                     return None;

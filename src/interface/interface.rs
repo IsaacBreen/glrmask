@@ -446,14 +446,15 @@ mod tests {
     use bitvec::prelude::*;
     use std::sync::{Arc, Mutex};
     use crate::constraint::LLMTokenBV;
+    use crate::datastructures::hybrid_bitset::HybridBitset;
 
-    fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> BitVec {
+    fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> HybridBitset {
         let mut bitvec = BitVec::new();
         bitvec.resize(capacity, false);
         for value in values {
             bitvec.set(value, true);
         }
-        bitvec
+        bitvec.into()
     }
 
     #[ignore]
