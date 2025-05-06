@@ -486,18 +486,6 @@ impl GrammarConstraint {
             state,
         }
     }
-
-    // Helper function for tests to dump the precomputed structure
-    #[cfg(test)]
-    fn dump_precomputed(&self) {
-        crate::debug!(1, "Dumping Precomputed Structure:");
-        for (tokenizer_state_id, precompute_node) in &self.precomputed {
-            crate::debug!(1, "  Tokenizer State ID: {:?}", tokenizer_state_id);
-            // Wrap the node in an Arc<Mutex> for dumping
-            let root_arc = Arc::new(Mutex::new(precompute_node.clone()));
-            crate::datastructures::trie::dump_structure(root_arc);
-        }
-    }
 }
 
 impl<'a> GrammarConstraintState<'a> {
@@ -537,9 +525,7 @@ impl<'a> GrammarConstraintState<'a> {
         let closure = |content: &ParseStateNodeContent<LLMTokenInfo>| -> Option<(ParseStateNodeContent<LLMTokenInfo>, bool)> {
             if content.t.active[llm_token_id.0] {
                 // If the intersection already guarantees this token, we can stop early.
-                // The optimization check should be `content.t.intersection[llm_token_id.0]`
-                // If the specific committed token is in the intersection, propagation can stop.
-                if content.t.intersection[llm_token_id.0] {
+                if content.t.intersection.all() {
                      Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, false)) // Stop recursion
                 } else {
                      Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, true)) // Continue recursion
@@ -653,10 +639,7 @@ impl<'a> GrammarConstraintState<'a> {
                     final_glr_parse_state.active_states.retain_mut(|parse_state| {
                         // Intersect the *active* tokens with the clean_end tokens. Intersection retains current active tokens.
                         let current_active_tokens = parse_state.stack.value.t.active.clone();
-                        // This intersection logic might be wrong. The intersection should be what *all* paths guarantee.
-                        // However, for clean_end, we are checking if the final GLR state *can* accept the LLM token.
-                        // Let's keep the current logic for `active` and re-evaluate `intersection`.
-                        Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens; // This line might need adjustment based on intended meaning of intersection
+                        Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens;
                         Arc::make_mut(&mut parse_state.stack).value.t.active &= clean_end;
                         // Check if any active paths remain
                         !parse_state.stack.value.t.active.is_empty()
@@ -686,8 +669,7 @@ impl<'a> GrammarConstraintState<'a> {
                             glr_parse_state_filtered.active_states.retain_mut(|parse_state| {
                                 // Intersect the *active* tokens with the finalizer's allowed tokens. Intersection retains current active tokens.
                                 let current_active_tokens = parse_state.stack.value.t.active.clone();
-                                // Similar to clean_end, reconsider intersection logic here.
-                                Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens; // This line might need adjustment
+                                Arc::make_mut(&mut parse_state.stack).value.t.intersection &= current_active_tokens;
                                 Arc::make_mut(&mut parse_state.stack).value.t.active &= llm_tokens;
                                 // Check if any active paths remain
                                 !parse_state.stack.value.t.active.is_empty()
@@ -756,7 +738,7 @@ mod tests {
         dbg!(&parser);
 
         let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 2);
-        // constraint.dump_precomputed(); // Uncomment to see the precomputed structure
+        constraint.dump_precomputed();
 
         let mut constraint_state = constraint.init();
 
@@ -820,7 +802,7 @@ mod tests {
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map); // Start production is index 6
         dbg!(&parser);
         let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 6);
-        // constraint.dump_precomputed(); // Uncomment to see the precomputed structure
+        constraint.dump_precomputed();
 
         // Initial state and step
         let mut state = constraint.init();
@@ -835,6 +817,11 @@ mod tests {
         let mask = state.get_mask();
         // Now expect '+', '*', ')', '+i' => IDs 1,2,4,6
         assert_eq!(mask, LLMTokenBV::from_iter([false, true, true, false, true, false, true]));
+
+        // // Commit "(i"
+        // state.commit(LLMTokenID(5));
+        // state.step_with_all_llm_tokens();
+        // let mask = state.get_mask();
+        // assert_eq!(mask, LLMTokenBV::from_iter([false, false, false, false, false, false, false]));
     }
 }
-
