@@ -236,18 +236,15 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Starting precompute main BFS loop over VocabPrefixTree");
         while let Some(processing_item) = bfs_vocab_queue.pop_front() {
-            let current_vocab_node = processing_item.vocab_node;
-            let incoming_associations_by_state = processing_item.associated_pc_nodes_by_state;
-
             crate::debug!(3, "Processing VocabPrefixTreeNode ({} children), prefix: '{}'",
-                current_vocab_node.iter_children().count(),
-                String::from_utf8_lossy(current_vocab_node.prefix())
+                processing_item.vocab_node.iter_children().count(),
+                String::from_utf8_lossy(processing_item.vocab_node.prefix())
             );
 
             // Step 1: For each TokenizerStateID, merge the set of incoming PrecomputeNode handles into a single handle.
             // These merged_pc_nodes are the effective source PrecomputeNodes "at" current_vocab_node for each tokenizer state.
             let mut merged_source_pc_nodes_map: BTreeMap<TokenizerStateID, NodeHandle> = BTreeMap::new();
-            for (tokenizer_state_id, set_of_handles) in incoming_associations_by_state {
+            for (tokenizer_state_id, set_of_handles) in processing_item.associated_pc_nodes_by_state {
                 if set_of_handles.is_empty() {
                     continue;
                 }
@@ -273,7 +270,7 @@ impl GrammarConstraint {
             }
 
             // Step 2: Iterate over children of current_vocab_node in the VocabPrefixTree
-            for (bytes_segment, child_vocab_node) in current_vocab_node.iter_children() {
+            for (bytes_segment, child_vocab_node) in processing_item.vocab_node.iter_children() {
                 crate::debug!(3, "  Transitioning via segment: '{}' to child_vocab_node (prefix: '{}')",
                     String::from_utf8_lossy(bytes_segment),
                     String::from_utf8_lossy(child_vocab_node.prefix())
