@@ -219,9 +219,9 @@ impl GrammarConstraint {
         // --- Initialize Progress Bar ---
         let pb = ProgressBar::new(total_vocab_nodes);
         pb.set_style(ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) {msg}")
             .expect("Failed to set progress bar template")
-            .progress_chars("#>-"));
+            .progress_chars("##-"));
         pb.set_message("Precomputing constraints...");
 
 
@@ -242,7 +242,7 @@ impl GrammarConstraint {
         // --- Use a Vec as a stack for DFS ---
         let mut dfs_vocab_stack: Vec<VocabProcessingItem> = Vec::new();
 
-        // Initialize the DFS stack with the root of the VocabPrefixTree
+        // Initialize the DFS stack with the root of the VocabPrefixTree.
         let mut initial_associations_at_vocab_root = BTreeMap::new();
         for (tokenizer_id, pc_root_arc) in &precomputed_roots {
             let mut set_for_state = BTreeSet::new();
@@ -258,8 +258,7 @@ impl GrammarConstraint {
 
         // merge_map for deduplicating PrecomputeNode structures resulting from merged paths
         let mut merge_map: BTreeMap<BTreeSet<NodeHandle>, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
-        // Create a set representing all possible tokens [0..=max_llm_token_id]
-        let all_llm_tokens_for_merge_edge: LLMTokenBV = (0..=max_llm_token_id).collect();
+        let all_llm_tokens_for_merge_edge = HybridBitset::ones(max_llm_token_id);
 
 
         crate::debug!(2, "Starting precompute main DFS loop over VocabPrefixTree");
@@ -481,9 +480,9 @@ impl GrammarConstraint {
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
         let initial_token_info = LLMTokenInfo {
-            active: (0..=self.max_llm_token_id).collect(), // Create set [0..=max_id]
+            active: HybridBitset::ones(self.max_llm_token_id),
             // Initially, the intersection must also be all true, as no constraints have been applied.
-            intersection: (0..=self.max_llm_token_id).collect(), // Create set [0..=max_id]
+            intersection: HybridBitset::ones(self.max_llm_token_id),
         };
         let mut state = BTreeMap::new();
         let initial_glr_parser_state: GLRParserState<'_, LLMTokenInfo> = self.parser.init_glr_parser_with_t(initial_token_info);
@@ -509,23 +508,23 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn step_with_all_llm_tokens(&mut self) {
-        let all_llm_tokens: LLMTokenBV = (0..=self.parent.max_llm_token_id).collect();
+        let all_llm_tokens = HybridBitset::ones(self.parent.max_llm_token_id);
         self.step(&all_llm_tokens);
     }
 
     pub fn step_with_llm_token(&mut self, llm_token_id: LLMTokenID) {
         let mut llm_tokens = HybridBitset::new();
         llm_tokens.insert(llm_token_id.0);
-        self.step(&llm_tokens);
+        self.step(&llm_tokens); // llm_tokens is already a HybridBitset
     }
 
     /// Prunes the GSS based on the committed token and resets the active token sets.
     pub fn commit(&mut self, llm_token_id: LLMTokenID) {
         let all_true_token_info = LLMTokenInfo {
-            active: (0..=self.parent.max_llm_token_id).collect(),
-            intersection: (0..=self.parent.max_llm_token_id).collect(),
+            active: HybridBitset::ones(self.parent.max_llm_token_id),
+            intersection: HybridBitset::ones(self.parent.max_llm_token_id),
         };
-        // Clone the intersection part for comparison inside the closure
+        // Clone the intersection part for comparison inside the closure.
         let all_true_intersection = all_true_token_info.intersection.clone();
 
 
@@ -538,7 +537,7 @@ impl<'a> GrammarConstraintState<'a> {
             if content.t.active.contains(llm_token_id.0) {
                 // If the intersection already guarantees this token, we can stop early.
                 // Check if intersection contains all possible tokens
-                if content.t.intersection == all_true_intersection {
+                if content.t.intersection == all_true_intersection { // This comparison might be slow if not optimized
                      Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, false)) // Stop recursion
                 } else {
                      Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, true)) // Continue recursion
@@ -570,7 +569,10 @@ impl<'a> GrammarConstraintState<'a> {
 
     pub fn commit_and_step_many(&mut self, llm_token_ids: &[LLMTokenID]) {
         for &llm_token_id in llm_token_ids {
-            self.step_with_llm_token(llm_token_id);
+            // self.step_with_llm_token(llm_token_id); // This was incorrect, commit should happen first or after all steps
+            // Correct logic: commit the previous token, then step with the new one.
+            self.commit(llm_token_id); // Commit the effect of the *previous* token leading to this one.
+            self.step_with_llm_token(llm_token_id); // Step with the current token.
         }
     }
 

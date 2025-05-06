@@ -53,6 +53,30 @@ impl HybridBitset {
         }
     }
 
+    /// Creates a new HybridBitset with all indices from 0 up to `max_value` (inclusive) set to true.
+    pub fn ones(max_value: usize) -> Self {
+        assert!(DENSE_TO_SPARSE_THRESHOLD < SPARSE_TO_DENSE_THRESHOLD, "Thresholds misconfigured");
+        let num_elements = max_value.saturating_add(1); // Number of elements from 0 to max_value
+
+        if num_elements == 0 { // max_value was usize::MAX, and num_elements overflowed to 0
+            // Or if max_value was passed as a very large number that makes num_elements effectively 0 after saturation.
+            // This case implies an attempt to create an impossibly large set.
+            // For safety, return an empty set, though this scenario is unlikely with typical token IDs.
+            return Self::new();
+        }
+
+        if num_elements >= SPARSE_TO_DENSE_THRESHOLD {
+            // Use Dense representation
+            let bits = bitvec![usize, Lsb0; 1; num_elements]; // Create BitVec of `num_elements` length, all set to 1
+            HybridBitset {
+                inner: BitsetRepr::Dense { bits, lower_bound_count: num_elements, upper_bound_count: num_elements }
+            }
+        } else {
+            // Use Sparse representation
+            HybridBitset::from_iter(0..num_elements)
+        }
+    }
+
     /// Creates a HybridBitset from an iterator of indices.
     pub fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
         let mut set = HybridBitset::new();
