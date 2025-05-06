@@ -883,8 +883,12 @@ where
 
 
     /// Returns the resulting destination node, if one was found or created.
-    pub fn into_option(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
-        self.result.clone() // Clone the Arc if present
+    pub fn into_option(self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
+        self.result
+    }
+
+    pub fn clone_into_option(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
+        self.result.clone()
     }
 
     /// Returns the resulting destination node, panicking if none was found or created.
@@ -2127,7 +2131,7 @@ mod tests {
 
         // Try fails
         let inserter_after_try = inserter.try_destination(dest1.clone());
-        assert!(inserter_after_try.into_option().is_none());
+        assert!(inserter_after_try.clone_into_option().is_none());
 
         // Now use else_create
         let inserter_after_else = inserter_after_try.else_create_destination_with_value("fallback".to_string());
