@@ -213,7 +213,6 @@ impl GrammarConstraint {
         }
 
         let mut bfs_vocab_queue: VecDeque<VocabProcessingItem> = VecDeque::new();
-        let mut visited_vocab_nodes: HashSet<*const VocabPrefixTreeNode> = HashSet::new();
 
         // Initialize the BFS queue with the root of the VocabPrefixTree
         let mut initial_associations_at_vocab_root = BTreeMap::new();
@@ -227,7 +226,6 @@ impl GrammarConstraint {
             vocab_node: &vocab_prefix_tree.root,
             associated_pc_nodes_by_state: initial_associations_at_vocab_root,
         });
-        visited_vocab_nodes.insert(&vocab_prefix_tree.root as *const _);
 
         // merge_map for deduplicating PrecomputeNode structures resulting from merged paths
         let mut merge_map: BTreeMap<BTreeSet<NodeHandle>, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
@@ -384,34 +382,11 @@ impl GrammarConstraint {
                         // Handle partial match at the end of the segment_suffix (i.e., tokenizer consumed all remaining bytes)
                         if let Some(final_tokenizer_state_val) = results.end_state {
                             let final_tokenizer_state_id = TokenizerStateID(final_tokenizer_state_val);
-                            let edge_llm_tokens = child_vocab_node.reachable_token_ids().clone();
-
-                            // --- Use EdgeInserter for partial match ---
-                            let mut potential_targets_partial: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
-                            // Potential targets from next_level_associations_for_child
-                             if let Some(set_at_state) = next_level_associations_for_child.get(&final_tokenizer_state_id) {
-                                potential_targets_partial.extend(set_at_state.iter().map(|h| h.0.clone()));
-                            }
-                            // Potential targets from existing children (key is None for partial match)
-                            let existing_children_no_key = segment_source_pc_handle.0.lock().unwrap()
-                                .get(&None)
-                                .map_or(Vec::new(), |v| v.iter().map(|(_, arc)| arc.clone()).collect());
-                            potential_targets_partial.extend(existing_children_no_key);
-
-                            let target_pc_node_arc_partial = EdgeInserter::new(
-                                    segment_source_pc_handle.0.clone(),
-                                    None, // No full grammar token matched
-                                    edge_llm_tokens.clone(),
-                                    |ev_exist, ev_new| Some(ev_exist.clone() | ev_new)
-                                )
-                                .try_destinations(&potential_targets_partial)
-                                .else_create_destination_with_value(PrecomputedNodeContents::default())
-                                .unwrap();
 
                             next_level_associations_for_child
                                 .entry(final_tokenizer_state_id)
                                 .or_default()
-                                .insert(NodeHandle(target_pc_node_arc_partial.clone()));
+                                .insert(segment_source_pc_handle.clone());
 
                             // Add finalizer info to segment_source_pc_handle's value (node *before* this partial consumption)
                             let possible_final_grammar_tokens = tokenizer.tokens_accessible_from_state(final_tokenizer_state_id);
@@ -428,24 +403,11 @@ impl GrammarConstraint {
                     }
                 } // End while segment_processing_q not empty
 
-                // After processing bytes_segment, if next_level_associations_for_child is not empty,
-                // add child_vocab_node to the main BFS queue.
-                if !next_level_associations_for_child.is_empty() {
-                    if !visited_vocab_nodes.contains(&(child_vocab_node as *const _)) {
-                         visited_vocab_nodes.insert(child_vocab_node as *const _);
-                         bfs_vocab_queue.push_back(VocabProcessingItem {
-                            vocab_node: child_vocab_node,
-                            associated_pc_nodes_by_state: next_level_associations_for_child,
-                        });
-                    } else {
-                        // If already visited (e.g. if VocabPrefixTree were a DAG), we'd need to merge
-                        // next_level_associations_for_child into the existing entry in bfs_vocab_queue
-                        // or handle it if it was already processed. For a tree, this branch is less critical.
-                        // To robustly handle DAGs, the bfs_vocab_queue might need to be a BTreeMap
-                        // to allow updates, or a more complex state management.
-                        crate::debug!(3, "  Skipping already visited child_vocab_node (prefix: '{}') for BFS queue addition.", String::from_utf8_lossy(child_vocab_node.prefix()));
-                    }
-                }
+                // After processing bytes_segment, add child_vocab_node to the main BFS queue.
+                bfs_vocab_queue.push_back(VocabProcessingItem {
+                    vocab_node: child_vocab_node,
+                    associated_pc_nodes_by_state: next_level_associations_for_child,
+                });
             } // End for each child_vocab_node of current_vocab_node
         } // End while bfs_vocab_queue not empty
         crate::debug!(2, "Done precomputing main BFS loop.");
