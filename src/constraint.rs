@@ -449,24 +449,33 @@ impl GrammarConstraint {
         crate::debug!(2, "Done precomputing main DFS loop.");
 
 
-        // Pull the roots out of their Arc<Mutex<_>> (Unchanged logic)
-        let final_precomputed = precomputed_roots.into_iter().map(|(id, arc_mutex_node)| {
-            // Ensure the Arc has only one strong reference before trying to unwrap.
-            // If other parts of the graph still hold Arcs to these root nodes (e.g. due to cycles back to roots),
-            // Arc::try_unwrap will fail. In such cases, .clone().into_inner() might be needed if the graph
-            // structure implies roots can be children of other nodes.
-            // For now, assume roots are distinct and try_unwrap is appropriate.
+        // Pull the roots out of their Arc<Mutex<_>> and count failures to unwrap.
+        let mut final_precomputed: Precomputed = BTreeMap::new();
+        let mut clone_count = 0;
+        for (id, arc_mutex_node) in precomputed_roots {
             match Arc::try_unwrap(arc_mutex_node) {
-                Ok(mutex_node) => (id, mutex_node.into_inner().expect("Mutex poisoned at end of precompute")),
+                Ok(mutex_node) => {
+                    final_precomputed.insert(
+                        id,
+                        mutex_node
+                            .into_inner()
+                            .expect("Mutex poisoned at end of precompute"),
+                    );
+                }
                 Err(arc_still_owned) => {
-                    // This case means a root node is also a child in the graph, or there's a bug.
-                    // We'll clone the inner Trie data if we can't unwrap the Arc.
-                    crate::debug!(4, "Warning: Precomputed root for TokenizerStateID {:?} still has multiple owners. Cloning inner Trie.", id);
-                    (id, arc_still_owned.lock().unwrap().clone())
+                    // Arc had multiple owners; clone the inner Trie.
+                    clone_count += 1;
+                    final_precomputed.insert(id, arc_still_owned.lock().unwrap().clone());
                 }
             }
-        }).collect();
-
+        }
+        if clone_count > 0 {
+            crate::debug!(
+                4,
+                "Warning: {} precomputed root(s) had multiple owners; cloned inner Trie for them.",
+                clone_count
+            );
+        }
         final_precomputed
     }
 
