@@ -232,6 +232,45 @@ impl GrammarConstraint {
             precomputed_roots.insert(TokenizerStateID(tokenizer_state_id), precompute_node);
         }
 
+        // merge_map for deduplicating PrecomputeNode structures resulting from merged paths
+        let mut merge_map: BTreeMap<BTreeSet<NodeHandle>, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
+        let all_llm_tokens_for_merge_edge = HybridBitset::ones(max_llm_token_id);
+
+        // ---- Helper function to merge NodeHandles ----
+        fn merge_node_handles_internal(
+            set_of_handles: &BTreeSet<NodeHandle>,
+            merge_map: &mut BTreeMap<BTreeSet<NodeHandle>, Arc<Mutex<PrecomputeNode>>>,
+            all_llm_tokens_for_merge_edge: &HybridBitset,
+        ) -> Option<NodeHandle> {
+            if set_of_handles.is_empty() {
+                return None;
+            }
+            if set_of_handles.len() == 1 {
+                // .clone() on NodeHandle is cheap (Arc clone)
+                return Some(set_of_handles.iter().next().unwrap().clone());
+            }
+
+            // Check if already merged
+            if let Some(existing_merged_arc) = merge_map.get(set_of_handles) {
+                Some(NodeHandle(existing_merged_arc.clone()))
+            } else {
+                // Create a new merged node
+                let new_merged_pc_node_arc = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
+                {
+                    let mut new_merged_pc_node_guard = new_merged_pc_node_arc.lock().unwrap();
+                    for handle in set_of_handles { // handle is &NodeHandle
+                        new_merged_pc_node_guard.force_insert_to_node(None, all_llm_tokens_for_merge_edge.clone(), &handle.0);
+                    }
+                }
+                // Store the new merged node in merge_map.
+                // set_of_handles must be cloned to be owned by the map.
+                merge_map.insert(set_of_handles.clone(), new_merged_pc_node_arc.clone());
+                Some(NodeHandle(new_merged_pc_node_arc))
+            }
+        }
+        // --------------------------------------------
+
+
         // Struct for DFS item
         struct VocabProcessingItem<'a> {
             vocab_node: &'a VocabPrefixTreeNode,
@@ -256,10 +295,6 @@ impl GrammarConstraint {
             associated_pc_nodes_by_state: initial_associations_at_vocab_root,
         });
 
-        // merge_map for deduplicating PrecomputeNode structures resulting from merged paths
-        let mut merge_map: BTreeMap<BTreeSet<NodeHandle>, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
-        let all_llm_tokens_for_merge_edge = HybridBitset::ones(max_llm_token_id);
-
 
         crate::debug!(2, "Starting precompute main DFS loop over VocabPrefixTree");
         // --- Main DFS loop ---
@@ -276,25 +311,12 @@ impl GrammarConstraint {
             // These merged_pc_nodes are the effective source PrecomputeNodes "at" current_vocab_node for each tokenizer state.
             let mut merged_source_pc_nodes_map: BTreeMap<TokenizerStateID, NodeHandle> = BTreeMap::new();
             for (tokenizer_state_id, set_of_handles) in processing_item.associated_pc_nodes_by_state {
-                if set_of_handles.is_empty() {
-                    continue;
-                }
-                if set_of_handles.len() == 1 {
-                    merged_source_pc_nodes_map.insert(tokenizer_state_id, set_of_handles.into_iter().next().unwrap());
-                } else {
-                    if let Some(existing_merged_arc) = merge_map.get(&set_of_handles) {
-                        merged_source_pc_nodes_map.insert(tokenizer_state_id, NodeHandle(existing_merged_arc.clone()));
-                    } else {
-                        let new_merged_pc_node_arc = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
-                        {
-                            let mut new_merged_pc_node_guard = new_merged_pc_node_arc.lock().unwrap();
-                            for handle in &set_of_handles { // Use set_of_segment_source_handles here
-                                new_merged_pc_node_guard.force_insert_to_node(None, all_llm_tokens_for_merge_edge.clone(), &handle.0);
-                            }
-                        }
-                        merge_map.insert(set_of_handles.clone(), new_merged_pc_node_arc.clone());
-                        merged_source_pc_nodes_map.insert(tokenizer_state_id, NodeHandle(new_merged_pc_node_arc));
-                    }
+                if let Some(merged_handle) = merge_node_handles_internal(
+                    &set_of_handles,
+                    &mut merge_map,
+                    &all_llm_tokens_for_merge_edge
+                ) {
+                    merged_source_pc_nodes_map.insert(tokenizer_state_id, merged_handle);
                 }
             }
 
@@ -332,23 +354,12 @@ impl GrammarConstraint {
                         }
 
                         // Merge the set_of_segment_source_handles for this specific path in segment processing.
-                        let segment_source_pc_handle: NodeHandle = if set_of_segment_source_handles.len() == 1 {
-                            set_of_segment_source_handles.into_iter().next().unwrap()
-                        } else {
-                            if let Some(existing_merged_arc) = merge_map.get(&set_of_segment_source_handles) {
-                                NodeHandle(existing_merged_arc.clone())
-                            } else {
-                                let new_merged_pc_node_arc = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
-                                {
-                                    let mut new_merged_pc_node_guard = new_merged_pc_node_arc.lock().unwrap();
-                                    for handle in &set_of_segment_source_handles {
-                                        new_merged_pc_node_guard.force_insert_to_node(None, all_llm_tokens_for_merge_edge.clone(), &handle.0);
-                                    }
-                                }
-                                merge_map.insert(set_of_segment_source_handles.clone(), new_merged_pc_node_arc.clone());
-                                NodeHandle(new_merged_pc_node_arc)
-                            }
-                        };
+                        let segment_source_pc_handle: NodeHandle = merge_node_handles_internal(
+                            &set_of_segment_source_handles,
+                            &mut merge_map,
+                            &all_llm_tokens_for_merge_edge
+                        ).expect("set_of_segment_source_handles should not be empty due to prior check");
+
                         // Now segment_source_pc_handle is the single PrecomputeNode from which we process &bytes_segment[current_offset..]
 
                         let segment_suffix_to_process = &bytes_segment[current_offset..];
@@ -758,7 +769,7 @@ mod tests {
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
         dbg!(&parser);
 
-        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 2);
+        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 3); // max_llm_token_id should be 3 for 0, 1, 2
         constraint.dump_precomputed();
 
         let mut constraint_state = constraint.init();
@@ -822,7 +833,7 @@ mod tests {
 
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map); // Start production is index 6
         dbg!(&parser);
-        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 6);
+        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 7); // max_llm_token_id should be 7 for IDs 0-6
         constraint.dump_precomputed();
 
         // Initial state and step
