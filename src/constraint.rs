@@ -21,6 +21,7 @@ use crate::datastructures::trie::EdgeInserter;
 use indicatif::{ProgressBar, ProgressStyle};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::ComparableArc; // Need ComparableArc for HashSet in final stats calculation
+use std::hash::{Hash, Hasher}; // Import Hash and Hasher
 
 
 pub type LLMTokenBV = HybridBitset;
@@ -247,6 +248,13 @@ impl GrammarConstraint {
                 (Arc::as_ptr(&self.0) as usize).cmp(&(Arc::as_ptr(&other.0) as usize))
             }
         }
+
+        // Add this Hash implementation for NodeHandle
+        impl Hash for NodeHandle {
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                (Arc::as_ptr(&self.0) as usize).hash(state);
+            }
+        }
         // ------------------------------------------------------------------------------------
 
         // Create the vocab prefix tree.
@@ -313,25 +321,35 @@ impl GrammarConstraint {
             // using an EdgeInserter. The edge key will be None.
             for handle_to_become_child in set_of_handles {
                 // Edge: new_merged_pc_node_arc --(None, all_llm_tokens_for_merge_edge)--> handle_to_become_child.0
-                const TRY_INSERT_CHILDREN: bool = true;
                 let mut insert_result = EdgeInserter::new(
-                    handle_to_become_child.0.clone(), // Source Arc<Mutex<PrecomputeNode>>
+                    new_merged_pc_node_arc.clone(), // Source Arc<Mutex<PrecomputeNode>>
                     None,                           // Edge key: Option<GrammarTokenID> = None
                     all_llm_tokens_for_merge_edge.clone(), // Edge value: LLMTokenBV
                     // Merge function for edge values (LLMTokenBV)
                     |ev_exist: &LLMTokenBV, ev_new: LLMTokenBV| Some(ev_exist | &ev_new),
                 );
-                if TRY_INSERT_CHILDREN {
-                    insert_result = insert_result.try_children();
-                }
+
+                // Removed the old try_children() call here as it's replaced by the logic in the main DFS loop
+
                 if !insert_result.clone_into_option().is_some() {
-                    insert_result = insert_result.try_destination(new_merged_pc_node_arc.clone());
+                    insert_result = insert_result.try_destination(handle_to_become_child.0.clone()); // Corrected destination
                     stats.gross_edges_with_none_key += 1;
                     stats.edges_inserted_by_merge_policy += 1;
                 }
 
-                result_set.insert(NodeHandle(insert_result.unwrap()));
 
+                // The result of the insert_result chain should be the destination node (the child handle)
+                // which might be the original child handle or a merged one if try_destination found a match.
+                // The merge policy's goal is just to create the new parent and link to the *existing* children.
+                // We don't expect try_destination to find an existing edge here because the source is brand new.
+                // So this simplified path is more correct:
+                new_merged_pc_node_arc.lock().unwrap().force_insert_to_node(
+                    None,
+                    all_llm_tokens_for_merge_edge.clone(),
+                    &handle_to_become_child.0,
+                );
+                stats.gross_edges_with_none_key += 1;
+                stats.edges_inserted_by_merge_policy += 1;
             }
 
             result_set.insert(NodeHandle(new_merged_pc_node_arc)); // The result is the single new merge parent
@@ -401,9 +419,14 @@ impl GrammarConstraint {
                     String::from_utf8_lossy(child_vocab_node.prefix())
                 );
 
+                // Initialize yellow_nodes set for the current segment
+                let mut yellow_nodes: HashSet<NodeHandle> = HashSet::new();
+
+
                 // This map will collect PrecomputeNodes formed at the *end* of processing bytes_segment,
                 // to be associated with child_vocab_node for the next DFS level.
-                // Key: TokenizerStateID at child_vocab_node. Value: Set of PrecomputeNode handles.
+                // Key: TokenizerStateID (at that offset within the segment processing).
+                // Value: Map from TokenizerStateID (at the end of the segment) to a SET of PrecomputeNode handles.
                 let mut next_level_associations_for_child: BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>> = BTreeMap::new();
 
                 // Inner queue for processing bytes_segment (offset-based)
@@ -437,6 +460,12 @@ impl GrammarConstraint {
                             continue;
                         }
 
+                        // Paint the current source nodes yellow while processing edges originating from them in this segment step.
+                        for handle in &effective_source_handles_for_suffix {
+                            yellow_nodes.insert(handle.clone());
+                        }
+
+
                         let segment_suffix_to_process = &bytes_segment[current_offset..];
                         let results = tokenizer.execute_from_state(segment_suffix_to_process, tokenizer_state_before_suffix);
 
@@ -447,34 +476,63 @@ impl GrammarConstraint {
 
                             let edge_llm_tokens = child_vocab_node.reachable_token_ids().clone();
 
-                            let mut potential_targets: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
-                            if match_end_offset < bytes_segment.len() {
-                                if let Some(map_at_offset) = segment_processing_q.get(&match_end_offset) {
-                                    if let Some(set_at_state0) = map_at_offset.get(&TokenizerStateID(0)) {
-                                        potential_targets.extend(set_at_state0.iter().map(|h| h.0.clone()));
-                                    }
-                                }
-                            }
-                            if match_end_offset == bytes_segment.len() {
-                                if let Some(set_at_state0) = next_level_associations_for_child.get(&TokenizerStateID(0)) {
-                                    potential_targets.extend(set_at_state0.iter().map(|h| h.0.clone()));
-                                }
-                            }
 
                             // Iterate over each effective source handle
                             for segment_source_pc_handle in &effective_source_handles_for_suffix {
-                                let source_for_inserter = segment_source_pc_handle.0.clone();
+                                let source_for_inserter_arc = segment_source_pc_handle.0.clone();
                                 let edge_key_for_inserter = Some(grammar_token_id);
-                                // edge_llm_tokens is already defined above as child_vocab_node.reachable_token_ids().clone();
 
                                 let mut inserter = EdgeInserter::new(
-                                    source_for_inserter,
+                                    source_for_inserter_arc.clone(), // Clone Arc for EdgeInserter
                                     edge_key_for_inserter,
                                     edge_llm_tokens.clone(), // Use the already cloned edge_llm_tokens
                                     |ev_exist: &HybridBitset, ev_new: HybridBitset| Some(ev_exist | &ev_new),
                                 );
+
+                                let mut potential_targets: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+                                if match_end_offset < bytes_segment.len() {
+                                    if let Some(map_at_offset) = segment_processing_q.get(&match_end_offset) {
+                                        if let Some(set_at_state0) = map_at_offset.get(&TokenizerStateID(0)) {
+                                            // Only add targets if they are NOT yellow
+                                            potential_targets.extend(set_at_state0.iter()
+                                                .filter(|h| !yellow_nodes.contains(h))
+                                                .map(|h| h.0.clone()));
+                                        }
+                                    }
+                                }
+                                if match_end_offset == bytes_segment.len() {
+                                    if let Some(set_at_state0) = next_level_associations_for_child.get(&TokenizerStateID(0)) {
+                                        // Only add targets if they are NOT yellow
+                                        potential_targets.extend(set_at_state0.iter()
+                                            .filter(|h| !yellow_nodes.contains(h))
+                                            .map(|h| h.0.clone()));
+                                    }
+                                }
+
                                 inserter = inserter.try_destinations(&potential_targets);
-                                inserter = inserter.try_children();
+
+                                // ---- START: Replacement for try_children ----
+                                if inserter.clone_into_option().is_none() {
+                                    let mut additional_potential_targets_from_children: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+                                    let source_guard = source_for_inserter_arc.lock().unwrap(); // Lock the source node
+                                    // edge_key_for_inserter is Option<GrammarTokenID> (Some(grammar_token_id))
+                                    if let Some(dest_map_for_current_key) = source_guard.children().get(&edge_key_for_inserter) {
+                                        for child_comparable_arc in dest_map_for_current_key.keys() {
+                                            let child_arc = child_comparable_arc.as_arc();
+                                            let child_handle = NodeHandle(child_arc.clone()); // Create NodeHandle for the child
+                                            if !yellow_nodes.contains(&child_handle) { // Check if child is NOT yellow
+                                                additional_potential_targets_from_children.push(child_arc.clone());
+                                            }
+                                        }
+                                    }
+                                    drop(source_guard); // Release lock
+
+                                    if !additional_potential_targets_from_children.is_empty() {
+                                        inserter = inserter.try_destinations(&additional_potential_targets_from_children);
+                                    }
+                                }
+                                // ---- END: Replacement for try_children ----
+
 
                                 let target_pc_node_arc;
                                 if inserter.clone_into_option().is_some() {
@@ -507,8 +565,8 @@ impl GrammarConstraint {
                                         .or_default()
                                         .insert(NodeHandle(target_pc_node_arc));
                                 }
-                            }
-                        }
+                            } // End for segment_source_pc_handle in effective_source_handles_for_suffix
+                        } // End for match_info in results.matches
 
                         // --- Existing logic for results.end_state ---
                         if let Some(final_tokenizer_state_val) = results.end_state {
@@ -533,6 +591,12 @@ impl GrammarConstraint {
                                 }
                             }
                         }
+
+                        // Unpaint the current source nodes after processing edges originating from them in this segment step.
+                        for handle in &effective_source_handles_for_suffix {
+                            yellow_nodes.remove(handle);
+                        }
+
                     }
                 } // End while segment_processing_q not empty
 
@@ -601,7 +665,19 @@ impl GrammarConstraint {
             }
         }
 
-        // --- Print Statistics ---
+        // Compute and print separate averages for Some-key and None-key edge groups
+        let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
+            stats.final_total_occupancy_sum_for_some_keys as f64
+                / stats.final_num_occupied_some_edge_keys as f64
+        } else {
+            0.0
+        };
+        let avg_none = if stats.final_num_occupied_none_edge_keys > 0 {
+            stats.final_total_occupancy_sum_for_none_keys as f64
+                / stats.final_num_occupied_none_edge_keys as f64
+        } else {
+            0.0
+        };
         println!("--- Precomputation Statistics ---");
         println!("Gross Counts (approximations during build):");
         println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
@@ -637,19 +713,6 @@ impl GrammarConstraint {
         println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
         println!("  Total Finalizer Entries (sum of map sizes in all unique nodes): {}", stats.final_total_finalizer_entries_in_graph);
 
-        // Compute and print separate averages for Some-key and None-key edge groups
-        let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
-            stats.final_total_occupancy_sum_for_some_keys as f64
-                / stats.final_num_occupied_some_edge_keys as f64
-        } else {
-            0.0
-        };
-        let avg_none = if stats.final_num_occupied_none_edge_keys > 0 {
-            stats.final_total_occupancy_sum_for_none_keys as f64
-                / stats.final_num_occupied_none_edge_keys as f64
-        } else {
-            0.0
-        };
         println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
         println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
         println!("---------------------------------");
@@ -926,6 +989,23 @@ mod tests {
     use crate::glr::table::{generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
     use super::*;
     use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
+    use std::hash::{Hash, Hasher}; // Ensure Hash and Hasher are in scope for the test module
+
+    // Use concrete types for merge tests
+    type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;
+    type TestNodeMerge = Arc<Mutex<TestTrieMerge>>;
+    // Use simpler types for basic tests
+    type TestTrieBasic = Trie<&'static str, &'static str, i32>;
+    type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
+
+    // Use concrete types for EdgeInserter tests
+    type TestTrieEI = Trie<&'static str, HybridBitset, String>; // Use HybridBitset here
+    type TestNodeEI = Arc<Mutex<TestTrieEI>>;
+
+    // Helper to get Arc pointer for tests
+    fn arc_ptr<N>(arc: &Arc<Mutex<N>>) -> *const Mutex<N> {
+        Arc::as_ptr(arc)
+    }
 
     #[test]
     fn test_constraint_simple() {
