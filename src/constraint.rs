@@ -809,7 +809,7 @@ impl<'a> GrammarConstraintState<'a> {
                     Arc::make_mut(&mut parse_state.stack).value.t.active &= edge_llm_tokens;
                     !parse_state.stack.value.t.active.is_empty() // Check if any active paths remain
                 });
-                grammar_token_id.map(|grammar_token_id| glr_parse_state.step(grammar_token_id));
+                grammar_token_id.map(|grammar_token_id| cloned_glr_parse_state.step(grammar_token_id));
                 if cloned_glr_parse_state.active_states.is_empty() {
                     crate::debug!(3, "No active states after processing grammar token {:?}", grammar_token_id.map(|grammar_token_id| grammar_token_id.0));
                     return None;
@@ -833,10 +833,10 @@ impl<'a> GrammarConstraintState<'a> {
                     // Use BitOrAssign<&HybridBitset>
                     active_llm_tokens |= &parse_state.stack.value.t.active;
                 }
-                crate::debug!(3, "Processing node with {} active states, {} LLM tokens, {} finalizers", glr_parse_state.active_states.len(), active_llm_tokens.len(), node.value.finalizers.len());
+                crate::debug!(3, "Processing node with {} active states, {} LLM tokens, {} finalizers", current_glr_parse_state.active_states.len(), active_llm_tokens.len(), node.value.finalizers.len());
                 // Handle clean end
                 if let Some(clean_end) = &node.value.clean_end {
-                    let mut final_glr_parse_state = glr_parse_state.clone();
+                    let mut final_glr_parse_state = current_glr_parse_state.clone();
                     final_glr_parse_state.active_states.retain(|_key, parse_state| {
                          // Intersect the *active* tokens with the clean_end tokens. Intersection retains current active tokens.
                         let current_active_tokens = parse_state.stack.value.t.active.clone();
@@ -860,7 +860,7 @@ impl<'a> GrammarConstraintState<'a> {
                 // Handle finalizers
                 for (possible_final_grammar_token, precomputed_finalizer) in &node.value.finalizers {
                     // Ensure the final tokens parses
-                    let mut possible_next_glr_parse_state = glr_parse_state.clone();
+                    let mut possible_next_glr_parse_state = current_glr_parse_state.clone();
                     crate::debug!(3, "Stepping semi-final GLR parse state");
                     possible_next_glr_parse_state.step(*possible_final_grammar_token);
                     if possible_next_glr_parse_state.is_ok() {
