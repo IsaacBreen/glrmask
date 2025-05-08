@@ -380,7 +380,7 @@ impl GrammarConstraint {
                 // Process the current bytes_segment
                 while let Some((current_offset, states_at_offset_map)) = segment_processing_q.pop_first() {
                     for (tokenizer_state_before_suffix, current_path_source_handles_set) in states_at_offset_map {
-                         if current_path_source_handles_set.is_empty() {
+                        if current_path_source_handles_set.is_empty() {
                             continue;
                         }
 
@@ -389,7 +389,7 @@ impl GrammarConstraint {
                             &current_path_source_handles_set,
                             &mut merge_map,
                             &all_llm_tokens_for_merge_edge,
-                            MERGE_THRESHOLD
+                            MERGE_THRESHOLD,
                         );
 
                         if effective_source_handles_for_suffix.is_empty() {
@@ -399,40 +399,39 @@ impl GrammarConstraint {
                         let segment_suffix_to_process = &bytes_segment[current_offset..];
                         let results = tokenizer.execute_from_state(segment_suffix_to_process, tokenizer_state_before_suffix);
 
-                        // Iterate over each effective source handle
-                        for segment_source_pc_handle in effective_source_handles_for_suffix {
-                            // --- Existing logic for results.matches ---
-                            for match_info in &results.matches {
-                                let grammar_token_id = GrammarTokenID(match_info.id);
-                                let match_end_offset = current_offset + match_info.width;
+                        // --- Existing logic for results.matches ---
+                        for match_info in &results.matches {
+                            let grammar_token_id = GrammarTokenID(match_info.id);
+                            let match_end_offset = current_offset + match_info.width;
 
-                                let edge_llm_tokens = child_vocab_node.reachable_token_ids().clone();
+                            let edge_llm_tokens = child_vocab_node.reachable_token_ids().clone();
 
-                                let mut potential_targets: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
-                                if match_end_offset < bytes_segment.len() {
-                                    if let Some(map_at_offset) = segment_processing_q.get(&match_end_offset) {
-                                        if let Some(set_at_state0) = map_at_offset.get(&TokenizerStateID(0)) {
-                                            potential_targets.extend(set_at_state0.iter().map(|h| h.0.clone()));
-                                        }
-                                    }
-                                }
-                                if match_end_offset == bytes_segment.len() {
-                                     if let Some(set_at_state0) = next_level_associations_for_child.get(&TokenizerStateID(0)) {
+                            let mut potential_targets: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+                            if match_end_offset < bytes_segment.len() {
+                                if let Some(map_at_offset) = segment_processing_q.get(&match_end_offset) {
+                                    if let Some(set_at_state0) = map_at_offset.get(&TokenizerStateID(0)) {
                                         potential_targets.extend(set_at_state0.iter().map(|h| h.0.clone()));
                                     }
                                 }
+                            }
+                            if match_end_offset == bytes_segment.len() {
+                                if let Some(set_at_state0) = next_level_associations_for_child.get(&TokenizerStateID(0)) {
+                                    potential_targets.extend(set_at_state0.iter().map(|h| h.0.clone()));
+                                }
+                            }
 
+                            // Iterate over each effective source handle
+                            for segment_source_pc_handle in &effective_source_handles_for_suffix {
                                 let target_pc_node_arc = EdgeInserter::new(
-                                        segment_source_pc_handle.0.clone(),
-                                        Some(grammar_token_id),
-                                        edge_llm_tokens.clone(),
-                                        |ev_exist: &HybridBitset, ev_new: HybridBitset| Some(ev_exist | &ev_new),
-                                    )
+                                    segment_source_pc_handle.0.clone(),
+                                    Some(grammar_token_id),
+                                    edge_llm_tokens.clone(),
+                                    |ev_exist: &HybridBitset, ev_new: HybridBitset| Some(ev_exist | &ev_new),
+                                )
                                     .try_destinations(&potential_targets)
                                     .try_children()
                                     .else_create_destination_with_value(PrecomputedNodeContents::default())
                                     .unwrap();
-
 
                                 if match_end_offset == bytes_segment.len() {
                                     next_level_associations_for_child
@@ -442,8 +441,8 @@ impl GrammarConstraint {
 
                                     let mut target_guard = target_pc_node_arc.lock().unwrap();
                                     target_guard.value.clean_end
-                                         .get_or_insert_with(HybridBitset::new)
-                                         .insert(child_vocab_node.token_id());
+                                        .get_or_insert_with(HybridBitset::new)
+                                        .insert(child_vocab_node.token_id());
                                 } else {
                                     segment_processing_q.entry(match_end_offset)
                                         .or_default()
@@ -452,11 +451,13 @@ impl GrammarConstraint {
                                         .insert(NodeHandle(target_pc_node_arc));
                                 }
                             }
+                        }
 
-                            // --- Existing logic for results.end_state ---
-                            if let Some(final_tokenizer_state_val) = results.end_state {
-                                let final_tokenizer_state_id = TokenizerStateID(final_tokenizer_state_val);
+                        // --- Existing logic for results.end_state ---
+                        if let Some(final_tokenizer_state_val) = results.end_state {
+                            let final_tokenizer_state_id = TokenizerStateID(final_tokenizer_state_val);
 
+                            for segment_source_pc_handle in &effective_source_handles_for_suffix {
                                 next_level_associations_for_child
                                     .entry(final_tokenizer_state_id)
                                     .or_default()
@@ -469,7 +470,7 @@ impl GrammarConstraint {
                                         gtid,
                                         LLMTokenID(child_vocab_node.token_id()),
                                         final_tokenizer_state_id,
-                                        max_llm_token_id
+                                        max_llm_token_id,
                                     );
                                 }
                             }
