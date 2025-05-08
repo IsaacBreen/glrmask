@@ -26,6 +26,12 @@ use crate::datastructures::trie::ComparableArc; // Need ComparableArc for HashSe
 pub type LLMTokenBV = HybridBitset;
 pub type GrammarTokenBV = BitVec; // Assuming GrammarTokenBV remains BitVec
 
+#[derive(Debug, Clone)]
+pub struct GrammarConstraintState<'a> {
+    pub(crate) parent: &'a GrammarConstraint,
+    pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, LLMTokenInfo>>,
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct PrecomputedFinalizer {
     pub(crate) content: BTreeMap<TokenizerStateID, LLMTokenBV>,
@@ -172,7 +178,7 @@ impl PrecomputedNodeContents {
 
 impl GrammarConstraint {
     pub fn new(
-        tokenizer: &Regex,
+        tokenizer: Regex,
         parser: GLRParser,
         llm_token_map: LLMTokenMap,
         max_llm_token_id: usize

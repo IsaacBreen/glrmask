@@ -12,7 +12,7 @@ use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
 pub struct ComparableArc<N>(Arc<Mutex<N>>);
 
 impl<N> ComparableArc<N> {
-    fn new(arc: Arc<Mutex<N>>) -> Self {
+    pub(crate) fn new(arc: Arc<Mutex<N>>) -> Self {
         ComparableArc(arc)
     }
 
