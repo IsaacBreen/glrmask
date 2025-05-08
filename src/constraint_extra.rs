@@ -65,16 +65,16 @@ fn dump_precompute_trie_recursive(
         println!("{}  Children:", indent);
         let new_indent = format!("{}    ", indent);
         for (edge_key, children_vec) in node.children() {
-            for (edge_val_bv, child_arc) in children_vec {
+            for (child_arc, edge_val_bv) in children_vec {
                 println!(
                     "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Ptr: {:p}",
                     indent,
                     edge_key.map(|grammar_token_id| grammar_token_id.0),
                     format_bv_indices(edge_val_bv),
-                    node_ptr(child_arc)
+                    node_ptr(child_arc.as_arc())
                 );
                 // Recurse
-                dump_precompute_trie_recursive(child_arc, new_indent.clone(), visited);
+                dump_precompute_trie_recursive(child_arc.as_arc(), new_indent.clone(), visited);
             }
         }
     }

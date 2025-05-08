@@ -9,14 +9,14 @@ use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
 
 // Wrapper for Arc<Mutex<N>> to make it Ord and Hashable based on its pointer.
 #[derive(Debug)]
-struct ComparableArc<N>(Arc<Mutex<N>>);
+pub struct ComparableArc<N>(Arc<Mutex<N>>);
 
 impl<N> ComparableArc<N> {
     fn new(arc: Arc<Mutex<N>>) -> Self {
         ComparableArc(arc)
     }
 
-    fn as_arc(&self) -> &Arc<Mutex<N>> {
+    pub fn as_arc(&self) -> &Arc<Mutex<N>> {
         &self.0
     }
 

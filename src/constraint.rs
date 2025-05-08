@@ -345,7 +345,7 @@ impl GrammarConstraint {
                     MERGE_THRESHOLD,
                 );
                 if !effective_handles_set.is_empty() {
-                    effective_source_pc_nodes_map.insert(*tokenizer_state_id, effective_handles_set);
+                    effective_source_pc_nodes_map.insert(tokenizer_state_id, effective_handles_set);
                 }
             }
 
@@ -460,7 +460,7 @@ impl GrammarConstraint {
                                 next_level_associations_for_child
                                     .entry(final_tokenizer_state_id)
                                     .or_default()
-                                    .insert(segment_source_pc_handle.0.clone());
+                                    .insert(NodeHandle(segment_source_pc_handle.0.clone()));
 
                                 let possible_final_grammar_tokens = tokenizer.tokens_accessible_from_state(final_tokenizer_state_id);
                                 let mut segment_source_guard = segment_source_pc_handle.0.lock().unwrap();
