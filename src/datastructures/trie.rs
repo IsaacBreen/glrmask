@@ -990,6 +990,11 @@ where
     pub fn unwrap(self) -> Arc<Mutex<Trie<EK, EV, T>>> {
         self.result.expect("EdgeInserter::unwrap() called but no destination was found or created")
     }
+
+    /// Returns the resulting destination node, panicking with the given message if none was found or created.
+    pub fn expect(self, msg: &str) -> Arc<Mutex<Trie<EK, EV, T>>> {
+        self.result.expect(msg)
+    }
 }
 
 
