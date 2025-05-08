@@ -560,6 +560,10 @@ impl GrammarConstraint {
         }
         stats.final_unique_nodes_count = all_reachable_nodes_for_final_stats.len();
 
+        // Initialize these accumulators *before* iterating over all unique nodes
+        stats.final_total_occupancy_sum_for_avg = 0;
+        stats.final_num_occupied_edge_keys_for_avg = 0;
+
         for comp_arc_node in &all_reachable_nodes_for_final_stats {
             let node_arc = comp_arc_node.as_arc(); // Gets &Arc<Mutex<PrecomputeNode>>
             let node_guard = node_arc.lock().expect("Mutex poisoned during final stats calculation");
@@ -572,6 +576,11 @@ impl GrammarConstraint {
                 } else {
                     stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
                 }
+                // Accumulate for average edge occupancy
+                if num_edges_for_this_key_to_distinct_children > 0 {
+                    stats.final_total_occupancy_sum_for_avg += num_edges_for_this_key_to_distinct_children;
+                    stats.final_num_occupied_edge_keys_for_avg += 1;
+                }
             }
 
             if node_guard.value.clean_end.is_some() {
@@ -580,9 +589,6 @@ impl GrammarConstraint {
             for finalizer_for_gtid in node_guard.value.finalizers.values() {
                 stats.final_total_finalizer_entries_in_graph += finalizer_for_gtid.content.len();
             }
-            // Initialize new stats fields
-            stats.final_total_occupancy_sum_for_avg = 0;
-            stats.final_num_occupied_edge_keys_for_avg = 0;
         }
 
         // --- Print Statistics ---
