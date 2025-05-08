@@ -20,6 +20,7 @@ use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::datastructures::trie::EdgeInserter;
 use indicatif::{ProgressBar, ProgressStyle};
 use crate::datastructures::hybrid_bitset::HybridBitset;
+use crate::datastructures::trie::ComparableArc; // Need ComparableArc for HashSet in final stats calculation
 
 
 pub type LLMTokenBV = HybridBitset;
@@ -96,11 +97,40 @@ pub struct GrammarConstraint {
     pub(crate) max_llm_token_id: usize,
 }
 
-#[derive(Debug, Clone)]
-pub struct GrammarConstraintState<'a> {
-    pub(crate) parent: &'a GrammarConstraint,
-    pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, LLMTokenInfo>>,
+
+// Add this struct definition before impl GrammarConstraint
+#[derive(Default, Debug)]
+struct PrecomputeStats {
+    // Gross counts (before sharing/merging reduces them in the final structure)
+    initial_root_nodes_created: usize,
+    nodes_created_by_merge_policy_as_new_parent: usize, // Nodes created by merge_node_handles_internal to be the new parent
+    nodes_created_by_edge_inserter_else_create: usize,  // Nodes created by EdgeInserter's else_create in main loop
+
+    edges_inserted_by_merge_policy: usize,          // Edges from new parent to its constituents in merge_policy
+    edges_inserted_by_edge_inserter_main_loop: usize, // Edges created by EdgeInserter in main DFS loop
+
+    gross_edges_with_none_key: usize,
+    gross_edges_with_some_key: usize,
+
+    // Merge policy stats
+    merge_policy_invocations: usize,
+    merge_policy_merges_performed: usize,          // Actual merges (input size > threshold)
+    merge_policy_nodes_input_total: usize,         // Sum of set_of_handles.len() passed to merge_policy
+    merge_policy_nodes_effectively_merged_count: usize, // Sum of set_of_handles.len() for sets that *were* merged
+
+    // Gross counts for content modifications
+    finalizer_infos_pushed_to_nodes: usize, // How many times push_finalizer_info was called on a node's value
+    clean_end_tokens_inserted_to_nodes: usize, // How many times a token_id was inserted into a node's clean_end bitset
+
+    // Final structure stats (net counts, after all processing and sharing)
+    final_unique_nodes_count: usize,
+    final_edges_count: usize,
+    final_edges_with_none_key: usize,
+    final_edges_with_some_key: usize,
+    final_nodes_with_clean_end: usize,
+    final_total_finalizer_entries_in_graph: usize, // Sum of node.value.finalizers.values().map(|pf| pf.content.len()).sum() across unique nodes
 }
+
 
 impl MergeAndIntersect for LLMTokenInfo {
     fn merge(&self, other: &Self) -> Self {
@@ -142,7 +172,7 @@ impl PrecomputedNodeContents {
 
 impl GrammarConstraint {
     pub fn new(
-        tokenizer: Regex,
+        tokenizer: &Regex,
         parser: GLRParser,
         llm_token_map: LLMTokenMap,
         max_llm_token_id: usize
@@ -162,6 +192,8 @@ impl GrammarConstraint {
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         max_llm_token_id: usize,
     ) -> Precomputed {
+        let mut stats = PrecomputeStats::default();
+
         // ---- Helper function to count nodes in VocabPrefixTree ----
         fn count_vocab_nodes(node: &VocabPrefixTreeNode) -> u64 {
             let mut count = 1u64; // Count this node
@@ -232,6 +264,7 @@ impl GrammarConstraint {
         for tokenizer_state_id in 0..tokenizer.max_state() {
             let precompute_node = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
             precomputed_roots.insert(TokenizerStateID(tokenizer_state_id), precompute_node);
+            stats.initial_root_nodes_created += 1;
         }
 
         // merge_map for deduplicating PrecomputeNode structures resulting from merged paths
@@ -239,10 +272,14 @@ impl GrammarConstraint {
 
         // ---- Helper function to merge NodeHandles ----
         fn merge_node_handles_internal(
+            stats: &mut PrecomputeStats,
             set_of_handles: &BTreeSet<NodeHandle>,
             all_llm_tokens_for_merge_edge: &HybridBitset,
             threshold: usize,
         ) -> BTreeSet<NodeHandle> { // Changed return type
+            stats.merge_policy_invocations += 1;
+            stats.merge_policy_nodes_input_total += set_of_handles.len();
+
             if set_of_handles.is_empty() {
                 return BTreeSet::new();
             }
@@ -251,36 +288,35 @@ impl GrammarConstraint {
                 return set_of_handles.clone();
             }
 
+            stats.merge_policy_merges_performed += 1;
+            stats.merge_policy_nodes_effectively_merged_count += set_of_handles.len();
+
             // Create a new node to represent the merged set.
             let new_merged_pc_node_arc = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
+            stats.nodes_created_by_merge_policy_as_new_parent += 1;
 
             let mut result_set = BTreeSet::new();
 
             // Add each handle in the input set as a child of the new_merged_pc_node_arc
             // using an EdgeInserter. The edge key will be None.
             for handle_to_become_child in set_of_handles {
-                // The EdgeInserter will lock the source (new_merged_pc_node_arc)
-                // and attempt to insert an edge to handle_to_become_child.0.
-                // Since new_merged_pc_node_arc is new, this will always be an insert.
-                const TRY_INSERT_CHILDREN: bool = true;
-                let mut insert_result = EdgeInserter::new(
-                    handle_to_become_child.0.clone(), // Source Arc<Mutex<PrecomputeNode>>
+                // Edge: new_merged_pc_node_arc --(None, all_llm_tokens_for_merge_edge)--> handle_to_become_child.0
+                EdgeInserter::new(
+                    new_merged_pc_node_arc.clone(), // Source is the new merge node
                     None,                           // Edge key: Option<GrammarTokenID> = None
                     all_llm_tokens_for_merge_edge.clone(), // Edge value: LLMTokenBV
                     // Merge function for edge values (LLMTokenBV)
                     |ev_exist: &LLMTokenBV, ev_new: LLMTokenBV| Some(ev_exist | &ev_new),
-                );
-                if TRY_INSERT_CHILDREN {
-                    insert_result = insert_result.try_children();
-                }
-                let insert_result = insert_result.try_destination(new_merged_pc_node_arc.clone()) // Destination Arc<Mutex<PrecomputeNode>>
-                .expect("EdgeInserter failed to add child during merge_node_handles_internal. This is unexpected.");
+                )
+                .try_destination(handle_to_become_child.0.clone()) // Destination Arc<Mutex<PrecomputeNode>>
+                .expect("EdgeInserter failed to add child from new merge parent in merge_node_handles_internal.");
 
-                result_set.insert(NodeHandle(insert_result));
+                stats.edges_inserted_by_merge_policy += 1;
+                stats.gross_edges_with_none_key += 1;
             }
 
-            // Return a set containing only the new merged handle.
-            result_set
+            result_set.insert(NodeHandle(new_merged_pc_node_arc)); // The result is the single new merge parent
+            result_set // Return a set containing only the new merged handle.
         }
         // --------------------------------------------
 
@@ -325,6 +361,7 @@ impl GrammarConstraint {
             let mut effective_source_pc_nodes_map: BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>> = BTreeMap::new(); // Changed name from merged_source_pc_nodes_map
             for (tokenizer_state_id, set_of_handles) in processing_item.associated_pc_nodes_by_state {
                 let effective_handles_set = merge_node_handles_internal(
+                    &mut stats,
                     &set_of_handles,
                     &all_llm_tokens_for_merge_edge,
                     MERGE_THRESHOLD,
@@ -371,6 +408,7 @@ impl GrammarConstraint {
 
                         // Apply the merge policy to the set of handles for this specific path in segment processing.
                         let effective_source_handles_for_suffix: BTreeSet<NodeHandle> = merge_node_handles_internal(
+                            &mut stats,
                             &current_path_source_handles_set,
                             &all_llm_tokens_for_merge_edge,
                             MERGE_THRESHOLD,
@@ -406,16 +444,29 @@ impl GrammarConstraint {
 
                             // Iterate over each effective source handle
                             for segment_source_pc_handle in &effective_source_handles_for_suffix {
-                                let target_pc_node_arc = EdgeInserter::new(
-                                    segment_source_pc_handle.0.clone(),
-                                    Some(grammar_token_id),
-                                    edge_llm_tokens.clone(),
+                                let source_for_inserter = segment_source_pc_handle.0.clone();
+                                let edge_key_for_inserter = Some(grammar_token_id);
+                                // edge_llm_tokens is already defined above as child_vocab_node.reachable_token_ids().clone();
+
+                                let mut inserter = EdgeInserter::new(
+                                    source_for_inserter,
+                                    edge_key_for_inserter,
+                                    edge_llm_tokens.clone(), // Use the already cloned edge_llm_tokens
                                     |ev_exist: &HybridBitset, ev_new: HybridBitset| Some(ev_exist | &ev_new),
-                                )
-                                    .try_destinations(&potential_targets)
-                                    .try_children()
-                                    .else_create_destination_with_value(PrecomputedNodeContents::default())
-                                    .unwrap();
+                                );
+                                inserter = inserter.try_destinations(&potential_targets);
+                                inserter = inserter.try_children();
+
+                                let target_pc_node_arc;
+                                if inserter.clone_into_option().is_some() {
+                                    target_pc_node_arc = inserter.unwrap();
+                                    // Edge was made to an existing node (or existing edge value merged)
+                                } else {
+                                    stats.nodes_created_by_edge_inserter_else_create += 1;
+                                    target_pc_node_arc = inserter.else_create_destination_with_value(PrecomputedNodeContents::default()).unwrap();
+                                }
+                                stats.edges_inserted_by_edge_inserter_main_loop += 1;
+                                stats.gross_edges_with_some_key += 1; // Edge key is Some(grammar_token_id)
 
                                 if match_end_offset == bytes_segment.len() {
                                     next_level_associations_for_child
@@ -424,9 +475,12 @@ impl GrammarConstraint {
                                         .insert(NodeHandle(target_pc_node_arc.clone()));
 
                                     let mut target_guard = target_pc_node_arc.lock().unwrap();
-                                    target_guard.value.clean_end
-                                        .get_or_insert_with(HybridBitset::new)
-                                        .insert(child_vocab_node.token_id());
+                                    // Update stats for clean_end
+                                    let _ = target_guard.value.clean_end.get_or_insert_with(HybridBitset::new); // Ensure it exists
+                                    let inserted = target_guard.value.clean_end.as_mut().unwrap().insert(child_vocab_node.token_id());
+                                    if inserted { // HybridBitset::insert returns true if value was newly inserted
+                                        stats.clean_end_tokens_inserted_to_nodes += 1;
+                                    }
                                 } else {
                                     segment_processing_q.entry(match_end_offset)
                                         .or_default()
@@ -456,6 +510,7 @@ impl GrammarConstraint {
                                         final_tokenizer_state_id,
                                         max_llm_token_id,
                                     );
+                                    stats.finalizer_infos_pushed_to_nodes += 1;
                                 }
                             }
                         }
@@ -473,6 +528,79 @@ impl GrammarConstraint {
         // --- Finish progress bar ---
         pb.finish_with_message("Precomputation complete");
         crate::debug!(2, "Done precomputing main DFS loop.");
+
+
+        // --- Calculate Final Statistics from precomputed_roots before unwrapping ---
+        crate::debug!(2, "Calculating final precompute statistics...");
+        let mut all_reachable_nodes_for_final_stats: HashSet<ComparableArc<PrecomputeNode>> = HashSet::new();
+        for root_arc_mutex_node in precomputed_roots.values() {
+            // PrecomputeNode is type alias for Trie<...>
+            // Trie::all_nodes expects Arc<Mutex<Trie<...>>>
+            let nodes_from_this_root = PrecomputeNode::all_nodes(root_arc_mutex_node.clone());
+            for node_arc in nodes_from_this_root {
+                all_reachable_nodes_for_final_stats.insert(ComparableArc::new(node_arc));
+            }
+        }
+        stats.final_unique_nodes_count = all_reachable_nodes_for_final_stats.len();
+
+        for comp_arc_node in &all_reachable_nodes_for_final_stats {
+            let node_arc = comp_arc_node.as_arc(); // Gets &Arc<Mutex<PrecomputeNode>>
+            let node_guard = node_arc.lock().expect("Mutex poisoned during final stats calculation");
+
+            for (edge_key, dest_map) in node_guard.children() {
+                let num_edges_for_this_key_to_distinct_children = dest_map.len();
+                stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
+                if edge_key.is_some() {
+                    stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
+                } else {
+                    stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
+                }
+            }
+
+            if node_guard.value.clean_end.is_some() {
+                stats.final_nodes_with_clean_end += 1;
+            }
+            for finalizer_for_gtid in node_guard.value.finalizers.values() {
+                stats.final_total_finalizer_entries_in_graph += finalizer_for_gtid.content.len();
+            }
+        }
+
+        // --- Print Statistics ---
+        println!("--- Precomputation Statistics ---");
+        println!("Gross Counts (approximations during build):");
+        println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
+        println!("  Nodes Created by Merge Policy (as new parent): {}", stats.nodes_created_by_merge_policy_as_new_parent);
+        println!("  Nodes Created by EdgeInserter (else_create in main loop): {}", stats.nodes_created_by_edge_inserter_else_create);
+        let total_gross_nodes = stats.initial_root_nodes_created + stats.nodes_created_by_merge_policy_as_new_parent + stats.nodes_created_by_edge_inserter_else_create;
+        println!("  Total Gross Nodes Approx.: {}", total_gross_nodes);
+
+
+        println!("  Edges Inserted by Merge Policy: {}", stats.edges_inserted_by_merge_policy);
+        println!("  Edges Inserted by EdgeInserter (main loop): {}", stats.edges_inserted_by_edge_inserter_main_loop);
+        let total_gross_edges = stats.edges_inserted_by_merge_policy + stats.edges_inserted_by_edge_inserter_main_loop;
+        println!("  Total Gross Edges Approx.: {}", total_gross_edges);
+        println!("    Gross Edges with None Key: {}", stats.gross_edges_with_none_key);
+        println!("    Gross Edges with Some Key: {}", stats.gross_edges_with_some_key);
+
+
+        println!("\nMerge Policy Details:");
+        println!("  Invocations: {}", stats.merge_policy_invocations);
+        println!("  Actual Merges Performed (input size > threshold): {}", stats.merge_policy_merges_performed);
+        println!("  Total Nodes Input to Policy: {}", stats.merge_policy_nodes_input_total);
+        println!("  Nodes Effectively Merged (sum of len of sets that were merged): {}", stats.merge_policy_nodes_effectively_merged_count);
+
+        println!("\nGross Content Modification Counts:");
+        println!("  Finalizer Infos Pushed to Node Values: {}", stats.finalizer_infos_pushed_to_nodes);
+        println!("  Clean End Token IDs Inserted into Node Values: {}", stats.clean_end_tokens_inserted_to_nodes);
+
+        println!("\nFinal Graph Structure (after sharing and deduplication):");
+        println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
+        println!("  Total Edges: {}", stats.final_edges_count);
+        println!("    Edges with None Key: {}", stats.final_edges_with_none_key);
+        println!("    Edges with Some Key: {}", stats.final_edges_with_some_key);
+        println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
+        println!("  Total Finalizer Entries (sum of map sizes in all unique nodes): {}", stats.final_total_finalizer_entries_in_graph);
+        println!("---------------------------------");
 
 
         // Pull the roots out of their Arc<Mutex<_>> and count failures to unwrap.
