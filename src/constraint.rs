@@ -135,6 +135,10 @@ struct PrecomputeStats {
     final_edges_with_some_key: usize,
     final_nodes_with_clean_end: usize,
     final_total_finalizer_entries_in_graph: usize, // Sum of node.value.finalizers.values().map(|pf| pf.content.len()).sum() across unique nodes
+
+    // For average edge occupancy
+    final_total_occupancy_sum_for_avg: usize,
+    final_num_occupied_edge_keys_for_avg: usize,
 }
 
 
@@ -576,6 +580,9 @@ impl GrammarConstraint {
             for finalizer_for_gtid in node_guard.value.finalizers.values() {
                 stats.final_total_finalizer_entries_in_graph += finalizer_for_gtid.content.len();
             }
+            // Initialize new stats fields
+            stats.final_total_occupancy_sum_for_avg = 0;
+            stats.final_num_occupied_edge_keys_for_avg = 0;
         }
 
         // --- Print Statistics ---
@@ -613,7 +620,15 @@ impl GrammarConstraint {
         println!("    Edges with Some Key: {}", stats.final_edges_with_some_key);
         println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
         println!("  Total Finalizer Entries (sum of map sizes in all unique nodes): {}", stats.final_total_finalizer_entries_in_graph);
+
+        let final_average_edge_occupancy_per_key = if stats.final_num_occupied_edge_keys_for_avg > 0 {
+            stats.final_total_occupancy_sum_for_avg as f64 / stats.final_num_occupied_edge_keys_for_avg as f64
+        } else {
+            0.0
+        };
+        println!("  Average Edge Occupancy (children per non-empty edge key): {:.2}", final_average_edge_occupancy_per_key);
         println!("---------------------------------");
+
 
 
         // Pull the roots out of their Arc<Mutex<_>> and count failures to unwrap.
