@@ -136,9 +136,11 @@ struct PrecomputeStats {
     final_nodes_with_clean_end: usize,
     final_total_finalizer_entries_in_graph: usize, // Sum of node.value.finalizers.values().map(|pf| pf.content.len()).sum() across unique nodes
 
-    // For average edge occupancy
-    final_total_occupancy_sum_for_avg: usize,
-    final_num_occupied_edge_keys_for_avg: usize,
+    // For average edge occupancy per key type
+    final_total_occupancy_sum_for_some_keys: usize,
+    final_num_occupied_some_edge_keys: usize,
+    final_total_occupancy_sum_for_none_keys: usize,
+    final_num_occupied_none_edge_keys: usize,
 }
 
 
@@ -561,8 +563,11 @@ impl GrammarConstraint {
         stats.final_unique_nodes_count = all_reachable_nodes_for_final_stats.len();
 
         // Initialize these accumulators *before* iterating over all unique nodes
-        stats.final_total_occupancy_sum_for_avg = 0;
-        stats.final_num_occupied_edge_keys_for_avg = 0;
+        stats.final_total_occupancy_sum_for_some_keys = 0;
+        stats.final_num_occupied_some_edge_keys = 0;
+        stats.final_total_occupancy_sum_for_none_keys = 0;
+        stats.final_num_occupied_none_edge_keys = 0;
+
 
         for comp_arc_node in &all_reachable_nodes_for_final_stats {
             let node_arc = comp_arc_node.as_arc(); // Gets &Arc<Mutex<PrecomputeNode>>
@@ -578,8 +583,13 @@ impl GrammarConstraint {
                 }
                 // Accumulate for average edge occupancy
                 if num_edges_for_this_key_to_distinct_children > 0 {
-                    stats.final_total_occupancy_sum_for_avg += num_edges_for_this_key_to_distinct_children;
-                    stats.final_num_occupied_edge_keys_for_avg += 1;
+                    if edge_key.is_some() {
+                        stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key_to_distinct_children;
+                        stats.final_num_occupied_some_edge_keys += 1;
+                    } else {
+                        stats.final_total_occupancy_sum_for_none_keys += num_edges_for_this_key_to_distinct_children;
+                        stats.final_num_occupied_none_edge_keys += 1;
+                    }
                 }
             }
 
@@ -627,12 +637,21 @@ impl GrammarConstraint {
         println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
         println!("  Total Finalizer Entries (sum of map sizes in all unique nodes): {}", stats.final_total_finalizer_entries_in_graph);
 
-        let final_average_edge_occupancy_per_key = if stats.final_num_occupied_edge_keys_for_avg > 0 {
-            stats.final_total_occupancy_sum_for_avg as f64 / stats.final_num_occupied_edge_keys_for_avg as f64
+        // Compute and print separate averages for Some-key and None-key edge groups
+        let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
+            stats.final_total_occupancy_sum_for_some_keys as f64
+                / stats.final_num_occupied_some_edge_keys as f64
         } else {
             0.0
         };
-        println!("  Average Edge Occupancy (children per non-empty edge key): {:.2}", final_average_edge_occupancy_per_key);
+        let avg_none = if stats.final_num_occupied_none_edge_keys > 0 {
+            stats.final_total_occupancy_sum_for_none_keys as f64
+                / stats.final_num_occupied_none_edge_keys as f64
+        } else {
+            0.0
+        };
+        println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
+        println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
         println!("---------------------------------");
 
 
