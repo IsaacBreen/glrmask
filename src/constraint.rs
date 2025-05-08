@@ -307,18 +307,24 @@ impl GrammarConstraint {
             // using an EdgeInserter. The edge key will be None.
             for handle_to_become_child in set_of_handles {
                 // Edge: new_merged_pc_node_arc --(None, all_llm_tokens_for_merge_edge)--> handle_to_become_child.0
-                EdgeInserter::new(
-                    new_merged_pc_node_arc.clone(), // Source is the new merge node
+                const TRY_INSERT_CHILDREN: bool = true;
+                let mut insert_result = EdgeInserter::new(
+                    handle_to_become_child.0.clone(), // Source Arc<Mutex<PrecomputeNode>>
                     None,                           // Edge key: Option<GrammarTokenID> = None
                     all_llm_tokens_for_merge_edge.clone(), // Edge value: LLMTokenBV
                     // Merge function for edge values (LLMTokenBV)
                     |ev_exist: &LLMTokenBV, ev_new: LLMTokenBV| Some(ev_exist | &ev_new),
-                )
-                .try_destination(handle_to_become_child.0.clone()) // Destination Arc<Mutex<PrecomputeNode>>
-                .expect("EdgeInserter failed to add child from new merge parent in merge_node_handles_internal.");
+                );
+                insert_result = insert_result.try_children();
+                if insert_result.clone_into_option().is_some() {
+                } else {
+                    insert_result = insert_result.try_destination(new_merged_pc_node_arc.clone());
+                    stats.gross_edges_with_none_key += 1;
+                    stats.edges_inserted_by_merge_policy += 1;
+                }
 
-                stats.edges_inserted_by_merge_policy += 1;
-                stats.gross_edges_with_none_key += 1;
+                result_set.insert(NodeHandle(insert_result.unwrap()));
+
             }
 
             result_set.insert(NodeHandle(new_merged_pc_node_arc)); // The result is the single new merge parent
