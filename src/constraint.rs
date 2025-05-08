@@ -687,9 +687,9 @@ impl GrammarConstraint {
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&mut self) -> LLMTokenBV {
         let mut mask = HybridBitset::new();
-        for (_, state) in &self.state {
-            for active_state in &state.active_states {
-                // Use BitOrAssign<&HybridBitset>
+        for (_tokenizer_state_id, glr_parser_state) in &self.state {
+            for active_state in glr_parser_state.active_states.values() {
+                // `active_state` is a `&ParseState<LLMTokenInfo>`
                 mask |= &active_state.stack.peek().t.active;
             }
         }
@@ -738,16 +738,18 @@ impl<'a> GrammarConstraintState<'a> {
 
         let mut memo = HashMap::new();
         self.state.retain(|tokenizer_state_id, glr_state| {
-            glr_state.active_states.retain_mut(|parse_state| {
+            // BTreeMap::retain takes FnMut(&K, &mut V) -> bool
+            glr_state.active_states.retain(|_key, parse_state| { // parse_state is &mut ParseState<LLMTokenInfo>
                 let maybe_new_node = prune_and_transform_recursive(&parse_state.stack, &closure, &mut memo);
                 if let Some(new_node) = maybe_new_node {
-                    parse_state.stack = new_node;
+                    parse_state.stack = new_node; // Modify the V in BTreeMap
                     true
                 } else {
                     false
                 }
             });
             !glr_state.active_states.is_empty()
+            // TODO: Check if glr_state.action_not_found_states also needs pruning or clearing
         });
     }
 
@@ -762,8 +764,8 @@ impl<'a> GrammarConstraintState<'a> {
         let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, GLRParserState<'_, LLMTokenInfo>> = BTreeMap::new();
 
         for (tokenizer_state_id, state) in &self.state {
-            let mut state = state.clone();
-            for parse_state in state.active_states.iter_mut() {
+            let mut cloned_state = state.clone(); // Clone the GLRParserState
+            for parse_state in cloned_state.active_states.values_mut() { // Iterate over mutable values of the BTreeMap
                 // Only update the *active* tokens at the *top* of the stack.
                 // The intersection remains unchanged, and deeper nodes are untouched.
                 // The special_map logic will handle intersecting with edge_llm_tokens.
@@ -771,7 +773,7 @@ impl<'a> GrammarConstraintState<'a> {
                 Arc::make_mut(&mut parse_state.stack).value.t.active &= llm_tokens;
                 // Intersection is NOT modified here. It reflects the guarantee from *below*.
             }
-            tokenizer_state_id_to_parse_states.insert(*tokenizer_state_id, state);
+            tokenizer_state_id_to_parse_states.insert(*tokenizer_state_id, cloned_state);
         }
 
         for (tokenizer_state_id, state) in tokenizer_state_id_to_parse_states {
@@ -798,8 +800,8 @@ impl<'a> GrammarConstraintState<'a> {
             |glr_parse_state, grammar_token_id, edge_llm_tokens, child_node| {
                 let node_ptr = std::ptr::addr_of!(*child_node) as usize;
                 crate::debug!(3, "Processing grammar node {:p} token {:?} with {} active states", node_ptr as *const (), grammar_token_id.map(|grammar_token_id| grammar_token_id.0), glr_parse_state.active_states.len());
-                let mut glr_parse_state = glr_parse_state.clone();
-                glr_parse_state.active_states.retain_mut(|parse_state| {
+                let mut cloned_glr_parse_state = glr_parse_state.clone();
+                cloned_glr_parse_state.active_states.retain(|_key, parse_state| { // parse_state is &mut V
                     // Intersect the *active* tokens with the edge tokens. Intersection inherits current active tokens.
                     let current_active_tokens = parse_state.stack.value.t.active.clone();
                     // Use BitAndAssign<&HybridBitset>
@@ -808,12 +810,12 @@ impl<'a> GrammarConstraintState<'a> {
                     !parse_state.stack.value.t.active.is_empty() // Check if any active paths remain
                 });
                 grammar_token_id.map(|grammar_token_id| glr_parse_state.step(grammar_token_id));
-                if glr_parse_state.active_states.is_empty() {
+                if cloned_glr_parse_state.active_states.is_empty() {
                     crate::debug!(3, "No active states after processing grammar token {:?}", grammar_token_id.map(|grammar_token_id| grammar_token_id.0));
                     return None;
                 } else {
-                    crate::debug!(3, "Processed grammar token {:?}, {} active states.", grammar_token_id.map(|grammar_token_id| grammar_token_id.0), glr_parse_state.active_states.len());
-                    Some(glr_parse_state)
+                    crate::debug!(3, "Processed grammar token {:?}, {} active states.", grammar_token_id.map(|grammar_token_id| grammar_token_id.0), cloned_glr_parse_state.active_states.len());
+                    Some(cloned_glr_parse_state)
                 }
             },
             // merge
@@ -824,10 +826,10 @@ impl<'a> GrammarConstraintState<'a> {
             // process
             // Input: &PrecomputeNode, &GLRParserState<'_, LLMTokenInfo>
             // Output: bool (continue?)
-            |node, glr_parse_state| {
-                glr_parse_state.merge_active_states();
+            |node, current_glr_parse_state| { // Renamed to avoid confusion with self.state
+                // glr_parse_state.merge_active_states(); // This is no longer needed
                 let mut active_llm_tokens = HybridBitset::new();
-                for parse_state in &glr_parse_state.active_states {
+                for parse_state in current_glr_parse_state.active_states.values() {
                     // Use BitOrAssign<&HybridBitset>
                     active_llm_tokens |= &parse_state.stack.value.t.active;
                 }
@@ -835,8 +837,8 @@ impl<'a> GrammarConstraintState<'a> {
                 // Handle clean end
                 if let Some(clean_end) = &node.value.clean_end {
                     let mut final_glr_parse_state = glr_parse_state.clone();
-                    final_glr_parse_state.active_states.retain_mut(|parse_state| {
-                        // Intersect the *active* tokens with the clean_end tokens. Intersection retains current active tokens.
+                    final_glr_parse_state.active_states.retain(|_key, parse_state| {
+                         // Intersect the *active* tokens with the clean_end tokens. Intersection retains current active tokens.
                         let current_active_tokens = parse_state.stack.value.t.active.clone();
                         // Use BitAndAssign<&HybridBitset>
                         Arc::make_mut(&mut parse_state.stack).value.t.intersection &= &current_active_tokens;
@@ -865,8 +867,8 @@ impl<'a> GrammarConstraintState<'a> {
                         crate::debug!(3, "Semi-final GLR parse state is OK");
                         for (tokenizer_state_id, llm_tokens) in &precomputed_finalizer.content {
                             // Intersect *active* tokens with the finalizer's allowed tokens.
-                            let mut glr_parse_state_filtered = glr_parse_state.clone();
-                            glr_parse_state_filtered.active_states.retain_mut(|parse_state| {
+                            let mut glr_parse_state_filtered = current_glr_parse_state.clone();
+                            glr_parse_state_filtered.active_states.retain(|_key, parse_state| {
                                 // Intersect the *active* tokens with the finalizer's allowed tokens. Intersection retains current active tokens.
                                 let current_active_tokens = parse_state.stack.value.t.active.clone();
                                 // Use BitAndAssign<&HybridBitset>
@@ -890,7 +892,7 @@ impl<'a> GrammarConstraintState<'a> {
 
                 // Check if the current GLR state still has valid paths before continuing traversal
                 // (This check might be redundant if the retain calls above handle it)
-                !glr_parse_state.active_states.is_empty()
+                !current_glr_parse_state.active_states.is_empty()
             },
         );
     }

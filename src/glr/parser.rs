@@ -77,10 +77,13 @@ impl GLRParser {
     }
 
     pub fn init_glr_parser_with_t<T: MergeAndIntersect>(&self, t: T) -> GLRParserState<T> {
+        let initial_parse_state = self.init_parse_state_with_t(t);
+        let mut active_states_map = BTreeMap::new();
+        active_states_map.insert(initial_parse_state.key(), initial_parse_state);
         GLRParserState {
             parser: self,
-            active_states: vec![self.init_parse_state_with_t(t)],
-            action_not_found_states: Vec::new(),
+            active_states: active_states_map,
+            action_not_found_states: BTreeMap::new(),
         }
     }
     pub fn init_glr_parser_from_parse_state<T: MergeAndIntersect>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
@@ -95,10 +98,14 @@ impl GLRParser {
         &self,
         parse_states: Vec<ParseState<T>>,
     ) -> GLRParserState<T> {
+        let mut active_states_map = BTreeMap::new();
+        for state in parse_states {
+            active_states_map.insert_with(state.key(), state, |existing, new_s| existing.merge(new_s));
+        }
         GLRParserState {
             parser: self,
-            active_states: parse_states,
-            action_not_found_states: Vec::new(),
+            active_states: active_states_map,
+            action_not_found_states: BTreeMap::new(),
         }
     }
 
@@ -247,8 +254,8 @@ impl Display for GLRParser {
 #[derive(Debug, Clone)]
 pub struct GLRParserState<'a, T: MergeAndIntersect> {
     pub parser: &'a GLRParser,
-    pub active_states: Vec<ParseState<T>>,
-    pub action_not_found_states: Vec<ParseState<T>>,
+    pub active_states: BTreeMap<ParseStateKey, ParseState<T>>,
+    pub action_not_found_states: BTreeMap<ParseStateKey, ParseState<T>>,
 }
 
 impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
@@ -294,7 +301,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
     /// Debug helper so the main `step` body stays short.
     fn log_gss(&self, phase: &str, token: TerminalID) {
         const MAX: usize = 30;
-        let roots: Vec<_> = self.active_states.iter().map(|s| s.stack.clone()).collect();
+        let roots: Vec<_> = self.active_states.values().map(|s| s.stack.clone()).collect();
         let stats = gather_gss_stats(&roots);
         crate::debug!(3, "{} - token {} ({:?}) - – active: {}, nodes: {:?}",
                       phase, token.0, self.parser.terminal_map.get_by_right(&token).unwrap().0, self.active_states.len(), stats);
@@ -343,12 +350,12 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         /* ---------- logging & preparation ---------- */
         self.log_gss("Step-start", token_id);
 
-        let mut todo = std::mem::take(&mut self.active_states);
-        let mut next = Vec::<ParseState<T>>::new();
-        let mut not_found = Vec::<ParseState<T>>::new();
+        let mut todo = std::mem::take(&mut self.active_states).into_values().collect::<Vec<_>>();
+        let mut next = BTreeMap::<ParseStateKey, ParseState<T>>::new();
+        let mut not_found = BTreeMap::<ParseStateKey, ParseState<T>>::new();
 
         /* ---------- core loop ---------- */
-        while let Some(state) = todo.pop() {
+        while let Some(state) = todo.pop() { // Process states from the worklist
             let stack   = state.stack;
             let top     = stack.peek();
             let row     = &self.parser.stage_7_table[&top.state_id];
@@ -357,7 +364,8 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                 /* ------ 1. plain shift ------ */
                 Some(Stage7ShiftsAndReduces::Shift(to)) => {
                     crate::debug!(4, "Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
-                    next.push(self.push_state(&stack, *to, top.t.clone()));
+                    let new_parse_state = self.push_state(&stack, *to, top.t.clone());
+                    next.insert_with(new_parse_state.key(), new_parse_state, |existing, new_s| existing.merge(new_s));
                 }
 
                 /* ------ 2. single reduce ------ */
@@ -365,7 +373,8 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                                                      len, .. }) => {
                     crate::debug!(4, "Reduce from state {} via token {} to nonterminal {}", top.state_id.0, token_id.0, nt.0);
                     for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
-                        todo.push(ParseState { stack: s });
+                        // Add to worklist for current step; merging happens when moving to `next`
+                        todo.push(ParseState { stack: s }); 
                     }
                 }
 
@@ -375,13 +384,15 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                     // optional shift part
                     if let Some(to) = shift {
                         crate::debug!(4, " Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
-                        next.push(self.push_state(&stack, *to, top.t.clone()));
+                        let new_parse_state = self.push_state(&stack, *to, top.t.clone());
+                        next.insert_with(new_parse_state.key(), new_parse_state, |existing, new_s| existing.merge(new_s));
                     }
                     // every reduce alternative
                     for (len, nts) in reduces {
                         crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top.state_id.0, token_id.0, nts);
                         for (nt, _prod_ids) in nts {        // we ignore prod-ids here
                             for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
+                                // Add to worklist for current step
                                 todo.push(ParseState { stack: s });
                             }
                         }
@@ -391,7 +402,8 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                 /* ------ 4. no action ------ */
                 None => {
                     crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, top.state_id.0);
-                    not_found.push(ParseState { stack })
+                    let not_found_state = ParseState { stack };
+                    not_found.insert_with(not_found_state.key(), not_found_state, |existing, new_s| existing.merge(new_s));
                 },
             }
         }
@@ -404,28 +416,24 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         self.action_not_found_states.clear();        // current design: we drop them
     }
 
-    // TODO: Review merge logic, especially interaction with GSSNode::merge and ParseState::merge
+    /// Merging is now handled implicitly when states are added to `next` in the `step` method.
+    /// This method can be removed if no other part of the code relies on it explicitly.
+    /// For now, let's keep it as a no-op or ensure it's not called.
+    /// Given the new structure, explicit merging of `self.active_states` is no longer needed
+    /// as `BTreeMap::insert_with` handles it.
     pub fn merge_active_states(&mut self) {
-        let mut active_state_map: BTreeMap<ParseStateKey, ParseState<T>> = BTreeMap::new();
-        let num_active_states = self.active_states.len();
-
-        for state in std::mem::take(&mut self.active_states) {
-            let key = state.key();
-            active_state_map.insert_with(key, state, |existing, new_state| {
-                existing.merge(new_state);
-            });
-        }
-
-        crate::debug!(3, "Merged {} active states into {} active states", num_active_states, active_state_map.len());
-        self.active_states = active_state_map.into_values().collect();
+        // This method is no longer necessary as merging is done on insertion.
+        // crate::debug!(3, "merge_active_states called (now a no-op due to BTreeMap usage)");
     }
 
     pub fn merge_with(&mut self, other: GLRParserState<T>) {
         assert!(std::ptr::eq(self.parser, other.parser));
-        self.active_states.extend(other.active_states);
-        self.action_not_found_states.extend(other.action_not_found_states);
-        // Consider merging active states here if performance becomes an issue
-        // self.merge_active_states();
+        for (key, state) in other.active_states {
+            self.active_states.insert_with(key, state, |existing, new_s| existing.merge(new_s));
+        }
+        for (key, state) in other.action_not_found_states {
+            self.action_not_found_states.insert_with(key, state, |existing, new_s| existing.merge(new_s));
+        }
     }
 
     pub fn is_ok(&self) -> bool {
