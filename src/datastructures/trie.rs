@@ -305,7 +305,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
                 .values() // Iterates over BTreeMap<ComparableArc, EV>
                 .flat_map(|dest_map| dest_map.keys().map(|ca| ca.as_arc().clone()))
                 .collect()
-        };
+        }; // child_guard lock released here
 
         // For each child, compute the candidate depth.
         let candidate_depth = current_depth.saturating_add(1);
@@ -393,6 +393,76 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
             // node lock is released here
         }
         result
+    }
+
+    /// Checks if there are any cycles reachable from the given `root_arc`.
+    /// Returns `true` if a cycle is detected, `false` otherwise.
+    /// This method is useful for verifying graph integrity after complex build processes.
+    pub fn has_any_cycle(root_arc: Arc<Mutex<Trie<EK, EV, T>>>) -> bool {
+        let mut global_visited_arcs: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
+        let mut recursion_stack_arcs: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
+        // Call the recursive helper starting with the root node.
+        Self::_has_any_cycle_recursive(root_arc, &mut global_visited_arcs, &mut recursion_stack_arcs)
+    }
+
+    /// Recursive helper function for `has_any_cycle`.
+    ///
+    /// `global_visited_arcs`: Tracks all nodes that have been visited and processed across
+    ///                        all recursion branches. This prevents re-processing subgraphs
+    ///                        that are already known to be cycle-free (or whose cycles
+    ///                        would have been detected via another path).
+    /// `recursion_stack_arcs`: Tracks nodes currently in the recursion stack for the *current*
+    ///                         DFS path. A cycle is detected if we try to visit a node
+    ///                         that is already in this set.
+    fn _has_any_cycle_recursive(
+        node_arc: Arc<Mutex<Trie<EK, EV, T>>>,
+        global_visited_arcs: &mut HashSet<*const Mutex<Trie<EK, EV, T>>>,
+        recursion_stack_arcs: &mut HashSet<*const Mutex<Trie<EK, EV, T>>>,
+    ) -> bool {
+        let node_arc_ptr = Arc::as_ptr(&node_arc);
+
+        // If the node is already in the current recursion stack, we've found a back-edge (a cycle).
+        if recursion_stack_arcs.contains(&node_arc_ptr) {
+            return true; // Cycle detected
+        }
+
+        // If the node has been globally visited AND is not in the current recursion stack,
+        // it means this node was fully processed via another path and no cycles were found
+        // originating from it *then*. We can safely return false to avoid re-exploring.
+        if global_visited_arcs.contains(&node_arc_ptr) {
+            return false; // Already processed and known to be part of a cycle-free subgraph (from its perspective)
+        }
+
+        // Add the current node to both sets:
+        // - To recursion_stack_arcs to mark it as part of the current DFS path.
+        // - To global_visited_arcs to mark it as processed, so we don't re-explore it unnecessarily
+        //   if reached from another path later.
+        recursion_stack_arcs.insert(node_arc_ptr);
+        global_visited_arcs.insert(node_arc_ptr);
+
+        // Lock the node to get its children.
+        // It's important to collect children Arcs first and then release the lock before recursing.
+        let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
+            let node_guard = node_arc.lock().expect("Mutex poisoned during has_any_cycle traversal");
+            node_guard.children
+                .values() // Iterate over BTreeMap<ComparableArc, EV>
+                .flat_map(|dest_map| dest_map.keys().map(|comparable_arc| comparable_arc.as_arc().clone()))
+                .collect()
+        }; // node_guard lock is released here.
+
+        // Recursively check each child.
+        for child_arc in children_arcs {
+            if Self::_has_any_cycle_recursive(child_arc, global_visited_arcs, recursion_stack_arcs) {
+                return true; // Cycle detected in a descendant path
+            }
+        }
+
+        // If we've processed all children of this node and found no cycles,
+        // remove it from the recursion stack (as we are "returning" up the DFS path).
+        // It remains in global_visited_arcs.
+        recursion_stack_arcs.remove(&node_arc_ptr);
+
+        false // No cycle found originating from this node or its descendants along this path
     }
 }
 
@@ -1545,6 +1615,62 @@ mod tests {
         assert!(node_ptrs.contains(&arc_ptr(&child)));
     }
 
+     #[test]
+    fn test_has_any_cycle() {
+        // No cycle
+        let root1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
+        let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+        let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+        let grandchild: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
+        root1.lock().unwrap().force_insert_to_node("a", "e1", &child1);
+        root1.lock().unwrap().force_insert_to_node("b", "e2", &child2);
+        child1.lock().unwrap().force_insert_to_node("c", "e3", &grandchild);
+        child2.lock().unwrap().force_insert_to_node("d", "e4", &grandchild); // Diamond
+        assert!(!Trie::has_any_cycle(root1.clone()));
+
+        // Simple cycle: root2 -> child3 -> root2
+        let root2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(10)));
+        let child3: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(11)));
+        root2.lock().unwrap().force_insert_to_node("x", "e5", &child3);
+        child3.lock().unwrap().force_insert_to_node("y", "e6", &root2);
+        assert!(Trie::has_any_cycle(root2.clone()));
+
+        // Larger cycle: root3 -> A -> B -> C -> A
+        let root3: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(20)));
+        let node_a: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(21)));
+        let node_b: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(22)));
+        let node_c: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(23)));
+        root3.lock().unwrap().force_insert_to_node("r->a", "e7", &node_a);
+        node_a.lock().unwrap().force_insert_to_node("a->b", "e8", &node_b);
+        node_b.lock().unwrap().force_insert_to_node("b->c", "e9", &node_c);
+        node_c.lock().unwrap().force_insert_to_node("c->a", "e10", &node_a); // Cycle C -> A
+        assert!(Trie::has_any_cycle(root3.clone()));
+
+        // Cycle with unconnected node: root4 -> A -> B -> A; C (unconnected)
+        let root4: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(30)));
+        let node_a2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(31)));
+        let node_b2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(32)));
+        let node_c2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(33))); // Unconnected to root4
+        root4.lock().unwrap().force_insert_to_node("r->a", "e11", &node_a2);
+        node_a2.lock().unwrap().force_insert_to_node("a->b", "e12", &node_b2);
+        node_b2.lock().unwrap().force_insert_to_node("b->a", "e13", &node_a2); // Cycle B -> A
+        assert!(Trie::has_any_cycle(root4.clone()));
+
+        // Disconnected graph with a cycle: root5 (linear chain), root6 (cycle)
+        let root5: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(40)));
+        let node_d: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(41)));
+        root5.lock().unwrap().force_insert_to_node("r->d", "e14", &node_d);
+        // Separately, a cycle structure
+        let root6_in_cycle: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(50)));
+        let node_e: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(51)));
+        root6_in_cycle.lock().unwrap().force_insert_to_node("c1->e", "e15", &node_e);
+        node_e.lock().unwrap().force_insert_to_node("e->c1", "e16", &root6_in_cycle); // Cycle
+        // Checking from root5 should NOT find the cycle
+        assert!(!Trie::has_any_cycle(root5.clone()));
+        // Checking from root6_in_cycle SHOULD find the cycle
+        assert!(Trie::has_any_cycle(root6_in_cycle.clone()));
+    }
+
 
     #[test]
     fn test_cycle_special_map_no_panic_limited_processing() {
@@ -2210,7 +2336,7 @@ mod tests {
         let initial_edge_val1: HybridBitset = vec![10].into_iter().collect();
         let initial_edge_val2: HybridBitset = vec![20].into_iter().collect();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-        let merged_edge_val1: HybridBitset = vec![1, 10].into_iter().collect();
+        let merged_edge_val1: HybridBitset = vec![1, 10].into_iter().collect(); // Expected merge with child1
 
         // Pre-insert edges with the target key
         {
@@ -2450,7 +2576,7 @@ mod tests {
         {
             let s_guard = source.lock().unwrap();
             let children_map_target_key = s_guard.get(&edge_key).expect("Target key should exist");
-            
+
             let ev_c1 = children_map_target_key.get(&ComparableArc::new(child1.clone())).expect("Child1 should be under target_key");
             assert_eq!(*ev_c1, merged_ev_c1, "Edge value for child1 should be merged");
 
@@ -2470,7 +2596,7 @@ mod tests {
         let new_ev_inserter_nm: HybridBitset = vec![5].into_iter().collect();
 
         source_nm.lock().unwrap().try_insert(edge_key_nm, initial_ev_nm.clone(), child1_nm.clone()).unwrap();
-        
+
         // Define a merge function that always returns None (fails to merge)
         fn failing_merge_fn(_existing: &HybridBitset, _new: HybridBitset) -> Option<HybridBitset> {
             None
@@ -2479,7 +2605,7 @@ mod tests {
         let inserter_nm = EdgeInserter::new(source_nm.clone(), edge_key_nm, new_ev_inserter_nm.clone(), failing_merge_fn);
         let result_node_nm_opt = inserter_nm.try_children().into_option();
         assert!(result_node_nm_opt.is_none(), "try_children should return None if all merges fail for children under the key");
-        
+
         // Check edge value for child1_nm is unchanged
         let s_nm_guard = source_nm.lock().unwrap();
         let ev_c1_nm = s_nm_guard
@@ -2508,7 +2634,7 @@ mod tests {
             .try_children() // Will do nothing as no children under "chain_key"
             .else_create_destination_with_value(created_val.clone()) // This should execute
             .unwrap();
-        
+
         assert_eq!(result_node_chain.lock().unwrap().value, created_val, "Fallback node should be created with correct value");
         // Check that an edge was created to this new node
         let s_chain_guard = source_chain.lock().unwrap();

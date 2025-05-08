@@ -612,6 +612,20 @@ impl GrammarConstraint {
         pb.finish_with_message("Precomputation complete");
         crate::debug!(2, "Done precomputing main DFS loop.");
 
+        // ---- Perform final cycle check on the fully built graph ----
+        crate::debug!(2, "Performing final cycle check on precomputed graph structure...");
+        for (tokenizer_state_id, root_arc) in &precomputed_roots {
+            // PrecomputeNode is an alias for Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>
+            // We call has_any_cycle on this Trie type.
+            if PrecomputeNode::has_any_cycle(root_arc.clone()) {
+                panic!(
+                    "Cycle detected in precomputed graph for tokenizer_state_id {:?} after all precomputation steps. This indicates an issue in the graph construction logic.",
+                    tokenizer_state_id
+                );
+            }
+        }
+        crate::debug!(2, "Final cycle check passed: No cycles found in precomputed graph structure.");
+        // -------------------------------------------------------------
 
         // --- Calculate Final Statistics from precomputed_roots before unwrapping ---
         crate::debug!(2, "Calculating final precompute statistics...");
