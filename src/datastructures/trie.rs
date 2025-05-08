@@ -1149,7 +1149,7 @@ mod tests {
         // Use Arc pointers for comparison
         let retrieved_data_a: HashSet<(&str, *const Mutex<TestTrieBasic>)> = retrieved_children_a
             .iter() // Iterates yielding (&ComparableArc, &&str)
-            .map(|(ca, ev_ref)| (**ev_ref, arc_ptr(ca.as_arc()))) // Dereference ev_ref twice
+            .map(|(ca, ev_ref)| (*ev_ref, arc_ptr(ca.as_arc()))) // Dereference ev_ref twice
             .collect();
         assert!(retrieved_data_a.contains(&("edge_a1", arc_ptr(&child1))));
         assert!(retrieved_data_a.contains(&("edge_a3", arc_ptr(&child3))));
@@ -1158,7 +1158,7 @@ mod tests {
         let retrieved_children_b = root.get(&"b").expect("Failed to get child 'b'"); // Now a &BTreeMap
         assert_eq!(retrieved_children_b.len(), 1);
         let (ca, ev_ref) = retrieved_children_b.iter().next().unwrap(); // Get the single entry
-        assert_eq!(**ev_ref, "edge_b"); // Check edge value
+        assert_eq!(*ev_ref, "edge_b"); // Check edge value
         assert!(Arc::ptr_eq(ca.as_arc(), &child2)); // Check Arc pointer equality
 
         assert!(root.get(&"c").is_none());
@@ -1201,7 +1201,7 @@ mod tests {
             assert_eq!(children_map.len(), 2);
             let child_data: HashSet<(&str, *const Mutex<TestTrieBasic>)> = children_map
                 .iter()
-                .map(|(ca, ev_ref)| (**ev_ref, arc_ptr(ca.as_arc())))
+                .map(|(ca, ev_ref)| (*ev_ref, arc_ptr(ca.as_arc())))
                 .collect();
             assert!(child_data.contains(&("val1", arc_ptr(&child1))));
             assert!(child_data.contains(&("val2", arc_ptr(&child2))));
@@ -1509,8 +1509,8 @@ mod tests {
         let child: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
 
         // Manually create links
-        root.lock().unwrap().force_insert_to_node("r->c", "e1", child.clone());
-        child.lock().unwrap().force_insert_to_node("c->r", "e2", root.clone());
+        root.lock().unwrap().force_insert_to_node("r->c", "e1", &child);
+        child.lock().unwrap().force_insert_to_node("c->r", "e2", &root);
         // Manually set depths (optional for all_nodes logic)
         root.lock().unwrap().max_depth = 0;
         child.lock().unwrap().max_depth = 1;
@@ -1534,8 +1534,8 @@ mod tests {
         let child: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
 
         // Manually create links
-        root.lock().unwrap().force_insert_to_node("r->c", "e1", child.clone());
-        child.lock().unwrap().force_insert_to_node("c->r", "e2", root.clone());
+        root.lock().unwrap().force_insert_to_node("r->c", "e1", &child);
+        child.lock().unwrap().force_insert_to_node("c->r", "e2", &root);
         // Manually set depths. These are crucial for special_map's readiness check.
         root.lock().unwrap().max_depth = 0; // Initial node, depth 0
         child.lock().unwrap().max_depth = 1; // Child reachable at depth 1
@@ -2453,7 +2453,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(result_node_fb.lock().unwrap().value, new_node_val_if_created); // Fallback node was created
-        let children_map_fb = source_for_fb.lock().unwrap().get(&"fallback_key").unwrap(); // Now a BTreeMap
+        let source_guard_fb = source_for_fb.lock().unwrap();
+        let children_map_fb = source_guard_fb.get(&"fallback_key").unwrap(); // Now a BTreeMap
         assert_eq!(children_map_fb.len(), 1); // New edge created
         let (ca_fb, ev_fb) = children_map_fb.iter().next().unwrap();
         assert!(Arc::ptr_eq(ca_fb.as_arc(), &result_node_fb)); // Edge points to new node
