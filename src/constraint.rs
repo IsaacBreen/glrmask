@@ -210,7 +210,7 @@ impl GrammarConstraint {
         }
         // -----------------------------------------------------------
 
-        const MERGE_THRESHOLD: usize = 10;
+        const MERGE_THRESHOLD: usize = 2;
 
         // ----  Ord-capable handle for `Arc<Mutex<PrecomputeNode>>` --------------------------
         // `Arc<Mutex<PrecomputeNode>>` cannot live in a `BTreeSet` because `Mutex<T>` lacks
