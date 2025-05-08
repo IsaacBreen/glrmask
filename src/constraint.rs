@@ -320,36 +320,21 @@ impl GrammarConstraint {
             // Add each handle in the input set as a child of the new_merged_pc_node_arc
             // using an EdgeInserter. The edge key will be None.
             for handle_to_become_child in set_of_handles {
-                // Edge: new_merged_pc_node_arc --(None, all_llm_tokens_for_merge_edge)--> handle_to_become_child.0
                 let mut insert_result = EdgeInserter::new(
-                    new_merged_pc_node_arc.clone(), // Source Arc<Mutex<PrecomputeNode>>
+                    handle_to_become_child.0.clone(), // Source Arc<Mutex<PrecomputeNode>>
                     None,                           // Edge key: Option<GrammarTokenID> = None
                     all_llm_tokens_for_merge_edge.clone(), // Edge value: LLMTokenBV
                     // Merge function for edge values (LLMTokenBV)
                     |ev_exist: &LLMTokenBV, ev_new: LLMTokenBV| Some(ev_exist | &ev_new),
                 );
 
-                // Removed the old try_children() call here as it's replaced by the logic in the main DFS loop
+                insert_result = insert_result.try_children(); // Will do nothing as no children under "None"
 
                 if !insert_result.clone_into_option().is_some() {
-                    insert_result = insert_result.try_destination(handle_to_become_child.0.clone()); // Corrected destination
+                    insert_result = insert_result.try_destination(new_merged_pc_node_arc.clone()); // Corrected destination
                     stats.gross_edges_with_none_key += 1;
                     stats.edges_inserted_by_merge_policy += 1;
                 }
-
-
-                // The result of the insert_result chain should be the destination node (the child handle)
-                // which might be the original child handle or a merged one if try_destination found a match.
-                // The merge policy's goal is just to create the new parent and link to the *existing* children.
-                // We don't expect try_destination to find an existing edge here because the source is brand new.
-                // So this simplified path is more correct:
-                new_merged_pc_node_arc.lock().unwrap().force_insert_to_node(
-                    None,
-                    all_llm_tokens_for_merge_edge.clone(),
-                    &handle_to_become_child.0,
-                );
-                stats.gross_edges_with_none_key += 1;
-                stats.edges_inserted_by_merge_policy += 1;
             }
 
             result_set.insert(NodeHandle(new_merged_pc_node_arc)); // The result is the single new merge parent
