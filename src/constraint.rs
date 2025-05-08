@@ -316,8 +316,7 @@ impl GrammarConstraint {
                     |ev_exist: &LLMTokenBV, ev_new: LLMTokenBV| Some(ev_exist | &ev_new),
                 );
                 insert_result = insert_result.try_children();
-                if insert_result.clone_into_option().is_some() {
-                } else {
+                if !insert_result.clone_into_option().is_some() {
                     insert_result = insert_result.try_destination(new_merged_pc_node_arc.clone());
                     stats.gross_edges_with_none_key += 1;
                     stats.edges_inserted_by_merge_policy += 1;
