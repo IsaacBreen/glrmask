@@ -895,14 +895,22 @@ where
         self
     }
 
-    /// Tries to establish an edge to any existing child node of the source node,
-    /// regardless of the edge key under which the child was originally added.
+    /// Tries to merge the edge with existing children under `self.edge_key`.
     ///
-    /// Iterates through *all* children of the source node. For each child, it calls
-    /// `try_destination` to attempt adding the new edge (`self.edge_key`, `self.edge_value`)
-    /// pointing to that child. The first successful attempt (either merging an existing
-    /// edge with the same key to that child, or inserting a new edge if no cycle occurs)
-    /// sets the result and stops further attempts.
+    /// This method identifies all children of the source node that are already
+    /// destinations for an edge with `self.edge_key`. For each such child, it
+    /// attempts to merge `self.edge_value` into the existing edge's value using
+    /// the `merge_edge_value` closure provided when the `EdgeInserter` was created.
+    /// This is done by calling `try_destination` for each identified child.
+    ///
+    /// The first child for which `try_destination` is successful (typically by merging
+    /// the edge value, as the edge `(self.edge_key, child)` already exists)
+    /// will be set as `self.result`, and no further children under this key will be tried.
+    ///
+    /// If `merge_edge_value` returns `None` for a child (causing `try_destination` to not
+    /// set a result for that child), or if no children exist under `self.edge_key`,
+    /// `self.result` remains unchanged by this method with respect to those children.
+    /// This method focuses on updating existing edges associated with `self.edge_key`.
     ///
     /// Returns `self` to allow chaining.
     pub fn try_children(mut self) -> Self {
@@ -910,17 +918,23 @@ where
             return self;
         }
 
-        // Collect ALL children arcs, regardless of the edge key they are under.
-        let all_children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
-            let source = self.source_arc.lock().expect("Mutex poisoned while locking source in try_children");
-            source.children
-                .values() // Iterates over BTreeMap<ComparableArc, EV> for each edge key
-                .flat_map(|dest_map| dest_map.keys().map(|ca| ca.as_arc().clone())) // Extract Arcs
-                .collect()
+        // Collect children arcs that are specifically under self.edge_key.
+        let children_for_this_key: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
+            let source_guard = self.source_arc.lock().expect("Mutex poisoned while locking source in try_children");
+            if let Some(dest_map) = source_guard.children.get(&self.edge_key) {
+                dest_map.keys().map(|ca| ca.as_arc().clone()).collect()
+            } else {
+                Vec::new() // No children under this specific edge key
+            }
         }; // Lock is dropped here
 
-        // Call try_slice with the collected children
-        self.try_destinations(&all_children_arcs)
+        // If there are children under this key, try them.
+        // self.try_destinations will attempt to merge the edge value.
+        if !children_for_this_key.is_empty() {
+            self = self.try_destinations(&children_for_this_key);
+        }
+        // Return self, which may or may not have found a result.
+        self
     }
 
 
@@ -2396,74 +2410,112 @@ mod tests {
     }
 
      #[test]
-    fn test_ei_try_children() {
+    fn test_ei_try_children_new_logic() {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string())));
         let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
-        let initial_edge_val1: HybridBitset = vec![10].into_iter().collect();
-        let initial_edge_val2: HybridBitset = vec![20].into_iter().collect();
-        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-        let dummy_edge_val = HybridBitset::new();
+        let child_other_key: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child_other_key".to_string())));
 
+        let edge_key = "target_key";
+        let initial_ev_c1: HybridBitset = vec![10].into_iter().collect();
+        let initial_ev_c2: HybridBitset = vec![20].into_iter().collect();
+        let new_ev_for_inserter: HybridBitset = vec![1].into_iter().collect();
+        let merged_ev_c1: HybridBitset = vec![1, 10].into_iter().collect(); // Expected merge with child1
 
-        // Add child1 and child2 as children of source under different keys initially
+        // Setup:
+        // source --(target_key, initial_ev_c1)--> child1
+        // source --(target_key, initial_ev_c2)--> child2
+        // source --("other_key", dummy_ev)--> child_other_key
         {
             let mut s = source.lock().unwrap();
-            s.try_insert("other_key_c1", initial_edge_val1.clone(), child1.clone()).unwrap();
-            s.try_insert("other_key_c2", initial_edge_val2.clone(), child2.clone()).unwrap();
+            s.try_insert(edge_key, initial_ev_c1.clone(), child1.clone()).unwrap();
+            s.try_insert(edge_key, initial_ev_c2.clone(), child2.clone()).unwrap();
+            s.try_insert("other_key", HybridBitset::new(), child_other_key.clone()).unwrap();
         }
 
-        // Now use EdgeInserter from source to try inserting an edge *to* its *existing children* under a NEW key
-        let inserter = EdgeInserter::new(source.clone(), "new_edge_key", new_edge_val.clone(), merge_bitset_union);
-        // try_children will look for existing children of 'source' under 'new_edge_key', find none, then try
-        // inserting to child1 and child2 using try_slice. Assuming no cycles exist *now* to child1 or child2
-        // via the new 'new_edge_key', the first attempt (to child1) should succeed.
-        let result_node = inserter.try_children().unwrap();
+        // 1. Test successful merge with the first child under the key.
+        //    EdgeInserter is created with source, target_key, and new_ev_for_inserter.
+        //    merge_bitset_union should merge new_ev_for_inserter into initial_ev_c1.
+        let inserter = EdgeInserter::new(source.clone(), edge_key, new_ev_for_inserter.clone(), merge_bitset_union);
+        let result_node_opt = inserter.try_children().into_option();
 
-        assert!(Arc::ptr_eq(&result_node, &child1), "try_children should succeed with the first child it tries if no cycle");
+        assert!(result_node_opt.is_some(), "Should find and merge with child1");
+        let result_node = result_node_opt.unwrap();
+        assert!(Arc::ptr_eq(&result_node, &child1), "Result should be child1");
 
-        // Check the new edge was added to source, pointing to child1
-        let s = source.lock().unwrap();
-        let children_map_new_key = s.get(&"new_edge_key").unwrap(); // Now a BTreeMap
-        assert_eq!(children_map_new_key.len(), 1);
-        let (ca, ev) = children_map_new_key.iter().next().unwrap();
-        assert!(Arc::ptr_eq(ca.as_arc(), &child1));
-        assert_eq!(*ev, new_edge_val);
+        // Check edge values:
+        // Edge to child1 should be merged.
+        // Edge to child2 should be unchanged (because merge with child1 succeeded first).
+        // Edge to child_other_key should be unchanged.
+        {
+            let s_guard = source.lock().unwrap();
+            let children_map_target_key = s_guard.get(&edge_key).expect("Target key should exist");
+            
+            let ev_c1 = children_map_target_key.get(&ComparableArc::new(child1.clone())).expect("Child1 should be under target_key");
+            assert_eq!(*ev_c1, merged_ev_c1, "Edge value for child1 should be merged");
+
+            let ev_c2 = children_map_target_key.get(&ComparableArc::new(child2.clone())).expect("Child2 should be under target_key");
+            assert_eq!(*ev_c2, initial_ev_c2, "Edge value for child2 should be unchanged");
+
+            let children_map_other_key = s_guard.get(&"other_key").expect("Other key should exist");
+            assert_eq!(children_map_other_key.len(), 1, "Should be one child under other_key");
+            // You could also check the value of the edge to child_other_key if necessary.
+        }
+
+        // 2. Test when merge_edge_value fails for all children under the key.
+        let source_nm: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source_nm".to_string())));
+        let child1_nm: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1_nm".to_string())));
+        let edge_key_nm = "nm_key"; // "nm" for "no merge"
+        let initial_ev_nm: HybridBitset = vec![50].into_iter().collect();
+        let new_ev_inserter_nm: HybridBitset = vec![5].into_iter().collect();
+
+        source_nm.lock().unwrap().try_insert(edge_key_nm, initial_ev_nm.clone(), child1_nm.clone()).unwrap();
+        
+        // Define a merge function that always returns None (fails to merge)
+        fn failing_merge_fn(_existing: &HybridBitset, _new: HybridBitset) -> Option<HybridBitset> {
+            None
+        }
+
+        let inserter_nm = EdgeInserter::new(source_nm.clone(), edge_key_nm, new_ev_inserter_nm.clone(), failing_merge_fn);
+        let result_node_nm_opt = inserter_nm.try_children().into_option();
+        assert!(result_node_nm_opt.is_none(), "try_children should return None if all merges fail for children under the key");
+        
+        // Check edge value for child1_nm is unchanged
+        let s_nm_guard = source_nm.lock().unwrap();
+        let ev_c1_nm = s_nm_guard
+            .get(&edge_key_nm).unwrap()
+            .get(&ComparableArc::new(child1_nm.clone())).unwrap();
+        assert_eq!(*ev_c1_nm, initial_ev_nm, "Edge value for child1_nm should be unchanged after failing merge");
 
 
-        // Check original edges are still there
-        assert_eq!(s.get(&"other_key_c1").unwrap().len(), 1);
-         assert_eq!(s.get(&"other_key_c2").unwrap().len(), 1);
+        // 3. Test when no children exist under the specified edge_key.
+        let source_empty: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source_empty".to_string())));
+        let edge_key_empty = "empty_key"; // This key has no children in source_empty
+        let new_ev_inserter_empty: HybridBitset = vec![7].into_iter().collect();
 
-        // Test with fallback: Try children (should fail if cycles exist), then create a new node
-         let source_for_fb: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source_fb".to_string())));
-         let child1_fb: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1_fb".to_string())));
-         let child2_fb: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2_fb".to_string())));
+        let inserter_empty = EdgeInserter::new(source_empty.clone(), edge_key_empty, new_ev_inserter_empty.clone(), merge_bitset_union);
+        let result_node_empty_opt = inserter_empty.try_children().into_option();
+        assert!(result_node_empty_opt.is_none(), "try_children should return None if no children under the key");
 
-         // Make try_children fail by creating cycles
-         {
-            let mut s = source_for_fb.lock().unwrap();
-            s.try_insert("fb_key_c1", initial_edge_val1.clone(), child1_fb.clone()).unwrap(); // Link source -> child1
-            child1_fb.lock().unwrap().force_insert_to_node("c1->s", dummy_edge_val.clone(), &source_for_fb); // Link child1 -> source (cycle)
+        // 4. Test chaining with else_create: try_children (no children under key) -> else_create
+        let source_chain: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source_chain".to_string())));
+        let edge_key_chain = "chain_key"; // No children under this key initially in source_chain
+        let new_ev_chain: HybridBitset = vec![8].into_iter().collect();
+        let created_val = "created_node_via_fallback".to_string();
 
-            s.try_insert("fb_key_c2", initial_edge_val2.clone(), child2_fb.clone()).unwrap(); // Link source -> child2
-            child2_fb.lock().unwrap().force_insert_to_node("c2->s", dummy_edge_val.clone(), &source_for_fb); // Link child2 -> source (cycle)
-         }
-
-        let new_node_val_if_created = "fallback_node".to_string();
-        let fallback_edge_val: HybridBitset = vec![99].into_iter().collect();
-         let inserter_fb = EdgeInserter::new(source_for_fb.clone(), "fallback_key", fallback_edge_val.clone(), merge_bitset_union);
-         let result_node_fb = inserter_fb
-            .try_children() // Try inserting to child1_fb or child2_fb, both should fail cycle detection
-            .else_create_destination_with_value(new_node_val_if_created.clone()) // Succeeds
+        let inserter_chain = EdgeInserter::new(source_chain.clone(), edge_key_chain, new_ev_chain.clone(), merge_bitset_union);
+        let result_node_chain = inserter_chain
+            .try_children() // Will do nothing as no children under "chain_key"
+            .else_create_destination_with_value(created_val.clone()) // This should execute
             .unwrap();
-
-        assert_eq!(result_node_fb.lock().unwrap().value, new_node_val_if_created); // Fallback node was created
-        let source_guard_fb = source_for_fb.lock().unwrap();
-        let children_map_fb = source_guard_fb.get(&"fallback_key").unwrap(); // Now a BTreeMap
-        assert_eq!(children_map_fb.len(), 1); // New edge created
-        let (ca_fb, ev_fb) = children_map_fb.iter().next().unwrap();
-        assert!(Arc::ptr_eq(ca_fb.as_arc(), &result_node_fb)); // Edge points to new node
-        assert_eq!(*ev_fb, fallback_edge_val);
-     }
+        
+        assert_eq!(result_node_chain.lock().unwrap().value, created_val, "Fallback node should be created with correct value");
+        // Check that an edge was created to this new node
+        let s_chain_guard = source_chain.lock().unwrap();
+        let children_map_chain = s_chain_guard.get(&edge_key_chain).expect("Chain key should now exist in source_chain");
+        assert_eq!(children_map_chain.len(), 1, "One edge should be created under chain_key");
+        let (ca_chain, ev_chain) = children_map_chain.iter().next().unwrap();
+        assert!(Arc::ptr_eq(ca_chain.as_arc(), &result_node_chain), "Edge should point to the newly created node");
+        assert_eq!(*ev_chain, new_ev_chain, "Edge should have the new_ev_chain value");
+    }
 }
