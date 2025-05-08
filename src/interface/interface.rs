@@ -534,7 +534,7 @@ mod tests {
         // i.e. break the "(i" token into "(" and "i". But that's a waste of a token.
         // A good LLM tokenizer would greedily emit the longest possible token at each step.
         let prefill: Vec<_> = llm_token_vec!(b"(i", b"+i", b"*", b"i").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
-        grammar_constraint_state.commit_and_step_many(&prefill);
+        grammar_constraint_state.step_with_llm_token_sequence(&prefill);
 
         // Get the mask.
         // The valid LLM tokens right now are ["+", "*", ")", "+i)"].
@@ -544,7 +544,7 @@ mod tests {
 
         // Finish it
         let terminals: Vec<_> = llm_token_vec!(b")").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
-        grammar_constraint_state.commit_and_step_many(&terminals);
+        grammar_constraint_state.step_with_llm_token_sequence(&terminals);
         let mask = grammar_constraint_state.get_mask();
         let mut expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"+", b"*", b"+i"));
         // Add the EOF token
@@ -596,7 +596,7 @@ mod tests {
 
         // Commit "a"
         let terminals: Vec<_> = llm_token_vec!(b"a").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
-        grammar_constraint_state.commit_and_step_many(&terminals);
+        grammar_constraint_state.step_with_llm_token_sequence(&terminals);
 
         // Get the mask.
         let mask = grammar_constraint_state.get_mask();
@@ -644,7 +644,7 @@ mod tests {
 
         // Commit "a"
         let terminals: Vec<_> = llm_token_vec!(b"a").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
-        grammar_constraint_state.commit_and_step_many(&terminals);
+        grammar_constraint_state.step_with_llm_token_sequence(&terminals);
 
         // Get the mask.
         // let mask = grammar_constraint_state.get_mask();

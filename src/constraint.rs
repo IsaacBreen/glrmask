@@ -604,16 +604,9 @@ impl<'a> GrammarConstraintState<'a> {
         });
     }
 
-    pub fn step_and_commit(&mut self, llm_token_id: LLMTokenID) {
-        self.step_with_llm_token(llm_token_id);
-        self.commit(llm_token_id);
-    }
-
-    pub fn commit_and_step_many(&mut self, llm_token_ids: &[LLMTokenID]) {
+    pub fn step_with_llm_token_sequence(&mut self, llm_token_ids: &[LLMTokenID]) {
         for &llm_token_id in llm_token_ids {
-            // Correct logic: commit the previous token, then step with the new one.
-            self.commit(llm_token_id); // Commit the effect of the *previous* token leading to this one.
-            self.step_with_llm_token(llm_token_id); // Step with the current token.
+            self.step_with_llm_token(llm_token_id);
         }
     }
 
