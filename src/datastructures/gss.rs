@@ -98,7 +98,7 @@ impl<T> GSSNode<T> {
     }
 
     pub fn pop(&self) -> Vec<Arc<Self>> {
-        self.predecessors.iter().map(|ptr| (*ptr).clone()).collect()
+        self.predecessors.iter().map(|ptr| (*ptr).0.clone()).collect()
     }
 
     pub fn popn(&self, n: usize) -> Vec<Arc<Self>>
@@ -166,16 +166,12 @@ impl<T> GSSNode<T> {
         T: PartialEq,
     {
         assert!(self.value == other.value);
-        for pred_ptr in other.predecessors { // other.predecessors is consumed
-            self.predecessors.insert(pred_ptr);
-        }
+        self.predecessors.extend(std::mem::take(&mut other.predecessors));
     }
 
     pub fn merge_unchecked(&mut self, mut other: Self)
     {
-        for pred_ptr in other.predecessors { // other.predecessors is consumed
-            self.predecessors.insert(pred_ptr);
-        }
+        self.predecessors.extend(std::mem::take(&mut other.predecessors));
     }
 
     pub fn map<F, U>(&self, f: F) -> GSSNode<U>
@@ -227,7 +223,7 @@ impl<T: Clone> GSSTrait<T> for GSSNode<T> {
     }
 
     fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
-        self.predecessors.iter().map(|ptr| (*ptr).clone()).collect()
+        self.predecessors.iter().map(|ptr| (*ptr).0.clone()).collect()
     }
 
     fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
@@ -250,7 +246,7 @@ impl<T: Clone> GSSTrait<T> for Arc<GSSNode<T>> {
     }
 
     fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
-        self.predecessors.iter().map(|ptr| (*ptr).clone()).collect()
+        self.predecessors.iter().map(|ptr| (*ptr).0.clone()).collect()
     }
 
     fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
@@ -554,7 +550,7 @@ pub fn gather_gss_stats<T: Clone>(roots: &[Arc<GSSNode<T>>]) -> GSSStats {
             let pred_arc = &*pred_gss_ptr; // pred_arc is &Arc<GSSNode<T>>
             let pred_raw_ptr = Arc::as_ptr(pred_arc);
             if visited.insert(pred_raw_ptr) {
-                queue.push_back((pred_arc.clone(), current_depth + 1));
+                queue.push_back((pred_arc.0.clone(), current_depth + 1));
             }
         }
     }
