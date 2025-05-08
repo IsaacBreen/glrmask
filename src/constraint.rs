@@ -235,13 +235,11 @@ impl GrammarConstraint {
         }
 
         // merge_map for deduplicating PrecomputeNode structures resulting from merged paths
-        let mut merge_map: BTreeMap<BTreeSet<NodeHandle>, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
         let all_llm_tokens_for_merge_edge = HybridBitset::ones(max_llm_token_id);
 
         // ---- Helper function to merge NodeHandles ----
         fn merge_node_handles_internal(
             set_of_handles: &BTreeSet<NodeHandle>,
-            merge_map: &mut BTreeMap<BTreeSet<NodeHandle>, Arc<Mutex<PrecomputeNode>>>,
             all_llm_tokens_for_merge_edge: &HybridBitset,
             threshold: usize,
         ) -> BTreeSet<NodeHandle> { // Changed return type
@@ -253,15 +251,10 @@ impl GrammarConstraint {
                 return set_of_handles.clone();
             }
 
-            // Attempt to find an already merged node for this exact set.
-            if let Some(existing_merged_arc) = merge_map.get(set_of_handles) {
-                let mut result_set = BTreeSet::new();
-                result_set.insert(NodeHandle(existing_merged_arc.clone()));
-                return result_set;
-            }
-
             // Create a new node to represent the merged set.
             let new_merged_pc_node_arc = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
+
+            let mut result_set = BTreeSet::new();
 
             // Add each handle in the input set as a child of the new_merged_pc_node_arc
             // using an EdgeInserter. The edge key will be None.
@@ -270,30 +263,20 @@ impl GrammarConstraint {
                 // and attempt to insert an edge to handle_to_become_child.0.
                 // Since new_merged_pc_node_arc is new, this will always be an insert.
                 let insert_result = EdgeInserter::new(
-                    new_merged_pc_node_arc.clone(), // Source Arc<Mutex<PrecomputeNode>>
+                    handle_to_become_child.0.clone(), // Source Arc<Mutex<PrecomputeNode>>
                     None,                           // Edge key: Option<GrammarTokenID> = None
                     all_llm_tokens_for_merge_edge.clone(), // Edge value: LLMTokenBV
                     // Merge function for edge values (LLMTokenBV)
                     |ev_exist: &LLMTokenBV, ev_new: LLMTokenBV| Some(ev_exist | &ev_new),
                 )
-                .try_destination(handle_to_become_child.0.clone()) // Destination Arc<Mutex<PrecomputeNode>>
-                .into_option();
+                .try_children()
+                .try_destination(new_merged_pc_node_arc.clone()) // Destination Arc<Mutex<PrecomputeNode>>
+                .expect("EdgeInserter failed to add child during merge_node_handles_internal. This is unexpected.");
 
-                if insert_result.is_none() {
-                    // This might happen if try_insert detects a cycle, though unlikely for new nodes
-                    // and None edges. Or if the destination itself is problematic.
-                    // For robustness, one might log this or handle it, but for now, we expect success.
-                    panic!("EdgeInserter failed to add child during merge_node_handles_internal. This is unexpected.");
-                }
+                result_set.insert(NodeHandle(insert_result));
             }
 
-            // Store the new merged node in merge_map for future reuse.
-            // The key is a clone of the original set_of_handles.
-            merge_map.insert(set_of_handles.clone(), new_merged_pc_node_arc.clone());
-
             // Return a set containing only the new merged handle.
-            let mut result_set = BTreeSet::new();
-            result_set.insert(NodeHandle(new_merged_pc_node_arc));
             result_set
         }
         // --------------------------------------------
@@ -340,7 +323,6 @@ impl GrammarConstraint {
             for (tokenizer_state_id, set_of_handles) in processing_item.associated_pc_nodes_by_state {
                 let effective_handles_set = merge_node_handles_internal(
                     &set_of_handles,
-                    &mut merge_map,
                     &all_llm_tokens_for_merge_edge,
                     MERGE_THRESHOLD,
                 );
@@ -387,7 +369,6 @@ impl GrammarConstraint {
                         // Apply the merge policy to the set of handles for this specific path in segment processing.
                         let effective_source_handles_for_suffix: BTreeSet<NodeHandle> = merge_node_handles_internal(
                             &current_path_source_handles_set,
-                            &mut merge_map,
                             &all_llm_tokens_for_merge_edge,
                             MERGE_THRESHOLD,
                         );
