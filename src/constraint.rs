@@ -315,7 +315,9 @@ impl GrammarConstraint {
                     // Merge function for edge values (LLMTokenBV)
                     |ev_exist: &LLMTokenBV, ev_new: LLMTokenBV| Some(ev_exist | &ev_new),
                 );
-                insert_result = insert_result.try_children();
+                if TRY_INSERT_CHILDREN {
+                    insert_result = insert_result.try_children();
+                }
                 if !insert_result.clone_into_option().is_some() {
                     insert_result = insert_result.try_destination(new_merged_pc_node_arc.clone());
                     stats.gross_edges_with_none_key += 1;
