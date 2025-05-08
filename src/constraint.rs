@@ -687,9 +687,9 @@ impl GrammarConstraint {
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&mut self) -> LLMTokenBV {
         let mut mask = HybridBitset::new();
-        for (_, glr_state) in &self.state { // glr_state is GLRParserState
-            for active_state in glr_state.active_states() { // iterate over values
-                // Use BitOrAssign<&HybridBitset> // active_state is &ParseState<T>
+        for (_, state) in &self.state {
+            for active_state in &state.active_states {
+                // Use BitOrAssign<&HybridBitset>
                 mask |= &active_state.stack.peek().t.active;
             }
         }
@@ -738,21 +738,16 @@ impl<'a> GrammarConstraintState<'a> {
 
         let mut memo = HashMap::new();
         self.state.retain(|tokenizer_state_id, glr_state| {
-            // Rebuild the active_states map for the glr_state
-            let mut next_active_states_for_glr = BTreeMap::new();
-            // Iterate over the original map by consuming it (or cloning then consuming)
-            // Here, we iterate over a clone of keys to avoid mutable borrow issues, then modify.
-            // A cleaner way is to build a new map.
-            for (key, parse_state) in glr_state.iter_active_states_map() { // Iterate over (&Key, &Value)
+            glr_state.active_states.retain_mut(|parse_state| {
                 let maybe_new_node = prune_and_transform_recursive(&parse_state.stack, &closure, &mut memo);
                 if let Some(new_node) = maybe_new_node {
-                    let mut new_parse_state = parse_state.clone(); // ParseState is Clone
-                    new_parse_state.stack = new_node;
-                    next_active_states_for_glr.insert(*key, new_parse_state);
+                    parse_state.stack = new_node;
+                    true
+                } else {
+                    false
                 }
-            }
-            glr_state.active_states = next_active_states_for_glr;
-            glr_state.is_ok()
+            });
+            !glr_state.active_states.is_empty()
         });
     }
 
@@ -766,9 +761,9 @@ impl<'a> GrammarConstraintState<'a> {
         let mut initial_nodes_and_values: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'_, LLMTokenInfo>)> = Vec::new();
         let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, GLRParserState<'_, LLMTokenInfo>> = BTreeMap::new();
 
-        for (tokenizer_state_id, glr_ps_state) in &self.state {
-            let mut cloned_glr_ps_state = glr_ps_state.clone();
-            for parse_state in cloned_glr_ps_state.active_states_mut() { // Iterate over &mut ParseState<T>
+        for (tokenizer_state_id, state) in &self.state {
+            let mut state = state.clone();
+            for parse_state in state.active_states.iter_mut() {
                 // Only update the *active* tokens at the *top* of the stack.
                 // The intersection remains unchanged, and deeper nodes are untouched.
                 // The special_map logic will handle intersecting with edge_llm_tokens.
@@ -776,7 +771,7 @@ impl<'a> GrammarConstraintState<'a> {
                 Arc::make_mut(&mut parse_state.stack).value.t.active &= llm_tokens;
                 // Intersection is NOT modified here. It reflects the guarantee from *below*.
             }
-            tokenizer_state_id_to_parse_states.insert(*tokenizer_state_id, cloned_glr_ps_state);
+            tokenizer_state_id_to_parse_states.insert(*tokenizer_state_id, state);
         }
 
         for (tokenizer_state_id, state) in tokenizer_state_id_to_parse_states {
@@ -801,32 +796,24 @@ impl<'a> GrammarConstraintState<'a> {
             // Input: &GLRParserState<'_, LLMTokenInfo>, GrammarTokenID, &LLMTokenBV, &Arc<Mutex<PrecomputeNode>>
             // Output: Option<GLRParserState<'_, LLMTokenInfo>>
             |glr_parse_state, grammar_token_id, edge_llm_tokens, child_node| {
-                // Clone the GLRParserState to modify its active_states
-                let mut current_glr_state = glr_parse_state.clone();
                 let node_ptr = std::ptr::addr_of!(*child_node) as usize;
-                crate::debug!(3, "Processing grammar node {:p} token {:?} with {} active states", node_ptr as *const (), grammar_token_id.map(|grammar_token_id| grammar_token_id.0), current_glr_state.num_active_states());
-
-                let mut next_active_for_current_glr = BTreeMap::new();
-                for (key, mut parse_state) in std::mem::take(&mut current_glr_state.active_states) {
+                crate::debug!(3, "Processing grammar node {:p} token {:?} with {} active states", node_ptr as *const (), grammar_token_id.map(|grammar_token_id| grammar_token_id.0), glr_parse_state.active_states.len());
+                let mut glr_parse_state = glr_parse_state.clone();
+                glr_parse_state.active_states.retain_mut(|parse_state| {
                     // Intersect the *active* tokens with the edge tokens. Intersection inherits current active tokens.
                     let current_active_tokens = parse_state.stack.value.t.active.clone();
                     // Use BitAndAssign<&HybridBitset>
                     Arc::make_mut(&mut parse_state.stack).value.t.intersection &= &current_active_tokens;
                     Arc::make_mut(&mut parse_state.stack).value.t.active &= edge_llm_tokens;
-                    if !parse_state.stack.value.t.active.is_empty() { // Check if any active paths remain
-                        next_active_for_current_glr.insert(key, parse_state);
-                    }
-                }
-                current_glr_state.active_states = next_active_for_current_glr;
-
-                grammar_token_id.map(|gid| current_glr_state.step(gid)); // step modifies current_glr_state in place
-
-                if !current_glr_state.is_ok() {
+                    !parse_state.stack.value.t.active.is_empty() // Check if any active paths remain
+                });
+                grammar_token_id.map(|grammar_token_id| glr_parse_state.step(grammar_token_id));
+                if glr_parse_state.active_states.is_empty() {
                     crate::debug!(3, "No active states after processing grammar token {:?}", grammar_token_id.map(|grammar_token_id| grammar_token_id.0));
                     return None;
                 } else {
-                    crate::debug!(3, "Processed grammar token {:?}, {} active states.", grammar_token_id.map(|grammar_token_id| grammar_token_id.0), current_glr_state.num_active_states());
-                    Some(current_glr_state)
+                    crate::debug!(3, "Processed grammar token {:?}, {} active states.", grammar_token_id.map(|grammar_token_id| grammar_token_id.0), glr_parse_state.active_states.len());
+                    Some(glr_parse_state)
                 }
             },
             // merge
@@ -838,35 +825,25 @@ impl<'a> GrammarConstraintState<'a> {
             // Input: &PrecomputeNode, &GLRParserState<'_, LLMTokenInfo>
             // Output: bool (continue?)
             |node, glr_parse_state| {
-                // merge_active_states is no longer needed as BTreeMap handles merging on insert.
-                // However, glr_parse_state here is a reference. If it needs modification, it must be cloned.
-                // The process callback receives &GLRParserState. If it needs to be modified for further processing
-                // (e.g. filtering for clean_end or finalizers), it should be cloned.
-
+                glr_parse_state.merge_active_states();
                 let mut active_llm_tokens = HybridBitset::new();
-                for parse_state in glr_parse_state.active_states() {
+                for parse_state in &glr_parse_state.active_states {
                     // Use BitOrAssign<&HybridBitset>
                     active_llm_tokens |= &parse_state.stack.value.t.active;
                 }
-                crate::debug!(3, "Processing node with {} active states, {} LLM tokens, {} finalizers", glr_parse_state.num_active_states(), active_llm_tokens.len(), node.value.finalizers.len());
-
+                crate::debug!(3, "Processing node with {} active states, {} LLM tokens, {} finalizers", glr_parse_state.active_states.len(), active_llm_tokens.len(), node.value.finalizers.len());
                 // Handle clean end
                 if let Some(clean_end) = &node.value.clean_end {
                     let mut final_glr_parse_state = glr_parse_state.clone();
-                    let mut next_active_for_final_glr = BTreeMap::new();
-                    for (key, mut parse_state) in std::mem::take(&mut final_glr_parse_state.active_states) {
+                    final_glr_parse_state.active_states.retain_mut(|parse_state| {
                         // Intersect the *active* tokens with the clean_end tokens. Intersection retains current active tokens.
                         let current_active_tokens = parse_state.stack.value.t.active.clone();
                         // Use BitAndAssign<&HybridBitset>
                         Arc::make_mut(&mut parse_state.stack).value.t.intersection &= &current_active_tokens;
                         Arc::make_mut(&mut parse_state.stack).value.t.active &= clean_end;
                         // Check if any active paths remain
-                        if !parse_state.stack.value.t.active.is_empty() {
-                            next_active_for_final_glr.insert(key, parse_state);
-                        }
-                    }
-                    final_glr_parse_state.active_states = next_active_for_final_glr;
-
+                        !parse_state.stack.value.t.active.is_empty()
+                    });
                     crate::debug!(3, "At clean end state");
                     if final_glr_parse_state.is_ok() {
                         crate::debug!(3, "GLR parse state at clean end is OK");
@@ -880,29 +857,24 @@ impl<'a> GrammarConstraintState<'a> {
 
                 // Handle finalizers
                 for (possible_final_grammar_token, precomputed_finalizer) in &node.value.finalizers {
-                    // Create a temporary state to test the reduction with possible_final_grammar_token
-                    let mut temp_glr_state_for_reduction_test = glr_parse_state.clone();
-                    crate::debug!(3, "Stepping GLR parse state for finalizer token {:?}", possible_final_grammar_token.0);
-                    temp_glr_state_for_reduction_test.step(*possible_final_grammar_token);
-
-                    if temp_glr_state_for_reduction_test.is_ok() {
-                        crate::debug!(3, "GLR parse state after finalizer token is OK");
-                        for (tokenizer_state_id, finalizer_llm_tokens) in &precomputed_finalizer.content {
-                            // Now, filter the *original* glr_parse_state's active stacks based on these finalizer_llm_tokens
-                            // This ensures that the 't' values are from before the test reduction.
-                            let mut glr_parse_state_filtered_for_finalizer = glr_parse_state.clone();
-                            let mut next_active_for_finalizer_filter = BTreeMap::new();
-                            for (key, mut parse_state) in std::mem::take(&mut glr_parse_state_filtered_for_finalizer.active_states) {
+                    // Ensure the final tokens parses
+                    let mut possible_next_glr_parse_state = glr_parse_state.clone();
+                    crate::debug!(3, "Stepping semi-final GLR parse state");
+                    possible_next_glr_parse_state.step(*possible_final_grammar_token);
+                    if possible_next_glr_parse_state.is_ok() {
+                        crate::debug!(3, "Semi-final GLR parse state is OK");
+                        for (tokenizer_state_id, llm_tokens) in &precomputed_finalizer.content {
+                            // Intersect *active* tokens with the finalizer's allowed tokens.
+                            let mut glr_parse_state_filtered = glr_parse_state.clone();
+                            glr_parse_state_filtered.active_states.retain_mut(|parse_state| {
                                 // Intersect the *active* tokens with the finalizer's allowed tokens. Intersection retains current active tokens.
                                 let current_active_tokens = parse_state.stack.value.t.active.clone();
+                                // Use BitAndAssign<&HybridBitset>
                                 Arc::make_mut(&mut parse_state.stack).value.t.intersection &= &current_active_tokens;
-                                Arc::make_mut(&mut parse_state.stack).value.t.active &= finalizer_llm_tokens;
-                                if !parse_state.stack.value.t.active.is_empty() {
-                                    next_active_for_finalizer_filter.insert(key, parse_state);
-                                }
-                            }
-                            glr_parse_state_filtered_for_finalizer.active_states = next_active_for_finalizer_filter;
-
+                                Arc::make_mut(&mut parse_state.stack).value.t.active &= llm_tokens;
+                                // Check if any active paths remain
+                                !parse_state.stack.value.t.active.is_empty()
+                            });
                             crate::debug!(3, "Processing finalizer");
                             if glr_parse_state_filtered.is_ok() {
                                 crate::debug!(3, "Finalizer is compatible");
@@ -918,7 +890,7 @@ impl<'a> GrammarConstraintState<'a> {
 
                 // Check if the current GLR state still has valid paths before continuing traversal
                 // (This check might be redundant if the retain calls above handle it)
-                glr_parse_state.is_ok()
+                !glr_parse_state.active_states.is_empty()
             },
         );
     }
