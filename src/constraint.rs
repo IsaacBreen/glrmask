@@ -262,15 +262,18 @@ impl GrammarConstraint {
                 // The EdgeInserter will lock the source (new_merged_pc_node_arc)
                 // and attempt to insert an edge to handle_to_become_child.0.
                 // Since new_merged_pc_node_arc is new, this will always be an insert.
-                let insert_result = EdgeInserter::new(
+                const TRY_INSERT_CHILDREN: bool = true;
+                let mut insert_result = EdgeInserter::new(
                     handle_to_become_child.0.clone(), // Source Arc<Mutex<PrecomputeNode>>
                     None,                           // Edge key: Option<GrammarTokenID> = None
                     all_llm_tokens_for_merge_edge.clone(), // Edge value: LLMTokenBV
                     // Merge function for edge values (LLMTokenBV)
                     |ev_exist: &LLMTokenBV, ev_new: LLMTokenBV| Some(ev_exist | &ev_new),
-                )
-                .try_children()
-                .try_destination(new_merged_pc_node_arc.clone()) // Destination Arc<Mutex<PrecomputeNode>>
+                );
+                if TRY_INSERT_CHILDREN {
+                    insert_result = insert_result.try_children();
+                }
+                let insert_result = insert_result.try_destination(new_merged_pc_node_arc.clone()) // Destination Arc<Mutex<PrecomputeNode>>
                 .expect("EdgeInserter failed to add child during merge_node_handles_internal. This is unexpected.");
 
                 result_set.insert(NodeHandle(insert_result));
