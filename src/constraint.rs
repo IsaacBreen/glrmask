@@ -833,7 +833,8 @@ impl<'a> GrammarConstraintState<'a> {
                     // Use BitOrAssign<&HybridBitset>
                     active_llm_tokens |= &parse_state.stack.value.t.active;
                 }
-                crate::debug!(3, "Processing node with {} active states, {} LLM tokens, {} finalizers", current_glr_parse_state.active_states.len(), active_llm_tokens.len(), node.value.finalizers.len());
+                let node_ptr = std::ptr::addr_of!(*node);
+                crate::debug!(3, "Processing node {:?} with {} active states, {} LLM tokens, {} finalizers", node_ptr, current_glr_parse_state.active_states.len(), active_llm_tokens.len(), node.value.finalizers.len());
                 // Handle clean end
                 if let Some(clean_end) = &node.value.clean_end {
                     let mut final_glr_parse_state = current_glr_parse_state.clone();
