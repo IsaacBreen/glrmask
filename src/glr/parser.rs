@@ -89,8 +89,8 @@ impl GLRParser {
     pub fn init_glr_parser_from_parse_state<T: MergeAndIntersect>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
         GLRParserState {
             parser: self,
-            active_states: vec![parse_state],
-            action_not_found_states: Vec::new(),
+            active_states: BTreeMap::from([(parse_state.key(), parse_state)]),
+            action_not_found_states: BTreeMap::new(),
         }
     }
 
