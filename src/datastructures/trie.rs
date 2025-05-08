@@ -2428,7 +2428,7 @@ mod tests {
 
         // Check original edges are still there
         assert_eq!(s.get(&"other_key_c1").unwrap().len(), 1);
-         assert_eq!(s.get(&"other_key_c2").unwrap().unwrap().len(), 1); // Added unwrap() here as it was missing
+         assert_eq!(s.get(&"other_key_c2").unwrap().len(), 1);
 
         // Test with fallback: Try children (should fail if cycles exist), then create a new node
          let source_for_fb: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source_fb".to_string())));
