@@ -147,47 +147,48 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         let self_ptr = self as *const Trie<EK, EV, T>;
         if Self::detect_cycle(self_ptr, &child) {
             return Err(CycleDetectedError);
-        }
+        } else {
+            // ------------------------------------------------------------------
+            // 2. Update the child's max-depth *before* the edge is inserted.
+            //    This lets us rollback cleanly if `propagate_max_depth` fails
+            //    (because no structural change has been committed yet).
+            // ------------------------------------------------------------------
+            let candidate_depth = self.max_depth.saturating_add(1);
+            let previous_child_depth; // Store previous depth for potential rollback
+            let needs_depth_update;
 
-        // ------------------------------------------------------------------
-        // 2. Update the child's max-depth *before* the edge is inserted.
-        //    This lets us rollback cleanly if `propagate_max_depth` fails
-        //    (because no structural change has been committed yet).
-        // ------------------------------------------------------------------
-        let candidate_depth = self.max_depth.saturating_add(1);
-        let previous_child_depth; // Store previous depth for potential rollback
-        let needs_depth_update;
-
-        // Scope for child lock
-        {
-            let mut child_guard = child
-                .lock()
-                .expect("Mutex poisoned while updating child's max_depth");
-            previous_child_depth = child_guard.max_depth;
-            needs_depth_update = candidate_depth > previous_child_depth;
-            if needs_depth_update {
-                child_guard.max_depth = candidate_depth;
-            }
-        } // child_guard lock released here
-
-        // If the child's depth actually changed we must propagate.
-        if needs_depth_update {
-            // Propagate the update. If it fails (cycle detected during propagation),
-            // roll back the change we just made to the child's depth.
-            if let Err(e) = Self::propagate_max_depth(child.clone(), candidate_depth) {
-                // Roll-back the depth change made above
+            // Scope for child lock
+            {
                 let mut child_guard = child
                     .lock()
-                    .expect("Mutex poisoned while rolling back max_depth");
-                // Only roll back if the depth is still what we set it to.
-                // (Another thread might have increased it further, which is fine).
-                if child_guard.max_depth == candidate_depth {
-                     child_guard.max_depth = previous_child_depth;
+                    .expect("Mutex poisoned while updating child's max_depth");
+                previous_child_depth = child_guard.max_depth;
+                needs_depth_update = candidate_depth > previous_child_depth;
+                if needs_depth_update {
+                    child_guard.max_depth = candidate_depth;
                 }
-                // We should still return the error, as a cycle was detected somewhere.
-                return Err(e);
+            } // child_guard lock released here
+
+            // If the child's depth actually changed we must propagate.
+            if needs_depth_update {
+                // Propagate the update. If it fails (cycle detected during propagation),
+                // roll back the change we just made to the child's depth.
+                if let Err(e) = Self::propagate_max_depth(child.clone(), candidate_depth) {
+                    // Roll-back the depth change made above
+                    let mut child_guard = child
+                        .lock()
+                        .expect("Mutex poisoned while rolling back max_depth");
+                    // Only roll back if the depth is still what we set it to.
+                    // (Another thread might have increased it further, which is fine).
+                    if child_guard.max_depth == candidate_depth {
+                         child_guard.max_depth = previous_child_depth;
+                    }
+                    // We should still return the error, as a cycle was detected somewhere.
+                    return Err(e);
+                }
             }
         }
+
 
         // ------------------------------------------------------------------
         // 3. All checks have passed – perform the real structural mutation.
@@ -2427,7 +2428,7 @@ mod tests {
 
         // Check original edges are still there
         assert_eq!(s.get(&"other_key_c1").unwrap().len(), 1);
-         assert_eq!(s.get(&"other_key_c2").unwrap().len(), 1);
+         assert_eq!(s.get(&"other_key_c2").unwrap().unwrap().len(), 1); // Added unwrap() here as it was missing
 
         // Test with fallback: Try children (should fail if cycles exist), then create a new node
          let source_for_fb: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source_fb".to_string())));
