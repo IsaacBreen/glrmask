@@ -1494,10 +1494,11 @@ mod tests {
          };
         assert!(!has_edge_to_root, "Edge that would introduce a cycle should NOT be present");
 
-
         // - Max depths should be unchanged from before the failed insertion attempt.
         assert_eq!(root.lock().unwrap().max_depth, 0);
-        assert_eq!(child.lock().unwrap().max_depth, 1);
+        assert_eq!(child_locked.max_depth, 1);
+
+        println!("Done testing cycle detection on try_insert");
     }
 
 
