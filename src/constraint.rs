@@ -172,6 +172,8 @@ impl GrammarConstraint {
         }
         // -----------------------------------------------------------
 
+        const MERGE_THRESHOLD: usize = 10;
+
         // ----  Ord-capable handle for `Arc<Mutex<PrecomputeNode>>` --------------------------
         // `Arc<Mutex<PrecomputeNode>>` cannot live in a `BTreeSet` because `Mutex<T>` lacks
         // an `Ord` implementation.  We wrap it and order by the (stable) pointer address.
@@ -241,32 +243,58 @@ impl GrammarConstraint {
             set_of_handles: &BTreeSet<NodeHandle>,
             merge_map: &mut BTreeMap<BTreeSet<NodeHandle>, Arc<Mutex<PrecomputeNode>>>,
             all_llm_tokens_for_merge_edge: &HybridBitset,
-        ) -> Option<NodeHandle> {
+            threshold: usize,
+        ) -> BTreeSet<NodeHandle> { // Changed return type
             if set_of_handles.is_empty() {
-                return None;
+                return BTreeSet::new();
             }
-            if set_of_handles.len() == 1 {
-                // .clone() on NodeHandle is cheap (Arc clone)
-                return Some(set_of_handles.iter().next().unwrap().clone());
+            // If set size is within threshold, don't merge, return the set as is.
+            if set_of_handles.len() <= threshold {
+                return set_of_handles.clone();
             }
 
-            // Check if already merged
+            // Attempt to find an already merged node for this exact set.
             if let Some(existing_merged_arc) = merge_map.get(set_of_handles) {
-                Some(NodeHandle(existing_merged_arc.clone()))
-            } else {
-                // Create a new merged node
-                let new_merged_pc_node_arc = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
-                {
-                    let mut new_merged_pc_node_guard = new_merged_pc_node_arc.lock().unwrap();
-                    for handle in set_of_handles { // handle is &NodeHandle
-                        new_merged_pc_node_guard.force_insert_to_node(None, all_llm_tokens_for_merge_edge.clone(), &handle.0);
-                    }
-                }
-                // Store the new merged node in merge_map.
-                // set_of_handles must be cloned to be owned by the map.
-                merge_map.insert(set_of_handles.clone(), new_merged_pc_node_arc.clone());
-                Some(NodeHandle(new_merged_pc_node_arc))
+                let mut result_set = BTreeSet::new();
+                result_set.insert(NodeHandle(existing_merged_arc.clone()));
+                return result_set;
             }
+
+            // Create a new node to represent the merged set.
+            let new_merged_pc_node_arc = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
+
+            // Add each handle in the input set as a child of the new_merged_pc_node_arc
+            // using an EdgeInserter. The edge key will be None.
+            for handle_to_become_child in set_of_handles {
+                // The EdgeInserter will lock the source (new_merged_pc_node_arc)
+                // and attempt to insert an edge to handle_to_become_child.0.
+                // Since new_merged_pc_node_arc is new, this will always be an insert.
+                let insert_result = EdgeInserter::new(
+                    new_merged_pc_node_arc.clone(), // Source Arc<Mutex<PrecomputeNode>>
+                    None,                           // Edge key: Option<GrammarTokenID> = None
+                    all_llm_tokens_for_merge_edge.clone(), // Edge value: LLMTokenBV
+                    // Merge function for edge values (LLMTokenBV)
+                    |ev_exist: &LLMTokenBV, ev_new: LLMTokenBV| Some(ev_exist | &ev_new),
+                )
+                .try_destination(handle_to_become_child.0.clone()) // Destination Arc<Mutex<PrecomputeNode>>
+                .into_option();
+
+                if insert_result.is_none() {
+                    // This might happen if try_insert detects a cycle, though unlikely for new nodes
+                    // and None edges. Or if the destination itself is problematic.
+                    // For robustness, one might log this or handle it, but for now, we expect success.
+                    panic!("EdgeInserter failed to add child during merge_node_handles_internal. This is unexpected.");
+                }
+            }
+
+            // Store the new merged node in merge_map for future reuse.
+            // The key is a clone of the original set_of_handles.
+            merge_map.insert(set_of_handles.clone(), new_merged_pc_node_arc.clone());
+
+            // Return a set containing only the new merged handle.
+            let mut result_set = BTreeSet::new();
+            result_set.insert(NodeHandle(new_merged_pc_node_arc));
+            result_set
         }
         // --------------------------------------------
 
@@ -307,16 +335,17 @@ impl GrammarConstraint {
                 String::from_utf8_lossy(processing_item.vocab_node.prefix())
             );
 
-            // Step 1: For each TokenizerStateID, merge the set of incoming PrecomputeNode handles into a single handle.
-            // These merged_pc_nodes are the effective source PrecomputeNodes "at" current_vocab_node for each tokenizer state.
-            let mut merged_source_pc_nodes_map: BTreeMap<TokenizerStateID, NodeHandle> = BTreeMap::new();
+            // Step 1: For each TokenizerStateID, apply merge policy to the set of incoming PrecomputeNode handles.
+            let mut effective_source_pc_nodes_map: BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>> = BTreeMap::new(); // Changed name from merged_source_pc_nodes_map
             for (tokenizer_state_id, set_of_handles) in processing_item.associated_pc_nodes_by_state {
-                if let Some(merged_handle) = merge_node_handles_internal(
+                let effective_handles_set = merge_node_handles_internal(
                     &set_of_handles,
                     &mut merge_map,
-                    &all_llm_tokens_for_merge_edge
-                ) {
-                    merged_source_pc_nodes_map.insert(tokenizer_state_id, merged_handle);
+                    &all_llm_tokens_for_merge_edge,
+                    MERGE_THRESHOLD,
+                );
+                if !effective_handles_set.is_empty() {
+                    effective_source_pc_nodes_map.insert(*tokenizer_state_id, effective_handles_set);
                 }
             }
 
@@ -341,106 +370,108 @@ impl GrammarConstraint {
                 // Value: Map from TokenizerStateID (at that offset) to a SET of PrecomputeNode handles that are sources for the *remaining* part of the segment.
                 let mut segment_processing_q: BTreeMap<usize, BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>>> = BTreeMap::new();
 
-                // Initialize segment_processing_q at offset 0 using merged_source_pc_nodes_map (nodes at current_vocab_node)
-                for (initial_tokenizer_state_id, source_pc_node_handle) in &merged_source_pc_nodes_map {
-                    segment_processing_q.entry(0).or_default().entry(*initial_tokenizer_state_id).or_default().insert(source_pc_node_handle.clone());
+                // Initialize segment_processing_q at offset 0 using effective_source_pc_nodes_map (nodes at current_vocab_node after merge policy)
+                for (initial_tokenizer_state_id, effective_source_handles_set) in &effective_source_pc_nodes_map {
+                    segment_processing_q.entry(0).or_default()
+                        .entry(*initial_tokenizer_state_id).or_default()
+                        .extend(effective_source_handles_set.iter().cloned());
                 }
 
                 // Process the current bytes_segment
                 while let Some((current_offset, states_at_offset_map)) = segment_processing_q.pop_first() {
-                    for (tokenizer_state_before_suffix, set_of_segment_source_handles) in states_at_offset_map {
-                        if set_of_segment_source_handles.is_empty() {
+                    for (tokenizer_state_before_suffix, current_path_source_handles_set) in states_at_offset_map {
+                         if current_path_source_handles_set.is_empty() {
                             continue;
                         }
 
-                        // Merge the set_of_segment_source_handles for this specific path in segment processing.
-                        let segment_source_pc_handle: NodeHandle = merge_node_handles_internal(
-                            &set_of_segment_source_handles,
+                        // Apply the merge policy to the set of handles for this specific path in segment processing.
+                        let effective_source_handles_for_suffix: BTreeSet<NodeHandle> = merge_node_handles_internal(
+                            &current_path_source_handles_set,
                             &mut merge_map,
-                            &all_llm_tokens_for_merge_edge
-                        ).expect("set_of_segment_source_handles should not be empty due to prior check");
+                            &all_llm_tokens_for_merge_edge,
+                            MERGE_THRESHOLD
+                        );
 
-                        // Now segment_source_pc_handle is the single PrecomputeNode from which we process &bytes_segment[current_offset..]
+                        if effective_source_handles_for_suffix.is_empty() {
+                            continue;
+                        }
 
                         let segment_suffix_to_process = &bytes_segment[current_offset..];
                         let results = tokenizer.execute_from_state(segment_suffix_to_process, tokenizer_state_before_suffix);
 
-                        // Handle full grammar token matches within the segment_suffix
-                        for match_info in results.matches {
-                            let grammar_token_id = GrammarTokenID(match_info.id);
-                            let match_end_offset = current_offset + match_info.width;
+                        // Iterate over each effective source handle
+                        for segment_source_pc_handle in effective_source_handles_for_suffix {
+                            // --- Existing logic for results.matches ---
+                            for match_info in &results.matches {
+                                let grammar_token_id = GrammarTokenID(match_info.id);
+                                let match_end_offset = current_offset + match_info.width;
 
-                            // LLM tokens for the edge are those reachable from child_vocab_node (end of the whole segment)
-                            let edge_llm_tokens = child_vocab_node.reachable_token_ids().clone();
+                                let edge_llm_tokens = child_vocab_node.reachable_token_ids().clone();
 
-                            // --- Use EdgeInserter to find/create target_pc_node_arc ---
-                            let mut potential_targets: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
-                            // Potential targets from segment_processing_q (if match doesn't end segment)
-                            if match_end_offset < bytes_segment.len() {
-                                if let Some(map_at_offset) = segment_processing_q.get(&match_end_offset) {
-                                    if let Some(set_at_state0) = map_at_offset.get(&TokenizerStateID(0)) {
+                                let mut potential_targets: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+                                if match_end_offset < bytes_segment.len() {
+                                    if let Some(map_at_offset) = segment_processing_q.get(&match_end_offset) {
+                                        if let Some(set_at_state0) = map_at_offset.get(&TokenizerStateID(0)) {
+                                            potential_targets.extend(set_at_state0.iter().map(|h| h.0.clone()));
+                                        }
+                                    }
+                                }
+                                if match_end_offset == bytes_segment.len() {
+                                     if let Some(set_at_state0) = next_level_associations_for_child.get(&TokenizerStateID(0)) {
                                         potential_targets.extend(set_at_state0.iter().map(|h| h.0.clone()));
                                     }
                                 }
-                            }
-                            // Potential targets from next_level_associations_for_child (if match ends segment)
-                            if match_end_offset == bytes_segment.len() {
-                                 if let Some(set_at_state0) = next_level_associations_for_child.get(&TokenizerStateID(0)) {
-                                    potential_targets.extend(set_at_state0.iter().map(|h| h.0.clone()));
+
+                                let target_pc_node_arc = EdgeInserter::new(
+                                        segment_source_pc_handle.0.clone(),
+                                        Some(grammar_token_id),
+                                        edge_llm_tokens.clone(),
+                                        |ev_exist: &HybridBitset, ev_new: HybridBitset| Some(ev_exist | &ev_new),
+                                    )
+                                    .try_destinations(&potential_targets)
+                                    .try_children()
+                                    .else_create_destination_with_value(PrecomputedNodeContents::default())
+                                    .unwrap();
+
+
+                                if match_end_offset == bytes_segment.len() {
+                                    next_level_associations_for_child
+                                        .entry(TokenizerStateID(0))
+                                        .or_default()
+                                        .insert(NodeHandle(target_pc_node_arc.clone()));
+
+                                    let mut target_guard = target_pc_node_arc.lock().unwrap();
+                                    target_guard.value.clean_end
+                                         .get_or_insert_with(HybridBitset::new)
+                                         .insert(child_vocab_node.token_id());
+                                } else {
+                                    segment_processing_q.entry(match_end_offset)
+                                        .or_default()
+                                        .entry(TokenizerStateID(0))
+                                        .or_default()
+                                        .insert(NodeHandle(target_pc_node_arc));
                                 }
                             }
 
-                            let target_pc_node_arc = EdgeInserter::new(
-                                    segment_source_pc_handle.0.clone(),
-                                    Some(grammar_token_id),
-                                    edge_llm_tokens.clone(), // edge_llm_tokens is HybridBitset now
-                                    // MergeFn for HybridBitset: &HybridBitset | &HybridBitset -> HybridBitset
-                                    |ev_exist: &HybridBitset, ev_new: HybridBitset| Some(ev_exist | &ev_new)
-                                )
-                                .try_destinations(&potential_targets) // Tries all collected potential targets
-                                .try_children()
-                                .else_create_destination_with_value(PrecomputedNodeContents::default())
-                                .unwrap();
+                            // --- Existing logic for results.end_state ---
+                            if let Some(final_tokenizer_state_val) = results.end_state {
+                                let final_tokenizer_state_id = TokenizerStateID(final_tokenizer_state_val);
 
-
-                            if match_end_offset == bytes_segment.len() { // Reached end of current LLM token segment
                                 next_level_associations_for_child
-                                    .entry(TokenizerStateID(0)) // After full grammar token, tokenizer resets
+                                    .entry(final_tokenizer_state_id)
                                     .or_default()
-                                    .insert(NodeHandle(target_pc_node_arc.clone()));
+                                    .insert(segment_source_pc_handle.0.clone());
 
-                                target_pc_node_arc.lock().unwrap().value.clean_end
-                                     .get_or_insert_with(HybridBitset::new) // Create empty set
-                                     .insert(child_vocab_node.token_id()); // Insert the token ID
-                            } else { // Still more bytes in this LLM token segment
-                                segment_processing_q.entry(match_end_offset)
-                                    .or_default()
-                                    .entry(TokenizerStateID(0))
-                                    .or_default()
-                                    .insert(NodeHandle(target_pc_node_arc));
-                            }
-                        }
-
-                        // Handle partial match at the end of the segment_suffix (i.e., tokenizer consumed all remaining bytes)
-                        if let Some(final_tokenizer_state_val) = results.end_state {
-                            let final_tokenizer_state_id = TokenizerStateID(final_tokenizer_state_val);
-
-                            next_level_associations_for_child
-                                .entry(final_tokenizer_state_id)
-                                .or_default()
-                                .insert(segment_source_pc_handle.clone());
-
-                            // Add finalizer info to segment_source_pc_handle's value (node *before* this partial consumption)
-                            let possible_final_grammar_tokens = tokenizer.tokens_accessible_from_state(final_tokenizer_state_id);
-                            let mut segment_source_guard = segment_source_pc_handle.0.lock().unwrap();
-                            // Pass max_llm_token_id only because push_finalizer_info still expects it, though it doesn't use it now.
-                            for gtid in possible_final_grammar_tokens {
-                                segment_source_guard.value.push_finalizer_info(
-                                    gtid, // GrammarTokenID
-                                    LLMTokenID(child_vocab_node.token_id()),
-                                    final_tokenizer_state_id,
-                                    max_llm_token_id
-                                );
+                                let possible_final_grammar_tokens = tokenizer.tokens_accessible_from_state(final_tokenizer_state_id);
+                                let mut segment_source_guard = segment_source_pc_handle.0.lock().unwrap();
+                                for gtid in possible_final_grammar_tokens {
+                                    segment_source_guard.value.push_finalizer_info(
+                                        gtid,
+                                        LLMTokenID(child_vocab_node.token_id()),
+                                        final_tokenizer_state_id,
+                                        max_llm_token_id
+                                    );
+                                }
                             }
                         }
                     }
@@ -580,7 +611,6 @@ impl<'a> GrammarConstraintState<'a> {
 
     pub fn commit_and_step_many(&mut self, llm_token_ids: &[LLMTokenID]) {
         for &llm_token_id in llm_token_ids {
-            // self.step_with_llm_token(llm_token_id); // This was incorrect, commit should happen first or after all steps
             // Correct logic: commit the previous token, then step with the new one.
             self.commit(llm_token_id); // Commit the effect of the *previous* token leading to this one.
             self.step_with_llm_token(llm_token_id); // Step with the current token.
@@ -770,7 +800,7 @@ mod tests {
         dbg!(&parser);
 
         let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 3); // max_llm_token_id should be 3 for 0, 1, 2
-        constraint.dump_precomputed();
+        // constraint.dump_precomputed(); // Commented out dump for cleaner test output
 
         let mut constraint_state = constraint.init();
 
@@ -834,7 +864,7 @@ mod tests {
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map); // Start production is index 6
         dbg!(&parser);
         let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 7); // max_llm_token_id should be 7 for IDs 0-6
-        constraint.dump_precomputed();
+        // constraint.dump_precomputed(); // Commented out dump for cleaner test output
 
         // Initial state and step
         let mut state = constraint.init();
@@ -854,6 +884,6 @@ mod tests {
         // state.commit(LLMTokenID(5));
         // state.step_with_all_llm_tokens();
         // let mask = state.get_mask();
-        // assert_eq!(mask, LLMTokenBV::from_iter([false, false, false, false, false, false, false]));
+        // assert_eq!(mask, LLMTokenBV::from_iter([false, false, false, false, false, false, false])); // This line seems incorrect based on the previous assertion.
     }
 }
