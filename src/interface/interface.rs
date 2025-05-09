@@ -480,14 +480,14 @@ impl<'a> IncrementalParser<'a> {
                 if next_glr_state.is_ok() {
                     if position + token.width == bytes.len() {
                         // Reached the end of the input, so this is a clean match
-                        let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id(); // Tokenizer resets after a full match
+                        let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
                         next_states.entry(next_tokenizer_state_id)
                             .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
-                            .or_insert(next_glr_state.clone()); // Carry over the *original* GLR state? No, the state *after* stepping.
+                            .or_insert(next_glr_state.clone()); // Carry over the *original* GLR state
                     } else {
                         // After a full match, the tokenizer resets to its initial state
                         let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
-                         queue.entry((position + token.width, next_tokenizer_state_id))
+                        queue.entry((position + token.width, next_tokenizer_state_id))
                             .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
                             .or_insert(next_glr_state);
                     }
@@ -496,17 +496,20 @@ impl<'a> IncrementalParser<'a> {
 
             // Handle partial matches (tokenizer ended mid-token)
             if let Some(end_state_id) = results.end_state {
-                // For partial matches, we continue from the tokenizer's end state, but the GLR parser state doesn't change yet.
-                 let next_tokenizer_state_id = TokenizerStateID(end_state_id);
-                 // Only add to next_states if the current GLR state is valid and there's a possible path from the end_state_id
-                 // that would eventually lead to a valid GLR step.
-                 // This check is currently expensive; should be optimized or done lazily.
-                 // For now, we'll add the state and rely on is_valid later.
-                 if current_glr_state.is_ok() {
-                     next_states.entry(next_tokenizer_state_id)
-                         .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
-                         .or_insert(current_glr_state.clone());
-                 }
+                // Ensure at least one possible final token parses
+                // TODO: no need to do this here unless it's needed in is_valid. Don't want to do it in is_valid because it's expensive.
+                //  Would be better to put this in a lazily-initialized field in each entry in self.states, and compute it only when is_valid is called.
+                let possible_final_grammar_tokens: Vec<_> = self.grammar.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id));
+                for possible_final_grammar_token in possible_final_grammar_tokens {
+                    let mut final_glr_state = current_glr_state.clone(); // Clone before stepping
+                    final_glr_state.step(possible_final_grammar_token);
+                    if final_glr_state.is_ok() {
+                        let next_tokenizer_state_id = TokenizerStateID(end_state_id);
+                        next_states.entry(next_tokenizer_state_id)
+                            .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
+                            .or_insert(current_glr_state.clone()); // Carry over the *original* GLR state
+                    }
+                }
             }
         }
 
@@ -515,31 +518,7 @@ impl<'a> IncrementalParser<'a> {
 
     /// Checks if the current state is valid (i.e., there's at least one active parse path).
     pub fn is_valid(&self) -> bool {
-        // A state is valid if at least one tokenizer state can lead to a valid GLR state
-        // by consuming one of the possible next tokens from that tokenizer state.
-        // This is an expensive check as currently implemented.
-        self.state.iter().any(|(tokenizer_state_id, glr_state)| {
-            if !glr_state.is_ok() {
-                return false;
-            }
-            let possible_next_grammar_tokens: Vec<_> = self.grammar.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
-            // Also consider the case where the tokenizer state is a final state for a token - stepping with EOF?
-            // This depends on how EOF is handled and tokenized.
-
-            if possible_next_grammar_tokens.is_empty() {
-                // If no tokens are accessible, this tokenizer path is a dead end,
-                // unless it corresponds to a state from which EOF is possible.
-                 // Assuming EOF is handled separately or implicitly after all input.
-                false // Currently, if no tokens are accessible, the tokenizer path is not valid for extending.
-            } else {
-                // Check if any of the accessible tokens can lead to a valid GLR state
-                possible_next_grammar_tokens.into_iter().any(|grammar_token_id| {
-                    let mut next_glr_state = glr_state.clone();
-                    next_glr_state.step(grammar_token_id);
-                    next_glr_state.is_ok()
-                })
-            }
-        })
+        self.state.values().any(|glr_state| glr_state.is_ok())
     }
 
     // TODO: Add is_accepting() method? Requires checking if any state can accept EOF.
