@@ -75,6 +75,26 @@ impl Grammar {
         }
         mangled_name
     }
+
+    // Helper function to generate unique names like Base[0], Base[1], etc.
+    // Or, if base itself is Base[0], then Base[0][0], Base[0][1], etc.
+    fn generate_unique_indexed_name(
+        base_name: &str,
+        counters: &mut HashMap<String, usize>, // Key: base_name, Value: next index for this base
+        all_existing_names: &mut HashSet<String>, // All names generated or defined so far (NTs and Ts)
+    ) -> String {
+        let idx_ref = counters.entry(base_name.to_string()).or_insert(0);
+        let mut current_idx = *idx_ref;
+        loop {
+            let new_name = format!("{}[{}]", base_name, current_idx);
+            if !all_existing_names.contains(&new_name) {
+                all_existing_names.insert(new_name.clone());
+                *idx_ref = current_idx + 1;
+                return new_name;
+            }
+            current_idx += 1;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,7 +104,7 @@ pub enum GrammarExpr {
     Sequence(Vec<GrammarExpr>),
     Choice(Vec<GrammarExpr>),
     Optional(Box<GrammarExpr>),
-    Repeat(Box<GrammarExpr>),
+    Repeat(Box<GrammarExpr>), // Zero or more repetition
 }
 
 pub fn regex(expr: Expr) -> GrammarExpr {
@@ -114,6 +134,8 @@ pub fn repeat(expr: GrammarExpr) -> GrammarExpr {
 impl Grammar {
     pub fn glr_parser(&self) -> GLRParser {
         // Return a clone or reference if stored
+        // Note: This currently regenerates the parser. If self.glr_parser is already stored,
+        // perhaps return self.glr_parser.clone() instead?
         generate_glr_parser(&self.productions, self.start_production_id)
     }
 }
@@ -123,10 +145,13 @@ impl Grammar {
     /// The first non-terminal in the list is treated as the start symbol.
     pub fn from_exprs(exprs: Vec<(String, GrammarExpr)>) -> Self {
         let mut productions = Vec::new();
-        let mut literal_map = BTreeMap::new();
+        let mut literal_map = BTreeMap::new(); // This doesn't seem to be used in convert_expr anymore?
         let mut terminal_name_to_group_id = BiBTreeMap::new();
         let mut terminal_expr_to_group_id = BiBTreeMap::new();
-        let mut next_terminal_id = 0;
+        let mut next_terminal_group_id = 0; // Renamed for clarity
+
+        let mut all_names: HashSet<String> = exprs.iter().map(|(name, _)| name.clone()).collect();
+        let mut per_base_counters: HashMap<String, usize> = HashMap::new();
 
         // Add a start production.
         // make sure the start production name is not already taken by adding apostrophes to it until it's unique.
@@ -140,79 +165,85 @@ impl Grammar {
             lhs: NonTerminal(start_production_name.clone()),
             rhs: vec![Symbol::NonTerminal(NonTerminal(exprs[0].0.clone()))],
         });
+        all_names.insert(start_production_name.clone()); // Ensure it's known
 
         fn convert_expr(
             expr: &GrammarExpr,
+            current_rule_name_or_path: &str, // e.g., "S", or "S[0]" if inside an internal rule
             productions: &mut Vec<Production>,
-            non_terminal_map: &mut BiBTreeMap<NonTerminal, NonTerminalID>,
-            next_non_terminal_id: &mut usize,
-            literal_map: &mut BTreeMap<String, String>,
+            // literal_map: &mut BTreeMap<String, String>, // Remove if unused
             terminal_string_to_expr: &mut BTreeMap<String, Expr>,
             terminal_name_to_group_id: &mut BiBTreeMap<String, usize>,
-            // todo: make this `terminal_group_id_to_expr` instead
             terminal_expr_to_group_id: &mut BiBTreeMap<Expr, usize>,
-            next_terminal_id: &mut usize,
+            next_terminal_group_id: &mut usize,
+            per_base_counters: &mut HashMap<String, usize>,
+            all_names: &mut HashSet<String>, // Contains all NT and T names
         ) -> Vec<Symbol> {
-            // TODO: Pre-collect all user-defined non-terminal names to ensure generated names are unique.
-            // TODO: define a function that makes us a unique name for an internal rule, with an appropriate prefix.
-            //  e.g. Option0, Repeat0, etc. Make sure there's no existing rule with that name (and there won't be one later either).
-            //  i.e. collect all nonterminals in the grammar upfront and pass it to convert_expr.
             match expr {
                 GrammarExpr::RegexExpr(regex_expr) => {
-                    // TODO: what if this is already in the map (e.g. the user happens to create a rule with name `__regex_0`?
-                    //  We need to generate a unique regex name.
-                    if let Some(terminal_id) = terminal_expr_to_group_id.get_by_left(&regex_expr) {
-                        vec![Symbol::Terminal(Terminal(format!("__regex_{}", terminal_id)))]
+                    if let Some(group_id) = terminal_expr_to_group_id.get_by_left(regex_expr) {
+                        // Existing terminal, find its name
+                        let terminal_name = terminal_name_to_group_id.get_by_right(group_id)
+                            .expect("Internal error: group_id has no name").clone();
+                        vec![Symbol::Terminal(Terminal(terminal_name))]
                     } else {
-                        // Create a unique terminal name for this regex expression
-                        let terminal_id = *next_terminal_id;
-                        let terminal_name = format!("__regex_{}", terminal_id);
-                        terminal_name_to_group_id.insert(terminal_name.clone(), terminal_id);
-                        terminal_expr_to_group_id.insert(regex_expr.clone(), terminal_id);
+                        let terminal_name = Grammar::generate_unique_indexed_name(
+                            current_rule_name_or_path, // Base name for the terminal
+                            per_base_counters,
+                            all_names,
+                        );
+                        let group_id = *next_terminal_group_id;
+                        terminal_name_to_group_id.insert(terminal_name.clone(), group_id);
+                        terminal_expr_to_group_id.insert(regex_expr.clone(), group_id);
                         terminal_string_to_expr.insert(terminal_name.clone(), regex_expr.clone());
-                        *next_terminal_id += 1;
+                        *next_terminal_group_id += 1;
                         vec![Symbol::Terminal(Terminal(terminal_name))]
                     }
                 }
-                GrammarExpr::Ref(name) => vec![Symbol::NonTerminal(NonTerminal(name.clone()))],
+                GrammarExpr::Ref(name) => {
+                    // Ensure the referred name exists or will exist as a user-defined rule.
+                    // This check isn't strictly necessary here for correctness but could help catch errors.
+                    // For now, assume the ref is valid.
+                    vec![Symbol::NonTerminal(NonTerminal(name.clone()))]
+                },
                 GrammarExpr::Sequence(exprs) => exprs
                     .iter()
                     .flat_map(|e| {
                         convert_expr(
                             e,
+                            current_rule_name_or_path, // Pass current path
                             productions,
-                            non_terminal_map,
-                            next_non_terminal_id,
-                            literal_map,
+                            // literal_map, // if used
                             terminal_string_to_expr,
                             terminal_name_to_group_id,
                             terminal_expr_to_group_id,
-                            next_terminal_id,
+                            next_terminal_group_id,
+                            per_base_counters,
+                            all_names,
                         )
                     })
                     .collect(),
                 GrammarExpr::Choice(exprs) => {
-                    let new_nonterminal = format!("Choice{}", *next_non_terminal_id);
-                    let nt = NonTerminal(new_nonterminal.clone());
-
-                    // TODO: what if this is already in the map (e.g. the user happens to create a rule with name `Choice0`?
-                    //  We need to generate a unique nonterminal name.
-                    if !non_terminal_map.contains_left(&nt) {
-                        non_terminal_map.insert(nt.clone(), NonTerminalID(*next_non_terminal_id));
-                        *next_non_terminal_id += 1;
-                    }
+                    let choice_nt_name = Grammar::generate_unique_indexed_name(
+                        current_rule_name_or_path,
+                        per_base_counters,
+                        all_names,
+                    );
+                    let nt = NonTerminal(choice_nt_name.clone());
+                    // all_names is updated by generate_unique_indexed_name
 
                     for expr in exprs {
                         let rhs = convert_expr(
                             expr,
+                            &choice_nt_name, // Pass the new NT name as the base for its children
                             productions,
-                            non_terminal_map,
-                            next_non_terminal_id,
-                            literal_map,
+                            // literal_map, // if used
                             terminal_string_to_expr,
                             terminal_name_to_group_id,
                             terminal_expr_to_group_id,
-                            next_terminal_id,
+                            next_terminal_group_id,
+                            per_base_counters,
+                            all_names,
                         );
                         productions.push(Production {
                             lhs: nt.clone(),
@@ -222,66 +253,101 @@ impl Grammar {
 
                     vec![Symbol::NonTerminal(nt)]
                 }
-                GrammarExpr::Optional(expr) => {
-                    // TODO: name the internal rule here Option{} or something rather than Choice{}.
+                GrammarExpr::Optional(expr_box) => {
+                    // Optional(E) becomes Choice(E, epsilon)
                     convert_expr(
-                        &GrammarExpr::Choice(vec![*expr.clone(), GrammarExpr::Sequence(vec![])]),
+                        &GrammarExpr::Choice(vec![*expr_box.clone(), GrammarExpr::Sequence(vec![])]),
+                        current_rule_name_or_path, // Pass current path for the Choice NT to be based on
                         productions,
-                        non_terminal_map,
-                        next_non_terminal_id,
-                        literal_map,
+                        // literal_map, // if used
                         terminal_string_to_expr,
                         terminal_name_to_group_id,
                         terminal_expr_to_group_id,
-                        next_terminal_id,
+                        next_terminal_group_id,
+                        per_base_counters,
+                        all_names,
                     )
                 }
-                GrammarExpr::Repeat(expr) => {
-                    // TODO: same as above, make sure it's unique.
-                    let nonterminal_id = *next_non_terminal_id;
-                    let nonterminal_name = format!("Repeat{}", nonterminal_id);
-                    non_terminal_map.insert(NonTerminal(nonterminal_name.clone()), NonTerminalID(nonterminal_id));
-                    *next_non_terminal_id += 1;
-                    let rhs = convert_expr(
-                        expr,
+                GrammarExpr::Repeat(expr_box) => {
+                    // Repeat(E) becomes:
+                    // RepeatNT ::= E RepeatNT
+                    // RepeatNT ::= epsilon
+                    let inner_expr = &*expr_box;
+                    let repeat_nt_name = Grammar::generate_unique_indexed_name(
+                        current_rule_name_or_path,
+                        per_base_counters,
+                        all_names,
+                    );
+                    // all_names is updated by generate_unique_indexed_name
+
+                    // Convert the inner expression E. Terminals/NTs inside E will be named relative to repeat_nt_name.
+                    let expr_symbols = convert_expr(
+                        inner_expr,
+                        &repeat_nt_name, // Children are named relative to this new RepeatNT
                         productions,
-                        non_terminal_map,
-                        next_non_terminal_id,
-                        literal_map,
+                        // literal_map, // if used
                         terminal_string_to_expr,
                         terminal_name_to_group_id,
                         terminal_expr_to_group_id,
-                        next_terminal_id,
+                        next_terminal_group_id,
+                        per_base_counters,
+                        all_names,
                     );
+
+                    // Production 1: RepeatNT ::= E RepeatNT
+                    // Only add this if E is not an empty sequence, otherwise RepeatNT -> RepeatNT is problematic.
+                    // If E can derive epsilon, this is fine. If E *is* epsilon, then RepeatNT should just be epsilon.
+                    // Checking if expr_symbols is empty is a proxy for checking if inner_expr can derive epsilon *directly*
+                    // as an empty sequence. This might need refinement if inner_expr is a complex structure
+                    // that can derive epsilon. For now, checking for empty sequence is a simple approach.
+                     if !expr_symbols.is_empty() {
+                        let mut rhs1 = expr_symbols.clone();
+                        rhs1.push(Symbol::NonTerminal(NonTerminal(repeat_nt_name.clone())));
+                        productions.push(Production {
+                            lhs: NonTerminal(repeat_nt_name.clone()),
+                            rhs: rhs1,
+                        });
+                    } else {
+                        // If expr_symbols is empty, it means inner_expr converted to an empty sequence.
+                        // Repeat of epsilon is just epsilon. The RepeatNT effectively becomes an epsilon rule.
+                        // No need for RepeatNT ::= RepeatNT in this specific case.
+                    }
+
+
+                    // Production 2: RepeatNT ::= epsilon (for zero-or-more)
+                    let rhs2 = vec![]; // Epsilon production
                     productions.push(Production {
-                        lhs: NonTerminal(nonterminal_name.clone()),
-                        rhs,
+                        lhs: NonTerminal(repeat_nt_name.clone()),
+                        rhs: rhs2,
                     });
-                    vec![Symbol::NonTerminal(NonTerminal(nonterminal_name))]
+
+                    // The Repeat(E) expression in the original rule resolves to a reference to this new RepeatNT
+                    vec![Symbol::NonTerminal(NonTerminal(repeat_nt_name))]
                 }
             }
         }
 
-        let mut non_terminal_map = BiBTreeMap::new();
-        let mut next_non_terminal_id = 0;
         let mut terminal_string_to_expr = BTreeMap::new();
 
         // Process each rule definition
         for (name, expr) in tqdm!(exprs.iter()) {
             let lhs = NonTerminal(name.clone());
+            let lhs_name_str = &name; // This is the top-level rule name, e.g., "S"
+
             // Optimization: If the top-level expression is a Choice, create multiple productions directly.
             if let GrammarExpr::Choice(choices) = expr {
                 for choice_expr in choices {
                     let rhs = convert_expr(
                         choice_expr,
+                        lhs_name_str, // Pass current rule's name as base
                         &mut productions,
-                        &mut non_terminal_map,
-                        &mut next_non_terminal_id,
-                        &mut literal_map,
+                        // &mut literal_map, // if used
                         &mut terminal_string_to_expr,
                         &mut terminal_name_to_group_id,
                         &mut terminal_expr_to_group_id,
-                        &mut next_terminal_id,
+                        &mut next_terminal_group_id,
+                        &mut per_base_counters,
+                        &mut all_names,
                     );
                     productions.push(Production { lhs: lhs.clone(), rhs });
                 }
@@ -289,25 +355,36 @@ impl Grammar {
                 // Otherwise, convert the expression as usual and create a single production.
                 let rhs = convert_expr(
                     expr,
+                    lhs_name_str, // Pass current rule's name as base
                     &mut productions,
-                    &mut non_terminal_map,
-                    &mut next_non_terminal_id,
-                    &mut literal_map,
+                    // &mut literal_map, // if used
                     &mut terminal_string_to_expr,
                     &mut terminal_name_to_group_id,
                     &mut terminal_expr_to_group_id,
-                    &mut next_terminal_id,
+                    &mut next_terminal_group_id,
+                    &mut per_base_counters,
+                    &mut all_names,
                 );
                 productions.push(Production { lhs, rhs });
             }
         }
 
         let mut tokenizer_exprs_vec: Vec<ExprGroup> = Vec::new();
-        for group_id in 0..terminal_string_to_expr.len() {
-            let name = terminal_name_to_group_id.get_by_right(&group_id).unwrap();
-            let expr = terminal_string_to_expr.get(name).unwrap();
-            tokenizer_exprs_vec.push(greedy_group(expr.clone()));
+        // Ensure terminals are added to the tokenizer in the order of their group IDs
+        let mut sorted_terminals: Vec<_> = terminal_string_to_expr.iter().collect();
+        sorted_terminals.sort_by_key(|(name, _)| terminal_name_to_group_id.get_by_left(*name).unwrap());
+
+        for (name, expr) in sorted_terminals {
+             // Use the group ID assigned during convert_expr
+            let group_id = *terminal_name_to_group_id.get_by_left(name).unwrap();
+            // Ensure we add the expr to the tokenizer_exprs_vec at the correct index (group_id)
+             while tokenizer_exprs_vec.len() <= group_id {
+                 tokenizer_exprs_vec.push(greedy_group(Expr::Empty)); // Placeholder
+             }
+            tokenizer_exprs_vec[group_id] = greedy_group(expr.clone());
         }
+
+
         let tokenizer_expr_groups = groups(tokenizer_exprs_vec);
         debug!(2, "Building tokenizer");
         let tokenizer = tokenizer_expr_groups.clone().build();
@@ -316,8 +393,8 @@ impl Grammar {
         debug!(2, "Done defining grammar");
         Self {
             productions,
-            start_production_id: 0,
-            literal_map,
+            start_production_id: 0, // Assuming the first production is the start production
+            literal_map, // Still here, but maybe unused?
             terminal_name_to_group_id,
             terminal_expr_to_group_id,
             tokenizer,
@@ -403,14 +480,14 @@ impl<'a> IncrementalParser<'a> {
                 if next_glr_state.is_ok() {
                     if position + token.width == bytes.len() {
                         // Reached the end of the input, so this is a clean match
-                        let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
+                        let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id(); // Tokenizer resets after a full match
                         next_states.entry(next_tokenizer_state_id)
                             .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
-                            .or_insert(next_glr_state.clone()); // Carry over the *original* GLR state
+                            .or_insert(next_glr_state.clone()); // Carry over the *original* GLR state? No, the state *after* stepping.
                     } else {
                         // After a full match, the tokenizer resets to its initial state
                         let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
-                        queue.entry((position + token.width, next_tokenizer_state_id))
+                         queue.entry((position + token.width, next_tokenizer_state_id))
                             .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
                             .or_insert(next_glr_state);
                     }
@@ -419,20 +496,17 @@ impl<'a> IncrementalParser<'a> {
 
             // Handle partial matches (tokenizer ended mid-token)
             if let Some(end_state_id) = results.end_state {
-                // Ensure at least one possible final token parses
-                // TODO: no need to do this here unless it's needed in is_valid. Don't want to do it in is_valid because it's expensive.
-                //  Would be better to put this in a lazily-initialized field in each entry in self.states, and compute it only when is_valid is called.
-                let possible_final_grammar_tokens: Vec<_> = self.grammar.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id));
-                for possible_final_grammar_token in possible_final_grammar_tokens {
-                    let mut final_glr_state = current_glr_state.clone(); // Clone before stepping
-                    final_glr_state.step(possible_final_grammar_token);
-                    if final_glr_state.is_ok() {
-                        let next_tokenizer_state_id = TokenizerStateID(end_state_id);
-                        next_states.entry(next_tokenizer_state_id)
-                            .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
-                            .or_insert(current_glr_state.clone()); // Carry over the *original* GLR state
-                    }
-                }
+                // For partial matches, we continue from the tokenizer's end state, but the GLR parser state doesn't change yet.
+                 let next_tokenizer_state_id = TokenizerStateID(end_state_id);
+                 // Only add to next_states if the current GLR state is valid and there's a possible path from the end_state_id
+                 // that would eventually lead to a valid GLR step.
+                 // This check is currently expensive; should be optimized or done lazily.
+                 // For now, we'll add the state and rely on is_valid later.
+                 if current_glr_state.is_ok() {
+                     next_states.entry(next_tokenizer_state_id)
+                         .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
+                         .or_insert(current_glr_state.clone());
+                 }
             }
         }
 
@@ -441,7 +515,31 @@ impl<'a> IncrementalParser<'a> {
 
     /// Checks if the current state is valid (i.e., there's at least one active parse path).
     pub fn is_valid(&self) -> bool {
-        self.state.values().any(|glr_state| glr_state.is_ok())
+        // A state is valid if at least one tokenizer state can lead to a valid GLR state
+        // by consuming one of the possible next tokens from that tokenizer state.
+        // This is an expensive check as currently implemented.
+        self.state.iter().any(|(tokenizer_state_id, glr_state)| {
+            if !glr_state.is_ok() {
+                return false;
+            }
+            let possible_next_grammar_tokens: Vec<_> = self.grammar.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
+            // Also consider the case where the tokenizer state is a final state for a token - stepping with EOF?
+            // This depends on how EOF is handled and tokenized.
+
+            if possible_next_grammar_tokens.is_empty() {
+                // If no tokens are accessible, this tokenizer path is a dead end,
+                // unless it corresponds to a state from which EOF is possible.
+                 // Assuming EOF is handled separately or implicitly after all input.
+                false // Currently, if no tokens are accessible, the tokenizer path is not valid for extending.
+            } else {
+                // Check if any of the accessible tokens can lead to a valid GLR state
+                possible_next_grammar_tokens.into_iter().any(|grammar_token_id| {
+                    let mut next_glr_state = glr_state.clone();
+                    next_glr_state.step(grammar_token_id);
+                    next_glr_state.is_ok()
+                })
+            }
+        })
     }
 
     // TODO: Add is_accepting() method? Requires checking if any state can accept EOF.
