@@ -1,11 +1,11 @@
 local_system:
   attached_files:
-    - src/datastructures/trie.rs
     - src/constraint.rs
+    - src/datastructures/trie.rs
   conversation_file:
   compile_command:
   initial_file_contents:
-    src/datastructures/trie.rs: |
+    src/datastructures/trie.rs: |-
       use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
       use std::error::Error;
       use std::fmt::{self, Debug};
@@ -313,7 +313,7 @@ local_system:
                       .values() // Iterates over BTreeMap<ComparableArc, EV>
                       .flat_map(|dest_map| dest_map.keys().map(|ca| ca.as_arc().clone()))
                       .collect()
-              };
+              }; // child_guard lock released here
 
               // For each child, compute the candidate depth.
               let candidate_depth = current_depth.saturating_add(1);
@@ -401,6 +401,76 @@ local_system:
                   // node lock is released here
               }
               result
+          }
+
+          /// Checks if there are any cycles reachable from the given `root_arc`.
+          /// Returns `true` if a cycle is detected, `false` otherwise.
+          /// This method is useful for verifying graph integrity after complex build processes.
+          pub fn has_any_cycle(root_arc: Arc<Mutex<Trie<EK, EV, T>>>) -> bool {
+              let mut global_visited_arcs: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
+              let mut recursion_stack_arcs: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
+              // Call the recursive helper starting with the root node.
+              Self::_has_any_cycle_recursive(root_arc, &mut global_visited_arcs, &mut recursion_stack_arcs)
+          }
+
+          /// Recursive helper function for `has_any_cycle`.
+          ///
+          /// `global_visited_arcs`: Tracks all nodes that have been visited and processed across
+          ///                        all recursion branches. This prevents re-processing subgraphs
+          ///                        that are already known to be cycle-free (or whose cycles
+          ///                        would have been detected via another path).
+          /// `recursion_stack_arcs`: Tracks nodes currently in the recursion stack for the *current*
+          ///                         DFS path. A cycle is detected if we try to visit a node
+          ///                         that is already in this set.
+          fn _has_any_cycle_recursive(
+              node_arc: Arc<Mutex<Trie<EK, EV, T>>>,
+              global_visited_arcs: &mut HashSet<*const Mutex<Trie<EK, EV, T>>>,
+              recursion_stack_arcs: &mut HashSet<*const Mutex<Trie<EK, EV, T>>>,
+          ) -> bool {
+              let node_arc_ptr = Arc::as_ptr(&node_arc);
+
+              // If the node is already in the current recursion stack, we've found a back-edge (a cycle).
+              if recursion_stack_arcs.contains(&node_arc_ptr) {
+                  return true; // Cycle detected
+              }
+
+              // If the node has been globally visited AND is not in the current recursion stack,
+              // it means this node was fully processed via another path and no cycles were found
+              // originating from it *then*. We can safely return false to avoid re-exploring.
+              if global_visited_arcs.contains(&node_arc_ptr) {
+                  return false; // Already processed and known to be part of a cycle-free subgraph (from its perspective)
+              }
+
+              // Add the current node to both sets:
+              // - To recursion_stack_arcs to mark it as part of the current DFS path.
+              // - To global_visited_arcs to mark it as processed, so we don't re-explore it unnecessarily
+              //   if reached from another path later.
+              recursion_stack_arcs.insert(node_arc_ptr);
+              global_visited_arcs.insert(node_arc_ptr);
+
+              // Lock the node to get its children.
+              // It's important to collect children Arcs first and then release the lock before recursing.
+              let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
+                  let node_guard = node_arc.lock().expect("Mutex poisoned during has_any_cycle traversal");
+                  node_guard.children
+                      .values() // Iterate over BTreeMap<ComparableArc, EV>
+                      .flat_map(|dest_map| dest_map.keys().map(|comparable_arc| comparable_arc.as_arc().clone()))
+                      .collect()
+              }; // node_guard lock is released here.
+
+              // Recursively check each child.
+              for child_arc in children_arcs {
+                  if Self::_has_any_cycle_recursive(child_arc, global_visited_arcs, recursion_stack_arcs) {
+                      return true; // Cycle detected in a descendant path
+                  }
+              }
+
+              // If we've processed all children of this node and found no cycles,
+              // remove it from the recursion stack (as we are "returning" up the DFS path).
+              // It remains in global_visited_arcs.
+              recursion_stack_arcs.remove(&node_arc_ptr);
+
+              false // No cycle found originating from this node or its descendants along this path
           }
       }
 
@@ -1553,6 +1623,62 @@ local_system:
               assert!(node_ptrs.contains(&arc_ptr(&child)));
           }
 
+           #[test]
+          fn test_has_any_cycle() {
+              // No cycle
+              let root1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
+              let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+              let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+              let grandchild: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
+              root1.lock().unwrap().force_insert_to_node("a", "e1", &child1);
+              root1.lock().unwrap().force_insert_to_node("b", "e2", &child2);
+              child1.lock().unwrap().force_insert_to_node("c", "e3", &grandchild);
+              child2.lock().unwrap().force_insert_to_node("d", "e4", &grandchild); // Diamond
+              assert!(!Trie::has_any_cycle(root1.clone()));
+
+              // Simple cycle: root2 -> child3 -> root2
+              let root2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(10)));
+              let child3: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(11)));
+              root2.lock().unwrap().force_insert_to_node("x", "e5", &child3);
+              child3.lock().unwrap().force_insert_to_node("y", "e6", &root2);
+              assert!(Trie::has_any_cycle(root2.clone()));
+
+              // Larger cycle: root3 -> A -> B -> C -> A
+              let root3: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(20)));
+              let node_a: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(21)));
+              let node_b: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(22)));
+              let node_c: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(23)));
+              root3.lock().unwrap().force_insert_to_node("r->a", "e7", &node_a);
+              node_a.lock().unwrap().force_insert_to_node("a->b", "e8", &node_b);
+              node_b.lock().unwrap().force_insert_to_node("b->c", "e9", &node_c);
+              node_c.lock().unwrap().force_insert_to_node("c->a", "e10", &node_a); // Cycle C -> A
+              assert!(Trie::has_any_cycle(root3.clone()));
+
+              // Cycle with unconnected node: root4 -> A -> B -> A; C (unconnected)
+              let root4: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(30)));
+              let node_a2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(31)));
+              let node_b2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(32)));
+              let node_c2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(33))); // Unconnected to root4
+              root4.lock().unwrap().force_insert_to_node("r->a", "e11", &node_a2);
+              node_a2.lock().unwrap().force_insert_to_node("a->b", "e12", &node_b2);
+              node_b2.lock().unwrap().force_insert_to_node("b->a", "e13", &node_a2); // Cycle B -> A
+              assert!(Trie::has_any_cycle(root4.clone()));
+
+              // Disconnected graph with a cycle: root5 (linear chain), root6 (cycle)
+              let root5: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(40)));
+              let node_d: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(41)));
+              root5.lock().unwrap().force_insert_to_node("r->d", "e14", &node_d);
+              // Separately, a cycle structure
+              let root6_in_cycle: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(50)));
+              let node_e: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(51)));
+              root6_in_cycle.lock().unwrap().force_insert_to_node("c1->e", "e15", &node_e);
+              node_e.lock().unwrap().force_insert_to_node("e->c1", "e16", &root6_in_cycle); // Cycle
+              // Checking from root5 should NOT find the cycle
+              assert!(!Trie::has_any_cycle(root5.clone()));
+              // Checking from root6_in_cycle SHOULD find the cycle
+              assert!(Trie::has_any_cycle(root6_in_cycle.clone()));
+          }
+
 
           #[test]
           fn test_cycle_special_map_no_panic_limited_processing() {
@@ -2218,7 +2344,7 @@ local_system:
               let initial_edge_val1: HybridBitset = vec![10].into_iter().collect();
               let initial_edge_val2: HybridBitset = vec![20].into_iter().collect();
               let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-              let merged_edge_val1: HybridBitset = vec![1, 10].into_iter().collect();
+              let merged_edge_val1: HybridBitset = vec![1, 10].into_iter().collect(); // Expected merge with child1
 
               // Pre-insert edges with the target key
               {
@@ -2458,7 +2584,7 @@ local_system:
               {
                   let s_guard = source.lock().unwrap();
                   let children_map_target_key = s_guard.get(&edge_key).expect("Target key should exist");
-                  
+
                   let ev_c1 = children_map_target_key.get(&ComparableArc::new(child1.clone())).expect("Child1 should be under target_key");
                   assert_eq!(*ev_c1, merged_ev_c1, "Edge value for child1 should be merged");
 
@@ -2478,7 +2604,7 @@ local_system:
               let new_ev_inserter_nm: HybridBitset = vec![5].into_iter().collect();
 
               source_nm.lock().unwrap().try_insert(edge_key_nm, initial_ev_nm.clone(), child1_nm.clone()).unwrap();
-              
+
               // Define a merge function that always returns None (fails to merge)
               fn failing_merge_fn(_existing: &HybridBitset, _new: HybridBitset) -> Option<HybridBitset> {
                   None
@@ -2487,7 +2613,7 @@ local_system:
               let inserter_nm = EdgeInserter::new(source_nm.clone(), edge_key_nm, new_ev_inserter_nm.clone(), failing_merge_fn);
               let result_node_nm_opt = inserter_nm.try_children().into_option();
               assert!(result_node_nm_opt.is_none(), "try_children should return None if all merges fail for children under the key");
-              
+
               // Check edge value for child1_nm is unchanged
               let s_nm_guard = source_nm.lock().unwrap();
               let ev_c1_nm = s_nm_guard
@@ -2516,7 +2642,7 @@ local_system:
                   .try_children() // Will do nothing as no children under "chain_key"
                   .else_create_destination_with_value(created_val.clone()) // This should execute
                   .unwrap();
-              
+
               assert_eq!(result_node_chain.lock().unwrap().value, created_val, "Fallback node should be created with correct value");
               // Check that an edge was created to this new node
               let s_chain_guard = source_chain.lock().unwrap();
@@ -2527,7 +2653,7 @@ local_system:
               assert_eq!(*ev_chain, new_ev_chain, "Edge should have the new_ev_chain value");
           }
       }
-    src/constraint.rs: |
+    src/constraint.rs: |-
       use std::cmp::Ordering;
       use crate::datastructures::trie::Trie;
       use crate::finite_automata::Regex;
@@ -2850,36 +2976,21 @@ local_system:
                   // Add each handle in the input set as a child of the new_merged_pc_node_arc
                   // using an EdgeInserter. The edge key will be None.
                   for handle_to_become_child in set_of_handles {
-                      // Edge: new_merged_pc_node_arc --(None, all_llm_tokens_for_merge_edge)--> handle_to_become_child.0
                       let mut insert_result = EdgeInserter::new(
-                          new_merged_pc_node_arc.clone(), // Source Arc<Mutex<PrecomputeNode>>
+                          handle_to_become_child.0.clone(), // Source Arc<Mutex<PrecomputeNode>>
                           None,                           // Edge key: Option<GrammarTokenID> = None
                           all_llm_tokens_for_merge_edge.clone(), // Edge value: LLMTokenBV
                           // Merge function for edge values (LLMTokenBV)
                           |ev_exist: &LLMTokenBV, ev_new: LLMTokenBV| Some(ev_exist | &ev_new),
                       );
 
-                      // Removed the old try_children() call here as it's replaced by the logic in the main DFS loop
+                      insert_result = insert_result.try_children(); // Will do nothing as no children under "None"
 
                       if !insert_result.clone_into_option().is_some() {
-                          insert_result = insert_result.try_destination(handle_to_become_child.0.clone()); // Corrected destination
+                          insert_result = insert_result.try_destination(new_merged_pc_node_arc.clone()); // Corrected destination
                           stats.gross_edges_with_none_key += 1;
                           stats.edges_inserted_by_merge_policy += 1;
                       }
-
-
-                      // The result of the insert_result chain should be the destination node (the child handle)
-                      // which might be the original child handle or a merged one if try_destination found a match.
-                      // The merge policy's goal is just to create the new parent and link to the *existing* children.
-                      // We don't expect try_destination to find an existing edge here because the source is brand new.
-                      // So this simplified path is more correct:
-                      new_merged_pc_node_arc.lock().unwrap().force_insert_to_node(
-                          None,
-                          all_llm_tokens_for_merge_edge.clone(),
-                          &handle_to_become_child.0,
-                      );
-                      stats.gross_edges_with_none_key += 1;
-                      stats.edges_inserted_by_merge_policy += 1;
                   }
 
                   result_set.insert(NodeHandle(new_merged_pc_node_arc)); // The result is the single new merge parent
@@ -3142,6 +3253,20 @@ local_system:
               pb.finish_with_message("Precomputation complete");
               crate::debug!(2, "Done precomputing main DFS loop.");
 
+              // ---- Perform final cycle check on the fully built graph ----
+              crate::debug!(2, "Performing final cycle check on precomputed graph structure...");
+              for (tokenizer_state_id, root_arc) in &precomputed_roots {
+                  // PrecomputeNode is an alias for Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>
+                  // We call has_any_cycle on this Trie type.
+                  if PrecomputeNode::has_any_cycle(root_arc.clone()) {
+                      panic!(
+                          "Cycle detected in precomputed graph for tokenizer_state_id {:?} after all precomputation steps. This indicates an issue in the graph construction logic.",
+                          tokenizer_state_id
+                      );
+                  }
+              }
+              crate::debug!(2, "Final cycle check passed: No cycles found in precomputed graph structure.");
+              // -------------------------------------------------------------
 
               // --- Calculate Final Statistics from precomputed_roots before unwrapping ---
               crate::debug!(2, "Calculating final precompute statistics...");
@@ -3660,7 +3785,7 @@ local_system:
           }
       }
   prev_file_contents:
-    src/datastructures/trie.rs: |
+    src/datastructures/trie.rs: |-
       use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
       use std::error::Error;
       use std::fmt::{self, Debug};
@@ -3968,7 +4093,7 @@ local_system:
                       .values() // Iterates over BTreeMap<ComparableArc, EV>
                       .flat_map(|dest_map| dest_map.keys().map(|ca| ca.as_arc().clone()))
                       .collect()
-              };
+              }; // child_guard lock released here
 
               // For each child, compute the candidate depth.
               let candidate_depth = current_depth.saturating_add(1);
@@ -4056,6 +4181,76 @@ local_system:
                   // node lock is released here
               }
               result
+          }
+
+          /// Checks if there are any cycles reachable from the given `root_arc`.
+          /// Returns `true` if a cycle is detected, `false` otherwise.
+          /// This method is useful for verifying graph integrity after complex build processes.
+          pub fn has_any_cycle(root_arc: Arc<Mutex<Trie<EK, EV, T>>>) -> bool {
+              let mut global_visited_arcs: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
+              let mut recursion_stack_arcs: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
+              // Call the recursive helper starting with the root node.
+              Self::_has_any_cycle_recursive(root_arc, &mut global_visited_arcs, &mut recursion_stack_arcs)
+          }
+
+          /// Recursive helper function for `has_any_cycle`.
+          ///
+          /// `global_visited_arcs`: Tracks all nodes that have been visited and processed across
+          ///                        all recursion branches. This prevents re-processing subgraphs
+          ///                        that are already known to be cycle-free (or whose cycles
+          ///                        would have been detected via another path).
+          /// `recursion_stack_arcs`: Tracks nodes currently in the recursion stack for the *current*
+          ///                         DFS path. A cycle is detected if we try to visit a node
+          ///                         that is already in this set.
+          fn _has_any_cycle_recursive(
+              node_arc: Arc<Mutex<Trie<EK, EV, T>>>,
+              global_visited_arcs: &mut HashSet<*const Mutex<Trie<EK, EV, T>>>,
+              recursion_stack_arcs: &mut HashSet<*const Mutex<Trie<EK, EV, T>>>,
+          ) -> bool {
+              let node_arc_ptr = Arc::as_ptr(&node_arc);
+
+              // If the node is already in the current recursion stack, we've found a back-edge (a cycle).
+              if recursion_stack_arcs.contains(&node_arc_ptr) {
+                  return true; // Cycle detected
+              }
+
+              // If the node has been globally visited AND is not in the current recursion stack,
+              // it means this node was fully processed via another path and no cycles were found
+              // originating from it *then*. We can safely return false to avoid re-exploring.
+              if global_visited_arcs.contains(&node_arc_ptr) {
+                  return false; // Already processed and known to be part of a cycle-free subgraph (from its perspective)
+              }
+
+              // Add the current node to both sets:
+              // - To recursion_stack_arcs to mark it as part of the current DFS path.
+              // - To global_visited_arcs to mark it as processed, so we don't re-explore it unnecessarily
+              //   if reached from another path later.
+              recursion_stack_arcs.insert(node_arc_ptr);
+              global_visited_arcs.insert(node_arc_ptr);
+
+              // Lock the node to get its children.
+              // It's important to collect children Arcs first and then release the lock before recursing.
+              let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
+                  let node_guard = node_arc.lock().expect("Mutex poisoned during has_any_cycle traversal");
+                  node_guard.children
+                      .values() // Iterate over BTreeMap<ComparableArc, EV>
+                      .flat_map(|dest_map| dest_map.keys().map(|comparable_arc| comparable_arc.as_arc().clone()))
+                      .collect()
+              }; // node_guard lock is released here.
+
+              // Recursively check each child.
+              for child_arc in children_arcs {
+                  if Self::_has_any_cycle_recursive(child_arc, global_visited_arcs, recursion_stack_arcs) {
+                      return true; // Cycle detected in a descendant path
+                  }
+              }
+
+              // If we've processed all children of this node and found no cycles,
+              // remove it from the recursion stack (as we are "returning" up the DFS path).
+              // It remains in global_visited_arcs.
+              recursion_stack_arcs.remove(&node_arc_ptr);
+
+              false // No cycle found originating from this node or its descendants along this path
           }
       }
 
@@ -5208,6 +5403,62 @@ local_system:
               assert!(node_ptrs.contains(&arc_ptr(&child)));
           }
 
+           #[test]
+          fn test_has_any_cycle() {
+              // No cycle
+              let root1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
+              let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+              let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+              let grandchild: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
+              root1.lock().unwrap().force_insert_to_node("a", "e1", &child1);
+              root1.lock().unwrap().force_insert_to_node("b", "e2", &child2);
+              child1.lock().unwrap().force_insert_to_node("c", "e3", &grandchild);
+              child2.lock().unwrap().force_insert_to_node("d", "e4", &grandchild); // Diamond
+              assert!(!Trie::has_any_cycle(root1.clone()));
+
+              // Simple cycle: root2 -> child3 -> root2
+              let root2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(10)));
+              let child3: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(11)));
+              root2.lock().unwrap().force_insert_to_node("x", "e5", &child3);
+              child3.lock().unwrap().force_insert_to_node("y", "e6", &root2);
+              assert!(Trie::has_any_cycle(root2.clone()));
+
+              // Larger cycle: root3 -> A -> B -> C -> A
+              let root3: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(20)));
+              let node_a: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(21)));
+              let node_b: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(22)));
+              let node_c: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(23)));
+              root3.lock().unwrap().force_insert_to_node("r->a", "e7", &node_a);
+              node_a.lock().unwrap().force_insert_to_node("a->b", "e8", &node_b);
+              node_b.lock().unwrap().force_insert_to_node("b->c", "e9", &node_c);
+              node_c.lock().unwrap().force_insert_to_node("c->a", "e10", &node_a); // Cycle C -> A
+              assert!(Trie::has_any_cycle(root3.clone()));
+
+              // Cycle with unconnected node: root4 -> A -> B -> A; C (unconnected)
+              let root4: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(30)));
+              let node_a2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(31)));
+              let node_b2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(32)));
+              let node_c2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(33))); // Unconnected to root4
+              root4.lock().unwrap().force_insert_to_node("r->a", "e11", &node_a2);
+              node_a2.lock().unwrap().force_insert_to_node("a->b", "e12", &node_b2);
+              node_b2.lock().unwrap().force_insert_to_node("b->a", "e13", &node_a2); // Cycle B -> A
+              assert!(Trie::has_any_cycle(root4.clone()));
+
+              // Disconnected graph with a cycle: root5 (linear chain), root6 (cycle)
+              let root5: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(40)));
+              let node_d: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(41)));
+              root5.lock().unwrap().force_insert_to_node("r->d", "e14", &node_d);
+              // Separately, a cycle structure
+              let root6_in_cycle: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(50)));
+              let node_e: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(51)));
+              root6_in_cycle.lock().unwrap().force_insert_to_node("c1->e", "e15", &node_e);
+              node_e.lock().unwrap().force_insert_to_node("e->c1", "e16", &root6_in_cycle); // Cycle
+              // Checking from root5 should NOT find the cycle
+              assert!(!Trie::has_any_cycle(root5.clone()));
+              // Checking from root6_in_cycle SHOULD find the cycle
+              assert!(Trie::has_any_cycle(root6_in_cycle.clone()));
+          }
+
 
           #[test]
           fn test_cycle_special_map_no_panic_limited_processing() {
@@ -5873,7 +6124,7 @@ local_system:
               let initial_edge_val1: HybridBitset = vec![10].into_iter().collect();
               let initial_edge_val2: HybridBitset = vec![20].into_iter().collect();
               let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-              let merged_edge_val1: HybridBitset = vec![1, 10].into_iter().collect();
+              let merged_edge_val1: HybridBitset = vec![1, 10].into_iter().collect(); // Expected merge with child1
 
               // Pre-insert edges with the target key
               {
@@ -6113,7 +6364,7 @@ local_system:
               {
                   let s_guard = source.lock().unwrap();
                   let children_map_target_key = s_guard.get(&edge_key).expect("Target key should exist");
-                  
+
                   let ev_c1 = children_map_target_key.get(&ComparableArc::new(child1.clone())).expect("Child1 should be under target_key");
                   assert_eq!(*ev_c1, merged_ev_c1, "Edge value for child1 should be merged");
 
@@ -6133,7 +6384,7 @@ local_system:
               let new_ev_inserter_nm: HybridBitset = vec![5].into_iter().collect();
 
               source_nm.lock().unwrap().try_insert(edge_key_nm, initial_ev_nm.clone(), child1_nm.clone()).unwrap();
-              
+
               // Define a merge function that always returns None (fails to merge)
               fn failing_merge_fn(_existing: &HybridBitset, _new: HybridBitset) -> Option<HybridBitset> {
                   None
@@ -6142,7 +6393,7 @@ local_system:
               let inserter_nm = EdgeInserter::new(source_nm.clone(), edge_key_nm, new_ev_inserter_nm.clone(), failing_merge_fn);
               let result_node_nm_opt = inserter_nm.try_children().into_option();
               assert!(result_node_nm_opt.is_none(), "try_children should return None if all merges fail for children under the key");
-              
+
               // Check edge value for child1_nm is unchanged
               let s_nm_guard = source_nm.lock().unwrap();
               let ev_c1_nm = s_nm_guard
@@ -6171,7 +6422,7 @@ local_system:
                   .try_children() // Will do nothing as no children under "chain_key"
                   .else_create_destination_with_value(created_val.clone()) // This should execute
                   .unwrap();
-              
+
               assert_eq!(result_node_chain.lock().unwrap().value, created_val, "Fallback node should be created with correct value");
               // Check that an edge was created to this new node
               let s_chain_guard = source_chain.lock().unwrap();
@@ -6182,7 +6433,7 @@ local_system:
               assert_eq!(*ev_chain, new_ev_chain, "Edge should have the new_ev_chain value");
           }
       }
-    src/constraint.rs: |
+    src/constraint.rs: |-
       use std::cmp::Ordering;
       use crate::datastructures::trie::Trie;
       use crate::finite_automata::Regex;
@@ -6505,36 +6756,21 @@ local_system:
                   // Add each handle in the input set as a child of the new_merged_pc_node_arc
                   // using an EdgeInserter. The edge key will be None.
                   for handle_to_become_child in set_of_handles {
-                      // Edge: new_merged_pc_node_arc --(None, all_llm_tokens_for_merge_edge)--> handle_to_become_child.0
                       let mut insert_result = EdgeInserter::new(
-                          new_merged_pc_node_arc.clone(), // Source Arc<Mutex<PrecomputeNode>>
+                          handle_to_become_child.0.clone(), // Source Arc<Mutex<PrecomputeNode>>
                           None,                           // Edge key: Option<GrammarTokenID> = None
                           all_llm_tokens_for_merge_edge.clone(), // Edge value: LLMTokenBV
                           // Merge function for edge values (LLMTokenBV)
                           |ev_exist: &LLMTokenBV, ev_new: LLMTokenBV| Some(ev_exist | &ev_new),
                       );
 
-                      // Removed the old try_children() call here as it's replaced by the logic in the main DFS loop
+                      insert_result = insert_result.try_children(); // Will do nothing as no children under "None"
 
                       if !insert_result.clone_into_option().is_some() {
-                          insert_result = insert_result.try_destination(handle_to_become_child.0.clone()); // Corrected destination
+                          insert_result = insert_result.try_destination(new_merged_pc_node_arc.clone()); // Corrected destination
                           stats.gross_edges_with_none_key += 1;
                           stats.edges_inserted_by_merge_policy += 1;
                       }
-
-
-                      // The result of the insert_result chain should be the destination node (the child handle)
-                      // which might be the original child handle or a merged one if try_destination found a match.
-                      // The merge policy's goal is just to create the new parent and link to the *existing* children.
-                      // We don't expect try_destination to find an existing edge here because the source is brand new.
-                      // So this simplified path is more correct:
-                      new_merged_pc_node_arc.lock().unwrap().force_insert_to_node(
-                          None,
-                          all_llm_tokens_for_merge_edge.clone(),
-                          &handle_to_become_child.0,
-                      );
-                      stats.gross_edges_with_none_key += 1;
-                      stats.edges_inserted_by_merge_policy += 1;
                   }
 
                   result_set.insert(NodeHandle(new_merged_pc_node_arc)); // The result is the single new merge parent
@@ -6797,6 +7033,20 @@ local_system:
               pb.finish_with_message("Precomputation complete");
               crate::debug!(2, "Done precomputing main DFS loop.");
 
+              // ---- Perform final cycle check on the fully built graph ----
+              crate::debug!(2, "Performing final cycle check on precomputed graph structure...");
+              for (tokenizer_state_id, root_arc) in &precomputed_roots {
+                  // PrecomputeNode is an alias for Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>
+                  // We call has_any_cycle on this Trie type.
+                  if PrecomputeNode::has_any_cycle(root_arc.clone()) {
+                      panic!(
+                          "Cycle detected in precomputed graph for tokenizer_state_id {:?} after all precomputation steps. This indicates an issue in the graph construction logic.",
+                          tokenizer_state_id
+                      );
+                  }
+              }
+              crate::debug!(2, "Final cycle check passed: No cycles found in precomputed graph structure.");
+              // -------------------------------------------------------------
 
               // --- Calculate Final Statistics from precomputed_roots before unwrapping ---
               crate::debug!(2, "Calculating final precompute statistics...");
@@ -7314,7 +7564,7 @@ local_system:
               // assert_eq!(mask, LLMTokenBV::from_iter([false, false, false, false, false, false, false])); // This line seems incorrect based on the previous assertion.
           }
       }
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
 system:
   message: |2
 
@@ -7648,7 +7898,7 @@ messages:
                       .values() // Iterates over BTreeMap<ComparableArc, EV>
                       .flat_map(|dest_map| dest_map.keys().map(|ca| ca.as_arc().clone()))
                       .collect()
-              };
+              }; // child_guard lock released here
 
               // For each child, compute the candidate depth.
               let candidate_depth = current_depth.saturating_add(1);
@@ -7736,6 +7986,76 @@ messages:
                   // node lock is released here
               }
               result
+          }
+
+          /// Checks if there are any cycles reachable from the given `root_arc`.
+          /// Returns `true` if a cycle is detected, `false` otherwise.
+          /// This method is useful for verifying graph integrity after complex build processes.
+          pub fn has_any_cycle(root_arc: Arc<Mutex<Trie<EK, EV, T>>>) -> bool {
+              let mut global_visited_arcs: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
+              let mut recursion_stack_arcs: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
+              // Call the recursive helper starting with the root node.
+              Self::_has_any_cycle_recursive(root_arc, &mut global_visited_arcs, &mut recursion_stack_arcs)
+          }
+
+          /// Recursive helper function for `has_any_cycle`.
+          ///
+          /// `global_visited_arcs`: Tracks all nodes that have been visited and processed across
+          ///                        all recursion branches. This prevents re-processing subgraphs
+          ///                        that are already known to be cycle-free (or whose cycles
+          ///                        would have been detected via another path).
+          /// `recursion_stack_arcs`: Tracks nodes currently in the recursion stack for the *current*
+          ///                         DFS path. A cycle is detected if we try to visit a node
+          ///                         that is already in this set.
+          fn _has_any_cycle_recursive(
+              node_arc: Arc<Mutex<Trie<EK, EV, T>>>,
+              global_visited_arcs: &mut HashSet<*const Mutex<Trie<EK, EV, T>>>,
+              recursion_stack_arcs: &mut HashSet<*const Mutex<Trie<EK, EV, T>>>,
+          ) -> bool {
+              let node_arc_ptr = Arc::as_ptr(&node_arc);
+
+              // If the node is already in the current recursion stack, we've found a back-edge (a cycle).
+              if recursion_stack_arcs.contains(&node_arc_ptr) {
+                  return true; // Cycle detected
+              }
+
+              // If the node has been globally visited AND is not in the current recursion stack,
+              // it means this node was fully processed via another path and no cycles were found
+              // originating from it *then*. We can safely return false to avoid re-exploring.
+              if global_visited_arcs.contains(&node_arc_ptr) {
+                  return false; // Already processed and known to be part of a cycle-free subgraph (from its perspective)
+              }
+
+              // Add the current node to both sets:
+              // - To recursion_stack_arcs to mark it as part of the current DFS path.
+              // - To global_visited_arcs to mark it as processed, so we don't re-explore it unnecessarily
+              //   if reached from another path later.
+              recursion_stack_arcs.insert(node_arc_ptr);
+              global_visited_arcs.insert(node_arc_ptr);
+
+              // Lock the node to get its children.
+              // It's important to collect children Arcs first and then release the lock before recursing.
+              let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
+                  let node_guard = node_arc.lock().expect("Mutex poisoned during has_any_cycle traversal");
+                  node_guard.children
+                      .values() // Iterate over BTreeMap<ComparableArc, EV>
+                      .flat_map(|dest_map| dest_map.keys().map(|comparable_arc| comparable_arc.as_arc().clone()))
+                      .collect()
+              }; // node_guard lock is released here.
+
+              // Recursively check each child.
+              for child_arc in children_arcs {
+                  if Self::_has_any_cycle_recursive(child_arc, global_visited_arcs, recursion_stack_arcs) {
+                      return true; // Cycle detected in a descendant path
+                  }
+              }
+
+              // If we've processed all children of this node and found no cycles,
+              // remove it from the recursion stack (as we are "returning" up the DFS path).
+              // It remains in global_visited_arcs.
+              recursion_stack_arcs.remove(&node_arc_ptr);
+
+              false // No cycle found originating from this node or its descendants along this path
           }
       }
 
@@ -8888,6 +9208,62 @@ messages:
               assert!(node_ptrs.contains(&arc_ptr(&child)));
           }
 
+           #[test]
+          fn test_has_any_cycle() {
+              // No cycle
+              let root1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
+              let child1: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
+              let child2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(2)));
+              let grandchild: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(3)));
+              root1.lock().unwrap().force_insert_to_node("a", "e1", &child1);
+              root1.lock().unwrap().force_insert_to_node("b", "e2", &child2);
+              child1.lock().unwrap().force_insert_to_node("c", "e3", &grandchild);
+              child2.lock().unwrap().force_insert_to_node("d", "e4", &grandchild); // Diamond
+              assert!(!Trie::has_any_cycle(root1.clone()));
+
+              // Simple cycle: root2 -> child3 -> root2
+              let root2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(10)));
+              let child3: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(11)));
+              root2.lock().unwrap().force_insert_to_node("x", "e5", &child3);
+              child3.lock().unwrap().force_insert_to_node("y", "e6", &root2);
+              assert!(Trie::has_any_cycle(root2.clone()));
+
+              // Larger cycle: root3 -> A -> B -> C -> A
+              let root3: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(20)));
+              let node_a: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(21)));
+              let node_b: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(22)));
+              let node_c: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(23)));
+              root3.lock().unwrap().force_insert_to_node("r->a", "e7", &node_a);
+              node_a.lock().unwrap().force_insert_to_node("a->b", "e8", &node_b);
+              node_b.lock().unwrap().force_insert_to_node("b->c", "e9", &node_c);
+              node_c.lock().unwrap().force_insert_to_node("c->a", "e10", &node_a); // Cycle C -> A
+              assert!(Trie::has_any_cycle(root3.clone()));
+
+              // Cycle with unconnected node: root4 -> A -> B -> A; C (unconnected)
+              let root4: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(30)));
+              let node_a2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(31)));
+              let node_b2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(32)));
+              let node_c2: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(33))); // Unconnected to root4
+              root4.lock().unwrap().force_insert_to_node("r->a", "e11", &node_a2);
+              node_a2.lock().unwrap().force_insert_to_node("a->b", "e12", &node_b2);
+              node_b2.lock().unwrap().force_insert_to_node("b->a", "e13", &node_a2); // Cycle B -> A
+              assert!(Trie::has_any_cycle(root4.clone()));
+
+              // Disconnected graph with a cycle: root5 (linear chain), root6 (cycle)
+              let root5: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(40)));
+              let node_d: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(41)));
+              root5.lock().unwrap().force_insert_to_node("r->d", "e14", &node_d);
+              // Separately, a cycle structure
+              let root6_in_cycle: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(50)));
+              let node_e: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(51)));
+              root6_in_cycle.lock().unwrap().force_insert_to_node("c1->e", "e15", &node_e);
+              node_e.lock().unwrap().force_insert_to_node("e->c1", "e16", &root6_in_cycle); // Cycle
+              // Checking from root5 should NOT find the cycle
+              assert!(!Trie::has_any_cycle(root5.clone()));
+              // Checking from root6_in_cycle SHOULD find the cycle
+              assert!(Trie::has_any_cycle(root6_in_cycle.clone()));
+          }
+
 
           #[test]
           fn test_cycle_special_map_no_panic_limited_processing() {
@@ -9553,7 +9929,7 @@ messages:
               let initial_edge_val1: HybridBitset = vec![10].into_iter().collect();
               let initial_edge_val2: HybridBitset = vec![20].into_iter().collect();
               let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-              let merged_edge_val1: HybridBitset = vec![1, 10].into_iter().collect();
+              let merged_edge_val1: HybridBitset = vec![1, 10].into_iter().collect(); // Expected merge with child1
 
               // Pre-insert edges with the target key
               {
@@ -9793,7 +10169,7 @@ messages:
               {
                   let s_guard = source.lock().unwrap();
                   let children_map_target_key = s_guard.get(&edge_key).expect("Target key should exist");
-                  
+
                   let ev_c1 = children_map_target_key.get(&ComparableArc::new(child1.clone())).expect("Child1 should be under target_key");
                   assert_eq!(*ev_c1, merged_ev_c1, "Edge value for child1 should be merged");
 
@@ -9813,7 +10189,7 @@ messages:
               let new_ev_inserter_nm: HybridBitset = vec![5].into_iter().collect();
 
               source_nm.lock().unwrap().try_insert(edge_key_nm, initial_ev_nm.clone(), child1_nm.clone()).unwrap();
-              
+
               // Define a merge function that always returns None (fails to merge)
               fn failing_merge_fn(_existing: &HybridBitset, _new: HybridBitset) -> Option<HybridBitset> {
                   None
@@ -9822,7 +10198,7 @@ messages:
               let inserter_nm = EdgeInserter::new(source_nm.clone(), edge_key_nm, new_ev_inserter_nm.clone(), failing_merge_fn);
               let result_node_nm_opt = inserter_nm.try_children().into_option();
               assert!(result_node_nm_opt.is_none(), "try_children should return None if all merges fail for children under the key");
-              
+
               // Check edge value for child1_nm is unchanged
               let s_nm_guard = source_nm.lock().unwrap();
               let ev_c1_nm = s_nm_guard
@@ -9851,7 +10227,7 @@ messages:
                   .try_children() // Will do nothing as no children under "chain_key"
                   .else_create_destination_with_value(created_val.clone()) // This should execute
                   .unwrap();
-              
+
               assert_eq!(result_node_chain.lock().unwrap().value, created_val, "Fallback node should be created with correct value");
               // Check that an edge was created to this new node
               let s_chain_guard = source_chain.lock().unwrap();
@@ -9862,7 +10238,6 @@ messages:
               assert_eq!(*ev_chain, new_ev_chain, "Edge should have the new_ev_chain value");
           }
       }
-
       ```
     metadata:
       filename: src/datastructures/trie.rs
@@ -10190,36 +10565,21 @@ messages:
                   // Add each handle in the input set as a child of the new_merged_pc_node_arc
                   // using an EdgeInserter. The edge key will be None.
                   for handle_to_become_child in set_of_handles {
-                      // Edge: new_merged_pc_node_arc --(None, all_llm_tokens_for_merge_edge)--> handle_to_become_child.0
                       let mut insert_result = EdgeInserter::new(
-                          new_merged_pc_node_arc.clone(), // Source Arc<Mutex<PrecomputeNode>>
+                          handle_to_become_child.0.clone(), // Source Arc<Mutex<PrecomputeNode>>
                           None,                           // Edge key: Option<GrammarTokenID> = None
                           all_llm_tokens_for_merge_edge.clone(), // Edge value: LLMTokenBV
                           // Merge function for edge values (LLMTokenBV)
                           |ev_exist: &LLMTokenBV, ev_new: LLMTokenBV| Some(ev_exist | &ev_new),
                       );
 
-                      // Removed the old try_children() call here as it's replaced by the logic in the main DFS loop
+                      insert_result = insert_result.try_children(); // Will do nothing as no children under "None"
 
                       if !insert_result.clone_into_option().is_some() {
-                          insert_result = insert_result.try_destination(handle_to_become_child.0.clone()); // Corrected destination
+                          insert_result = insert_result.try_destination(new_merged_pc_node_arc.clone()); // Corrected destination
                           stats.gross_edges_with_none_key += 1;
                           stats.edges_inserted_by_merge_policy += 1;
                       }
-
-
-                      // The result of the insert_result chain should be the destination node (the child handle)
-                      // which might be the original child handle or a merged one if try_destination found a match.
-                      // The merge policy's goal is just to create the new parent and link to the *existing* children.
-                      // We don't expect try_destination to find an existing edge here because the source is brand new.
-                      // So this simplified path is more correct:
-                      new_merged_pc_node_arc.lock().unwrap().force_insert_to_node(
-                          None,
-                          all_llm_tokens_for_merge_edge.clone(),
-                          &handle_to_become_child.0,
-                      );
-                      stats.gross_edges_with_none_key += 1;
-                      stats.edges_inserted_by_merge_policy += 1;
                   }
 
                   result_set.insert(NodeHandle(new_merged_pc_node_arc)); // The result is the single new merge parent
@@ -10482,6 +10842,20 @@ messages:
               pb.finish_with_message("Precomputation complete");
               crate::debug!(2, "Done precomputing main DFS loop.");
 
+              // ---- Perform final cycle check on the fully built graph ----
+              crate::debug!(2, "Performing final cycle check on precomputed graph structure...");
+              for (tokenizer_state_id, root_arc) in &precomputed_roots {
+                  // PrecomputeNode is an alias for Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>
+                  // We call has_any_cycle on this Trie type.
+                  if PrecomputeNode::has_any_cycle(root_arc.clone()) {
+                      panic!(
+                          "Cycle detected in precomputed graph for tokenizer_state_id {:?} after all precomputation steps. This indicates an issue in the graph construction logic.",
+                          tokenizer_state_id
+                      );
+                  }
+              }
+              crate::debug!(2, "Final cycle check passed: No cycles found in precomputed graph structure.");
+              // -------------------------------------------------------------
 
               // --- Calculate Final Statistics from precomputed_roots before unwrapping ---
               crate::debug!(2, "Calculating final precompute statistics...");
@@ -10999,140 +11373,1341 @@ messages:
               // assert_eq!(mask, LLMTokenBV::from_iter([false, false, false, false, false, false, false])); // This line seems incorrect based on the previous assertion.
           }
       }
-
       ```
     metadata:
       filename: src/constraint.rs
-  - user: At the end of precompute, do one final check to make sure there's no cycle
-      in the tree, and panic if there is.
+  - user: |-
+      Investigate 'Some' nodes. What grammar tokens are most common?
+      - At end of precompute, give full frequencies of each grammar token as edge keys. And give total number of edge *values* for each as well (remember: each edge key can have mutliple edge values.
     metadata:
   - assistant: |-
-      Okay, I can help you add a final cycle check to your `precompute` method. This will involve two parts:
-      1.  Adding new cycle detection methods to your `Trie` struct in `src/datastructures/trie.rs`.
-      2.  Calling these methods from `GrammarConstraint::precompute` in `src/constraint.rs`.
+      Okay, I will provide step-by-step instructions to modify `src/constraint.rs` to collect and display the frequency of `GrammarTokenID`s used as edge keys in the precomputed graph.
 
-      Here are the detailed instructions:
+      **File: `src/constraint.rs`**
 
-      ### Part 1: Add cycle detection methods to `src/datastructures/trie.rs`
+      1.  **Update the `PrecomputeStats` struct definition:**
+          *   Locate the `PrecomputeStats` struct definition (around line 113).
+          *   Add two new fields to store the counts for grammar token edge keys and their associated edge values.
 
-      You'll add two new methods, `has_any_cycle` and its recursive helper `_has_any_cycle_recursive`, to your `Trie` implementation.
+          ```rust
+          // Add these fields to PrecomputeStats
+          final_grammar_token_edge_key_counts: BTreeMap<GrammarTokenID, usize>,
+          final_grammar_token_edge_value_counts: BTreeMap<GrammarTokenID, usize>,
+          ```
+          The struct should now look like this (order of fields might vary slightly based on your auto-formatter):
+          ```rust
+          #[derive(Default, Debug)]
+          struct PrecomputeStats {
+              // Gross counts (before sharing/merging reduces them in the final structure)
+              initial_root_nodes_created: usize,
+              nodes_created_by_merge_policy_as_new_parent: usize, // Nodes created by merge_node_handles_internal to be the new parent
+              nodes_created_by_edge_inserter_else_create: usize,  // Nodes created by EdgeInserter's else_create in main loop
 
-      1.  **Open the file `src/datastructures/trie.rs`.**
-      2.  **Locate the implementation block `impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> { ... }`.**
-      3.  **Add the following two methods inside this `impl` block.** A good place would be after the `all_nodes` method or near other graph traversal utilities.
+              edges_inserted_by_merge_policy: usize,          // Edges from new parent to its constituents in merge_policy
+              edges_inserted_by_edge_inserter_main_loop: usize, // Edges created by EdgeInserter in main DFS loop
 
-      ```rust
-          /// Checks if there are any cycles reachable from the given `root_arc`.
-          /// Returns `true` if a cycle is detected, `false` otherwise.
-          /// This method is useful for verifying graph integrity after complex build processes.
-          pub fn has_any_cycle(root_arc: Arc<Mutex<Trie<EK, EV, T>>>) -> bool {
-              let mut global_visited_arcs: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
-              let mut recursion_stack_arcs: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
-              // Call the recursive helper starting with the root node.
-              Self::_has_any_cycle_recursive(root_arc, &mut global_visited_arcs, &mut recursion_stack_arcs)
+              gross_edges_with_none_key: usize,
+              gross_edges_with_some_key: usize,
+
+              // Merge policy stats
+              merge_policy_invocations: usize,
+              merge_policy_merges_performed: usize,          // Actual merges (input size > threshold)
+              merge_policy_nodes_input_total: usize,         // Sum of set_of_handles.len() passed to merge_policy
+              merge_policy_nodes_effectively_merged_count: usize, // Sum of set_of_handles.len() for sets that *were* merged
+
+              // Gross counts for content modifications
+              finalizer_infos_pushed_to_nodes: usize, // How many times push_finalizer_info was called on a node's value
+              clean_end_tokens_inserted_to_nodes: usize, // How many times a token_id was inserted into a node's clean_end bitset
+
+              // Final structure stats (net counts, after all processing and sharing)
+              final_unique_nodes_count: usize,
+              final_edges_count: usize,
+              final_edges_with_none_key: usize,
+              final_edges_with_some_key: usize,
+              final_nodes_with_clean_end: usize,
+              final_total_finalizer_entries_in_graph: usize, // Sum of node.value.finalizers.values().map(|pf| pf.content.len()).sum() across unique nodes
+
+              // For average edge occupancy per key type
+              final_total_occupancy_sum_for_some_keys: usize,
+              final_num_occupied_some_edge_keys: usize,
+              final_total_occupancy_sum_for_none_keys: usize,
+              final_num_occupied_none_edge_keys: usize,
+
+              // New fields for grammar token edge key statistics
+              final_grammar_token_edge_key_counts: BTreeMap<GrammarTokenID, usize>,
+              final_grammar_token_edge_value_counts: BTreeMap<GrammarTokenID, usize>,
+          }
+          ```
+          The `#[derive(Default)]` will correctly initialize the new `BTreeMap` fields to empty maps.
+
+      2.  **Update the statistics calculation loop in the `precompute` method:**
+          *   Locate the `precompute` method.
+          *   Find the loop: `for comp_arc_node in &all_reachable_nodes_for_final_stats { ... }` (around line 478).
+          *   Inside this loop, find the inner loop: `for (edge_key, dest_map) in node_guard.children() { ... }`.
+          *   Within this inner loop, after the existing `stats.final_edges_count += ...` lines, add the logic to populate the new statistics fields.
+
+          Modify this part:
+          ```rust
+                      stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
+                      if edge_key.is_some() {
+                          stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
+                      } else {
+                          stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
+                      }
+                      // Accumulate for average edge occupancy
+                      if num_edges_for_this_key_to_distinct_children > 0 {
+                          if edge_key.is_some() {
+                              stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key_to_distinct_children;
+                              stats.final_num_occupied_some_edge_keys += 1;
+                          } else {
+                              stats.final_total_occupancy_sum_for_none_keys += num_edges_for_this_key_to_distinct_children;
+                              stats.final_num_occupied_none_edge_keys += 1;
+                          }
+                      }
+          ```
+          To become:
+          ```rust
+                      stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
+                      if let Some(gtid) = edge_key { // Changed from edge_key.is_some() to capture gtid
+                          stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
+
+                          // New: Populate grammar token specific counts
+                          *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += 1;
+                          *stats.final_grammar_token_edge_value_counts.entry(*gtid).or_insert(0) += num_edges_for_this_key_to_distinct_children;
+
+                          // Accumulate for average edge occupancy for Some keys
+                          if num_edges_for_this_key_to_distinct_children > 0 {
+                              stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key_to_distinct_children;
+                              stats.final_num_occupied_some_edge_keys += 1;
+                          }
+                      } else { // Edge key is None
+                          stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
+                          // Accumulate for average edge occupancy for None keys
+                          if num_edges_for_this_key_to_distinct_children > 0 {
+                              stats.final_total_occupancy_sum_for_none_keys += num_edges_for_this_key_to_distinct_children;
+                              stats.final_num_occupied_none_edge_keys += 1;
+                          }
+                      }
+          ```
+          Note: I've slightly restructured the `if/else` for `edge_key.is_some()` to directly use `if let Some(gtid) = edge_key`. Also, ensure `*gtid` is used when calling `entry(*gtid)` because `edge_key` is `&Option<GrammarTokenID>`, so `gtid` will be `&GrammarTokenID`.
+
+      3.  **Update the statistics printing section in the `precompute` method:**
+          *   Locate the printing block that starts with `println!("--- Precomputation Statistics ---");` (around line 510).
+          *   After the lines printing "Average edge occupancy for Some-key edges" and "Average edge occupancy for None-key edges", and before `println!("---------------------------------");`, add the new printing logic.
+          *   Remember that the `tokenizer` (which is a `&Regex`) is available in the `precompute` method's scope, and it contains `token_names: Vec<String>`.
+
+          Add the following code block:
+          ```rust
+              println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
+              let mut grammar_token_stats: Vec<(GrammarTokenID, usize, usize)> = stats
+                  .final_grammar_token_edge_key_counts
+                  .iter()
+                  .map(|(gtid, key_count)| {
+                      let value_count = stats.final_grammar_token_edge_value_counts.get(gtid).copied().unwrap_or(0);
+                      (*gtid, *key_count, value_count)
+                  })
+                  .collect();
+
+              // Sort by key_count (number of times this gtid was an edge key) descending
+              grammar_token_stats.sort_by(|a, b| b.1.cmp(&a.1));
+
+              for (gtid, key_count, value_count) in grammar_token_stats {
+                  let token_name = tokenizer.token_names.get(gtid.0)
+                      .map_or_else(|| format!("ID {}", gtid.0), |s| s.clone());
+                  println!("  - Token '{}' (ID {}): Key Count = {}, Total Edge Values = {}",
+                           token_name, gtid.0, key_count, value_count);
+              }
+          ```
+          This snippet will:
+          *   Collect the grammar token statistics into a vector.
+          *   Sort them by the "key count" (how many times the `GrammarTokenID` appeared as an edge key) in descending order.
+          *   Iterate through the sorted statistics and print them, looking up the token name from the `tokenizer`.
+
+      These changes should provide the requested statistics about `GrammarTokenID` usage as edge keys.
+    metadata:
+  - user: |
+      Using model 'gemini/gemini-2.5-flash-preview-04-17' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      LLM Response (Attempt 1):
+      ```json
+      {
+        "actions": [
+          {"action": "replace", "filepath": "src/constraint.rs"}
+        ]
+      }
+      ``````rust "src/constraint.rs"
+      use std::cmp::Ordering;
+      use crate::datastructures::trie::Trie;
+      use crate::finite_automata::Regex;
+      use crate::glr::parser::ParseStateNodeContent;
+      use crate::glr::parser::{MergeAndIntersect, GLRParser, GLRParserState, ParseState, ParseStateKey};
+      use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
+      use bimap::BiBTreeMap;
+      use bitvec::prelude::*;
+      use bitvec::prelude::*; // Keep for macros or other uses if needed
+      use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque, HashSet};
+      use std::ops::BitOr;
+      use std::sync::{Arc, Mutex, MutexGuard};
+      use bitvec::macros::internal::funty::Fundamental;
+      use keyed_priority_queue::KeyedPriorityQueue;
+      use crate::constraint_extra::print_finalizer;
+      use crate::datastructures::charmap::TrieMap;
+      use crate::datastructures::gss::prune_and_transform_recursive;
+      use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
+      use crate::types::{TerminalID as GrammarTokenID, TerminalID};
+      use crate::datastructures::trie::EdgeInserter;
+      use indicatif::{ProgressBar, ProgressStyle};
+      use crate::datastructures::hybrid_bitset::HybridBitset;
+      use crate::datastructures::trie::ComparableArc; // Need ComparableArc for HashSet in final stats calculation
+      use std::hash::{Hash, Hasher}; // Import Hash and Hasher
+
+
+      pub type LLMTokenBV = HybridBitset;
+      pub type GrammarTokenBV = BitVec; // Assuming GrammarTokenBV remains BitVec
+
+      #[derive(Debug, Clone)]
+      pub struct GrammarConstraintState<'a> {
+          pub(crate) parent: &'a GrammarConstraint,
+          pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, LLMTokenInfo>>,
+      }
+
+      #[derive(Default, Debug, Clone)]
+      pub struct PrecomputedFinalizer {
+          pub(crate) content: BTreeMap<TokenizerStateID, LLMTokenBV>,
+      }
+
+      impl PrecomputedFinalizer {
+          pub(crate) fn new(compatible_llm_tokens: LLMTokenBV, tokenizer_state_id: TokenizerStateID) -> Self {
+              let content = BTreeMap::from([(tokenizer_state_id, compatible_llm_tokens)]);
+              Self { content }
+          }
+      }
+
+      #[derive(Default, Debug, Clone)]
+      pub(crate) struct PrecomputedNodeContents {
+          finalizers: BTreeMap<GrammarTokenID, PrecomputedFinalizer>,
+          pub(crate) clean_end: Option<LLMTokenBV>,
+      }
+
+      pub(crate) type PrecomputeNode = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
+      pub(crate) type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode>;
+
+      /// Holds the set of active LLM tokens and the intersection of tokens
+      /// guaranteed to be possible in all paths *below* this GSS node.
+      #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct LLMTokenInfo {
+          /// Union of possible LLM tokens allowed by paths reaching this node.
+          pub active: LLMTokenBV,
+          /// Intersection of LLM tokens guaranteed by *all* paths descending from this node.
+          /// Used for optimization during commit.
+          pub intersection: LLMTokenBV,
+      }
+
+      impl Default for LLMTokenInfo {
+          fn default() -> Self {
+              Self { active: Default::default(), intersection: Default::default() }
+          }
+      }
+
+      impl std::fmt::Debug for LLMTokenInfo {
+          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+              const MAX_ITEMS: usize = 10;
+
+              let format_bv = |bv: &LLMTokenBV| -> String {
+                  let ids: Vec<_> = bv.iter().collect();
+                  if ids.len() > MAX_ITEMS {
+                      format!("[{:?}... ({} total)]", &ids[..MAX_ITEMS], ids.len())
+                  } else {
+                      format!("{:?}", ids)
+                  }
+              };
+
+              f.debug_struct("LLMTokenInfo")
+                  .field("active", &format_args!("{}", format_bv(&self.active)))
+                  .field(
+                      "intersection",
+                      &format_args!("{}", format_bv(&self.intersection)),
+                  )
+                  .finish()
+          }
+      }
+
+
+      #[derive(Debug, Clone)] // Removed pub(crate) as it's likely used externally
+      pub struct GrammarConstraint {
+          pub(crate) tokenizer: Regex,
+          pub(crate) parser: GLRParser,
+          pub(crate) precomputed: Precomputed,
+          pub(crate) llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
+          pub(crate) max_llm_token_id: usize,
+      }
+
+
+      // Add this struct definition before impl GrammarConstraint
+      #[derive(Default, Debug)]
+      struct PrecomputeStats {
+          // Gross counts (before sharing/merging reduces them in the final structure)
+          initial_root_nodes_created: usize,
+          nodes_created_by_merge_policy_as_new_parent: usize, // Nodes created by merge_node_handles_internal to be the new parent
+          nodes_created_by_edge_inserter_else_create: usize,  // Nodes created by EdgeInserter's else_create in main loop
+
+          edges_inserted_by_merge_policy: usize,          // Edges from new parent to its constituents in merge_policy
+          edges_inserted_by_edge_inserter_main_loop: usize, // Edges created by EdgeInserter in main DFS loop
+
+          gross_edges_with_none_key: usize,
+          gross_edges_with_some_key: usize,
+
+          // Merge policy stats
+          merge_policy_invocations: usize,
+          merge_policy_merges_performed: usize,          // Actual merges (input size > threshold)
+          merge_policy_nodes_input_total: usize,         // Sum of set_of_handles.len() passed to merge_policy
+          merge_policy_nodes_effectively_merged_count: usize, // Sum of set_of_handles.len() for sets that *were* merged
+
+          // Gross counts for content modifications
+          finalizer_infos_pushed_to_nodes: usize, // How many times push_finalizer_info was called on a node's value
+          clean_end_tokens_inserted_to_nodes: usize, // How many times a token_id was inserted into a node's clean_end bitset
+
+          // Final structure stats (net counts, after all processing and sharing)
+          final_unique_nodes_count: usize,
+          final_edges_count: usize,
+          final_edges_with_none_key: usize,
+          final_edges_with_some_key: usize,
+          final_nodes_with_clean_end: usize,
+          final_total_finalizer_entries_in_graph: usize, // Sum of node.value.finalizers.values().map(|pf| pf.content.len()).sum() across unique nodes
+
+          // For average edge occupancy per key type
+          final_total_occupancy_sum_for_some_keys: usize,
+          final_num_occupied_some_edge_keys: usize,
+          final_total_occupancy_sum_for_none_keys: usize,
+          final_num_occupied_none_edge_keys: usize,
+
+          // New fields for grammar token edge key statistics
+          final_grammar_token_edge_key_counts: BTreeMap<GrammarTokenID, usize>,
+          final_grammar_token_edge_value_counts: BTreeMap<GrammarTokenID, usize>,
+      }
+
+
+      impl MergeAndIntersect for LLMTokenInfo {
+          fn merge(&self, other: &Self) -> Self {
+              // Merge: Active tokens are unioned, Intersection tokens are intersected.
+              Self {
+                  active: &self.active | &other.active, // Use reference for ops
+                  intersection: &self.intersection & &other.intersection, // Use reference for ops
+              }
+          }
+          fn intersect(&self, other: &Self) -> Self {
+              // Intersect: Active tokens are intersected, Intersection is also intersected.
+              Self {
+                  active: &self.active & &other.active, // Use reference for ops
+                  intersection: &self.intersection & &other.intersection, // Use reference for ops
+              }
+          }
+      }
+
+      impl PrecomputedNodeContents {
+          pub(crate) fn finalizers(&self) -> &BTreeMap<GrammarTokenID, PrecomputedFinalizer> { &self.finalizers }
+
+          /// Adds information about a final state reachable via a specific grammar token.
+          /// If an entry for the grammar token already exists, it merges the information.
+          pub fn push_finalizer_info(&mut self, possible_final_grammar_token: GrammarTokenID, llm_token_id: LLMTokenID, tokenizer_state_id: TokenizerStateID, max_llm_token_id: usize) {
+              // max_llm_token_id is no longer needed here, HybridBitset handles size dynamically
+              let mut current_compatible_llm_tokens = HybridBitset::new();
+              current_compatible_llm_tokens.insert(llm_token_id.0);
+
+              self.finalizers.entry(possible_final_grammar_token)
+                  .and_modify(|existing_finalizer| {
+                      existing_finalizer.content.entry(tokenizer_state_id).and_modify(|existing_llm_tokens| {
+                          // Use BitOrAssign<&HybridBitset>
+                          *existing_llm_tokens |= &current_compatible_llm_tokens;
+                      }).or_insert(current_compatible_llm_tokens.clone());
+                  })
+                  .or_insert_with(|| PrecomputedFinalizer::new(current_compatible_llm_tokens, tokenizer_state_id));
+          }
+      }
+
+      impl GrammarConstraint {
+          pub fn new(
+              tokenizer: Regex,
+              parser: GLRParser,
+              llm_token_map: LLMTokenMap,
+              max_llm_token_id: usize
+          ) -> Self {
+              let precomputed = GrammarConstraint::precompute(&tokenizer, &llm_token_map, max_llm_token_id);
+              Self {
+                  tokenizer,
+                  parser,
+                  precomputed,
+                  llm_token_map,
+                  max_llm_token_id,
+              }
           }
 
-          /// Recursive helper function for `has_any_cycle`.
-          ///
-          /// `global_visited_arcs`: Tracks all nodes that have been visited and processed across
-          ///                        all recursion branches. This prevents re-processing subgraphs
-          ///                        that are already known to be cycle-free (or whose cycles
-          ///                        would have been detected via another path).
-          /// `recursion_stack_arcs`: Tracks nodes currently in the recursion stack for the *current*
-          ///                         DFS path. A cycle is detected if we try to visit a node
-          ///                         that is already in this set.
-          fn _has_any_cycle_recursive(
-              node_arc: Arc<Mutex<Trie<EK, EV, T>>>,
-              global_visited_arcs: &mut HashSet<*const Mutex<Trie<EK, EV, T>>>,
-              recursion_stack_arcs: &mut HashSet<*const Mutex<Trie<EK, EV, T>>>,
-          ) -> bool {
-              let node_arc_ptr = Arc::as_ptr(&node_arc);
+          pub fn precompute<'a>(
+              tokenizer: &Regex,
+              llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+              max_llm_token_id: usize,
+          ) -> Precomputed {
+              let mut stats = PrecomputeStats::default();
 
-              // If the node is already in the current recursion stack, we've found a back-edge (a cycle).
-              if recursion_stack_arcs.contains(&node_arc_ptr) {
-                  return true; // Cycle detected
+              // ---- Helper function to count nodes in VocabPrefixTree ----
+              fn count_vocab_nodes(node: &VocabPrefixTreeNode) -> u64 {
+                  let mut count = 1u64; // Count this node
+                  for child_node in node.children().values() {
+                      count += count_vocab_nodes(child_node);
+                  }
+                  count
               }
+              // -----------------------------------------------------------
 
-              // If the node has been globally visited AND is not in the current recursion stack,
-              // it means this node was fully processed via another path and no cycles were found
-              // originating from it *then*. We can safely return false to avoid re-exploring.
-              if global_visited_arcs.contains(&node_arc_ptr) {
-                  return false; // Already processed and known to be part of a cycle-free subgraph (from its perspective)
+              const MERGE_THRESHOLD: usize = 100;
+
+              // ----  Ord-capable handle for `Arc<Mutex<PrecomputeNode>>` --------------------------
+              // `Arc<Mutex<PrecomputeNode>>` cannot live in a `BTreeSet` because `Mutex<T>` lacks
+              // an `Ord` implementation.  We wrap it and order by the (stable) pointer address.
+              #[derive(Clone)]
+              struct NodeHandle(Arc<Mutex<PrecomputeNode>>);
+
+              use std::ops::Deref;
+              impl Deref for NodeHandle {
+                  type Target = Arc<Mutex<PrecomputeNode>>;
+                  fn deref(&self) -> &Self::Target {
+                      &self.0
+                  }
               }
-
-              // Add the current node to both sets:
-              // - To recursion_stack_arcs to mark it as part of the current DFS path.
-              // - To global_visited_arcs to mark it as processed, so we don't re-explore it unnecessarily
-              //   if reached from another path later.
-              recursion_stack_arcs.insert(node_arc_ptr);
-              global_visited_arcs.insert(node_arc_ptr);
-
-              // Lock the node to get its children.
-              // It's important to collect children Arcs first and then release the lock before recursing.
-              let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
-                  let node_guard = node_arc.lock().expect("Mutex poisoned during has_any_cycle traversal");
-                  node_guard.children
-                      .values() // Iterate over BTreeMap<ComparableArc, EV>
-                      .flat_map(|dest_map| dest_map.keys().map(|comparable_arc| comparable_arc.as_arc().clone()))
-                      .collect()
-              }; // node_guard lock is released here.
-
-              // Recursively check each child.
-              for child_arc in children_arcs {
-                  if Self::_has_any_cycle_recursive(child_arc, global_visited_arcs, recursion_stack_arcs) {
-                      return true; // Cycle detected in a descendant path
+              impl PartialEq for NodeHandle {
+                  fn eq(&self, other: &Self) -> bool {
+                      Arc::ptr_eq(&self.0, &other.0)
+                  }
+              }
+              impl Eq for NodeHandle {}
+              impl PartialOrd for NodeHandle {
+                  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                      Some(self.cmp(other))
+                  }
+              }
+              impl Ord for NodeHandle {
+                  fn cmp(&self, other: &Self) -> Ordering {
+                      (Arc::as_ptr(&self.0) as usize).cmp(&(Arc::as_ptr(&other.0) as usize))
                   }
               }
 
-              // If we've processed all children of this node and found no cycles,
-              // remove it from the recursion stack (as we are "returning" up the DFS path).
-              // It remains in global_visited_arcs.
-              recursion_stack_arcs.remove(&node_arc_ptr);
+              // Add this Hash implementation for NodeHandle
+              impl Hash for NodeHandle {
+                  fn hash<H: Hasher>(&self, state: &mut H) {
+                      (Arc::as_ptr(&self.0) as usize).hash(state);
+                  }
+              }
+              // ------------------------------------------------------------------------------------
 
-              false // No cycle found originating from this node or its descendants along this path
-          }
-      ```
+              // Create the vocab prefix tree.
+              let mut tokens_for_vocab_prefix_tree_builder: Vec<(usize, Vec<u8>)> = vec![];
+              for (content, id) in llm_token_map {
+                  tokens_for_vocab_prefix_tree_builder.push((id.0, content.clone()));
+              }
+              crate::debug!(2, "Building vocab prefix tree");
+              let vocab_prefix_tree = VocabPrefixTree::build(&tokens_for_vocab_prefix_tree_builder);
+              crate::debug!(2, "Done building vocab prefix tree");
 
-      Make sure `std::collections::HashSet` is imported at the top of `src/datastructures/trie.rs` (it appears to be already in your provided code).
+              // --- Count nodes for progress bar ---
+              let total_vocab_nodes = count_vocab_nodes(&vocab_prefix_tree.root);
+              crate::debug!(2, "Total vocab nodes to process: {}", total_vocab_nodes);
 
-      ### Part 2: Call the cycle check in `src/constraint.rs`
-
-      Now, you'll modify the `precompute` method in `GrammarConstraint` to use this new cycle detection logic.
-
-      1.  **Open the file `src/constraint.rs`.**
-      2.  **Locate the `precompute` method within the `impl GrammarConstraint` block.**
-      3.  **Find the following lines of code:**
-          ```rust
-                  // --- Finish progress bar ---
-                  pb.finish_with_message("Precomputation complete");
-                  crate::debug!(2, "Done precomputing main DFS loop.");
+              // --- Initialize Progress Bar ---
+              let pb = ProgressBar::new(total_vocab_nodes);
+              pb.set_style(ProgressStyle::default_bar()
+                  .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta}) {msg}")
+                  .expect("Failed to set progress bar template")
+                  .progress_chars("##-"));
+              pb.set_message("Precomputing constraints...");
 
 
-                  // --- Calculate Final Statistics from precomputed_roots before unwrapping ---
-                  crate::debug!(2, "Calculating final precompute statistics...");
-          ```
-      4.  **Insert the new cycle check logic immediately *before* the line `// --- Calculate Final Statistics...` and *after* `crate::debug!(2, "Done precomputing main DFS loop.");`.**
+              // Create the roots.
+              let mut precomputed_roots: BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
+              for tokenizer_state_id in 0..tokenizer.max_state() {
+                  let precompute_node = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
+                  precomputed_roots.insert(TokenizerStateID(tokenizer_state_id), precompute_node);
+                  stats.initial_root_nodes_created += 1;
+              }
 
-          Add the following lines:
-          ```rust
-                  // ---- Perform final cycle check on the fully built graph ----
-                  crate::debug!(2, "Performing final cycle check on precomputed graph structure...");
-                  for (tokenizer_state_id, root_arc) in &precomputed_roots {
-                      // PrecomputeNode is an alias for Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>
-                      // We call has_any_cycle on this Trie type.
-                      if PrecomputeNode::has_any_cycle(root_arc.clone()) {
-                          panic!(
-                              "Cycle detected in precomputed graph for tokenizer_state_id {:?} after all precomputation steps. This indicates an issue in the graph construction logic.",
-                              tokenizer_state_id
-                          );
+              // merge_map for deduplicating PrecomputeNode structures resulting from merged paths
+              let all_llm_tokens_for_merge_edge = HybridBitset::ones(max_llm_token_id);
+
+              // ---- Helper function to merge NodeHandles ----
+              fn merge_node_handles_internal(
+                  stats: &mut PrecomputeStats,
+                  set_of_handles: &BTreeSet<NodeHandle>,
+                  all_llm_tokens_for_merge_edge: &HybridBitset,
+                  threshold: usize,
+              ) -> BTreeSet<NodeHandle> { // Changed return type
+                  stats.merge_policy_invocations += 1;
+                  stats.merge_policy_nodes_input_total += set_of_handles.len();
+
+                  if set_of_handles.is_empty() {
+                      return BTreeSet::new();
+                  }
+                  // If set size is within threshold, don't merge, return the set as is.
+                  if set_of_handles.len() <= threshold {
+                      return set_of_handles.clone();
+                  }
+
+                  stats.merge_policy_merges_performed += 1;
+                  stats.merge_policy_nodes_effectively_merged_count += set_of_handles.len();
+
+                  // Create a new node to represent the merged set.
+                  let new_merged_pc_node_arc = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
+                  stats.nodes_created_by_merge_policy_as_new_parent += 1;
+
+                  let mut result_set = BTreeSet::new();
+
+                  // Add each handle in the input set as a child of the new_merged_pc_node_arc
+                  // using an EdgeInserter. The edge key will be None.
+                  for handle_to_become_child in set_of_handles {
+                      let mut insert_result = EdgeInserter::new(
+                          handle_to_become_child.0.clone(), // Source Arc<Mutex<PrecomputeNode>>
+                          None,                           // Edge key: Option<GrammarTokenID> = None
+                          all_llm_tokens_for_merge_edge.clone(), // Edge value: LLMTokenBV
+                          // Merge function for edge values (LLMTokenBV)
+                          |ev_exist: &LLMTokenBV, ev_new: LLMTokenBV| Some(ev_exist | &ev_new),
+                      );
+
+                      insert_result = insert_result.try_children(); // Will do nothing as no children under "None"
+
+                      if !insert_result.clone_into_option().is_some() {
+                          insert_result = insert_result.try_destination(new_merged_pc_node_arc.clone()); // Corrected destination
+                          stats.gross_edges_with_none_key += 1;
+                          stats.edges_inserted_by_merge_policy += 1;
                       }
                   }
-                  crate::debug!(2, "Final cycle check passed: No cycles found in precomputed graph structure.");
-                  // -------------------------------------------------------------
-          ```
 
-      This will iterate through each root of your precomputed graph structures. For each root, it will perform a DFS to detect cycles. If any cycle is found, it will panic with a descriptive message. This check is performed on the graph structure while the nodes are still wrapped in `Arc<Mutex<...>>`, which is what `has_any_cycle` expects.
+                  result_set.insert(NodeHandle(new_merged_pc_node_arc)); // The result is the single new merge parent
+                  result_set // Return a set containing only the new merged handle.
+              }
+              // --------------------------------------------
 
-      After these changes, your `precompute` function will have an additional safety check to ensure the resulting graph is a DAG before proceeding to calculate statistics or unwrap Arcs.
+
+              // Struct for DFS item
+              struct VocabProcessingItem<'a> {
+                  vocab_node: &'a VocabPrefixTreeNode,
+                  // Maps TokenizerStateID (at this vocab_node) to a SET of PrecomputeNode handles that represent paths ending at (vocab_node, TokenizerStateID)
+                  associated_pc_nodes_by_state: BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>>,
+              }
+
+              // --- Use a Vec as a stack for DFS ---
+              let mut dfs_vocab_stack: Vec<VocabProcessingItem> = Vec::new();
+
+              // Initialize the DFS stack with the root of the VocabPrefixTree.
+              let mut initial_associations_at_vocab_root = BTreeMap::new();
+              for (tokenizer_id, pc_root_arc) in &precomputed_roots {
+                  let mut set_for_state = BTreeSet::new();
+                  set_for_state.insert(NodeHandle(pc_root_arc.clone())); // Each precomputed_root is a starting point
+                  initial_associations_at_vocab_root.insert(*tokenizer_id, set_for_state);
+              }
+
+              // --- Push root onto the DFS stack ---
+              dfs_vocab_stack.push(VocabProcessingItem {
+                  vocab_node: &vocab_prefix_tree.root,
+                  associated_pc_nodes_by_state: initial_associations_at_vocab_root,
+              });
+
+
+              crate::debug!(2, "Starting precompute main DFS loop over VocabPrefixTree");
+              // --- Main DFS loop ---
+              while let Some(processing_item) = dfs_vocab_stack.pop() {
+                  // --- Increment progress bar ---
+                  pb.inc(1);
+
+                  crate::debug!(3, "Processing VocabPrefixTreeNode ({} children), prefix: '{}'",
+                      processing_item.vocab_node.iter_children().count(),
+                      String::from_utf8_lossy(processing_item.vocab_node.prefix())
+                  );
+
+                  // Step 1: For each TokenizerStateID, apply merge policy to the set of incoming PrecomputeNode handles.
+                  let mut effective_source_pc_nodes_map: BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>> = BTreeMap::new(); // Changed name from merged_source_pc_nodes_map
+                  for (tokenizer_state_id, set_of_handles) in processing_item.associated_pc_nodes_by_state {
+                      let effective_handles_set = merge_node_handles_internal(
+                          &mut stats,
+                          &set_of_handles,
+                          &all_llm_tokens_for_merge_edge,
+                          MERGE_THRESHOLD,
+                      );
+                      if !effective_handles_set.is_empty() {
+                          effective_source_pc_nodes_map.insert(tokenizer_state_id, effective_handles_set);
+                      }
+                  }
+
+                  // Step 2: Iterate over children of current_vocab_node in the VocabPrefixTree
+                  // --- Collect children to process in reverse order for DFS ---
+                  let mut children_to_process: Vec<(&Vec<u8>, &VocabPrefixTreeNode)> = processing_item.vocab_node.iter_children().collect();
+                  children_to_process.reverse(); // Process in reverse order for DFS
+
+                  for (bytes_segment, child_vocab_node) in children_to_process {
+                      crate::debug!(3, "  Transitioning via segment: '{}' to child_vocab_node (prefix: '{}')",
+                          String::from_utf8_lossy(bytes_segment),
+                          String::from_utf8_lossy(child_vocab_node.prefix())
+                      );
+
+                      // Initialize yellow_nodes set for the current segment
+                      let mut yellow_nodes: HashSet<NodeHandle> = HashSet::new();
+
+
+                      // This map will collect PrecomputeNodes formed at the *end* of processing bytes_segment,
+                      // to be associated with child_vocab_node for the next DFS level.
+                      // Key: TokenizerStateID (at that offset within the segment processing).
+                      // Value: Map from TokenizerStateID (at the end of the segment) to a SET of PrecomputeNode handles.
+                      let mut next_level_associations_for_child: BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>> = BTreeMap::new();
+
+                      // Inner queue for processing bytes_segment (offset-based)
+                      // Key: offset within bytes_segment.
+                      // Value: Map from TokenizerStateID (at that offset) to a SET of PrecomputeNode handles that are sources for the *remaining* part of the segment.
+                      let mut segment_processing_q: BTreeMap<usize, BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>>> = BTreeMap::new();
+
+                      // Initialize segment_processing_q at offset 0 using effective_source_pc_nodes_map (nodes at current_vocab_node after merge policy)
+                      for (initial_tokenizer_state_id, effective_source_handles_set) in &effective_source_pc_nodes_map {
+                          segment_processing_q.entry(0).or_default()
+                              .entry(*initial_tokenizer_state_id).or_default()
+                              .extend(effective_source_handles_set.iter().cloned());
+                      }
+
+                      // Process the current bytes_segment
+                      while let Some((current_offset, states_at_offset_map)) = segment_processing_q.pop_first() {
+                          for (tokenizer_state_before_suffix, current_path_source_handles_set) in states_at_offset_map {
+                              if current_path_source_handles_set.is_empty() {
+                                  continue;
+                              }
+
+                              // Apply the merge policy to the set of handles for this specific path in segment processing.
+                              let effective_source_handles_for_suffix: BTreeSet<NodeHandle> = merge_node_handles_internal(
+                                  &mut stats,
+                                  &current_path_source_handles_set,
+                                  &all_llm_tokens_for_merge_edge,
+                                  MERGE_THRESHOLD,
+                              );
+
+                              if effective_source_handles_for_suffix.is_empty() {
+                                  continue;
+                              }
+
+                              // Paint the current source nodes yellow while processing edges originating from them in this segment step.
+                              for handle in &effective_source_handles_for_suffix {
+                                  yellow_nodes.insert(handle.clone());
+                              }
+
+
+                              let segment_suffix_to_process = &bytes_segment[current_offset..];
+                              let results = tokenizer.execute_from_state(segment_suffix_to_process, tokenizer_state_before_suffix);
+
+                              // --- Existing logic for results.matches ---
+                              for match_info in &results.matches {
+                                  let grammar_token_id = GrammarTokenID(match_info.id);
+                                  let match_end_offset = current_offset + match_info.width;
+
+                                  let edge_llm_tokens = child_vocab_node.reachable_token_ids().clone();
+
+
+                                  // Iterate over each effective source handle
+                                  for segment_source_pc_handle in &effective_source_handles_for_suffix {
+                                      let source_for_inserter_arc = segment_source_pc_handle.0.clone();
+                                      let edge_key_for_inserter = Some(grammar_token_id);
+
+                                      let mut inserter = EdgeInserter::new(
+                                          source_for_inserter_arc.clone(), // Clone Arc for EdgeInserter
+                                          edge_key_for_inserter,
+                                          edge_llm_tokens.clone(), // Use the already cloned edge_llm_tokens
+                                          |ev_exist: &HybridBitset, ev_new: HybridBitset| Some(ev_exist | &ev_new),
+                                      );
+
+                                      let mut potential_targets: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+                                      if match_end_offset < bytes_segment.len() {
+                                          if let Some(map_at_offset) = segment_processing_q.get(&match_end_offset) {
+                                              if let Some(set_at_state0) = map_at_offset.get(&TokenizerStateID(0)) {
+                                                  // Only add targets if they are NOT yellow
+                                                  potential_targets.extend(set_at_state0.iter()
+                                                      .filter(|h| !yellow_nodes.contains(h))
+                                                      .map(|h| h.0.clone()));
+                                              }
+                                          }
+                                      }
+                                      if match_end_offset == bytes_segment.len() {
+                                          if let Some(set_at_state0) = next_level_associations_for_child.get(&TokenizerStateID(0)) {
+                                              // Only add targets if they are NOT yellow
+                                              potential_targets.extend(set_at_state0.iter()
+                                                  .filter(|h| !yellow_nodes.contains(h))
+                                                  .map(|h| h.0.clone()));
+                                          }
+                                      }
+
+                                      inserter = inserter.try_destinations(&potential_targets);
+
+                                      // ---- START: Replacement for try_children ----
+                                      if inserter.clone_into_option().is_none() {
+                                          let mut additional_potential_targets_from_children: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+                                          let source_guard = source_for_inserter_arc.lock().unwrap(); // Lock the source node
+                                          // edge_key_for_inserter is Option<GrammarTokenID> (Some(grammar_token_id))
+                                          if let Some(dest_map_for_current_key) = source_guard.children().get(&edge_key_for_inserter) {
+                                              for child_comparable_arc in dest_map_for_current_key.keys() {
+                                                  let child_arc = child_comparable_arc.as_arc();
+                                                  let child_handle = NodeHandle(child_arc.clone()); // Create NodeHandle for the child
+                                                  if !yellow_nodes.contains(&child_handle) { // Check if child is NOT yellow
+                                                      additional_potential_targets_from_children.push(child_arc.clone());
+                                                  }
+                                              }
+                                          }
+                                          drop(source_guard); // Release lock
+
+                                          if !additional_potential_targets_from_children.is_empty() {
+                                              inserter = inserter.try_destinations(&additional_potential_targets_from_children);
+                                          }
+                                      }
+                                      // ---- END: Replacement for try_children ----
+
+
+                                      let target_pc_node_arc;
+                                      if inserter.clone_into_option().is_some() {
+                                          target_pc_node_arc = inserter.unwrap();
+                                          // Edge was made to an existing node (or existing edge value merged)
+                                      } else {
+                                          stats.nodes_created_by_edge_inserter_else_create += 1;
+                                          target_pc_node_arc = inserter.else_create_destination_with_value(PrecomputedNodeContents::default()).unwrap();
+                                      }
+                                      stats.edges_inserted_by_edge_inserter_main_loop += 1;
+                                      stats.gross_edges_with_some_key += 1; // Edge key is Some(grammar_token_id)
+
+                                      if match_end_offset == bytes_segment.len() {
+                                          next_level_associations_for_child
+                                              .entry(TokenizerStateID(0))
+                                              .or_default()
+                                              .insert(NodeHandle(target_pc_node_arc.clone()));
+
+                                          let mut target_guard = target_pc_node_arc.lock().unwrap();
+                                          // Update stats for clean_end
+                                          let _ = target_guard.value.clean_end.get_or_insert_with(HybridBitset::new); // Ensure it exists
+                                          let inserted = target_guard.value.clean_end.as_mut().unwrap().insert(child_vocab_node.token_id());
+                                          if inserted { // HybridBitset::insert returns true if value was newly inserted
+                                              stats.clean_end_tokens_inserted_to_nodes += 1;
+                                          }
+                                      } else {
+                                          segment_processing_q.entry(match_end_offset)
+                                              .or_default()
+                                              .entry(TokenizerStateID(0))
+                                              .or_default()
+                                              .insert(NodeHandle(target_pc_node_arc));
+                                      }
+                                  } // End for segment_source_pc_handle in effective_source_handles_for_suffix
+                              } // End for match_info in results.matches
+
+                              // --- Existing logic for results.end_state ---
+                              if let Some(final_tokenizer_state_val) = results.end_state {
+                                  let final_tokenizer_state_id = TokenizerStateID(final_tokenizer_state_val);
+
+                                  for segment_source_pc_handle in &effective_source_handles_for_suffix {
+                                      next_level_associations_for_child
+                                          .entry(final_tokenizer_state_id)
+                                          .or_default()
+                                          .insert(NodeHandle(segment_source_pc_handle.0.clone()));
+
+                                      let possible_final_grammar_tokens = tokenizer.tokens_accessible_from_state(final_tokenizer_state_id);
+                                      let mut segment_source_guard = segment_source_pc_handle.0.lock().unwrap();
+                                      for gtid in possible_final_grammar_tokens {
+                                          segment_source_guard.value.push_finalizer_info(
+                                              gtid,
+                                              LLMTokenID(child_vocab_node.token_id()),
+                                              final_tokenizer_state_id,
+                                              max_llm_token_id,
+                                          );
+                                          stats.finalizer_infos_pushed_to_nodes += 1;
+                                      }
+                                  }
+                              }
+
+                              // Unpaint the current source nodes after processing edges originating from them in this segment step.
+                              for handle in &effective_source_handles_for_suffix {
+                                  yellow_nodes.remove(handle);
+                              }
+
+                          }
+                      } // End while segment_processing_q not empty
+
+                      // --- Push child onto the main DFS stack ---
+                      dfs_vocab_stack.push(VocabProcessingItem {
+                          vocab_node: child_vocab_node,
+                          associated_pc_nodes_by_state: next_level_associations_for_child,
+                      });
+                  } // End for each child_vocab_node of current_vocab_node
+              } // End while dfs_vocab_stack not empty
+
+              // --- Finish progress bar ---
+              pb.finish_with_message("Precomputation complete");
+              crate::debug!(2, "Done precomputing main DFS loop.");
+
+              // ---- Perform final cycle check on the fully built graph ----
+              crate::debug!(2, "Performing final cycle check on precomputed graph structure...");
+              for (tokenizer_state_id, root_arc) in &precomputed_roots {
+                  // PrecomputeNode is an alias for Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>
+                  // We call has_any_cycle on this Trie type.
+                  if PrecomputeNode::has_any_cycle(root_arc.clone()) {
+                      panic!(
+                          "Cycle detected in precomputed graph for tokenizer_state_id {:?} after all precomputation steps. This indicates an issue in the graph construction logic.",
+                          tokenizer_state_id
+                      );
+                  }
+              }
+              crate::debug!(2, "Final cycle check passed: No cycles found in precomputed graph structure.");
+              // -------------------------------------------------------------
+
+              // --- Calculate Final Statistics from precomputed_roots before unwrapping ---
+              crate::debug!(2, "Calculating final precompute statistics...");
+              let mut all_reachable_nodes_for_final_stats: HashSet<ComparableArc<PrecomputeNode>> = HashSet::new();
+              for root_arc_mutex_node in precomputed_roots.values() {
+                  // PrecomputeNode is type alias for Trie<...>
+                  // Trie::all_nodes expects Arc<Mutex<Trie<...>>>
+                  let nodes_from_this_root = PrecomputeNode::all_nodes(root_arc_mutex_node.clone());
+                  for node_arc in nodes_from_this_root {
+                      all_reachable_nodes_for_final_stats.insert(ComparableArc::new(node_arc));
+                  }
+              }
+              stats.final_unique_nodes_count = all_reachable_nodes_for_final_stats.len();
+
+              // Initialize these accumulators *before* iterating over all unique nodes
+              stats.final_total_occupancy_sum_for_some_keys = 0;
+              stats.final_num_occupied_some_edge_keys = 0;
+              stats.final_total_occupancy_sum_for_none_keys = 0;
+              stats.final_num_occupied_none_edge_keys = 0;
+
+
+              for comp_arc_node in &all_reachable_nodes_for_final_stats {
+                  let node_arc = comp_arc_node.as_arc(); // Gets &Arc<Mutex<PrecomputeNode>>
+                  let node_guard = node_arc.lock().expect("Mutex poisoned during final stats calculation");
+
+                  for (edge_key, dest_map) in node_guard.children() {
+                      let num_edges_for_this_key_to_distinct_children = dest_map.len();
+                      stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
+                      if let Some(gtid) = edge_key { // Changed from edge_key.is_some() to capture gtid
+                          stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
+
+                          // New: Populate grammar token specific counts
+                          *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += 1;
+                          *stats.final_grammar_token_edge_value_counts.entry(*gtid).or_insert(0) += num_edges_for_this_key_to_distinct_children;
+
+                          // Accumulate for average edge occupancy for Some keys
+                          if num_edges_for_this_key_to_distinct_children > 0 {
+                              stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key_to_distinct_children;
+                              stats.final_num_occupied_some_edge_keys += 1;
+                          }
+                      } else { // Edge key is None
+                          stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
+                          // Accumulate for average edge occupancy for None keys
+                          if num_edges_for_this_key_to_distinct_children > 0 {
+                              stats.final_total_occupancy_sum_for_none_keys += num_edges_for_this_key_to_distinct_children;
+                              stats.final_num_occupied_none_edge_keys += 1;
+                          }
+                      }
+                  }
+
+                  if node_guard.value.clean_end.is_some() {
+                      stats.final_nodes_with_clean_end += 1;
+                  }
+                  for finalizer_for_gtid in node_guard.value.finalizers.values() {
+                      stats.final_total_finalizer_entries_in_graph += finalizer_for_gtid.content.len();
+                  }
+              }
+
+              // Compute and print separate averages for Some-key and None-key edge groups
+              let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
+                  stats.final_total_occupancy_sum_for_some_keys as f64
+                      / stats.final_num_occupied_some_edge_keys as f64
+              } else {
+                  0.0
+              };
+              let avg_none = if stats.final_num_occupied_none_edge_keys > 0 {
+                  stats.final_total_occupancy_sum_for_none_keys as f64
+                      / stats.final_num_occupied_none_edge_keys as f64
+              } else {
+                  0.0
+              };
+              println!("--- Precomputation Statistics ---");
+              println!("Gross Counts (approximations during build):");
+              println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
+              println!("  Nodes Created by Merge Policy (as new parent): {}", stats.nodes_created_by_merge_policy_as_new_parent);
+              println!("  Nodes Created by EdgeInserter (else_create in main loop): {}", stats.nodes_created_by_edge_inserter_else_create);
+              let total_gross_nodes = stats.initial_root_nodes_created + stats.nodes_created_by_merge_policy_as_new_parent + stats.nodes_created_by_edge_inserter_else_create;
+              println!("  Total Gross Nodes Approx.: {}", total_gross_nodes);
+
+
+              println!("  Edges Inserted by Merge Policy: {}", stats.edges_inserted_by_merge_policy);
+              println!("  Edges Inserted by EdgeInserter (main loop): {}", stats.edges_inserted_by_edge_inserter_main_loop);
+              let total_gross_edges = stats.edges_inserted_by_merge_policy + stats.edges_inserted_by_edge_inserter_main_loop;
+              println!("  Total Gross Edges Approx.: {}", total_gross_edges);
+              println!("    Gross Edges with None Key: {}", stats.gross_edges_with_none_key);
+              println!("    Gross Edges with Some Key: {}", stats.gross_edges_with_some_key);
+
+
+              println!("\nMerge Policy Details:");
+              println!("  Invocations: {}", stats.merge_policy_invocations);
+              println!("  Actual Merges Performed (input size > threshold): {}", stats.merge_policy_merges_performed);
+              println!("  Total Nodes Input to Policy: {}", stats.merge_policy_nodes_input_total);
+              println!("  Nodes Effectively Merged (sum of len of sets that were merged): {}", stats.merge_policy_nodes_effectively_merged_count);
+
+              println!("\nGross Content Modification Counts:");
+              println!("  Finalizer Infos Pushed to Node Values: {}", stats.finalizer_infos_pushed_to_nodes);
+              println!("  Clean End Token IDs Inserted into Node Values: {}", stats.clean_end_tokens_inserted_to_nodes);
+
+              println!("\nFinal Graph Structure (after sharing and deduplication):");
+              println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
+              println!("  Total Edges: {}", stats.final_edges_count);
+              println!("    Edges with None Key: {}", stats.final_edges_with_none_key);
+              println!("    Edges with Some Key: {}", stats.final_edges_with_some_key);
+              println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
+              println!("  Total Finalizer Entries (sum of map sizes in all unique nodes): {}", stats.final_total_finalizer_entries_in_graph);
+
+              println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
+              println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
+
+              println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
+              let mut grammar_token_stats: Vec<(GrammarTokenID, usize, usize)> = stats
+                  .final_grammar_token_edge_key_counts
+                  .iter()
+                  .map(|(gtid, key_count)| {
+                      let value_count = stats.final_grammar_token_edge_value_counts.get(gtid).copied().unwrap_or(0);
+                      (*gtid, *key_count, value_count)
+                  })
+                  .collect();
+
+              // Sort by key_count (number of times this gtid was an edge key) descending
+              grammar_token_stats.sort_by(|a, b| b.1.cmp(&a.1));
+
+              for (gtid, key_count, value_count) in grammar_token_stats {
+                  let token_name = tokenizer.token_names.get(gtid.0)
+                      .map_or_else(|| format!("ID {}", gtid.0), |s| s.clone());
+                  println!("  - Token '{}' (ID {}): Key Count = {}, Total Edge Values = {}",
+                           token_name, gtid.0, key_count, value_count);
+              }
+              println!("---------------------------------");
+
+
+
+              // Pull the roots out of their Arc<Mutex<_>> and count failures to unwrap.
+              let mut final_precomputed: Precomputed = BTreeMap::new();
+              let mut clone_count = 0;
+              for (id, arc_mutex_node) in precomputed_roots {
+                  match Arc::try_unwrap(arc_mutex_node) {
+                      Ok(mutex_node) => {
+                          final_precomputed.insert(
+                              id,
+                              mutex_node
+                                  .into_inner()
+                                  .expect("Mutex poisoned at end of precompute"),
+                          );
+                      }
+                      Err(arc_still_owned) => {
+                          // Arc had multiple owners; clone the inner Trie.
+                          clone_count += 1;
+                          final_precomputed.insert(id, arc_still_owned.lock().unwrap().clone());
+                      }
+                  }
+              }
+              if clone_count > 0 {
+                  crate::debug!(
+                      4,
+                      "Warning: {} precomputed root(s) had multiple owners; cloned inner Trie for them.",
+                      clone_count
+                  );
+              }
+              final_precomputed
+          }
+
+          pub fn init(&self) -> GrammarConstraintState<'_> {
+              let initial_token_info = LLMTokenInfo {
+                  active: HybridBitset::ones(self.max_llm_token_id),
+                  // Initially, the intersection must also be all true, as no constraints have been applied.
+                  intersection: HybridBitset::ones(self.max_llm_token_id),
+              };
+              let mut state = BTreeMap::new();
+              let initial_glr_parser_state: GLRParserState<'_, LLMTokenInfo> = self.parser.init_glr_parser_with_t(initial_token_info);
+              state.insert(self.tokenizer.initial_state_id(), initial_glr_parser_state);
+
+              GrammarConstraintState {
+                  parent: self,
+                  state,
+              }
+          }
+      }
+
+      impl<'a> GrammarConstraintState<'a> {
+          pub fn get_mask(&mut self) -> LLMTokenBV {
+              let mut mask = HybridBitset::new();
+              for (_tokenizer_state_id, glr_parser_state) in &self.state {
+                  for active_state in glr_parser_state.active_states.values() {
+                      // `active_state` is a `&ParseState<LLMTokenInfo>`
+                      mask |= &active_state.stack.peek().t.active;
+                  }
+              }
+              mask
+          }
+
+          pub fn step_with_all_llm_tokens(&mut self) {
+              let all_llm_tokens = HybridBitset::ones(self.parent.max_llm_token_id);
+              self.step(&all_llm_tokens);
+          }
+
+          pub fn step_with_llm_token(&mut self, llm_token_id: LLMTokenID) {
+              let mut llm_tokens = HybridBitset::new();
+              llm_tokens.insert(llm_token_id.0);
+              self.step(&llm_tokens); // llm_tokens is already a HybridBitset
+          }
+
+          /// Prunes the GSS based on the committed token and resets the active token sets.
+          pub fn commit(&mut self, llm_token_id: LLMTokenID) {
+              let all_true_token_info = LLMTokenInfo {
+                  active: HybridBitset::ones(self.parent.max_llm_token_id),
+                  intersection: HybridBitset::ones(self.parent.max_llm_token_id),
+              };
+              // Clone the intersection part for comparison inside the closure.
+              let all_true_intersection = all_true_token_info.intersection.clone();
+
+
+              // Closure for GSS transformation:
+              // - Prune if token not present in 'active'.
+              // - If token present:
+              //   - Reset 't' to 'all_true_token_info'.
+              //   - Stop recursion if token is present in 'intersection' (optimization).
+              let closure = |content: &ParseStateNodeContent<LLMTokenInfo>| -> Option<(ParseStateNodeContent<LLMTokenInfo>, bool)> {
+                  if content.t.active.contains(llm_token_id.0) {
+                      // If the intersection already guarantees this token, we can stop early.
+                      // Check if intersection contains all possible tokens
+                      if content.t.intersection == all_true_intersection { // This comparison might be slow if not optimized
+                           Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, false)) // Stop recursion
+                      } else {
+                           Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, true)) // Continue recursion
+                      }
+                  } else {
+                      None // Prune this path
+                  }
+              };
+
+              let mut memo = HashMap::new();
+              self.state.retain(|tokenizer_state_id, glr_state| {
+                  // BTreeMap::retain takes FnMut(&K, &mut V) -> bool
+                  glr_state.active_states.retain(|_key, parse_state| { // parse_state is &mut ParseState<LLMTokenInfo>
+                      let maybe_new_node = prune_and_transform_recursive(&parse_state.stack, &closure, &mut memo);
+                      if let Some(new_node) = maybe_new_node {
+                          parse_state.stack = new_node; // Modify the V in BTreeMap
+                          true
+                      } else {
+                          false
+                      }
+                  });
+                  !glr_state.active_states.is_empty()
+                  // TODO: Check if glr_state.action_not_found_states also needs pruning or clearing
+              });
+          }
+
+          pub fn step_with_llm_token_sequence(&mut self, llm_token_ids: &[LLMTokenID]) {
+              for &llm_token_id in llm_token_ids {
+                  self.step_with_llm_token(llm_token_id);
+              }
+          }
+
+          fn prepare_initial_nodes_and_values_for_special_map(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a, LLMTokenInfo>)> {
+              let mut initial_nodes_and_values: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'_, LLMTokenInfo>)> = Vec::new();
+              let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, GLRParserState<'_, LLMTokenInfo>> = BTreeMap::new();
+
+              for (tokenizer_state_id, state) in &self.state {
+                  let mut cloned_state = state.clone(); // Clone the GLRParserState
+                  for parse_state in cloned_state.active_states.values_mut() { // Iterate over mutable values of the BTreeMap
+                      // Only update the *active* tokens at the *top* of the stack.
+                      // The intersection remains unchanged, and deeper nodes are untouched.
+                      // The special_map logic will handle intersecting with edge_llm_tokens.
+                      // Use BitAndAssign<&HybridBitset>
+                      Arc::make_mut(&mut parse_state.stack).value.t.active &= llm_tokens;
+                      // Intersection is NOT modified here. It reflects the guarantee from *below*.
+                  }
+                  tokenizer_state_id_to_parse_states.insert(*tokenizer_state_id, cloned_state);
+              }
+
+              for (tokenizer_state_id, state) in tokenizer_state_id_to_parse_states {
+                  let token_trie = self.parent.precomputed[&tokenizer_state_id].clone();
+                  // Need to wrap the cloned node in an Arc<Mutex> for special_map
+                  let token_trie = Arc::new(Mutex::new(token_trie));
+                  initial_nodes_and_values.push((token_trie, state));
+              }
+              initial_nodes_and_values
+          }
+
+          pub fn step(&mut self, llm_tokens: &LLMTokenBV) {
+              crate::debug!(2, "Stepping grammar constraint state with tokenizer states {:?}", self.state.keys().map(|k| k.0).collect::<Vec<_>>());
+              let initial_nodes_and_values = self.prepare_initial_nodes_and_values_for_special_map(llm_tokens);
+
+              self.state = BTreeMap::new();
+
+              Trie::special_map(
+                  // Input: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'_, LLMTokenInfo>)>
+                  initial_nodes_and_values,
+                  // step
+                  // Input: &GLRParserState<'_, LLMTokenInfo>, GrammarTokenID, &LLMTokenBV, &Arc<Mutex<PrecomputeNode>>
+                  // Output: Option<GLRParserState<'_, LLMTokenInfo>>
+                  |glr_parse_state, grammar_token_id, edge_llm_tokens, child_node| {
+                      let node_ptr = std::ptr::addr_of!(*child_node) as usize;
+                      crate::debug!(3, "Processing grammar node {:p} token {:?} with {} active states", node_ptr as *const (), grammar_token_id.map(|grammar_token_id| grammar_token_id.0), glr_parse_state.active_states.len());
+                      let mut cloned_glr_parse_state = glr_parse_state.clone();
+                      cloned_glr_parse_state.active_states.retain(|_key, parse_state| { // parse_state is &mut V
+                          // Intersect the *active* tokens with the edge tokens. Intersection inherits current active tokens.
+                          let current_active_tokens = parse_state.stack.value.t.active.clone();
+                          // Use BitAndAssign<&HybridBitset>
+                          Arc::make_mut(&mut parse_state.stack).value.t.intersection &= &current_active_tokens;
+                          Arc::make_mut(&mut parse_state.stack).value.t.active &= edge_llm_tokens;
+                          !parse_state.stack.value.t.active.is_empty() // Check if any active paths remain
+                      });
+                      grammar_token_id.map(|grammar_token_id| cloned_glr_parse_state.step(grammar_token_id));
+                      if cloned_glr_parse_state.active_states.is_empty() {
+                          crate::debug!(3, "No active states after processing grammar token {:?}", grammar_token_id.map(|grammar_token_id| grammar_token_id.0));
+                          return None;
+                      } else {
+                          crate::debug!(3, "Processed grammar token {:?}, {} active states.", grammar_token_id.map(|grammar_token_id| grammar_token_id.0), cloned_glr_parse_state.active_states.len());
+                          Some(cloned_glr_parse_state)
+                      }
+                  },
+                  // merge
+                  // Input: &mut GLRParserState<'_, LLMTokenInfo>, GLRParserState<'_, LLMTokenInfo>
+                  |managed_parse_state1, managed_parse_state2| {
+                      managed_parse_state1.merge_with(managed_parse_state2);
+                  },
+                  // process
+                  // Input: &PrecomputeNode, &GLRParserState<'_, LLMTokenInfo>
+                  // Output: bool (continue?)
+                  |node, current_glr_parse_state| { // Renamed to avoid confusion with self.state
+                      // glr_parse_state.merge_active_states(); // This is no longer needed
+                      let mut active_llm_tokens = HybridBitset::new();
+                      for parse_state in current_glr_parse_state.active_states.values() {
+                          // Use BitOrAssign<&HybridBitset>
+                          active_llm_tokens |= &parse_state.stack.value.t.active;
+                      }
+                      let node_ptr = std::ptr::addr_of!(*node);
+                      crate::debug!(3, "Processing node {:?} with {} active states, {} LLM tokens, {} finalizers", node_ptr, current_glr_parse_state.active_states.len(), active_llm_tokens.len(), node.value.finalizers.len());
+                      // Handle clean end
+                      if let Some(clean_end) = &node.value.clean_end {
+                          let mut final_glr_parse_state = current_glr_parse_state.clone();
+                          final_glr_parse_state.active_states.retain(|_key, parse_state| {
+                               // Intersect the *active* tokens with the clean_end tokens. Intersection retains current active tokens.
+                              let current_active_tokens = parse_state.stack.value.t.active.clone();
+                              // Use BitAndAssign<&HybridBitset>
+                              Arc::make_mut(&mut parse_state.stack).value.t.intersection &= &current_active_tokens;
+                              Arc::make_mut(&mut parse_state.stack).value.t.active &= clean_end;
+                              // Check if any active paths remain
+                              !parse_state.stack.value.t.active.is_empty()
+                          });
+                          crate::debug!(3, "At clean end state");
+                          if final_glr_parse_state.is_ok() {
+                              crate::debug!(3, "GLR parse state at clean end is OK");
+                              if let Some(existing) = self.state.get_mut(&TokenizerStateID(0)) {
+                                  existing.merge_with(final_glr_parse_state.clone());
+                              } else {
+                                  self.state.insert(TokenizerStateID(0), final_glr_parse_state.clone());
+                              }
+                          }
+                      }
+
+                      // Handle finalizers
+                      for (possible_final_grammar_token, precomputed_finalizer) in &node.value.finalizers {
+                          // Ensure the final tokens parses
+                          let mut possible_next_glr_parse_state = current_glr_parse_state.clone();
+                          crate::debug!(3, "Stepping semi-final GLR parse state");
+                          possible_next_glr_parse_state.step(*possible_final_grammar_token);
+                          if possible_next_glr_parse_state.is_ok() {
+                              crate::debug!(3, "Semi-final GLR parse state is OK");
+                              for (tokenizer_state_id, llm_tokens) in &precomputed_finalizer.content {
+                                  // Intersect *active* tokens with the finalizer's allowed tokens.
+                                  let mut glr_parse_state_filtered = current_glr_parse_state.clone();
+                                  glr_parse_state_filtered.active_states.retain(|_key, parse_state| {
+                                      // Intersect the *active* tokens with the finalizer's allowed tokens. Intersection retains current active tokens.
+                                      let current_active_tokens = parse_state.stack.value.t.active.clone();
+                                      // Use BitAndAssign<&HybridBitset>
+                                      Arc::make_mut(&mut parse_state.stack).value.t.intersection &= &current_active_tokens;
+                                      Arc::make_mut(&mut parse_state.stack).value.t.active &= llm_tokens;
+                                      // Check if any active paths remain
+                                      !parse_state.stack.value.t.active.is_empty()
+                                  });
+                                  crate::debug!(3, "Processing finalizer");
+                                  if glr_parse_state_filtered.is_ok() {
+                                      crate::debug!(3, "Finalizer is compatible");
+                                      if let Some(existing) = self.state.get_mut(tokenizer_state_id) {
+                                          existing.merge_with(glr_parse_state_filtered.clone());
+                                      } else {
+                                          self.state.insert(*tokenizer_state_id, glr_parse_state_filtered.clone());
+                                      }
+                                  }
+                              }
+                          }
+                      }
+
+                      // Check if the current GLR state still has valid paths before continuing traversal
+                      // (This check might be redundant if the retain calls above handle it)
+                      !current_glr_parse_state.active_states.is_empty()
+                  },
+              );
+          }
+      }
+
+      #[cfg(test)]
+      mod tests {
+          use crate::finite_automata::eat_u8;
+          use crate::{choice, groups, seq};
+          use crate::glr::grammar::{nt, prod, t, NonTerminal, Terminal};
+          use crate::glr::table::{generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
+          use super::*;
+          use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
+          use std::hash::{Hash, Hasher}; // Ensure Hash and Hasher are in scope for the test module
+
+          // Use concrete types for merge tests
+          type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;
+          type TestNodeMerge = Arc<Mutex<TestTrieMerge>>;
+          // Use simpler types for basic tests
+          type TestTrieBasic = Trie<&'static str, &'static str, i32>;
+          type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
+
+          // Use concrete types for EdgeInserter tests
+          type TestTrieEI = Trie<&'static str, HybridBitset, String>; // Use HybridBitset here
+          type TestNodeEI = Arc<Mutex<TestTrieEI>>;
+
+          // Helper to get Arc pointer for tests
+          fn arc_ptr<N>(arc: &Arc<Mutex<N>>) -> *const Mutex<N> {
+              Arc::as_ptr(arc)
+          }
+
+          #[test]
+          fn test_constraint_simple() {
+              // LLM tokens: "ab", "ac", "$"
+              // Grammar tokens: "a", "ab", "b|c", "$" (EOF)
+              // Grammar: S -> X $ ; X -> "a" ("b|c") | "ab"
+              let expr = groups![
+                  eat_u8(b'a'),
+                  seq![eat_u8(b'a'), eat_u8(b'b')],
+                  choice![eat_u8(b'b'), eat_u8(b'c')], // ID 2
+                  eat_u8(b'$'),
+              ];
+              let tokenizer = expr.build();
+
+              let mut llm_token_map = LLMTokenMap::new();
+              llm_token_map.insert(b"ab".to_vec(), LLMTokenID(0));
+              llm_token_map.insert(b"ac".to_vec(), LLMTokenID(1));
+              llm_token_map.insert(b"$".to_vec(), LLMTokenID(2));
+
+              // Grammar Terminals mapped to Tokenizer IDs
+              let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+              grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0)); // Corresponds to eat_u8(b'a')
+              grammar_token_map.insert(Terminal("AB".to_string()), TerminalID(1)); // Corresponds to seq![eat_u8(b'a'), eat_u8(b'b')]
+              grammar_token_map.insert(Terminal("B_OR_C".to_string()), TerminalID(2)); // Corresponds to choice![eat_u8(b'b'), eat_u8(b'c')]
+              grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(3)); // Corresponds to eat_u8(b'$')
+
+              let productions = vec![
+                  prod("S", vec![nt("X"), t("EOF")]), // S -> X $
+                  prod("X", vec![t("A"), t("B_OR_C")]), // X -> a (b|c)
+                  prod("X", vec![t("AB")]),             // X -> ab
+              ];
+
+              let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
+              dbg!(&parser);
+
+              let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 3); // max_llm_token_id should be 3 for 0, 1, 2
+              // constraint.dump_precomputed(); // Commented out dump for cleaner test output
+
+              let mut constraint_state = constraint.init();
+
+              constraint_state.step_with_all_llm_tokens();
+
+              // Initially, we can match "a" (part of "ab" or "ac") or "ab".
+              // "a" leads to expecting "b" or "c".
+              // "ab" leads to expecting "$".
+              let mask = constraint_state.get_mask();
+              assert_eq!(mask, HybridBitset::from_iter(vec![0, 1])); // Expect "ab" or "ac"
+
+              // Commit "ab" (LLMTokenID 0)
+              constraint_state.commit(LLMTokenID(0));
+              constraint_state.step_with_all_llm_tokens();
+              let mask = constraint_state.get_mask();
+              assert_eq!(mask, HybridBitset::from_iter(vec![2])); // Expect "$" (EOF)
+          }
+
+          #[test]
+          fn test_constraint_expression() {
+              // Example grammar: E -> E '+' T | T; T -> T '*' F | F; F -> '(' E ')' | 'i'
+              // LLM token vocabulary: i, +, *, (, ), (i, +i
+              let mut llm_token_map = LLMTokenMap::new();
+              llm_token_map.insert(b"i".to_vec(), LLMTokenID(0));
+              llm_token_map.insert(b"+".to_vec(), LLMTokenID(1));
+              llm_token_map.insert(b"*".to_vec(), LLMTokenID(2));
+              llm_token_map.insert(b"(".to_vec(), LLMTokenID(3));
+              llm_token_map.insert(b")".to_vec(), LLMTokenID(4));
+              llm_token_map.insert(b"(i".to_vec(), LLMTokenID(5));
+              llm_token_map.insert(b"+i".to_vec(), LLMTokenID(6));
+
+              // Tokenizer regex for grammar tokens '+' '*' '(' ')' 'i'
+              let expr = groups![
+                  eat_u8(b'+'),
+                  eat_u8(b'*'),
+                  eat_u8(b'('),
+                  eat_u8(b')'),
+                  eat_u8(b'i'),
+              ];
+              let tokenizer = expr.build();
+
+              // Grammar productions
+              let productions = vec![
+                  prod("S", vec![nt("E"), t("EOF")]), // Start production
+                  prod("E", vec![nt("E"), t("PLUS"), nt("T")]),
+                  prod("E", vec![nt("T")]),
+                  prod("T", vec![nt("T"), t("TIMES"), nt("F")]),
+                  prod("T", vec![nt("F")]),
+                  prod("F", vec![t("LPAREN"), nt("E"), t("RPAREN")]),
+                  prod("F", vec![t("I")]),
+              ];
+              // Map grammar terminals to IDs matching regex order
+              let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+              grammar_token_map.insert(Terminal("PLUS".to_string()), TerminalID(0));
+              grammar_token_map.insert(Terminal("TIMES".to_string()), TerminalID(1));
+              grammar_token_map.insert(Terminal("LPAREN".to_string()), TerminalID(2));
+              grammar_token_map.insert(Terminal("RPAREN".to_string()), TerminalID(3));
+              grammar_token_map.insert(Terminal("I".to_string()), TerminalID(4));
+              grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(5));
+
+              let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map); // Start production is index 6
+              dbg!(&parser);
+              let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 7); // max_llm_token_id should be 7 for IDs 0-6
+              // constraint.dump_precomputed(); // Commented out dump for cleaner test output
+
+              // Initial state and step
+              let mut state = constraint.init();
+              state.step_with_all_llm_tokens();
+              let mask = state.get_mask();
+              // Expect LLM tokens that can start an expression: i (0), '(' (3), "(i" (5)
+              assert_eq!(mask, HybridBitset::from_iter(vec![0, 3, 5]));
+
+              // Commit "(i"
+              state.commit(LLMTokenID(5));
+              state.step_with_all_llm_tokens();
+              let mask = state.get_mask();
+              // Now expect '+', '*', ')', '+i' => IDs 1,2,4,6
+              assert_eq!(mask, HybridBitset::from_iter(vec![1, 2, 4, 6]));
+
+              // // Commit "(i"
+              // state.commit(LLMTokenID(5));
+              // state.step_with_all_llm_tokens();
+              // let mask = state.get_mask();
+              // assert_eq!(mask, LLMTokenBV::from_iter([false, false, false, false, false, false, false])); // This line seems incorrect based on the previous assertion.
+          }
+      }
+      ```
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/constraint.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/constraint.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/constraint.rs
     metadata:
 ...

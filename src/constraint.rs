@@ -142,6 +142,10 @@ struct PrecomputeStats {
     final_num_occupied_some_edge_keys: usize,
     final_total_occupancy_sum_for_none_keys: usize,
     final_num_occupied_none_edge_keys: usize,
+
+    // New fields for grammar token edge key statistics
+    final_grammar_token_edge_key_counts: BTreeMap<GrammarTokenID, usize>,
+    final_grammar_token_edge_value_counts: BTreeMap<GrammarTokenID, usize>,
 }
 
 
@@ -639,17 +643,22 @@ impl GrammarConstraint {
             for (edge_key, dest_map) in node_guard.children() {
                 let num_edges_for_this_key_to_distinct_children = dest_map.len();
                 stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
-                if edge_key.is_some() {
+                if let Some(gtid) = edge_key { // Changed from edge_key.is_some() to capture gtid
                     stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
-                } else {
-                    stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
-                }
-                // Accumulate for average edge occupancy
-                if num_edges_for_this_key_to_distinct_children > 0 {
-                    if edge_key.is_some() {
+
+                    // New: Populate grammar token specific counts
+                    *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += 1;
+                    *stats.final_grammar_token_edge_value_counts.entry(*gtid).or_insert(0) += num_edges_for_this_key_to_distinct_children;
+
+                    // Accumulate for average edge occupancy for Some keys
+                    if num_edges_for_this_key_to_distinct_children > 0 {
                         stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key_to_distinct_children;
                         stats.final_num_occupied_some_edge_keys += 1;
-                    } else {
+                    }
+                } else { // Edge key is None
+                    stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
+                    // Accumulate for average edge occupancy for None keys
+                    if num_edges_for_this_key_to_distinct_children > 0 {
                         stats.final_total_occupancy_sum_for_none_keys += num_edges_for_this_key_to_distinct_children;
                         stats.final_num_occupied_none_edge_keys += 1;
                     }
@@ -714,6 +723,26 @@ impl GrammarConstraint {
 
         println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
         println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
+
+        println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
+        let mut grammar_token_stats: Vec<(GrammarTokenID, usize, usize)> = stats
+            .final_grammar_token_edge_key_counts
+            .iter()
+            .map(|(gtid, key_count)| {
+                let value_count = stats.final_grammar_token_edge_value_counts.get(gtid).copied().unwrap_or(0);
+                (*gtid, *key_count, value_count)
+            })
+            .collect();
+
+        // Sort by key_count (number of times this gtid was an edge key) descending
+        grammar_token_stats.sort_by(|a, b| b.1.cmp(&a.1));
+
+        for (gtid, key_count, value_count) in grammar_token_stats {
+            let token_name = tokenizer.token_names.get(gtid.0)
+                .map_or_else(|| format!("ID {}", gtid.0), |s| s.clone());
+            println!("  - Token '{}' (ID {}): Key Count = {}, Total Edge Values = {}",
+                     token_name, gtid.0, key_count, value_count);
+        }
         println!("---------------------------------");
 
 
