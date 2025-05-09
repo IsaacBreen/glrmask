@@ -317,7 +317,8 @@ if __name__ == "__main__":
     tokenizer_vocab = {token: actual_vocab[token] for token in tokenizer_vocab}
     print(f"tokenizer_vocab: {textwrap.shorten(str(tokenizer_vocab), width=100)}")
 
-    llm_token_to_id = {token.replace("Ġ", " ").encode(): i for token, i in tokenizer_vocab.items()}
+    llm_token_to_id = {token.encode(): i for token, i in tokenizer_vocab.items()}
+    assert llm_token_to_id == {token.replace("Ġ", " ").encode(): i for token, i in tokenizer_vocab.items()}
     llm_tokens = list(tokenizer_vocab.keys()) # Use all tokens
 
     print("vocab size:", len(llm_tokens))
