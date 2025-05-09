@@ -738,10 +738,10 @@ impl GrammarConstraint {
         grammar_token_stats.sort_by(|a, b| b.1.cmp(&a.1));
 
         for (gtid, key_count, value_count) in grammar_token_stats {
-            let token_name = tokenizer.token_names.get(gtid.0)
-                .map_or_else(|| format!("ID {}", gtid.0), |s| s.clone());
-            println!("  - Token '{}' (ID {}): Key Count = {}, Total Edge Values = {}",
-                     token_name, gtid.0, key_count, value_count);
+            // let token_name = tokenizer.token_names.get(gtid.0)
+            //     .map_or_else(|| format!("ID {}", gtid.0), |s| s.clone());
+            println!("  - Token ID {}: Key Count = {}, Total Edge Values = {}",
+                     gtid.0, key_count, value_count);
         }
         println!("---------------------------------");
 
