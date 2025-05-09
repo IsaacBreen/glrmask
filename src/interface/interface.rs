@@ -51,8 +51,10 @@ impl Debug for Grammar {
         }
 
         writeln!(f, "  Terminals:")?;
-        for (group_id, name) in self.terminal_name_to_group_id.iter_by_right() {
-            writeln!(f, "    {}: {:?}", group_id, name)?;
+        let mut terminals = self.terminal_name_to_group_id.iter().collect::<Vec<_>>();
+        terminals.sort_by_key(|(group_id, _)| *group_id);
+        for (group_id, name) in terminals {
+            writeln!(f, "    {:?}: {:?}", group_id, name)?;
         }
 
         writeln!(f, "Tokenizer:");
