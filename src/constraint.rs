@@ -145,8 +145,9 @@ struct PrecomputeStats {
     final_total_occupancy_sum_for_none_keys: usize,
     final_num_occupied_none_edge_keys: usize,
 
-    // New field for grammar token edge key statistics (collects occupancy values)
-    final_grammar_token_occupancies: BTreeMap<GrammarTokenID, Vec<usize>>,
+    // New fields for grammar token edge key statistics
+    final_grammar_token_edge_key_counts: BTreeMap<GrammarTokenID, usize>,
+    final_grammar_token_edge_value_counts: BTreeMap<GrammarTokenID, usize>,
 }
 
 
@@ -651,11 +652,9 @@ impl GrammarConstraint {
                 if let Some(gtid) = edge_key { // Changed from edge_key.is_some() to capture gtid
                     stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
 
-                    // Update: Populate grammar token occupancies
-                    stats.final_grammar_token_occupancies
-                        .entry(*gtid)
-                        .or_default()
-                        .push(num_edges_for_this_key_to_distinct_children);
+                    // New: Populate grammar token specific counts
+                    *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += 1;
+                    *stats.final_grammar_token_edge_value_counts.entry(*gtid).or_insert(0) += num_edges_for_this_key_to_distinct_children;
 
                     // Accumulate for average edge occupancy for Some keys
                     if num_edges_for_this_key_to_distinct_children > 0 {
@@ -731,85 +730,41 @@ impl GrammarConstraint {
         println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
         println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
 
-        // Helper function to calculate median for a slice of usize
-        fn calculate_median_usize_slice(data_slice: &[usize]) -> f64 {
-            let len = data_slice.len();
-            if len == 0 {
-                return 0.0;
-            }
-            let mut data: Vec<usize> = data_slice.to_vec(); // Clone to sort
-            data.sort_unstable();
-            let mid = len / 2;
-            if len % 2 == 0 {
-                // For even length, average of two middle elements
-                (data[mid - 1] + data[mid]) as f64 / 2.0
-            } else {
-                // For odd length, the middle element
-                data[mid] as f64
-            }
-        }
-
-
         println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
         println!(
-            "  {:<28} {:>5} {:>10} {:>10} {:>15} {:>15} {:>15} {:>15}",
-            "Token Name", "ID", "KC (Mean)", "KC (Med)", "TEV (Mean)", "TEV (Med)", "AV/K (Mean)", "AV/K (Med)"
+            "  {:<30} {:<7} {:<12} {:<18} {:<15}",
+            "Token Name", "ID", "Key Count", "Total Edge Values", "Avg Values/Key"
         );
         println!(
-            "  {:-<28} {:-<5} {:-<10} {:-<10} {:-<15} {:-<15} {:-<15} {:-<15}",
-            "", "", "", "", "", "", "", ""
+            "  {:-<30} {:-<7} {:-<12} {:-<18} {:-<15}",
+            "", "", "", "", ""
         ); // Separator line
 
-        let mut grammar_token_data_for_table: Vec<(
-            GrammarTokenID,
-            usize,      // key_count for sorting
-            Vec<usize>, // list of occupancies
-        )> = stats
-            .final_grammar_token_occupancies
+        let mut grammar_token_stats: Vec<(GrammarTokenID, usize, usize)> = stats
+            .final_grammar_token_edge_key_counts
             .iter()
-            .map(|(gtid, occupancies)| {
-                let key_count = occupancies.len();
-                (*gtid, key_count, occupancies.clone())
+            .map(|(gtid, key_count)| {
+                let value_count = stats.final_grammar_token_edge_value_counts.get(gtid).copied().unwrap_or(0);
+                (*gtid, *key_count, value_count)
             })
             .collect();
 
-        // Sort by key_count (which is occupancies.len()) descending
-        grammar_token_data_for_table.sort_by(|a, b| b.1.cmp(&a.1));
+        // Sort by key_count (number of times this gtid was an edge key) descending
+        grammar_token_stats.sort_by(|a, b| b.1.cmp(&a.1));
 
-
-        for (gtid, key_count_val, occupancies) in &grammar_token_data_for_table { // Iterate by reference
+        for (gtid, key_count, value_count) in grammar_token_stats {
             let name = token_name_map
                 .get_by_right(&gtid.0)
                 .cloned()
                 .unwrap_or_else(|| gtid.0.to_string());
-
-            // Key Count (KC)
-            let kc_mean = *key_count_val as f64; // key_count_val is occupancies.len()
-            let kc_median = *key_count_val as f64; // For a single count, mean and median are the count itself
-
-            // Total Edge Values (TEV)
-            let current_total_edge_values: usize = occupancies.iter().sum();
-            let tev_mean = current_total_edge_values as f64;
-            let tev_median = current_total_edge_values as f64; // For a single sum, mean and median are the sum
-
-            // Avg Values/Key (AV/K)
-            let avk_mean = if *key_count_val > 0 {
-                current_total_edge_values as f64 / *key_count_val as f64
+            let avg_values_per_key = if key_count > 0 {
+                value_count as f64 / key_count as f64
             } else {
                 0.0
             };
-            let avk_median = calculate_median_usize_slice(occupancies);
-
             println!(
-                "  {:<28} {:>5} {:>10.2} {:>10.2} {:>15.2} {:>15.2} {:>15.2} {:>15.2}",
-                name,
-                gtid.0,
-                kc_mean,
-                kc_median,
-                tev_mean,
-                tev_median,
-                avk_mean,
-                avk_median
+                "  {:<30} {:>7} {:>12} {:>18} {:>15.2}",
+                name, gtid.0, key_count, value_count, avg_values_per_key
             );
         }
         println!("---------------------------------");
