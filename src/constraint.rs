@@ -11,7 +11,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque, HashSet};
 use std::ops::BitOr;
 use std::sync::{Arc, Mutex, MutexGuard};
 use bitvec::macros::internal::funty::Fundamental;
-use keyed_priority_queue::KeyedPriorityQueue;
 use crate::constraint_extra::print_finalizer;
 use crate::datastructures::charmap::TrieMap;
 use crate::datastructures::gss::prune_and_transform_recursive;
@@ -1244,8 +1243,11 @@ mod tests {
         // // Commit "(i"
         // state.commit(LLMTokenID(5));
         // state.step_with_all_llm_tokens();
+        // state.commit(LLMTokenID(4)); // Assuming ")"
+        // state.step_with_all_llm_tokens();
         // let mask = state.get_mask();
-        // assert_eq!(mask, LLMTokenBV::from_iter([false, false, false, false, false, false, false])); // This line seems incorrect based on the previous assertion.
+        // assert_eq!(mask, HybridBitset::from_iter(vec![1, 2, 5, 6, 3])); // Expect '+', '*', '(', '(i', '+i'
+
     }
 
     #[test]
