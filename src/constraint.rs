@@ -108,7 +108,7 @@ pub struct GrammarConstraint {
 
 // Add this struct definition before impl GrammarConstraint
 #[derive(Default, Debug)]
-struct PrecomputeStats {
+pub(crate) struct PrecomputeStats { // Made pub(crate) for potential external logging if needed
     // Gross counts (before sharing/merging reduces them in the final structure)
     initial_root_nodes_created: usize,
     nodes_created_by_merge_policy_as_new_parent: usize, // Nodes created by merge_node_handles_internal to be the new parent
@@ -144,10 +144,10 @@ struct PrecomputeStats {
     final_total_occupancy_sum_for_none_keys: usize,
     final_num_occupied_none_edge_keys: usize,
 
-    // New fields for grammar token edge key statistics
-    final_grammar_token_edge_key_counts: BTreeMap<GrammarTokenID, usize>,
-    final_grammar_token_edge_fanouts_dist: BTreeMap<GrammarTokenID, Vec<usize>>,
-    final_grammar_token_edge_token_set_sizes_dist: BTreeMap<GrammarTokenID, Vec<usize>>,
+    // Detailed stats for edges keyed by GrammarTokenID
+    pub(crate) final_grammar_token_edge_key_usages: BTreeMap<GrammarTokenID, usize>, // How many source nodes use this GTID as a key
+    pub(crate) final_grammar_token_edge_fanout_distributions: BTreeMap<GrammarTokenID, Vec<usize>>, // For each GTID key, a list of fanouts (num distinct children)
+    pub(crate) final_grammar_token_edge_value_size_distributions: BTreeMap<GrammarTokenID, Vec<usize>>, // For each GTID key, a list of LLMTokenBV sizes on its edges
 }
 
 
@@ -647,17 +647,17 @@ impl GrammarConstraint {
                     stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
 
                     // Increment count of source nodes that use this gtid as an edge key
-                    *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += 1;
+                    *stats.final_grammar_token_edge_key_usages.entry(*gtid).or_insert(0) += 1;
 
                     // Record the fanout (number of distinct children) for this gtid from this source node
-                    stats.final_grammar_token_edge_fanouts_dist
+                    stats.final_grammar_token_edge_fanout_distributions
                         .entry(*gtid)
                         .or_default()
                         .push(num_edges_for_this_key_to_distinct_children);
 
                     // For each actual edge (source, gtid, dest) -> LLMTokenBV, record LLMTokenBV.len()
                     for llm_token_bv_on_edge in dest_map.values() {
-                        stats.final_grammar_token_edge_token_set_sizes_dist
+                        stats.final_grammar_token_edge_value_size_distributions
                             .entry(*gtid)
                             .or_default()
                             .push(llm_token_bv_on_edge.len());
@@ -751,20 +751,20 @@ impl GrammarConstraint {
             (usize, Option<f64>, Option<f64>)  // token_set_size_stats (SumToks, AvgToks, MedToks)
         )> = Vec::new();
 
-        for (gtid, key_usages_count) in &stats.final_grammar_token_edge_key_counts {
-            let fanouts_for_gtid = stats.final_grammar_token_edge_fanouts_dist
+        for (gtid, key_usages_count) in &stats.final_grammar_token_edge_key_usages {
+            let fanouts_for_gtid = stats.final_grammar_token_edge_fanout_distributions
                                         .get(gtid)
                                         .cloned()
                                         .unwrap_or_else(Vec::new);
             let child_stats = calculate_stats_from_vec_usize(&fanouts_for_gtid);
 
-            let token_set_sizes_for_gtid = stats.final_grammar_token_edge_token_set_sizes_dist
+            let token_set_sizes_for_gtid = stats.final_grammar_token_edge_value_size_distributions
                                                 .get(gtid)
                                                 .cloned()
                                                 .unwrap_or_else(Vec::new);
             let toks_stats = calculate_stats_from_vec_usize(&token_set_sizes_for_gtid);
 
-            grammar_token_stats_new.push((*gtid, *key_usages_count, child_stats, toks_stats));
+            grammar_token_stats_new.push((*gtid, *key_usages_count, child_stats, toks_stats)); // Store the actual count
         }
 
         grammar_token_stats_new.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by KeyUse (key_usages_count)
