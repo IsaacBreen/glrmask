@@ -1022,12 +1022,14 @@ impl<'a> GrammarConstraintState<'a> {
 #[cfg(test)]
 mod tests {
     use crate::finite_automata::eat_u8;
-    use crate::{choice, groups, seq};
+    use crate::{choice, choice_fast, groups, seq, seq_fast};
     use crate::glr::grammar::{nt, prod, t, NonTerminal, Terminal};
     use crate::glr::table::{generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
     use super::*;
     use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
-    use std::hash::{Hash, Hasher}; // Ensure Hash and Hasher are in scope for the test module
+    use std::hash::{Hash, Hasher};
+    use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast};
+    // Ensure Hash and Hasher are in scope for the test module
 
     // Use concrete types for merge tests
     type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;

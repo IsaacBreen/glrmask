@@ -6,6 +6,7 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, NonTerminalID, TerminalID};
 use crate::tokenizer::LLMTokenID;
+use crate::types::TerminalID as GrammarTokenID;
 use bimap::BiBTreeMap;
 use kdam::tqdm;
 use std::collections::{BTreeMap, HashSet, HashMap, BTreeSet};
@@ -558,7 +559,7 @@ mod tests {
         // The original example prefill was "(i+i*i", but the step_with_llm_token_sequence call uses ["(i", "+i", "*", "i"].
         // After "(i", we expect "+", "*", ")", "+i". The sequence then commits "+i". After "+i", we expect "*", ")". Then commit "*". After "*", we expect "i", "(". Then commit "i". After "i", we expect "+", "*", ")", "+i".
         let prefill_tokens: Vec<_> = llm_token_vec!(b"(i", b"+", b"i", b"*", b"i").into_iter().map(LLMTokenID).collect();
-        let mut state = constraint.init();
+        let mut state = grammar_constraint.init();
         state.step_with_llm_token_sequence(&prefill_tokens);
         let mask = state.get_mask();
          // After "(i+i*i", expecting '+', '*', ')', or '+i'

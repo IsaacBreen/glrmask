@@ -104,6 +104,7 @@ impl GrammarConstraint {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use crate::finite_automata::{eat_u8, Regex};
     use crate::glr::grammar::{prod, t, Terminal};
     use crate::glr::parser::GLRParser;
@@ -173,8 +174,14 @@ mod tests {
         // Generate parser
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
 
+        let terminal_name_map = BTreeMap::from([
+            (TerminalID(0), "A".to_string()),
+            (TerminalID(1), "AA".to_string()),
+            (TerminalID(2), "EOF".to_string()),
+        ]);
+
         // Create constraint (this runs precomputation)
-        GrammarConstraint::new(tokenizer, parser, llm_token_map, max_llm_token_id)
+        GrammarConstraint::new(tokenizer, parser, llm_token_map, terminal_name_map, max_llm_token_id)
     }
 
     #[test]
