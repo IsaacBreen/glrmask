@@ -731,6 +731,15 @@ impl GrammarConstraint {
         println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
 
         println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
+        println!(
+            "  {:<30} {:<7} {:<12} {:<18} {:<15}",
+            "Token Name", "ID", "Key Count", "Total Edge Values", "Avg Values/Key"
+        );
+        println!(
+            "  {:-<30} {:-<7} {:-<12} {:-<18} {:-<15}",
+            "", "", "", "", ""
+        ); // Separator line
+
         let mut grammar_token_stats: Vec<(GrammarTokenID, usize, usize)> = stats
             .final_grammar_token_edge_key_counts
             .iter()
@@ -748,13 +757,17 @@ impl GrammarConstraint {
                 .get_by_right(&gtid.0)
                 .cloned()
                 .unwrap_or_else(|| gtid.0.to_string());
+            let avg_values_per_key = if key_count > 0 {
+                value_count as f64 / key_count as f64
+            } else {
+                0.0
+            };
             println!(
-                "  - Token ID '{}' ({}): Key Count = {}, Total Edge Values = {}",
-                name, gtid.0, key_count, value_count
+                "  {:<30} ({:>5}) {:>12} {:>18} {:>15.2}",
+                name, gtid.0, key_count, value_count, avg_values_per_key
             );
         }
         println!("---------------------------------");
-
 
 
         // Pull the roots out of their Arc<Mutex<_>> and count failures to unwrap.
