@@ -101,6 +101,8 @@ pub struct GrammarConstraint {
     pub(crate) parser: GLRParser,
     pub(crate) precomputed: Precomputed,
     pub(crate) llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
+    /// Mapping from GrammarTokenID → its human‐readable name
+    pub(crate) token_name_map: std::collections::BTreeMap<GrammarTokenID, String>,
     pub(crate) max_llm_token_id: usize,
 }
 
@@ -192,14 +194,17 @@ impl GrammarConstraint {
         tokenizer: Regex,
         parser: GLRParser,
         llm_token_map: LLMTokenMap,
+        token_name_map: std::collections::BTreeMap<GrammarTokenID, String>,
         max_llm_token_id: usize
     ) -> Self {
-        let precomputed = GrammarConstraint::precompute(&tokenizer, &llm_token_map, max_llm_token_id);
+        let precomputed =
+            GrammarConstraint::precompute(&tokenizer, &llm_token_map, &token_name_map, max_llm_token_id);
         Self {
             tokenizer,
             parser,
             precomputed,
             llm_token_map,
+            token_name_map,
             max_llm_token_id,
         }
     }
@@ -207,6 +212,7 @@ impl GrammarConstraint {
     pub fn precompute<'a>(
         tokenizer: &Regex,
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+        token_name_map: &std::collections::BTreeMap<GrammarTokenID, String>,
         max_llm_token_id: usize,
     ) -> Precomputed {
         let mut stats = PrecomputeStats::default();
@@ -738,10 +744,14 @@ impl GrammarConstraint {
         grammar_token_stats.sort_by(|a, b| b.1.cmp(&a.1));
 
         for (gtid, key_count, value_count) in grammar_token_stats {
-            // let token_name = tokenizer.token_names.get(gtid.0)
-            //     .map_or_else(|| format!("ID {}", gtid.0), |s| s.clone());
-            println!("  - Token ID {}: Key Count = {}, Total Edge Values = {}",
-                     gtid.0, key_count, value_count);
+            let name = token_name_map
+                .get(&gtid)
+                .cloned()
+                .unwrap_or_else(|| gtid.0.to_string());
+            println!(
+                "  - Token ID '{}' ({}): Key Count = {}, Total Edge Values = {}",
+                name, gtid.0, key_count, value_count
+            );
         }
         println!("---------------------------------");
 
@@ -1066,10 +1076,21 @@ mod tests {
             prod("X", vec![t("AB")]),             // X -> ab
         ];
 
-        let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
+        let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone());
         dbg!(&parser);
 
-        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 3); // max_llm_token_id should be 3 for 0, 1, 2
+        let mut token_name_map = BTreeMap::new();
+         for (term, id) in &grammar_token_map {
+            token_name_map.insert(*id, term.0.clone());
+        }
+
+        let constraint = GrammarConstraint::new(
+            tokenizer,
+            parser,
+            llm_token_map,
+            token_name_map,
+            3, // max_llm_token_id should be 3 for 0, 1, 2
+        );
         // constraint.dump_precomputed(); // Commented out dump for cleaner test output
 
         let mut constraint_state = constraint.init();
@@ -1131,9 +1152,21 @@ mod tests {
         grammar_token_map.insert(Terminal("I".to_string()), TerminalID(4));
         grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(5));
 
-        let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map); // Start production is index 6
+        let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone()); // Start production is index 6
         dbg!(&parser);
-        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, 7); // max_llm_token_id should be 7 for IDs 0-6
+
+        let mut token_name_map = BTreeMap::new();
+         for (term, id) in &grammar_token_map {
+            token_name_map.insert(*id, term.0.clone());
+        }
+
+        let constraint = GrammarConstraint::new(
+            tokenizer,
+            parser,
+            llm_token_map,
+            token_name_map,
+            7, // max_llm_token_id should be 7 for IDs 0-6
+        );
         // constraint.dump_precomputed(); // Commented out dump for cleaner test output
 
         // Initial state and step
@@ -1156,4 +1189,73 @@ mod tests {
         // let mask = state.get_mask();
         // assert_eq!(mask, LLMTokenBV::from_iter([false, false, false, false, false, false, false])); // This line seems incorrect based on the previous assertion.
     }
+
+    #[test]
+    fn test_precompute_for_python_name_token() {
+        // ignore = rep(choice([
+        //     eat_u8(ord(" ")),
+        //     seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]),
+        // ]))
+        // digit = choice([eat_u8(c) for c in range(ord("0"), ord("9") + 1)])
+        // alph_lower = choice([eat_u8(c) for c in range(ord("a"), ord("z") + 1)])
+        // alph_upper = choice([eat_u8(c) for c in range(ord("A"), ord("Z") + 1)])
+        //
+        // name_start = choice([
+        //     alph_lower,
+        //     alph_upper,
+        //     eat_u8(ord("_"))
+        // ])
+        // name_middle = choice([
+        //     name_start,
+        //     digit,
+        // ])
+        let ignore = repeat0_fast(choice_fast!(eat_u8_fast(b' '), seq_fast!(eat_u8_fast(b'#'), repeat0_fast(eat_u8_negation_fast(b'\n')), eat_u8_fast(b'\n'))));
+
+        let digit = eat_u8_range_fast(b'0', b'9');
+        let alph_lower = eat_u8_range_fast(b'a', b'z');
+        let alph_upper = eat_u8_range_fast(b'A', b'Z');
+
+        let name_start = choice_fast!(alph_lower, alph_upper, eat_u8_fast(b'_'));
+        let name_middle = choice_fast!(name_start.clone(), digit);
+        let name = seq_fast!(ignore, name_start, repeat0_fast(seq_fast!(name_middle)));
+
+        let tokenizer = name.build();
+        dbg!(&tokenizer);
+
+        let llm_tokens: Vec<Vec<u8>> = (0..2).map(|i| format!("abcdefghijk{}", i).as_bytes().to_vec()).collect();
+        let llm_tokens_slices: Vec<&[u8]> = llm_tokens.iter().map(|token| &token[..]).collect();
+        let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
+        let eof_llm_token_id = llm_tokens.len();
+        let max_llm_token_id = llm_tokens.len();
+        let precomputed = GrammarConstraint::precompute(
+            &tokenizer,
+            &llm_token_map,
+            &std::collections::BTreeMap::new(), // empty name‐map
+            max_llm_token_id,
+        );
+        // print_precomputed(&precomputed);
+        println!("Done precomputing");
+    }
+
+    #[test]
+    fn test_precompute_explosion() {
+        let tokenizer = groups![
+            eat_u8(b'a'),
+            eat_u8(b'a'),
+        ].build();
+
+        let llm_tokens: Vec<Vec<u8>> = vec![b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec()];
+        let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
+        let eof_llm_token_id = llm_tokens.len();
+        let max_llm_token_id = llm_tokens.len();
+        let precomputed = GrammarConstraint::precompute(
+            &tokenizer,
+            &llm_token_map,
+            &std::collections::BTreeMap::new(), // empty name‐map
+            max_llm_token_id,
+        );
+        // print_precomputed(&precomputed);
+        println!("Done precomputing");
+    }
 }
+
