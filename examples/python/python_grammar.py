@@ -392,7 +392,7 @@ if __name__ == "__main__":
         print("Got mask")
         print(f"Mask: {mask}")
         mask_ids = np.where(mask)[0].tolist()
-        mask_tokens = [id_to_llm_token[id] for id in mask_ids]
+        mask_tokens = [id_to_llm_token[id].decode() for id in mask_ids]
         print(f"Mask Token IDs: {textwrap.shorten(str(mask_ids), width=100)}")
         print(f"Mask Tokens: {textwrap.shorten(str(mask_tokens), width=300)}")
         print(f"Mask Tokens (first chars): {"".join(sorted(list({m[0] for m in mask_tokens})))!r}")
@@ -407,7 +407,7 @@ if __name__ == "__main__":
     print("Got mask")
     print(mask)
     mask_ids = np.where(mask)[0].tolist()
-    mask_tokens = [id_to_llm_token[id] for id in mask_ids]
+    mask_tokens = [id_to_llm_token[id].decode() for id in mask_ids]
     print(f"Mask Token IDs: {textwrap.shorten(str(mask_ids), width=100)}")
     print(f"Mask Tokens: {textwrap.shorten(str(mask_tokens), width=300)}")
     print(f"Mask Tokens (first chars): {"".join(sorted(list({m[0] for m in mask_tokens})))!r}")
