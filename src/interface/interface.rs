@@ -118,6 +118,24 @@ impl Grammar {
     }
 }
 
+fn generate_internal_nonterminal_name(
+    parent_rule_name: &str,
+    internal_rule_counters: &mut BTreeMap<String, usize>,
+    known_non_terminal_names: &mut HashSet<String>, // This set is updated by this function
+) -> String {
+    let counter_entry = internal_rule_counters.entry(parent_rule_name.to_string()).or_insert(0);
+    loop {
+        let new_name = format!("{}[{}]", parent_rule_name, *counter_entry);
+        if !known_non_terminal_names.contains(&new_name) {
+            known_non_terminal_names.insert(new_name.clone()); // Reserve the name
+            *counter_entry += 1; // Increment for the next call for this parent_rule_name
+            return new_name;
+        }
+        *counter_entry += 1; // Name clash, try next index
+    }
+}
+
+
 impl Grammar {
     /// Constructs a `Grammar` and `Regex` tokenizer from a list of grammar expressions.
     /// The first non-terminal in the list is treated as the start symbol.
@@ -128,13 +146,18 @@ impl Grammar {
         let mut terminal_expr_to_group_id = BiBTreeMap::new();
         let mut next_terminal_id = 0;
 
+        let mut known_non_terminal_names: HashSet<String> = exprs.iter().map(|(name, _)| name.clone()).collect();
+        let mut internal_rule_counters: BTreeMap<String, usize> = BTreeMap::new();
+
+
         // Add a start production.
         // make sure the start production name is not already taken by adding apostrophes to it until it's unique.
         let mut start_production_name = "start'".to_string();
-        let nonterminals: HashSet<&str> = exprs.iter().map(|(name, _)| name.as_str()).collect();
-        while nonterminals.contains(&start_production_name.as_str()) {
+        while known_non_terminal_names.contains(&start_production_name) {
             start_production_name.push('\'');
         }
+        known_non_terminal_names.insert(start_production_name.clone()); // Add the unique start name
+
         debug!(2, "start_production_name: {:?}", start_production_name);
         productions.push(Production {
             lhs: NonTerminal(start_production_name.clone()),
@@ -144,14 +167,15 @@ impl Grammar {
         fn convert_expr(
             expr: &GrammarExpr,
             productions: &mut Vec<Production>,
-            non_terminal_map: &mut BiBTreeMap<NonTerminal, NonTerminalID>,
-            next_non_terminal_id: &mut usize,
             literal_map: &mut BTreeMap<String, String>,
             terminal_string_to_expr: &mut BTreeMap<String, Expr>,
             terminal_name_to_group_id: &mut BiBTreeMap<String, usize>,
             // todo: make this `terminal_group_id_to_expr` instead
             terminal_expr_to_group_id: &mut BiBTreeMap<Expr, usize>,
             next_terminal_id: &mut usize,
+            parent_rule_name: &str,
+            internal_rule_counters: &mut BTreeMap<String, usize>,
+            known_non_terminal_names: &mut HashSet<String>,
         ) -> Vec<Symbol> {
             // TODO: Pre-collect all user-defined non-terminal names to ensure generated names are unique.
             // TODO: define a function that makes us a unique name for an internal rule, with an appropriate prefix.
@@ -181,38 +205,39 @@ impl Grammar {
                         convert_expr(
                             e,
                             productions,
-                            non_terminal_map,
-                            next_non_terminal_id,
                             literal_map,
                             terminal_string_to_expr,
                             terminal_name_to_group_id,
                             terminal_expr_to_group_id,
                             next_terminal_id,
+                            parent_rule_name, // Pass through current parent name
+                            internal_rule_counters,
+                            known_non_terminal_names,
                         )
                     })
                     .collect(),
                 GrammarExpr::Choice(exprs) => {
-                    let new_nonterminal = format!("Choice{}", *next_non_terminal_id);
-                    let nt = NonTerminal(new_nonterminal.clone());
-
-                    // TODO: what if this is already in the map (e.g. the user happens to create a rule with name `Choice0`?
-                    //  We need to generate a unique nonterminal name.
-                    if !non_terminal_map.contains_left(&nt) {
-                        non_terminal_map.insert(nt.clone(), NonTerminalID(*next_non_terminal_id));
-                        *next_non_terminal_id += 1;
-                    }
+                    let new_nonterminal_name = generate_internal_nonterminal_name(
+                        parent_rule_name,
+                        internal_rule_counters,
+                        known_non_terminal_names,
+                    );
+                    let nt = NonTerminal(new_nonterminal_name.clone());
+                    // The NonTerminalID assignment will be handled by the GLR table generator.
+                    // No need to manage non_terminal_map or next_non_terminal_id here.
 
                     for expr in exprs {
                         let rhs = convert_expr(
                             expr,
                             productions,
-                            non_terminal_map,
-                            next_non_terminal_id,
                             literal_map,
                             terminal_string_to_expr,
                             terminal_name_to_group_id,
                             terminal_expr_to_group_id,
                             next_terminal_id,
+                            &new_nonterminal_name, // Use the new NT name as parent for its RHS
+                            internal_rule_counters,
+                            known_non_terminal_names,
                         );
                         productions.push(Production {
                             lhs: nt.clone(),
@@ -222,48 +247,79 @@ impl Grammar {
 
                     vec![Symbol::NonTerminal(nt)]
                 }
-                GrammarExpr::Optional(expr) => {
-                    // TODO: name the internal rule here Option{} or something rather than Choice{}.
-                    convert_expr(
-                        &GrammarExpr::Choice(vec![*expr.clone(), GrammarExpr::Sequence(vec![])]),
+                GrammarExpr::Optional(inner_expr) => {
+                    let opt_nt_name = generate_internal_nonterminal_name(
+                        parent_rule_name,
+                        internal_rule_counters,
+                        known_non_terminal_names,
+                    );
+                    let nt = NonTerminal(opt_nt_name.clone());
+
+                    // Production: OptNt -> InnerExpr
+                    let expr_symbols = convert_expr(
+                        inner_expr.as_ref(),
                         productions,
-                        non_terminal_map,
-                        next_non_terminal_id,
                         literal_map,
                         terminal_string_to_expr,
                         terminal_name_to_group_id,
                         terminal_expr_to_group_id,
                         next_terminal_id,
-                    )
-                }
-                GrammarExpr::Repeat(expr) => {
-                    // TODO: same as above, make sure it's unique.
-                    let nonterminal_id = *next_non_terminal_id;
-                    let nonterminal_name = format!("Repeat{}", nonterminal_id);
-                    non_terminal_map.insert(NonTerminal(nonterminal_name.clone()), NonTerminalID(nonterminal_id));
-                    *next_non_terminal_id += 1;
-                    let rhs = convert_expr(
-                        expr,
-                        productions,
-                        non_terminal_map,
-                        next_non_terminal_id,
-                        literal_map,
-                        terminal_string_to_expr,
-                        terminal_name_to_group_id,
-                        terminal_expr_to_group_id,
-                        next_terminal_id,
+                        &opt_nt_name, // Inner expr's rules are children of opt_nt_name
+                        internal_rule_counters,
+                        known_non_terminal_names,
                     );
                     productions.push(Production {
-                        lhs: NonTerminal(nonterminal_name.clone()),
-                        rhs,
+                        lhs: nt.clone(),
+                        rhs: expr_symbols,
                     });
-                    vec![Symbol::NonTerminal(NonTerminal(nonterminal_name))]
+
+                    // Production: OptNt -> epsilon
+                    productions.push(Production {
+                        lhs: nt.clone(),
+                        rhs: vec![],
+                    });
+
+                    vec![Symbol::NonTerminal(nt)]
+                }
+                GrammarExpr::Repeat(inner_expr) => {
+                    let repeat_nt_name = generate_internal_nonterminal_name(
+                        parent_rule_name,
+                        internal_rule_counters,
+                        known_non_terminal_names,
+                    );
+                    let nt = NonTerminal(repeat_nt_name.clone());
+
+                    // Production: RepeatNt -> InnerExpr RepeatNt
+                    let expr_symbols = convert_expr(
+                        inner_expr.as_ref(),
+                        productions,
+                        literal_map,
+                        terminal_string_to_expr,
+                        terminal_name_to_group_id,
+                        terminal_expr_to_group_id,
+                        next_terminal_id,
+                        &repeat_nt_name, // Inner expr's rules are children of repeat_nt_name
+                        internal_rule_counters,
+                        known_non_terminal_names,
+                    );
+                    let mut recursive_rhs = expr_symbols;
+                    recursive_rhs.push(Symbol::NonTerminal(nt.clone())); // Add self-reference
+                    productions.push(Production {
+                        lhs: nt.clone(),
+                        rhs: recursive_rhs,
+                    });
+
+                    // Production: RepeatNt -> epsilon
+                    productions.push(Production {
+                        lhs: nt.clone(),
+                        rhs: vec![],
+                    });
+
+                    vec![Symbol::NonTerminal(nt)]
                 }
             }
         }
 
-        let mut non_terminal_map = BiBTreeMap::new();
-        let mut next_non_terminal_id = 0;
         let mut terminal_string_to_expr = BTreeMap::new();
 
         // Process each rule definition
@@ -275,13 +331,14 @@ impl Grammar {
                     let rhs = convert_expr(
                         choice_expr,
                         &mut productions,
-                        &mut non_terminal_map,
-                        &mut next_non_terminal_id,
                         &mut literal_map,
                         &mut terminal_string_to_expr,
                         &mut terminal_name_to_group_id,
                         &mut terminal_expr_to_group_id,
                         &mut next_terminal_id,
+                        name.as_str(), // Current rule name is the parent
+                        &mut internal_rule_counters,
+                        &mut known_non_terminal_names,
                     );
                     productions.push(Production { lhs: lhs.clone(), rhs });
                 }
@@ -290,13 +347,14 @@ impl Grammar {
                 let rhs = convert_expr(
                     expr,
                     &mut productions,
-                    &mut non_terminal_map,
-                    &mut next_non_terminal_id,
                     &mut literal_map,
                     &mut terminal_string_to_expr,
                     &mut terminal_name_to_group_id,
                     &mut terminal_expr_to_group_id,
                     &mut next_terminal_id,
+                    name.as_str(), // Current rule name is the parent
+                    &mut internal_rule_counters,
+                    &mut known_non_terminal_names,
                 );
                 productions.push(Production { lhs, rhs });
             }
@@ -570,7 +628,7 @@ mod tests {
         // Plus EOF.
         let mut expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"+", b"*", b"+i"));
         // Add the EOF token
-        expected_mask.set(llm_tokens.len(), true);
+        expected_mask.insert(llm_tokens.len());
         assert_eq!(mask, expected_mask);
     }
 
