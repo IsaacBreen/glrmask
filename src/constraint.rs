@@ -731,24 +731,13 @@ impl GrammarConstraint {
         println!("    Edges with Some Key: {}", stats.final_edges_with_some_key);
         println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
         println!("  Total Finalizer Entries (sum of map sizes in all unique nodes): {}", stats.final_total_finalizer_entries_in_graph);
-
         println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
         println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
-
-        println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
-        println!(
-            "  {:<30} {:<7} {:<12} {:<18} {:<15} {:<15}",
-            "Token Name", "ID", "KeyUseCount", "SumFanOut", "AvgFanOut", "MedFanOut"
-        );
-        println!(
-            "  {:-<30} {:-<7} {:-<12} {:-<18} {:-<15} {:-<15}",
-            "", "", "", "", "", ""
-        );
 
         // Helper function to calculate sum, mean, and median from Vec<usize>
         fn calculate_stats_from_vec_usize(numbers: &Vec<usize>) -> (usize, Option<f64>, Option<f64>) {
             if numbers.is_empty() {
-                return (0, None, None); // Or handle as error/panic if a gtid implies non-empty
+                return (0, None, None);
             }
             let sum: usize = numbers.iter().sum();
             let mean: Option<f64> = Some(sum as f64 / numbers.len() as f64);
@@ -757,7 +746,7 @@ impl GrammarConstraint {
             sorted_numbers.sort_unstable();
             let len = sorted_numbers.len();
             let mid = len / 2;
-            let median: Option<f64> = if len == 0 { // Should be caught by numbers.is_empty()
+            let median: Option<f64> = if len == 0 {
                 None
             } else if len % 2 == 0 {
                 Some((sorted_numbers[mid - 1] as f64 + sorted_numbers[mid] as f64) / 2.0)
@@ -767,11 +756,11 @@ impl GrammarConstraint {
             (sum, mean, median)
         }
 
-
         let mut grammar_token_stats_new: Vec<(
             GrammarTokenID,
-            usize, // key_usages (count of source nodes using this gtid)
-            (usize, Option<f64>, Option<f64>) // fanout_stats (sum, mean, median of dest_map.len())
+            usize, // key_usages (KeyUse)
+            (usize, Option<f64>, Option<f64>), // fanout_stats (SumChild, AvgChild, MedChild)
+            (usize, Option<f64>, Option<f64>)  // token_set_size_stats (SumToks, AvgToks, MedToks)
         )> = Vec::new();
 
         for (gtid, key_usages_count) in &stats.final_grammar_token_edge_key_counts {
@@ -779,40 +768,55 @@ impl GrammarConstraint {
                                         .get(gtid)
                                         .cloned()
                                         .unwrap_or_else(Vec::new);
-            let fanout_stats = calculate_stats_from_vec_usize(&fanouts_for_gtid);
+            let child_stats = calculate_stats_from_vec_usize(&fanouts_for_gtid);
 
-            grammar_token_stats_new.push((*gtid, *key_usages_count, fanout_stats));
+            let token_set_sizes_for_gtid = stats.final_grammar_token_edge_fanouts_dist
+                                                .get(gtid)
+                                                .cloned()
+                                                .unwrap_or_else(Vec::new);
+            let toks_stats = calculate_stats_from_vec_usize(&token_set_sizes_for_gtid);
+
+            grammar_token_stats_new.push((*gtid, *key_usages_count, child_stats, toks_stats));
         }
 
-        // Sort by key_usages_count (number of times this gtid was an edge key from a source node) descending
-        grammar_token_stats_new.sort_by(|a, b| b.1.cmp(&a.1));
+        grammar_token_stats_new.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by KeyUse (key_usages_count)
 
+        println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
+        println!(
+            "  {:<25} {:<5} {:<8} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10}",
+            "Token Name", "ID", "KeyUse", "SumChild", "AvgChild", "MedChild", "SumToks", "AvgToks", "MedToks"
+        );
+        println!(
+            "  {:-<25} {:-<5} {:-<8} {:-<10} {:-<10} {:-<10} {:-<10} {:-<10} {:-<10}",
+            "", "", "", "", "", "", "", "", ""
+        );
 
-        for (gtid, key_usages, fanout_stats) in grammar_token_stats_new {
+        for (gtid, key_usages, child_stats, toks_stats) in grammar_token_stats_new {
             let name = token_name_map
-                .get_by_right(&gtid.0)
+                .get_by_right(&gtid.0) // gtid is GrammarTokenID
                 .cloned()
                 .unwrap_or_else(|| gtid.0.to_string());
 
-            let (sum_fanout, avg_fanout, med_fanout) = fanout_stats;
+            let (sum_child, avg_child, med_child) = child_stats;
+            let (sum_toks, avg_toks, med_toks) = toks_stats;
 
-            // Helper to format Option<f64>
             let format_opt_f64 = |val: Option<f64>| val.map_or_else(|| "N/A".to_string(), |v| format!("{:.2}", v));
 
             println!(
-                "  {:<30} {:>7} {:>12} {:>18} {:>15} {:>15}",
+                "  {:<25} {:>5} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
                 name,
                 gtid.0,
                 key_usages,
-                sum_fanout,
-                format_opt_f64(avg_fanout),
-                format_opt_f64(med_fanout)
+                sum_child,
+                format_opt_f64(avg_child),
+                format_opt_f64(med_child),
+                sum_toks,
+                format_opt_f64(avg_toks),
+                format_opt_f64(med_toks)
             );
         }
         println!("---------------------------------");
 
-
-        // Pull the roots out of their Arc<Mutex<_>> and count failures to unwrap.
         let mut final_precomputed: Precomputed = BTreeMap::new();
         let mut clone_count = 0;
         for (id, arc_mutex_node) in precomputed_roots {
@@ -820,13 +824,10 @@ impl GrammarConstraint {
                 Ok(mutex_node) => {
                     final_precomputed.insert(
                         id,
-                        mutex_node
-                            .into_inner()
-                            .expect("Mutex poisoned at end of precompute"),
+                        mutex_node.into_inner().expect("Mutex poisoned at end of precompute"),
                     );
                 }
                 Err(arc_still_owned) => {
-                    // Arc had multiple owners; clone the inner Trie.
                     clone_count += 1;
                     final_precomputed.insert(id, arc_still_owned.lock().unwrap().clone());
                 }
