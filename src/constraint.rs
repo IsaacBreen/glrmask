@@ -148,7 +148,6 @@ struct PrecomputeStats {
     // New fields for grammar token edge key statistics
     final_grammar_token_edge_key_counts: BTreeMap<GrammarTokenID, usize>,
     final_grammar_token_edge_fanouts_dist: BTreeMap<GrammarTokenID, Vec<usize>>,
-    final_grammar_token_edge_token_set_sizes_dist: BTreeMap<GrammarTokenID, Vec<usize>>,
 }
 
 
@@ -662,14 +661,6 @@ impl GrammarConstraint {
                         .or_default()
                         .push(num_edges_for_this_key_to_distinct_children);
 
-                    // Collect LLMTokenBV lengths for edges under this gtid from this source node
-                    for llm_token_bv_on_edge in dest_map.values() {
-                        stats.final_grammar_token_edge_token_set_sizes_dist
-                            .entry(*gtid)
-                            .or_default()
-                            .push(llm_token_bv_on_edge.len());
-                    }
-
 
                     // Accumulate for average edge occupancy for Some keys
                     if num_edges_for_this_key_to_distinct_children > 0 {
@@ -747,12 +738,12 @@ impl GrammarConstraint {
 
         println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
         println!(
-            "  {:<25} {:<5} {:<8} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10}",
-            "Token Name", "ID", "KeyUse", "SumChild", "AvgChild", "MedChild", "SumToks", "AvgToks", "MedToks"
+            "  {:<30} {:<7} {:<12} {:<18} {:<15} {:<15}",
+            "Token Name", "ID", "KeyUseCount", "SumFanOut", "AvgFanOut", "MedFanOut"
         );
         println!(
-            "  {:-<25} {:-<5} {:-<8} {:-<10} {:-<10} {:-<10} {:-<10} {:-<10} {:-<10}",
-            "", "", "", "", "", "", "", "", ""
+            "  {:-<30} {:-<7} {:-<12} {:-<18} {:-<15} {:-<15}",
+            "", "", "", "", "", ""
         );
 
         // Helper function to calculate sum, mean, and median from Vec<usize>
@@ -781,53 +772,42 @@ impl GrammarConstraint {
         let mut grammar_token_stats_new: Vec<(
             GrammarTokenID,
             usize, // key_usages (count of source nodes using this gtid)
-            (usize, Option<f64>, Option<f64>), // fanout_stats (sum, mean, median of dest_map.len())
-            (usize, Option<f64>, Option<f64>)  // token_set_size_stats (sum, mean, median of LLMTokenBV.len())
+            (usize, Option<f64>, Option<f64>) // fanout_stats (sum, mean, median of dest_map.len())
         )> = Vec::new();
 
         for (gtid, key_usages_count) in &stats.final_grammar_token_edge_key_counts {
             let fanouts_for_gtid = stats.final_grammar_token_edge_fanouts_dist
                                         .get(gtid)
                                         .cloned()
-                                        .unwrap_or_else(Vec::new); // Use empty vec if no entries (should not happen if key_usages_count > 0)
+                                        .unwrap_or_else(Vec::new);
             let fanout_stats = calculate_stats_from_vec_usize(&fanouts_for_gtid);
 
-            let token_set_sizes_for_gtid = stats.final_grammar_token_edge_token_set_sizes_dist
-                                                .get(gtid)
-                                                .cloned()
-                                                .unwrap_or_else(Vec::new);
-            let token_set_size_stats = calculate_stats_from_vec_usize(&token_set_sizes_for_gtid);
-
-            grammar_token_stats_new.push((*gtid, *key_usages_count, fanout_stats, token_set_size_stats));
+            grammar_token_stats_new.push((*gtid, *key_usages_count, fanout_stats));
         }
 
         // Sort by key_usages_count (number of times this gtid was an edge key from a source node) descending
         grammar_token_stats_new.sort_by(|a, b| b.1.cmp(&a.1));
 
 
-        for (gtid, key_usages, fanout_stats, token_set_size_stats) in grammar_token_stats_new {
+        for (gtid, key_usages, fanout_stats) in grammar_token_stats_new {
             let name = token_name_map
                 .get_by_right(&gtid.0)
                 .cloned()
                 .unwrap_or_else(|| gtid.0.to_string());
 
             let (sum_fanout, avg_fanout, med_fanout) = fanout_stats;
-            let (sum_tok_size, avg_tok_size, med_tok_size) = token_set_size_stats;
 
             // Helper to format Option<f64>
             let format_opt_f64 = |val: Option<f64>| val.map_or_else(|| "N/A".to_string(), |v| format!("{:.2}", v));
 
             println!(
-                "  {:<25} {:>5} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+                "  {:<30} {:>7} {:>12} {:>18} {:>15} {:>15}",
                 name,
                 gtid.0,
                 key_usages,
                 sum_fanout,
                 format_opt_f64(avg_fanout),
-                format_opt_f64(med_fanout),
-                sum_tok_size,
-                format_opt_f64(avg_tok_size),
-                format_opt_f64(med_tok_size)
+                format_opt_f64(med_fanout)
             );
         }
         println!("---------------------------------");
