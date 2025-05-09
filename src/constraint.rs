@@ -147,6 +147,7 @@ struct PrecomputeStats {
     // New fields for grammar token edge key statistics
     final_grammar_token_edge_key_counts: BTreeMap<GrammarTokenID, usize>,
     final_grammar_token_edge_fanouts_dist: BTreeMap<GrammarTokenID, Vec<usize>>,
+    final_grammar_token_edge_token_set_sizes_dist: BTreeMap<GrammarTokenID, Vec<usize>>,
 }
 
 
@@ -585,24 +586,17 @@ impl GrammarConstraint {
                                 }
                             }
                         }
-
-                        // Unpaint the current source nodes after processing edges originating from them in this segment step.
                         for handle in &effective_source_handles_for_suffix {
                             yellow_nodes.remove(handle);
                         }
-
                     }
-                } // End while segment_processing_q not empty
-
-                // --- Push child onto the main DFS stack ---
+                }
                 dfs_vocab_stack.push(VocabProcessingItem {
                     vocab_node: child_vocab_node,
                     associated_pc_nodes_by_state: next_level_associations_for_child,
                 });
-            } // End for each child_vocab_node of current_vocab_node
-        } // End while dfs_vocab_stack not empty
-
-        // --- Finish progress bar ---
+            }
+        }
         pb.finish_with_message("Precomputation complete");
         crate::debug!(2, "Done precomputing main DFS loop.");
 
@@ -645,30 +639,36 @@ impl GrammarConstraint {
             let node_arc = comp_arc_node.as_arc(); // Gets &Arc<Mutex<PrecomputeNode>>
             let node_guard = node_arc.lock().expect("Mutex poisoned during final stats calculation");
 
-            for (edge_key, dest_map) in node_guard.children() {
+            for (edge_key_opt, dest_map) in node_guard.children() { // dest_map is TrieMap<Arc<Mutex<PrecomputeNode>>, LLMTokenBV>
                 let num_edges_for_this_key_to_distinct_children = dest_map.len();
                 stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
-                if let Some(gtid) = edge_key { // Changed from edge_key.is_some() to capture gtid
+
+                if let Some(gtid) = edge_key_opt { // Edge key is Some(GrammarTokenID)
                     stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
 
-                    // New: Populate grammar token specific counts
+                    // Increment count of source nodes that use this gtid as an edge key
                     *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += 1;
 
-                    // num_edges_for_this_key_to_distinct_children is the fanout for this gtid from this source node
+                    // Record the fanout (number of distinct children) for this gtid from this source node
                     stats.final_grammar_token_edge_fanouts_dist
                         .entry(*gtid)
                         .or_default()
                         .push(num_edges_for_this_key_to_distinct_children);
 
+                    // For each actual edge (source, gtid, dest) -> LLMTokenBV, record LLMTokenBV.len()
+                    for llm_token_bv_on_edge in dest_map.values() {
+                        stats.final_grammar_token_edge_token_set_sizes_dist
+                            .entry(*gtid)
+                            .or_default()
+                            .push(llm_token_bv_on_edge.len());
+                    }
 
-                    // Accumulate for average edge occupancy for Some keys
                     if num_edges_for_this_key_to_distinct_children > 0 {
                         stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key_to_distinct_children;
                         stats.final_num_occupied_some_edge_keys += 1;
                     }
                 } else { // Edge key is None
                     stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
-                    // Accumulate for average edge occupancy for None keys
                     if num_edges_for_this_key_to_distinct_children > 0 {
                         stats.final_total_occupancy_sum_for_none_keys += num_edges_for_this_key_to_distinct_children;
                         stats.final_num_occupied_none_edge_keys += 1;
@@ -684,19 +684,13 @@ impl GrammarConstraint {
             }
         }
 
-        // Compute and print separate averages for Some-key and None-key edge groups
         let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
-            stats.final_total_occupancy_sum_for_some_keys as f64
-                / stats.final_num_occupied_some_edge_keys as f64
-        } else {
-            0.0
-        };
+            stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
+        } else { 0.0 };
         let avg_none = if stats.final_num_occupied_none_edge_keys > 0 {
-            stats.final_total_occupancy_sum_for_none_keys as f64
-                / stats.final_num_occupied_none_edge_keys as f64
-        } else {
-            0.0
-        };
+            stats.final_total_occupancy_sum_for_none_keys as f64 / stats.final_num_occupied_none_edge_keys as f64
+        } else { 0.0 };
+
         println!("--- Precomputation Statistics ---");
         println!("Gross Counts (approximations during build):");
         println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
@@ -704,26 +698,20 @@ impl GrammarConstraint {
         println!("  Nodes Created by EdgeInserter (else_create in main loop): {}", stats.nodes_created_by_edge_inserter_else_create);
         let total_gross_nodes = stats.initial_root_nodes_created + stats.nodes_created_by_merge_policy_as_new_parent + stats.nodes_created_by_edge_inserter_else_create;
         println!("  Total Gross Nodes Approx.: {}", total_gross_nodes);
-
-
         println!("  Edges Inserted by Merge Policy: {}", stats.edges_inserted_by_merge_policy);
         println!("  Edges Inserted by EdgeInserter (main loop): {}", stats.edges_inserted_by_edge_inserter_main_loop);
         let total_gross_edges = stats.edges_inserted_by_merge_policy + stats.edges_inserted_by_edge_inserter_main_loop;
         println!("  Total Gross Edges Approx.: {}", total_gross_edges);
         println!("    Gross Edges with None Key: {}", stats.gross_edges_with_none_key);
         println!("    Gross Edges with Some Key: {}", stats.gross_edges_with_some_key);
-
-
         println!("\nMerge Policy Details:");
         println!("  Invocations: {}", stats.merge_policy_invocations);
         println!("  Actual Merges Performed (input size > threshold): {}", stats.merge_policy_merges_performed);
         println!("  Total Nodes Input to Policy: {}", stats.merge_policy_nodes_input_total);
         println!("  Nodes Effectively Merged (sum of len of sets that were merged): {}", stats.merge_policy_nodes_effectively_merged_count);
-
         println!("\nGross Content Modification Counts:");
         println!("  Finalizer Infos Pushed to Node Values: {}", stats.finalizer_infos_pushed_to_nodes);
         println!("  Clean End Token IDs Inserted into Node Values: {}", stats.clean_end_tokens_inserted_to_nodes);
-
         println!("\nFinal Graph Structure (after sharing and deduplication):");
         println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
         println!("  Total Edges: {}", stats.final_edges_count);
@@ -770,7 +758,7 @@ impl GrammarConstraint {
                                         .unwrap_or_else(Vec::new);
             let child_stats = calculate_stats_from_vec_usize(&fanouts_for_gtid);
 
-            let token_set_sizes_for_gtid = stats.final_grammar_token_edge_fanouts_dist
+            let token_set_sizes_for_gtid = stats.final_grammar_token_edge_token_set_sizes_dist
                                                 .get(gtid)
                                                 .cloned()
                                                 .unwrap_or_else(Vec::new);
