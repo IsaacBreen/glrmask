@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict};
 use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use sep1::glr::parser::{GLRParser, GLRParserState};
-use sep1::glr::table::{generate_glr_parser, StateID};
+use sep1::glr::table::{generate_glr_parser, StateID, TerminalID};
 use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence};
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
 use std::collections::{BTreeMap, BTreeSet};
@@ -232,7 +232,11 @@ impl PyGrammarConstraint {
         let tokenizer = grammar.inner.tokenizer.clone(); // Placeholder
         let parser = grammar.inner.glr_parser(); // Placeholder
 
-        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, max_llm_token_id);
+        let mut terminal_name_map = BTreeMap::new();
+        for (terminal, id) in grammar.inner.terminal_name_to_group_id {
+            terminal_name_map.insert(TerminalID(id), terminal);
+        }
+        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, terminal_name_map, max_llm_token_id);
         Ok(Self { inner: Arc::new(constraint) })
     }
 

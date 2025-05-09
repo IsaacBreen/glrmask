@@ -194,7 +194,7 @@ impl GrammarConstraint {
         tokenizer: Regex,
         parser: GLRParser,
         llm_token_map: LLMTokenMap,
-        token_name_map: std::collections::BTreeMap<GrammarTokenID, String>,
+        token_name_map: BTreeMap<GrammarTokenID, String>,
         max_llm_token_id: usize
     ) -> Self {
         let precomputed =
