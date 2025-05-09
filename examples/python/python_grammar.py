@@ -99,9 +99,11 @@ def define_tokens() -> list[tuple[str, Any]]:
         eat_u8(ord("\n")),
         seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]),
     ]))
+    tokens["IGNORE"] = ignore
 
     def regex(expr):
-        return ge.regex(seq([ignore, expr]))
+#         return ge.regex(seq([ignore, expr]))
+        return ge.seq([ge.ref("IGNORE"), expr])
 
     # TODO: uncomment this
     digit = eat_range('0', '9')
