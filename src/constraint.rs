@@ -147,7 +147,8 @@ struct PrecomputeStats {
 
     // New fields for grammar token edge key statistics
     final_grammar_token_edge_key_counts: BTreeMap<GrammarTokenID, usize>,
-    final_grammar_token_edge_value_counts: BTreeMap<GrammarTokenID, usize>,
+    final_grammar_token_edge_fanouts_dist: BTreeMap<GrammarTokenID, Vec<usize>>,
+    final_grammar_token_edge_token_set_sizes_dist: BTreeMap<GrammarTokenID, Vec<usize>>,
 }
 
 
@@ -654,7 +655,21 @@ impl GrammarConstraint {
 
                     // New: Populate grammar token specific counts
                     *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += 1;
-                    *stats.final_grammar_token_edge_value_counts.entry(*gtid).or_insert(0) += num_edges_for_this_key_to_distinct_children;
+
+                    // num_edges_for_this_key_to_distinct_children is the fanout for this gtid from this source node
+                    stats.final_grammar_token_edge_fanouts_dist
+                        .entry(*gtid)
+                        .or_default()
+                        .push(num_edges_for_this_key_to_distinct_children);
+
+                    // Collect LLMTokenBV lengths for edges under this gtid from this source node
+                    for llm_token_bv_on_edge in dest_map.values() {
+                        stats.final_grammar_token_edge_token_set_sizes_dist
+                            .entry(*gtid)
+                            .or_default()
+                            .push(llm_token_bv_on_edge.len());
+                    }
+
 
                     // Accumulate for average edge occupancy for Some keys
                     if num_edges_for_this_key_to_distinct_children > 0 {
@@ -732,145 +747,89 @@ impl GrammarConstraint {
 
         println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
         println!(
-            "  {:<30} {:<7} {:<12} {:<18} {:<15}",
-            "Token Name", "ID", "Key Count", "Total Edge Values", "Avg Values/Key"
+            "  {:<25} {:<5} {:<8} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10}",
+            "Token Name", "ID", "KeyUse", "SumChild", "AvgChild", "MedChild", "SumToks", "AvgToks", "MedToks"
         );
         println!(
-            "  {:-<30} {:-<7} {:-<12} {:-<18} {:-<15}",
-            "", "", "", "", ""
-        ); // Separator line
+            "  {:-<25} {:-<5} {:-<8} {:-<10} {:-<10} {:-<10} {:-<10} {:-<10} {:-<10}",
+            "", "", "", "", "", "", "", "", ""
+        );
 
-        let mut grammar_token_stats: Vec<(GrammarTokenID, usize, usize)> = stats
-            .final_grammar_token_edge_key_counts
-            .iter()
-            .map(|(gtid, key_count)| {
-                let value_count = stats.final_grammar_token_edge_value_counts.get(gtid).copied().unwrap_or(0);
-                (*gtid, *key_count, value_count)
-            })
-            .collect();
+        // Helper function to calculate sum, mean, and median from Vec<usize>
+        fn calculate_stats_from_vec_usize(numbers: &Vec<usize>) -> (usize, Option<f64>, Option<f64>) {
+            if numbers.is_empty() {
+                return (0, None, None); // Or handle as error/panic if a gtid implies non-empty
+            }
+            let sum: usize = numbers.iter().sum();
+            let mean: Option<f64> = Some(sum as f64 / numbers.len() as f64);
 
-        // Sort by key_count (number of times this gtid was an edge key) descending
-        grammar_token_stats.sort_by(|a, b| b.1.cmp(&a.1));
+            let mut sorted_numbers = numbers.clone();
+            sorted_numbers.sort_unstable();
+            let len = sorted_numbers.len();
+            let mid = len / 2;
+            let median: Option<f64> = if len == 0 { // Should be caught by numbers.is_empty()
+                None
+            } else if len % 2 == 0 {
+                Some((sorted_numbers[mid - 1] as f64 + sorted_numbers[mid] as f64) / 2.0)
+            } else {
+                Some(sorted_numbers[mid] as f64)
+            };
+            (sum, mean, median)
+        }
 
-        // Initialize collectors for totals, means, medians
-        let mut collected_key_counts: Vec<usize> = Vec::new();
-        let mut collected_total_edge_values: Vec<usize> = Vec::new();
-        let mut collected_avg_values_per_key: Vec<f64> = Vec::new();
+
+        let mut grammar_token_stats_new: Vec<(
+            GrammarTokenID,
+            usize, // key_usages (count of source nodes using this gtid)
+            (usize, Option<f64>, Option<f64>), // fanout_stats (sum, mean, median of dest_map.len())
+            (usize, Option<f64>, Option<f64>)  // token_set_size_stats (sum, mean, median of LLMTokenBV.len())
+        )> = Vec::new();
+
+        for (gtid, key_usages_count) in &stats.final_grammar_token_edge_key_counts {
+            let fanouts_for_gtid = stats.final_grammar_token_edge_fanouts_dist
+                                        .get(gtid)
+                                        .cloned()
+                                        .unwrap_or_else(Vec::new); // Use empty vec if no entries (should not happen if key_usages_count > 0)
+            let fanout_stats = calculate_stats_from_vec_usize(&fanouts_for_gtid);
+
+            let token_set_sizes_for_gtid = stats.final_grammar_token_edge_token_set_sizes_dist
+                                                .get(gtid)
+                                                .cloned()
+                                                .unwrap_or_else(Vec::new);
+            let token_set_size_stats = calculate_stats_from_vec_usize(&token_set_sizes_for_gtid);
+
+            grammar_token_stats_new.push((*gtid, *key_usages_count, fanout_stats, token_set_size_stats));
+        }
+
+        // Sort by key_usages_count (number of times this gtid was an edge key from a source node) descending
+        grammar_token_stats_new.sort_by(|a, b| b.1.cmp(&a.1));
 
 
-        for (gtid, key_count, value_count) in grammar_token_stats {
+        for (gtid, key_usages, fanout_stats, token_set_size_stats) in grammar_token_stats_new {
             let name = token_name_map
                 .get_by_right(&gtid.0)
                 .cloned()
                 .unwrap_or_else(|| gtid.0.to_string());
-            let avg_values_per_key = if key_count > 0 {
-                value_count as f64 / key_count as f64
-            } else {
-                0.0
-            };
-            // Populate collectors
-            collected_key_counts.push(key_count);
-            collected_total_edge_values.push(value_count);
-            collected_avg_values_per_key.push(avg_values_per_key);
+
+            let (sum_fanout, avg_fanout, med_fanout) = fanout_stats;
+            let (sum_tok_size, avg_tok_size, med_tok_size) = token_set_size_stats;
+
+            // Helper to format Option<f64>
+            let format_opt_f64 = |val: Option<f64>| val.map_or_else(|| "N/A".to_string(), |v| format!("{:.2}", v));
 
             println!(
-                "  {:<30} {:>7} {:>12} {:>18} {:>15.2}",
-                name, gtid.0, key_count, value_count, avg_values_per_key
+                "  {:<25} {:>5} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+                name,
+                gtid.0,
+                key_usages,
+                sum_fanout,
+                format_opt_f64(avg_fanout),
+                format_opt_f64(med_fanout),
+                sum_tok_size,
+                format_opt_f64(avg_tok_size),
+                format_opt_f64(med_tok_size)
             );
         }
-        // This separator line was after the loop, now it's before summary stats
-        println!(
-            "  {:-<30} {:-<7} {:-<12} {:-<18} {:-<15}",
-            "", "", "", "", ""
-        );
-
-        // Helper function to calculate median for Vec<usize>
-        fn calculate_median_usize(numbers: &mut Vec<usize>) -> Option<f64> {
-            if numbers.is_empty() {
-                return None;
-            }
-            numbers.sort_unstable();
-            let len = numbers.len();
-            let mid = len / 2;
-            if len % 2 == 0 {
-                Some((numbers[mid - 1] as f64 + numbers[mid] as f64) / 2.0)
-            } else {
-                Some(numbers[mid] as f64)
-            }
-        }
-
-        // Helper function to calculate median for Vec<f64>
-        fn calculate_median_f64(numbers: &mut Vec<f64>) -> Option<f64> {
-            if numbers.is_empty() {
-                return None;
-            }
-            numbers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let len = numbers.len();
-            let mid = len / 2;
-            if len % 2 == 0 {
-                Some((numbers[mid - 1] + numbers[mid]) / 2.0)
-            } else {
-                Some(numbers[mid])
-            }
-        }
-
-        // Calculate Totals
-        let total_key_counts: usize = collected_key_counts.iter().sum();
-        let total_total_edge_values: usize = collected_total_edge_values.iter().sum();
-        let total_avg_values_per_key: f64 = collected_avg_values_per_key.iter().sum();
-
-        // Calculate Means
-        let mean_total_edge_values: Option<f64> = if !collected_total_edge_values.is_empty() {
-            Some(total_total_edge_values as f64 / collected_total_edge_values.len() as f64)
-        } else {
-            None
-        };
-        let mean_avg_values_per_key: Option<f64> = if !collected_avg_values_per_key.is_empty() {
-            Some(total_avg_values_per_key / collected_avg_values_per_key.len() as f64)
-        } else {
-            None
-        };
-
-        // Calculate Medians
-        let mut cloned_total_edge_values_for_median = collected_total_edge_values.clone();
-        let median_total_edge_values: Option<f64> = calculate_median_usize(&mut cloned_total_edge_values_for_median);
-        
-        let mut cloned_avg_values_per_key_for_median = collected_avg_values_per_key.clone();
-        let median_avg_values_per_key: Option<f64> = calculate_median_f64(&mut cloned_avg_values_per_key_for_median);
-
-        // Totals Row
-        println!(
-            "  {:<30} {:>7} {:>12} {:>18} {:>15.2}",
-            "Totals",
-            "---",
-            total_key_counts,
-            total_total_edge_values,
-            total_avg_values_per_key
-        );
-
-        // Means Row
-        let mean_tev_str = mean_total_edge_values.map_or_else(|| "---".to_string(), |v| format!("{:.2}", v));
-        let mean_avpk_str = mean_avg_values_per_key.map_or_else(|| "---".to_string(), |v| format!("{:.2}", v));
-        println!(
-            "  {:<30} {:>7} {:>12} {:>18} {:>15}",
-            "Means",
-            "---",
-            "---",
-            mean_tev_str,
-            mean_avpk_str
-        );
-
-        // Medians Row
-        let med_tev_str = median_total_edge_values.map_or_else(|| "---".to_string(), |v| format!("{:.2}", v));
-        let med_avpk_str = median_avg_values_per_key.map_or_else(|| "---".to_string(), |v| format!("{:.2}", v));
-        println!(
-            "  {:<30} {:>7} {:>12} {:>18} {:>15}",
-            "Medians",
-            "---",
-            "---",
-            med_tev_str,
-            med_avpk_str
-        );
         println!("---------------------------------");
 
 
