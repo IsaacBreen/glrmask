@@ -752,21 +752,84 @@ impl GrammarConstraint {
         // Sort by key_count (number of times this gtid was an edge key) descending
         grammar_token_stats.sort_by(|a, b| b.1.cmp(&a.1));
 
-        for (gtid, key_count, value_count) in grammar_token_stats {
+        // Initialize collectors for summary statistics
+        let mut all_key_counts: Vec<usize> = Vec::with_capacity(grammar_token_stats.len());
+        let mut all_total_edge_values: Vec<usize> = Vec::with_capacity(grammar_token_stats.len());
+        let mut all_avg_values_per_key: Vec<f64> = Vec::with_capacity(grammar_token_stats.len());
+
+
+        for (gtid, key_count, value_count) in &grammar_token_stats { // Iterate by reference
             let name = token_name_map
-                .get_by_right(&gtid.0)
+                .get_by_right(&gtid.0) // gtid is &GrammarTokenID
                 .cloned()
                 .unwrap_or_else(|| gtid.0.to_string());
-            let avg_values_per_key = if key_count > 0 {
-                value_count as f64 / key_count as f64
+            let avg_values_per_key_current = if *key_count > 0 { // Dereference key_count
+                *value_count as f64 / *key_count as f64   // Dereference value_count and key_count
             } else {
                 0.0
             };
             println!(
                 "  {:<30} {:>7} {:>12} {:>18} {:>15.2}",
-                name, gtid.0, key_count, value_count, avg_values_per_key
+                name, gtid.0, key_count, value_count, avg_values_per_key_current // println! handles &usize fine
             );
+
+            // Populate collectors
+            all_key_counts.push(*key_count); // Dereference
+            all_total_edge_values.push(*value_count); // Dereference
+            all_avg_values_per_key.push(avg_values_per_key_current);
         }
+        println!("---------------------------------");
+
+        // Helper function to calculate mean and median for Vec<usize>
+        fn calculate_stats_usize(data: &mut Vec<usize>) -> (f64, f64) { // (mean, median)
+            if data.is_empty() {
+                return (0.0, 0.0);
+            }
+            let sum: usize = data.iter().sum();
+            let mean = sum as f64 / data.len() as f64;
+
+            data.sort_unstable();
+            let mid = data.len() / 2;
+            let median = if data.len() % 2 == 0 {
+                if data.len() < 2 { 0.0 } else { (data[mid - 1] + data[mid]) as f64 / 2.0 }
+            } else {
+                data[mid] as f64
+            };
+            (mean, median)
+        }
+
+        // Helper function to calculate mean and median for Vec<f64>
+        fn calculate_stats_f64(data: &mut Vec<f64>) -> (f64, f64) { // (mean, median)
+            if data.is_empty() {
+                return (0.0, 0.0);
+            }
+            let sum: f64 = data.iter().sum();
+            let mean = sum / data.len() as f64;
+
+            data.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mid = data.len() / 2;
+            let median = if data.len() % 2 == 0 {
+                if data.len() < 2 { 0.0 } else { (data[mid - 1] + data[mid]) / 2.0 }
+            } else {
+                data[mid]
+            };
+            (mean, median)
+        }
+
+
+        println!("\nSummary Statistics for Grammar Token Edge Keys (across all listed tokens):");
+        println!("  {:<22} {:>9} {:>9}", "Metric", "Mean", "Median");
+        println!("  {:-<22} {:-<9} {:-<9}", "", "", ""); // Separator line
+
+        let (mean_key_count, median_key_count) = calculate_stats_usize(&mut all_key_counts);
+        println!("  {:<22} {:>9.2} {:>9.2}", "Key Count", mean_key_count, median_key_count);
+
+        let (mean_total_edge_values, median_total_edge_values) = calculate_stats_usize(&mut all_total_edge_values);
+        println!("  {:<22} {:>9.2} {:>9.2}", "Total Edge Values", mean_total_edge_values, median_total_edge_values);
+
+        let (mean_avg_values_per_key, median_avg_values_per_key) = calculate_stats_f64(&mut all_avg_values_per_key);
+        println!("  {:<22} {:>9.2} {:>9.2}", "Avg Values/Key", mean_avg_values_per_key, median_avg_values_per_key);
+
         println!("---------------------------------");
 
 

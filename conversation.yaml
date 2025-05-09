@@ -738,6 +738,15 @@ local_system:
               println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
 
               println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
+              println!(
+                  "  {:<30} {:<7} {:<12} {:<18} {:<15}",
+                  "Token Name", "ID", "Key Count", "Total Edge Values", "Avg Values/Key"
+              );
+              println!(
+                  "  {:-<30} {:-<7} {:-<12} {:-<18} {:-<15}",
+                  "", "", "", "", ""
+              ); // Separator line
+
               let mut grammar_token_stats: Vec<(GrammarTokenID, usize, usize)> = stats
                   .final_grammar_token_edge_key_counts
                   .iter()
@@ -755,13 +764,17 @@ local_system:
                       .get_by_right(&gtid.0)
                       .cloned()
                       .unwrap_or_else(|| gtid.0.to_string());
+                  let avg_values_per_key = if key_count > 0 {
+                      value_count as f64 / key_count as f64
+                  } else {
+                      0.0
+                  };
                   println!(
-                      "  - Token ID '{}' ({}): Key Count = {}, Total Edge Values = {}",
-                      name, gtid.0, key_count, value_count
+                      "  {:<30} {:>7} {:>12} {:>18} {:>15.2}",
+                      name, gtid.0, key_count, value_count, avg_values_per_key
                   );
               }
               println!("---------------------------------");
-
 
 
               // Pull the roots out of their Arc<Mutex<_>> and count failures to unwrap.
@@ -2002,6 +2015,15 @@ local_system:
               println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
 
               println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
+              println!(
+                  "  {:<30} {:<7} {:<12} {:<18} {:<15}",
+                  "Token Name", "ID", "Key Count", "Total Edge Values", "Avg Values/Key"
+              );
+              println!(
+                  "  {:-<30} {:-<7} {:-<12} {:-<18} {:-<15}",
+                  "", "", "", "", ""
+              ); // Separator line
+
               let mut grammar_token_stats: Vec<(GrammarTokenID, usize, usize)> = stats
                   .final_grammar_token_edge_key_counts
                   .iter()
@@ -2019,13 +2041,17 @@ local_system:
                       .get_by_right(&gtid.0)
                       .cloned()
                       .unwrap_or_else(|| gtid.0.to_string());
+                  let avg_values_per_key = if key_count > 0 {
+                      value_count as f64 / key_count as f64
+                  } else {
+                      0.0
+                  };
                   println!(
-                      "  - Token ID '{}' ({}): Key Count = {}, Total Edge Values = {}",
-                      name, gtid.0, key_count, value_count
+                      "  {:<30} {:>7} {:>12} {:>18} {:>15.2}",
+                      name, gtid.0, key_count, value_count, avg_values_per_key
                   );
               }
               println!("---------------------------------");
-
 
 
               // Pull the roots out of their Arc<Mutex<_>> and count failures to unwrap.
@@ -3291,6 +3317,15 @@ messages:
               println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
 
               println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
+              println!(
+                  "  {:<30} {:<7} {:<12} {:<18} {:<15}",
+                  "Token Name", "ID", "Key Count", "Total Edge Values", "Avg Values/Key"
+              );
+              println!(
+                  "  {:-<30} {:-<7} {:-<12} {:-<18} {:-<15}",
+                  "", "", "", "", ""
+              ); // Separator line
+
               let mut grammar_token_stats: Vec<(GrammarTokenID, usize, usize)> = stats
                   .final_grammar_token_edge_key_counts
                   .iter()
@@ -3308,13 +3343,17 @@ messages:
                       .get_by_right(&gtid.0)
                       .cloned()
                       .unwrap_or_else(|| gtid.0.to_string());
+                  let avg_values_per_key = if key_count > 0 {
+                      value_count as f64 / key_count as f64
+                  } else {
+                      0.0
+                  };
                   println!(
-                      "  - Token ID '{}' ({}): Key Count = {}, Total Edge Values = {}",
-                      name, gtid.0, key_count, value_count
+                      "  {:<30} {:>7} {:>12} {:>18} {:>15.2}",
+                      name, gtid.0, key_count, value_count, avg_values_per_key
                   );
               }
               println!("---------------------------------");
-
 
 
               // Pull the roots out of their Arc<Mutex<_>> and count failures to unwrap.
@@ -3825,130 +3864,137 @@ messages:
     metadata:
       filename: src/constraint.rs
   - user: |-
-      Modify the "Grammar Token Edge Key Frequencies" section so that it's neater. Right now we get this.
-
+      Modify the code so that for these stats the median and mean and both reported.
       ```
       Grammar Token Edge Key Frequencies (Most Common First):
-        - Token ID 'complex_number[1]' (58): Key Count = 865, Total Edge Values = 865
-        - Token ID 'NAME[0]' (87): Key Count = 797, Total Edge Values = 4186
-        - Token ID 'import_from_targets[1]' (33): Key Count = 471, Total Edge Values = 471
-        - Token ID 'assignment[1][0]' (8): Key Count = 452, Total Edge Values = 452
-        - Token ID 'kwds[0]' (40): Key Count = 409, Total Edge Values = 409
-        - Token ID 'eq_bitwise_or[0]' (70): Key Count = 376, Total Edge Values = 376
-        - Token ID 'slash_no_default[1]' (39): Key Count = 345, Total Edge Values = 345
+        Token Name                     ID      Key Count    Total Edge Values  Avg Values/Key 
+        ------------------------------ ------- ------------ ------------------ ---------------
+        NAME[0]                             87          888               4770            5.37
+        complex_number[1]                   58          865                865            1.00
+        import_from_targets[1]              33          471                471            1.00
+        assignment[1][0]                     8          452                452            1.00
+        kwds[0]                             40          409                409            1.00
       ```
-
-      That's hard to read. Print it more tidily.
-      And add a col for av num edge values per edge key.
+      ie for all of these, key count, edge values, values/key, we should have both avg and median.
     metadata:
   - assistant: |-
-      Okay, I'll provide instructions to modify the "Grammar Token Edge Key Frequencies" output section in your `precompute` function to make it more readable and include the average number of edge values per edge key.
+      Okay, I'll provide instructions to modify the `precompute` method in your `src/constraint.rs` file to include mean and median statistics for "Key Count", "Total Edge Values", and "Avg Values/Key" in the "Grammar Token Edge Key Frequencies" report.
 
       Here are the step-by-step instructions:
 
-      1.  **Locate the relevant section:**
-          In the `precompute` function, find the following line:
+      1.  **Navigate to the `precompute` method in `impl GrammarConstraint`.**
+
+      2.  **Initialize Collectors for Summary Statistics:**
+          Locate the line where `grammar_token_stats` is sorted:
           ```rust
-          println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
+          grammar_token_stats.sort_by(|a, b| b.1.cmp(&a.1));
+          ```
+          Immediately *after* this line, add the following code to initialize vectors that will store the data for calculating mean and median:
+          ```rust
+                  // Initialize collectors for summary statistics
+                  let mut all_key_counts: Vec<usize> = Vec::with_capacity(grammar_token_stats.len());
+                  let mut all_total_edge_values: Vec<usize> = Vec::with_capacity(grammar_token_stats.len());
+                  let mut all_avg_values_per_key: Vec<f64> = Vec::with_capacity(grammar_token_stats.len());
           ```
 
-      2.  **Add a header row for the table:**
-          Immediately after the line identified in step 1, insert a new `println!` statement to print the table headers. This will define the columns for your tidier output.
-          ```rust
-          println!(
-              "  {:<30} {:<7} {:<12} {:<18} {:<15}",
-              "Token Name", "ID", "Key Count", "Total Edge Values", "Avg Values/Key"
-          );
-          println!(
-              "  {:-<30} {:-<7} {:-<12} {:-<18} {:-<15}",
-              "", "", "", "", ""
-          ); // Separator line
-          ```
-
-      3.  **Modify the loop and the `println!` for each token:**
-          Find the loop that iterates over `grammar_token_stats`:
+      3.  **Populate Collectors During Table Printing:**
+          Modify the loop that prints the "Grammar Token Edge Key Frequencies" table.
+          Change this line:
           ```rust
           for (gtid, key_count, value_count) in grammar_token_stats {
-              let name = token_name_map
-                  .get_by_right(&gtid.0)
-                  .cloned()
-                  .unwrap_or_else(|| gtid.0.to_string());
-              println!(
-                  "  - Token ID '{}' ({}): Key Count = {}, Total Edge Values = {}",
-                  name, gtid.0, key_count, value_count
-              );
-          }
           ```
-          You will replace the `println!` inside this loop.
-
-          First, calculate the average. Add this line inside the loop, before the `println!`:
+          to iterate by reference:
           ```rust
-          let avg_values_per_key = if key_count > 0 {
-              value_count as f64 / key_count as f64
-          } else {
-              0.0
-          };
+          for (gtid, key_count, value_count) in &grammar_token_stats {
           ```
+          Inside this loop, after the `println!(...)` statement that prints a row of the table, add the following lines to populate the collector vectors. The `avg_values_per_key` variable used here should be the one calculated just before the `println!`. Let's ensure it's named `avg_values_per_key_current` for clarity.
 
-          Then, replace the existing `println!` statement with the following formatted `println!`:
+          The loop should look like this (pay attention to `avg_values_per_key_current` and dereferencing `key_count` and `value_count` where necessary):
           ```rust
-          println!(
-              "  {:<30} ({:>5}) {:>12} {:>18} {:>15.2f}",
-              name, gtid.0, key_count, value_count, avg_values_per_key
-          );
+                  for (gtid, key_count, value_count) in &grammar_token_stats { // Iterate by reference
+                      let name = token_name_map
+                          .get_by_right(&gtid.0) // gtid is &GrammarTokenID
+                          .cloned()
+                          .unwrap_or_else(|| gtid.0.to_string());
+                      let avg_values_per_key_current = if *key_count > 0 { // Dereference key_count
+                          *value_count as f64 / *key_count as f64   // Dereference value_count and key_count
+                      } else {
+                          0.0
+                      };
+                      println!(
+                          "  {:<30} {:>7} {:>12} {:>18} {:>15.2}",
+                          name, gtid.0, key_count, value_count, avg_values_per_key_current // println! handles &usize fine
+                      );
+
+                      // Populate collectors
+                      all_key_counts.push(*key_count); // Dereference
+                      all_total_edge_values.push(*value_count); // Dereference
+                      all_avg_values_per_key.push(avg_values_per_key_current);
+                  }
           ```
 
-      Let's review the changes:
+      4.  **Define Helper Functions for Statistical Calculations:**
+          After the line `println!("---------------------------------");` that follows the loop you just modified, and *before* you would print the new summary statistics, add these two helper functions. They can be defined as local functions within `precompute`.
+          ```rust
+                  // Helper function to calculate mean and median for Vec<usize>
+                  fn calculate_stats_usize(data: &mut Vec<usize>) -> (f64, f64) { // (mean, median)
+                      if data.is_empty() {
+                          return (0.0, 0.0);
+                      }
+                      let sum: usize = data.iter().sum();
+                      let mean = sum as f64 / data.len() as f64;
 
-      The old `println!` was:
-      ```rust
-      println!(
-          "  - Token ID '{}' ({}): Key Count = {}, Total Edge Values = {}",
-          name, gtid.0, key_count, value_count
-      );
-      ```
+                      data.sort_unstable();
+                      let mid = data.len() / 2;
+                      let median = if data.len() % 2 == 0 {
+                          if data.len() < 2 { 0.0 } else { (data[mid - 1] + data[mid]) as f64 / 2.0 }
+                      } else {
+                          data[mid] as f64
+                      };
+                      (mean, median)
+                  }
 
-      The new structure around and inside the loop will be:
-      ```rust
-      // ... (code before this section) ...
-      println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
-      println!(
-          "  {:<30} {:<7} {:<12} {:<18} {:<15}",
-          "Token Name", "ID", "Key Count", "Total Edge Values", "Avg Values/Key"
-      );
-      println!(
-          "  {:-<30} {:-<7} {:-<12} {:-<18} {:-<15}",
-          "", "", "", "", ""
-      ); // Separator line
+                  // Helper function to calculate mean and median for Vec<f64>
+                  fn calculate_stats_f64(data: &mut Vec<f64>) -> (f64, f64) { // (mean, median)
+                      if data.is_empty() {
+                          return (0.0, 0.0);
+                      }
+                      let sum: f64 = data.iter().sum();
+                      let mean = sum / data.len() as f64;
 
-      for (gtid, key_count, value_count) in grammar_token_stats {
-          let name = token_name_map
-              .get_by_right(&gtid.0)
-              .cloned()
-              .unwrap_or_else(|| gtid.0.to_string());
-          let avg_values_per_key = if key_count > 0 {
-              value_count as f64 / key_count as f64
-          } else {
-              0.0
-          };
-          println!(
-              "  {:<30} ({:>5}) {:>12} {:>18} {:>15.2f}",
-              name, gtid.0, key_count, value_count, avg_values_per_key
-          );
-      }
-      // ... (code after this section, e.g., println!("---------------------------------");) ...
-      ```
+                      data.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                      let mid = data.len() / 2;
+                      let median = if data.len() % 2 == 0 {
+                          if data.len() < 2 { 0.0 } else { (data[mid - 1] + data[mid]) / 2.0 }
+                      } else {
+                          data[mid]
+                      };
+                      (mean, median)
+                  }
+          ```
+          Note: I've added a check for `data.len() < 2` in the even case for medians to prevent panic on `data[mid - 1]` if `data` has 0 elements (though `is_empty` check handles 0, this is for robustness if `mid-1` became invalid for a 0-length vec after an empty check, which shouldn't happen here but is safer). The `is_empty()` check at the start should prevent issues with empty vectors.
 
-      **Explanation of the format specifiers in the new `println!`: **
-      *   `{:<30}`: Left-aligns the `name` string in a field of 30 characters.
-      *   `({:>5})`: Right-aligns the `gtid.0` (token ID) in a field of 5 characters, enclosed in parentheses.
-      *   `{:>12}`: Right-aligns `key_count` in a field of 12 characters.
-      *   `{:>18}`: Right-aligns `value_count` in a field of 18 characters.
-      *   `{:>15.2f}`: Right-aligns the `avg_values_per_key` (a float) in a field of 15 characters, with 2 decimal places.
+      5.  **Calculate and Print Summary Statistics:**
+          Immediately after the helper functions you just added, insert the following code to calculate and print the mean and median for each collected metric:
+          ```rust
+                  println!("\nSummary Statistics for Grammar Token Edge Keys (across all listed tokens):");
+                  println!("  {:<22} {:>9} {:>9}", "Metric", "Mean", "Median");
+                  println!("  {:-<22} {:-<9} {:-<9}", "", "", ""); // Separator line
 
-      The header `println!` statements use similar alignment to create a well-formatted table. The second header `println!` creates a separator line using `-` characters.
+                  let (mean_key_count, median_key_count) = calculate_stats_usize(&mut all_key_counts);
+                  println!("  {:<22} {:>9.2} {:>9.2}", "Key Count", mean_key_count, median_key_count);
 
-      This should give you a much tidier and more informative output for the grammar token edge key frequencies.
+                  let (mean_total_edge_values, median_total_edge_values) = calculate_stats_usize(&mut all_total_edge_values);
+                  println!("  {:<22} {:>9.2} {:>9.2}", "Total Edge Values", mean_total_edge_values, median_total_edge_values);
+
+                  let (mean_avg_values_per_key, median_avg_values_per_key) = calculate_stats_f64(&mut all_avg_values_per_key);
+                  println!("  {:<22} {:>9.2} {:>9.2}", "Avg Values/Key", mean_avg_values_per_key, median_avg_values_per_key);
+          ```
+          This new block of `println!` statements should appear before the existing `println!("---------------------------------");` that marks the end of the entire statistics block (or you can add another one if you prefer). The current instructions place it so it's part of the "Grammar Token Edge Key Frequencies" section, appearing right after the detailed table. If there's a final `println!("---------------------------------");` for the whole stats dump, this new table will be above it.
+
+      Make sure `use std::cmp::Ordering;` is present at the top of your `src/constraint.rs` file (it likely is already). This is needed for `sort_unstable_by` with `f64`.
+
+      These changes will collect the necessary data while printing the per-token statistics, then use helper functions to calculate the mean and median for "Key Count", "Total Edge Values", and "Avg Values/Key", and finally print these summary statistics in a new formatted table.
     metadata:
   - user: |
       Using model 'gemini/gemini-2.5-flash-preview-04-17' for code completion.
@@ -3961,9 +4007,7 @@ messages:
           {"action": "replace", "filepath": "src/constraint.rs"}
         ]
       }
-      ```
-
-      ```rust "src/constraint.rs"
+      ``````rust "src/constraint.rs"
       use std::cmp::Ordering;
       use crate::datastructures::trie::Trie;
       use crate::finite_automata::Regex;
@@ -4718,21 +4762,84 @@ messages:
               // Sort by key_count (number of times this gtid was an edge key) descending
               grammar_token_stats.sort_by(|a, b| b.1.cmp(&a.1));
 
-              for (gtid, key_count, value_count) in grammar_token_stats {
+              // Initialize collectors for summary statistics
+              let mut all_key_counts: Vec<usize> = Vec::with_capacity(grammar_token_stats.len());
+              let mut all_total_edge_values: Vec<usize> = Vec::with_capacity(grammar_token_stats.len());
+              let mut all_avg_values_per_key: Vec<f64> = Vec::with_capacity(grammar_token_stats.len());
+
+
+              for (gtid, key_count, value_count) in &grammar_token_stats { // Iterate by reference
                   let name = token_name_map
-                      .get_by_right(&gtid.0)
+                      .get_by_right(&gtid.0) // gtid is &GrammarTokenID
                       .cloned()
                       .unwrap_or_else(|| gtid.0.to_string());
-                  let avg_values_per_key = if key_count > 0 {
-                      value_count as f64 / key_count as f64
+                  let avg_values_per_key_current = if *key_count > 0 { // Dereference key_count
+                      *value_count as f64 / *key_count as f64   // Dereference value_count and key_count
                   } else {
                       0.0
                   };
                   println!(
-                      "  {:<30} ({:>5}) {:>12} {:>18} {:>15.2f}",
-                      name, gtid.0, key_count, value_count, avg_values_per_key
+                      "  {:<30} {:>7} {:>12} {:>18} {:>15.2}",
+                      name, gtid.0, key_count, value_count, avg_values_per_key_current // println! handles &usize fine
                   );
+
+                  // Populate collectors
+                  all_key_counts.push(*key_count); // Dereference
+                  all_total_edge_values.push(*value_count); // Dereference
+                  all_avg_values_per_key.push(avg_values_per_key_current);
               }
+              println!("---------------------------------");
+
+              // Helper function to calculate mean and median for Vec<usize>
+              fn calculate_stats_usize(data: &mut Vec<usize>) -> (f64, f64) { // (mean, median)
+                  if data.is_empty() {
+                      return (0.0, 0.0);
+                  }
+                  let sum: usize = data.iter().sum();
+                  let mean = sum as f64 / data.len() as f64;
+
+                  data.sort_unstable();
+                  let mid = data.len() / 2;
+                  let median = if data.len() % 2 == 0 {
+                      if data.len() < 2 { 0.0 } else { (data[mid - 1] + data[mid]) as f64 / 2.0 }
+                  } else {
+                      data[mid] as f64
+                  };
+                  (mean, median)
+              }
+
+              // Helper function to calculate mean and median for Vec<f64>
+              fn calculate_stats_f64(data: &mut Vec<f64>) -> (f64, f64) { // (mean, median)
+                  if data.is_empty() {
+                      return (0.0, 0.0);
+                  }
+                  let sum: f64 = data.iter().sum();
+                  let mean = sum / data.len() as f64;
+
+                  data.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                  let mid = data.len() / 2;
+                  let median = if data.len() % 2 == 0 {
+                      if data.len() < 2 { 0.0 } else { (data[mid - 1] + data[mid]) / 2.0 }
+                  } else {
+                      data[mid]
+                  };
+                  (mean, median)
+              }
+
+
+              println!("\nSummary Statistics for Grammar Token Edge Keys (across all listed tokens):");
+              println!("  {:<22} {:>9} {:>9}", "Metric", "Mean", "Median");
+              println!("  {:-<22} {:-<9} {:-<9}", "", "", ""); // Separator line
+
+              let (mean_key_count, median_key_count) = calculate_stats_usize(&mut all_key_counts);
+              println!("  {:<22} {:>9.2} {:>9.2}", "Key Count", mean_key_count, median_key_count);
+
+              let (mean_total_edge_values, median_total_edge_values) = calculate_stats_usize(&mut all_total_edge_values);
+              println!("  {:<22} {:>9.2} {:>9.2}", "Total Edge Values", mean_total_edge_values, median_total_edge_values);
+
+              let (mean_avg_values_per_key, median_avg_values_per_key) = calculate_stats_f64(&mut all_avg_values_per_key);
+              println!("  {:<22} {:>9.2} {:>9.2}", "Avg Values/Key", mean_avg_values_per_key, median_avg_values_per_key);
+
               println!("---------------------------------");
 
 
