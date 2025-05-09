@@ -352,68 +352,68 @@ if __name__ == "__main__":
     print("Initializing grammar processor...")
     grammar_processor = GrammarConstrainedLogitsProcessor(grammar_constraint_state, llm_token_to_id)
 
-#     model = AutoModelForCausalLM.from_pretrained(model_name)
-#
-#     print("Generating text...")
-# #     pre_input_text = ""
-# #     input_text = "i^10=i*"
-# #     input_text = "5*6 + 7*2 = 5+5+5+"
-# #     input_text = "123+456+"
-# #     expected_next_token = "789"
-#
-# #     pre_input_text = ""
-# #     input_text = "hello="
-# #     expected_next_token = "world"
-#
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+
+    print("Generating text...")
 #     pre_input_text = ""
-#     input_text = '# This Python script'
-#     expected_next_token = ""
-#
-#     if expected_next_token:
-#         expected_next_token = tokenizer.decode([tokenizer.encode(expected_next_token)[0]])
-#
-#     # DEMO: Incremental Parser
-#     parser_state = PyIncrementalParser(grammar) # Use the imported class
-#     print(f"Initial valid: {parser_state.is_valid()}")
-#     parser_state.feed(input_text.encode("utf-8"))
-#     print(f"After '{input_text}': valid={parser_state.is_valid()}")
-#     print("--- End Incremental Parser Demo ---")
-#
-#     # DEMO: Get the mask
-#     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
-#
-#     tokens = tokenizer.encode(input_text, return_tensors="pt")
-#     tokens: list[int] = tokens.tolist()[0]
-#     print(f"Committing tokens: {tokens}")
-#     for i, token_id in enumerate(tokens):
-#         print(f"Ensuring token {tokenizer.decode([token_id])!r} (id: {token_id}) is in mask")
-#         mask = grammar_constraint_state.get_mask()
-#         print("Got mask")
-#         print(f"Mask: {mask}")
-#         mask_ids = np.where(mask)[0].tolist()
-#         mask_tokens = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
-#         print(f"Mask Token IDs: {textwrap.shorten(str(mask_ids), width=100)}")
-#         print(f"Mask Tokens: {textwrap.shorten(str(mask_tokens), width=100)}")
-#         assert token_id in mask_ids, f"Expected token {tokenizer.decode([token_id])!r} (id: {token_id}) in mask"
-#         print(f"--- Committing token {tokenizer.decode([token_id])!r} (id: {token_id}) ---")
-#         print(f"CALLING {grammar_constraint_state.commit}({token_id})")
-#         grammar_constraint_state.commit(token_id)
-#     print("--- End Committing Tokens ---")
-#
-#     print("Getting final mask")
-#     mask = grammar_constraint_state.get_mask()
-#     print("Got mask")
-#     print(mask)
-#     mask_ids = np.where(mask)[0].tolist()
-#     mask_tokens = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
-#     print(f"Mask Token IDs: {textwrap.shorten(str(mask_ids), width=100)}")
-#     print(f"Mask Tokens: {textwrap.shorten(str(mask_tokens), width=100)}")
-#
-#     if expected_next_token:
-#         assert expected_next_token in mask_tokens, f"Expected '{expected_next_token}' in mask"
-#
-#     # DEMO: Generate text.
-#     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
-# #     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
-#     output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
-#     print(output_text)
+#     input_text = "i^10=i*"
+#     input_text = "5*6 + 7*2 = 5+5+5+"
+#     input_text = "123+456+"
+#     expected_next_token = "789"
+
+#     pre_input_text = ""
+#     input_text = "hello="
+#     expected_next_token = "world"
+
+    pre_input_text = ""
+    input_text = '# This Python script'
+    expected_next_token = ""
+
+    if expected_next_token:
+        expected_next_token = tokenizer.decode([tokenizer.encode(expected_next_token)[0]])
+
+    # DEMO: Incremental Parser
+    parser_state = PyIncrementalParser(grammar) # Use the imported class
+    print(f"Initial valid: {parser_state.is_valid()}")
+    parser_state.feed(input_text.encode("utf-8"))
+    print(f"After '{input_text}': valid={parser_state.is_valid()}")
+    print("--- End Incremental Parser Demo ---")
+
+    # DEMO: Get the mask
+    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
+
+    tokens = tokenizer.encode(input_text, return_tensors="pt")
+    tokens: list[int] = tokens.tolist()[0]
+    print(f"Committing tokens: {tokens}")
+    for i, token_id in enumerate(tokens):
+        print(f"Ensuring token {tokenizer.decode([token_id])!r} (id: {token_id}) is in mask")
+        mask = grammar_constraint_state.get_mask()
+        print("Got mask")
+        print(f"Mask: {mask}")
+        mask_ids = np.where(mask)[0].tolist()
+        mask_tokens = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
+        print(f"Mask Token IDs: {textwrap.shorten(str(mask_ids), width=100)}")
+        print(f"Mask Tokens: {textwrap.shorten(str(mask_tokens), width=100)}")
+        assert token_id in mask_ids, f"Expected token {tokenizer.decode([token_id])!r} (id: {token_id}) in mask"
+        print(f"--- Committing token {tokenizer.decode([token_id])!r} (id: {token_id}) ---")
+        print(f"CALLING {grammar_constraint_state.commit}({token_id})")
+        grammar_constraint_state.commit(token_id)
+    print("--- End Committing Tokens ---")
+
+    print("Getting final mask")
+    mask = grammar_constraint_state.get_mask()
+    print("Got mask")
+    print(mask)
+    mask_ids = np.where(mask)[0].tolist()
+    mask_tokens = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
+    print(f"Mask Token IDs: {textwrap.shorten(str(mask_ids), width=100)}")
+    print(f"Mask Tokens: {textwrap.shorten(str(mask_tokens), width=100)}")
+
+    if expected_next_token:
+        assert expected_next_token in mask_tokens, f"Expected '{expected_next_token}' in mask"
+
+    # DEMO: Generate text.
+    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
+#     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
+    output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
+    print(output_text)
