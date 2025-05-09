@@ -174,11 +174,10 @@ mod tests {
         // Generate parser
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
 
-        let terminal_name_map = BTreeMap::from([
-            (TerminalID(0), "A".to_string()),
-            (TerminalID(1), "AA".to_string()),
-            (TerminalID(2), "EOF".to_string()),
-        ]);
+        let mut terminal_name_map = BiBTreeMap::new();
+        terminal_name_map.insert("A".to_string(), 0);
+        terminal_name_map.insert("AA".to_string(), 1);
+        terminal_name_map.insert("EOF".to_string(), 2);
 
         // Create constraint (this runs precomputation)
         GrammarConstraint::new(tokenizer, parser, llm_token_map, terminal_name_map, max_llm_token_id)
