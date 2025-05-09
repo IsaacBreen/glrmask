@@ -387,7 +387,7 @@ if __name__ == "__main__":
     tokens: list[int] = tokens.tolist()[0]
     print(f"Committing tokens: {tokens}")
     for i, token_id in enumerate(tokens):
-        print(f"Ensuring token {id_to_llm_token[token_id]!r} (id: {token_id}) is in mask")
+        print(f"Ensuring token {id_to_llm_token[token_id].decode()!r} (id: {token_id}) is in mask")
         mask = grammar_constraint_state.get_mask()
         print("Got mask")
         print(f"Mask: {mask}")
@@ -396,8 +396,8 @@ if __name__ == "__main__":
         print(f"Mask Token IDs: {textwrap.shorten(str(mask_ids), width=100)}")
         print(f"Mask Tokens: {textwrap.shorten(str(mask_tokens), width=300)}")
         print(f"Mask Tokens (first chars): {"".join(sorted(list({m[0] for m in mask_tokens})))!r}")
-        assert token_id in mask_ids, f"Expected token {id_to_llm_token[token_id]!r} (id: {token_id}) in mask"
-        print(f"--- Committing token {id_to_llm_token[token_id]!r} (id: {token_id}) ---")
+        assert token_id in mask_ids, f"Expected token {id_to_llm_token[token_id].decode()!r} (id: {token_id}) in mask"
+        print(f"--- Committing token {id_to_llm_token[token_id].decode()!r} (id: {token_id}) ---")
         print(f"CALLING {grammar_constraint_state.commit}({token_id})")
         grammar_constraint_state.commit(token_id)
     print("--- End Committing Tokens ---")
