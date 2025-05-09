@@ -752,6 +752,12 @@ impl GrammarConstraint {
         // Sort by key_count (number of times this gtid was an edge key) descending
         grammar_token_stats.sort_by(|a, b| b.1.cmp(&a.1));
 
+        // Initialize collectors for totals, means, medians
+        let mut collected_key_counts: Vec<usize> = Vec::new();
+        let mut collected_total_edge_values: Vec<usize> = Vec::new();
+        let mut collected_avg_values_per_key: Vec<f64> = Vec::new();
+
+
         for (gtid, key_count, value_count) in grammar_token_stats {
             let name = token_name_map
                 .get_by_right(&gtid.0)
@@ -762,11 +768,109 @@ impl GrammarConstraint {
             } else {
                 0.0
             };
+            // Populate collectors
+            collected_key_counts.push(key_count);
+            collected_total_edge_values.push(value_count);
+            collected_avg_values_per_key.push(avg_values_per_key);
+
             println!(
                 "  {:<30} {:>7} {:>12} {:>18} {:>15.2}",
                 name, gtid.0, key_count, value_count, avg_values_per_key
             );
         }
+        // This separator line was after the loop, now it's before summary stats
+        println!(
+            "  {:-<30} {:-<7} {:-<12} {:-<18} {:-<15}",
+            "", "", "", "", ""
+        );
+
+        // Helper function to calculate median for Vec<usize>
+        fn calculate_median_usize(numbers: &mut Vec<usize>) -> Option<f64> {
+            if numbers.is_empty() {
+                return None;
+            }
+            numbers.sort_unstable();
+            let len = numbers.len();
+            let mid = len / 2;
+            if len % 2 == 0 {
+                Some((numbers[mid - 1] as f64 + numbers[mid] as f64) / 2.0)
+            } else {
+                Some(numbers[mid] as f64)
+            }
+        }
+
+        // Helper function to calculate median for Vec<f64>
+        fn calculate_median_f64(numbers: &mut Vec<f64>) -> Option<f64> {
+            if numbers.is_empty() {
+                return None;
+            }
+            numbers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let len = numbers.len();
+            let mid = len / 2;
+            if len % 2 == 0 {
+                Some((numbers[mid - 1] + numbers[mid]) / 2.0)
+            } else {
+                Some(numbers[mid])
+            }
+        }
+
+        // Calculate Totals
+        let total_key_counts: usize = collected_key_counts.iter().sum();
+        let total_total_edge_values: usize = collected_total_edge_values.iter().sum();
+        let total_avg_values_per_key: f64 = collected_avg_values_per_key.iter().sum();
+
+        // Calculate Means
+        let mean_total_edge_values: Option<f64> = if !collected_total_edge_values.is_empty() {
+            Some(total_total_edge_values as f64 / collected_total_edge_values.len() as f64)
+        } else {
+            None
+        };
+        let mean_avg_values_per_key: Option<f64> = if !collected_avg_values_per_key.is_empty() {
+            Some(total_avg_values_per_key / collected_avg_values_per_key.len() as f64)
+        } else {
+            None
+        };
+
+        // Calculate Medians
+        let mut cloned_total_edge_values_for_median = collected_total_edge_values.clone();
+        let median_total_edge_values: Option<f64> = calculate_median_usize(&mut cloned_total_edge_values_for_median);
+        
+        let mut cloned_avg_values_per_key_for_median = collected_avg_values_per_key.clone();
+        let median_avg_values_per_key: Option<f64> = calculate_median_f64(&mut cloned_avg_values_per_key_for_median);
+
+        // Totals Row
+        println!(
+            "  {:<30} {:>7} {:>12} {:>18} {:>15.2}",
+            "Totals",
+            "---",
+            total_key_counts,
+            total_total_edge_values,
+            total_avg_values_per_key
+        );
+
+        // Means Row
+        let mean_tev_str = mean_total_edge_values.map_or_else(|| "---".to_string(), |v| format!("{:.2}", v));
+        let mean_avpk_str = mean_avg_values_per_key.map_or_else(|| "---".to_string(), |v| format!("{:.2}", v));
+        println!(
+            "  {:<30} {:>7} {:>12} {:>18} {:>15}",
+            "Means",
+            "---",
+            "---",
+            mean_tev_str,
+            mean_avpk_str
+        );
+
+        // Medians Row
+        let med_tev_str = median_total_edge_values.map_or_else(|| "---".to_string(), |v| format!("{:.2}", v));
+        let med_avpk_str = median_avg_values_per_key.map_or_else(|| "---".to_string(), |v| format!("{:.2}", v));
+        println!(
+            "  {:<30} {:>7} {:>12} {:>18} {:>15}",
+            "Medians",
+            "---",
+            "---",
+            med_tev_str,
+            med_avpk_str
+        );
         println!("---------------------------------");
 
 
