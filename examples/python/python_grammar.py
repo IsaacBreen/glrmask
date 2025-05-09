@@ -317,8 +317,8 @@ if __name__ == "__main__":
     tokenizer_vocab = {token: actual_vocab[token] for token in tokenizer_vocab}
     print(f"tokenizer_vocab: {textwrap.shorten(str(tokenizer_vocab), width=100)}")
 
-    llm_token_to_id = {token.encode(): i for token, i in tokenizer_vocab.items()}
-    assert llm_token_to_id == {token.replace("Ġ", " ").encode(): i for token, i in tokenizer_vocab.items()}
+    llm_token_to_id = {token.replace("Ġ", " ").encode(): i for token, i in tokenizer_vocab.items()}
+    id_to_llm_token = {i: token for token, i in llm_token_to_id.items()}
     llm_tokens = list(tokenizer_vocab.keys()) # Use all tokens
 
     print("vocab size:", len(llm_tokens))
@@ -330,7 +330,7 @@ if __name__ == "__main__":
 
 #     ts = ['Paris', 'London']
 #     llm_tokens = [x.encode() for x in ts]
-#     llm_token_to_id = {token.encode(): tokenizer.convert_tokens_to_ids(token) for token in ts}
+#     llm_token_to_id = {token.encode(): llm_token_to_id[token] for token in ts}
 
     print("Defining grammar...")
     grammar = define_python_grammar()
@@ -371,7 +371,7 @@ if __name__ == "__main__":
     expected_next_token = ""
 
     if expected_next_token:
-        expected_next_token = tokenizer.decode([tokenizer.encode(expected_next_token)[0]])
+        expected_next_token = id_to_llm_token[grammar_constraint_state.llm_token_map[expected_next_token]]
 
     # DEMO: Incremental Parser
     parser_state = PyIncrementalParser(grammar) # Use the imported class
@@ -387,17 +387,17 @@ if __name__ == "__main__":
     tokens: list[int] = tokens.tolist()[0]
     print(f"Committing tokens: {tokens}")
     for i, token_id in enumerate(tokens):
-        print(f"Ensuring token {tokenizer.decode([token_id])!r} (id: {token_id}) is in mask")
+        print(f"Ensuring token {id_to_llm_token[token_id]!r} (id: {token_id}) is in mask")
         mask = grammar_constraint_state.get_mask()
         print("Got mask")
         print(f"Mask: {mask}")
         mask_ids = np.where(mask)[0].tolist()
-        mask_tokens = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
+        mask_tokens = [id_to_llm_token[id] for id in mask_ids]
         print(f"Mask Token IDs: {textwrap.shorten(str(mask_ids), width=100)}")
         print(f"Mask Tokens: {textwrap.shorten(str(mask_tokens), width=300)}")
         print(f"Mask Tokens (first chars): {"".join(sorted(list({m[0] for m in mask_tokens})))!r}")
-        assert token_id in mask_ids, f"Expected token {tokenizer.decode([token_id])!r} (id: {token_id}) in mask"
-        print(f"--- Committing token {tokenizer.decode([token_id])!r} (id: {token_id}) ---")
+        assert token_id in mask_ids, f"Expected token {id_to_llm_token[token_id]!r} (id: {token_id}) in mask"
+        print(f"--- Committing token {id_to_llm_token[token_id]!r} (id: {token_id}) ---")
         print(f"CALLING {grammar_constraint_state.commit}({token_id})")
         grammar_constraint_state.commit(token_id)
     print("--- End Committing Tokens ---")
@@ -407,7 +407,7 @@ if __name__ == "__main__":
     print("Got mask")
     print(mask)
     mask_ids = np.where(mask)[0].tolist()
-    mask_tokens = [tokenizer.convert_ids_to_tokens(id).replace("Ġ", " ") for id in mask_ids]
+    mask_tokens = [id_to_llm_token[id] for id in mask_ids]
     print(f"Mask Token IDs: {textwrap.shorten(str(mask_ids), width=100)}")
     print(f"Mask Tokens: {textwrap.shorten(str(mask_tokens), width=300)}")
     print(f"Mask Tokens (first chars): {"".join(sorted(list({m[0] for m in mask_tokens})))!r}")
