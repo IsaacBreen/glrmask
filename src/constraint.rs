@@ -763,7 +763,7 @@ impl GrammarConstraint {
                 0.0
             };
             println!(
-                "  {:<30} ({:>5}) {:>12} {:>18} {:>15.2}",
+                "  {:<30} {:>7} {:>12} {:>18} {:>15.2}",
                 name, gtid.0, key_count, value_count, avg_values_per_key
             );
         }
