@@ -120,15 +120,18 @@ impl Grammar {
 
 fn generate_internal_nonterminal_name(
     parent_rule_name: &str,
-    internal_rule_counters: &mut BTreeMap<String, usize>,
-    known_non_terminal_names: &mut HashSet<String>, // This set is updated by this function
+    rule_type_suffix: &str, // e.g., "choice", "opt", "rep"
+    internal_rule_counters: &mut BTreeMap<(String, String), usize>,
+    known_non_terminal_names: &mut HashSet<String>,
 ) -> String {
-    let counter_entry = internal_rule_counters.entry(parent_rule_name.to_string()).or_insert(0);
+    let counter_key = (parent_rule_name.to_string(), rule_type_suffix.to_string());
+    let counter_entry = internal_rule_counters.entry(counter_key).or_insert(0);
     loop {
-        let new_name = format!("{}[{}]", parent_rule_name, *counter_entry);
+        // Format: ParentName_ruleType[index]
+        let new_name = format!("{}_{}[{}]", parent_rule_name, rule_type_suffix, *counter_entry);
         if !known_non_terminal_names.contains(&new_name) {
             known_non_terminal_names.insert(new_name.clone()); // Reserve the name
-            *counter_entry += 1; // Increment for the next call for this parent_rule_name
+            *counter_entry += 1; // Increment for the next call for this parent_rule_name and rule_type
             return new_name;
         }
         *counter_entry += 1; // Name clash, try next index
@@ -147,7 +150,7 @@ impl Grammar {
         let mut next_terminal_id = 0;
 
         let mut known_non_terminal_names: HashSet<String> = exprs.iter().map(|(name, _)| name.clone()).collect();
-        let mut internal_rule_counters: BTreeMap<String, usize> = BTreeMap::new();
+        let mut internal_rule_counters: BTreeMap<(String, String), usize> = BTreeMap::new();
 
 
         // Add a start production.
@@ -174,7 +177,7 @@ impl Grammar {
             terminal_expr_to_group_id: &mut BiBTreeMap<Expr, usize>,
             next_terminal_id: &mut usize,
             parent_rule_name: &str,
-            internal_rule_counters: &mut BTreeMap<String, usize>,
+            internal_rule_counters: &mut BTreeMap<(String, String), usize>,
             known_non_terminal_names: &mut HashSet<String>,
         ) -> Vec<Symbol> {
             // TODO: Pre-collect all user-defined non-terminal names to ensure generated names are unique.
@@ -218,7 +221,8 @@ impl Grammar {
                     .collect(),
                 GrammarExpr::Choice(exprs) => {
                     let new_nonterminal_name = generate_internal_nonterminal_name(
-                        parent_rule_name,
+                        parent_rule_name, // This is the name of the rule containing this choice
+                        "choice",         // Rule type suffix
                         internal_rule_counters,
                         known_non_terminal_names,
                     );
@@ -249,7 +253,8 @@ impl Grammar {
                 }
                 GrammarExpr::Optional(inner_expr) => {
                     let opt_nt_name = generate_internal_nonterminal_name(
-                        parent_rule_name,
+                        parent_rule_name, // Name of the rule containing this optional
+                        "opt",            // Rule type suffix
                         internal_rule_counters,
                         known_non_terminal_names,
                     );
@@ -283,7 +288,8 @@ impl Grammar {
                 }
                 GrammarExpr::Repeat(inner_expr) => {
                     let repeat_nt_name = generate_internal_nonterminal_name(
-                        parent_rule_name,
+                        parent_rule_name, // Name of the rule containing this repeat
+                        "rep",            // Rule type suffix
                         internal_rule_counters,
                         known_non_terminal_names,
                     );
