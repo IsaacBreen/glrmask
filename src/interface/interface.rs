@@ -379,7 +379,7 @@ impl Grammar {
             let group_id = *terminal_name_to_group_id.get_by_left(name).unwrap();
             // Ensure we add the expr to the tokenizer_exprs_vec at the correct index (group_id)
              while tokenizer_exprs_vec.len() <= group_id {
-                 tokenizer_exprs_vec.push(greedy_group(Expr::Empty)); // Placeholder
+                 tokenizer_exprs_vec.push(greedy_group(Expr::Epsilon));
              }
             tokenizer_exprs_vec[group_id] = greedy_group(expr.clone());
         }
