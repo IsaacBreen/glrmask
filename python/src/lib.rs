@@ -232,11 +232,16 @@ impl PyGrammarConstraint {
         let tokenizer = grammar.inner.tokenizer.clone(); // Placeholder
         let parser = grammar.inner.glr_parser(); // Placeholder
 
-        let mut terminal_name_map = BTreeMap::new();
-        for (terminal, id) in grammar.inner.terminal_name_to_group_id {
-            terminal_name_map.insert(TerminalID(id), terminal);
-        }
-        let constraint = GrammarConstraint::new(tokenizer, parser, llm_token_map, terminal_name_map, max_llm_token_id);
+        // terminal_name_to_group_id is already BiBTreeMap<String, usize>
+        let terminal_name_map = grammar.inner.terminal_name_to_group_id.clone();
+        let constraint = GrammarConstraint::new(
+            tokenizer,
+            parser,
+            llm_token_map,
+            terminal_name_map,
+            max_llm_token_id,
+        );
+
         Ok(Self { inner: Arc::new(constraint) })
     }
 
@@ -300,7 +305,7 @@ impl PyGrammarConstraintState {
             println!("step...");
             state.step_with_all_llm_tokens();
         });
-        
+
     }
 }
 

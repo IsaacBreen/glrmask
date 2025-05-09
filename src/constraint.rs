@@ -101,8 +101,8 @@ pub struct GrammarConstraint {
     pub(crate) parser: GLRParser,
     pub(crate) precomputed: Precomputed,
     pub(crate) llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
-    /// Mapping from GrammarTokenID → its human‐readable name
-    pub(crate) token_name_map: std::collections::BTreeMap<GrammarTokenID, String>,
+    /// Bidirectional map: token name ↔ grammar-ID
+    pub(crate) token_name_map: BiBTreeMap<String, usize>,
     pub(crate) max_llm_token_id: usize,
 }
 
@@ -194,7 +194,7 @@ impl GrammarConstraint {
         tokenizer: Regex,
         parser: GLRParser,
         llm_token_map: LLMTokenMap,
-        token_name_map: BTreeMap<GrammarTokenID, String>,
+        token_name_map: BiBTreeMap<String, usize>,
         max_llm_token_id: usize
     ) -> Self {
         let precomputed =
@@ -212,7 +212,7 @@ impl GrammarConstraint {
     pub fn precompute<'a>(
         tokenizer: &Regex,
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-        token_name_map: &std::collections::BTreeMap<GrammarTokenID, String>,
+        token_name_map: &BiBTreeMap<String, usize>,
         max_llm_token_id: usize,
     ) -> Precomputed {
         let mut stats = PrecomputeStats::default();
@@ -745,7 +745,7 @@ impl GrammarConstraint {
 
         for (gtid, key_count, value_count) in grammar_token_stats {
             let name = token_name_map
-                .get(&gtid)
+                .get_by_right(&gtid.0)
                 .cloned()
                 .unwrap_or_else(|| gtid.0.to_string());
             println!(
@@ -1081,9 +1081,9 @@ mod tests {
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone());
         dbg!(&parser);
 
-        let mut token_name_map = BTreeMap::new();
+        let mut token_name_map = BiBTreeMap::new();
          for (term, id) in &grammar_token_map {
-            token_name_map.insert(*id, term.0.clone());
+            token_name_map.insert(term.0.clone(), id.0);
         }
 
         let constraint = GrammarConstraint::new(
@@ -1157,9 +1157,9 @@ mod tests {
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone()); // Start production is index 6
         dbg!(&parser);
 
-        let mut token_name_map = BTreeMap::new();
+        let mut token_name_map = BiBTreeMap::new();
          for (term, id) in &grammar_token_map {
-            token_name_map.insert(*id, term.0.clone());
+            token_name_map.insert(term.0.clone(), id.0);
         }
 
         let constraint = GrammarConstraint::new(
@@ -1232,7 +1232,7 @@ mod tests {
         let precomputed = GrammarConstraint::precompute(
             &tokenizer,
             &llm_token_map,
-            &std::collections::BTreeMap::new(), // empty name‐map
+            &BiBTreeMap::new(), // empty name‐map
             max_llm_token_id,
         );
         // print_precomputed(&precomputed);
@@ -1253,11 +1253,10 @@ mod tests {
         let precomputed = GrammarConstraint::precompute(
             &tokenizer,
             &llm_token_map,
-            &std::collections::BTreeMap::new(), // empty name‐map
+            &BiBTreeMap::new(), // empty name‐map
             max_llm_token_id,
         );
         // print_precomputed(&precomputed);
         println!("Done precomputing");
     }
 }
-

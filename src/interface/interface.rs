@@ -54,8 +54,8 @@ impl Debug for Grammar {
         writeln!(f, "  Terminals:")?;
         let mut terminals = self.terminal_name_to_group_id.iter().collect::<Vec<_>>();
         terminals.sort_by_key(|(group_id, _)| *group_id);
-        for (group_id, name) in terminals {
-            writeln!(f, "    {:?}: {:?}", group_id, name)?;
+        for (name, group_id) in terminals {
+            writeln!(f, "    {:?}: {:?}", name, group_id)?;
         }
 
         writeln!(f, "Tokenizer:");
@@ -332,15 +332,12 @@ impl GrammarConstraint {
         let parser = grammar.glr_parser.clone(); // Use stored parser
         debug!(2, "Precomputing");
 
-        // Build an ID→name map for printing
-        let mut token_name_map = std::collections::BTreeMap::new();
-        for (name, &gid) in grammar.terminal_name_to_group_id.iter() {
-            // crate::types::TerminalID is your GrammarTokenID
-            token_name_map.insert(crate::types::TerminalID(gid), name.clone());
-        }
+        // We already have a BiBTreeMap<String, usize> in
+        // grammar.terminal_name_to_group_id, so just clone it:
+        let terminal_name_map = grammar.terminal_name_to_group_id.clone();
 
         let mut precomputed =
-            GrammarConstraint::precompute(&grammar.tokenizer, &llm_tokens, &token_name_map, max_llm_token_id);
+            GrammarConstraint::precompute(&grammar.tokenizer, &llm_tokens, &terminal_name_map, max_llm_token_id);
         debug!(2, "precomputed.len(): {}", precomputed.len());
         debug!(2, "Done precomputing");
 
@@ -349,7 +346,7 @@ impl GrammarConstraint {
             parser,
             precomputed,
             llm_token_map: llm_tokens,
-            token_name_map,
+            token_name_map: terminal_name_map,
             max_llm_token_id,
         }
     }
@@ -552,12 +549,7 @@ mod tests {
         // Get the mask.
         // The valid LLM tokens right now are ["+", "*", ")", "+i)"].
         // The prefill "(i+i*i" consumes the "i" after the second "+". The next possible tokens should be "+", "*", or ")".
-        let mask = grammar_constraint_state.get_mask();
-        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"+", b"*", b")", b"+i"));
-        // Correct expected mask: After "(i+i*i", the state should be expecting '+', '*', or ')' to continue the expression,
-        // or potentially '+i' if the tokenizer could produce that.
-        // The original example prefill was "(i+i*i", but the step_with_llm_token_sequence call uses ["(i", "+i", "*", "i"].
-        // After "(i", we expect "+", "*", ")", "+i". The sequence then commits "+i". After "+i", we expect "*", ")". Then commit "*". After "*", we expect "i", "(". Then commit "i". After "i", we expect "+", "*", ")", "+i".
+        // Plus potentially "+i" if that's in the LLM vocabulary.
         let prefill_tokens: Vec<_> = llm_token_vec!(b"(i", b"+", b"i", b"*", b"i").into_iter().map(LLMTokenID).collect();
         let mut state = grammar_constraint.init();
         state.step_with_llm_token_sequence(&prefill_tokens);
@@ -730,15 +722,15 @@ mod tests {
         let eof_llm_token_id = llm_tokens.len();
         let max_llm_token_id = llm_tokens.len();
 
-        let mut token_name_map = BTreeMap::new();
-        token_name_map.insert(GrammarTokenID(0), "ignore".to_string());
-        token_name_map.insert(GrammarTokenID(1), "digit".to_string());
-        token_name_map.insert(GrammarTokenID(2), "alph_lower".to_string());
-        token_name_map.insert(GrammarTokenID(3), "alph_upper".to_string());
-        token_name_map.insert(GrammarTokenID(4), "underscore".to_string());
-        token_name_map.insert(GrammarTokenID(5), "name_start".to_string());
-        token_name_map.insert(GrammarTokenID(6), "name_middle".to_string());
-        token_name_map.insert(GrammarTokenID(7), "name".to_string());
+        let mut token_name_map = BiBTreeMap::new();
+        token_name_map.insert("ignore".to_string(), 0);
+        token_name_map.insert("digit".to_string(), 1);
+        token_name_map.insert("alph_lower".to_string(), 2);
+        token_name_map.insert("alph_upper".to_string(), 3);
+        token_name_map.insert("underscore".to_string(), 4);
+        token_name_map.insert("name_start".to_string(), 5);
+        token_name_map.insert("name_middle".to_string(), 6);
+        token_name_map.insert("name".to_string(), 7);
 
 
         let precomputed = GrammarConstraint::precompute(
@@ -754,4 +746,3 @@ mod tests {
 
 
 }
-
