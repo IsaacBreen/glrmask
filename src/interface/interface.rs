@@ -50,9 +50,9 @@ impl Debug for Grammar {
             writeln!(f, "    {:?}: {}", literal, mangled_name)?;
         }
 
-        writeln!(f, "  Terminal Map (name to group ID):")?;
-        for (name, group_id) in &self.terminal_name_to_group_id {
-            writeln!(f, "    {:?}: {}", name, group_id)?;
+        writeln!(f, "  Terminals:")?;
+        for (group_id, name) in self.terminal_name_to_group_id.iter_by_right() {
+            writeln!(f, "    {}: {:?}", group_id, name)?;
         }
 
         writeln!(f, "Tokenizer:");
@@ -328,7 +328,7 @@ impl GrammarConstraint {
         debug!(2, "GrammarConstraint::from_grammar");
         let parser = grammar.glr_parser.clone(); // Use stored parser
         debug!(2, "Precomputing");
-        let mut precomputed = GrammarConstraint::precompute(&grammar.tokenizer, &llm_tokens, max_llm_token_id);
+        let mut precomputed = GrammarConstraint::precompute(&grammar.tokenizer, &llm_token_map, max_llm_token_id);
         debug!(2, "precomputed.len(): {}", precomputed.len());
         debug!(2, "Done precomputing");
 
@@ -710,3 +710,4 @@ mod tests {
         println!("Done precomputing");
     }
 }
+
