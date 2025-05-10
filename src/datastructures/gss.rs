@@ -4,65 +4,12 @@ use std::fmt::{Debug, Write};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 
-// Wrapper for Arc<GSSNode<T>> to enable pointer-based hashing, equality, and ordering.
-// This allows GSSNodePtr instances to be stored in BTreeSet based on pointer identity.
-struct GSSNodePtr<T>(Arc<GSSNode<T>>);
-
-impl<T> GSSNodePtr<T> {
-    fn new(node: Arc<GSSNode<T>>) -> Self {
-        GSSNodePtr(node)
-    }
-}
-
-impl<T> Deref for GSSNodePtr<T> {
-    type Target = Arc<GSSNode<T>>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T> Clone for GSSNodePtr<T> {
-    fn clone(&self) -> Self {
-        GSSNodePtr(self.0.clone()) // Clone the Arc, not just the wrapper
-    }
-}
-
-impl<T> Hash for GSSNodePtr<T> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        Arc::as_ptr(&self.0).hash(state);
-    }
-}
-
-impl<T> PartialEq for GSSNodePtr<T> {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-impl<T> Eq for GSSNodePtr<T> {}
-
-impl<T> PartialOrd for GSSNodePtr<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<T> Ord for GSSNodePtr<T> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        Arc::as_ptr(&self.0).cmp(&Arc::as_ptr(&other.0))
-    }
-}
-
-impl<T> Debug for GSSNodePtr<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Print the pointer to avoid deep recursion in debug output of GSSNode
-        write!(f, "GSSNodePtr({:p})", Arc::as_ptr(&self.0))
-    }
-}
+use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GSSNode<T> {
     pub value: T,
-    predecessors: BTreeSet<GSSNodePtr<T>>,
+    predecessors: BTreeSet<ArcPtrWrapper<GSSNode<T>>>,
 }
 
 impl<T> GSSNode<T> {
@@ -75,7 +22,7 @@ impl<T> GSSNode<T> {
     pub fn new_with_predecessors(value: T, predecessors: Vec<Arc<GSSNode<T>>>) -> Self {
         Self {
             value,
-            predecessors: predecessors.into_iter().map(GSSNodePtr::new).collect(),
+            predecessors: predecessors.into_iter().map(ArcPtrWrapper::new).collect(),
         }
     }
 
@@ -93,12 +40,12 @@ impl<T> GSSNode<T> {
 
     pub fn push(self, value: T) -> Self {
         let mut new_node = Self::new(value);
-        new_node.predecessors.insert(GSSNodePtr::new(Arc::new(self)));
+        new_node.predecessors.insert(ArcPtrWrapper::new(Arc::new(self)));
         new_node
     }
 
     pub fn pop(&self) -> Vec<Arc<Self>> {
-        self.predecessors.iter().map(|ptr| (*ptr).0.clone()).collect()
+        self.predecessors.iter().map(|wrapper| wrapper.as_arc().clone()).collect()
     }
 
     pub fn popn(&self, n: usize) -> Vec<Arc<Self>>
@@ -113,9 +60,10 @@ impl<T> GSSNode<T> {
         let mut seen: HashSet<*const GSSNode<T>> = HashSet::new();
 
         // recurse on predecessors and collect, skipping duplicates
-        for predecessor_ptr in &self.predecessors {
-            // predecessor_ptr is &GSSNodePtr<T>, (*predecessor_ptr) is Arc<GSSNode<T>>
-            for node in (*predecessor_ptr).popn(n - 1) {
+        for predecessor_wrapper in &self.predecessors {
+            // predecessor_wrapper is &ArcPtrWrapper<GSSNode<T>>
+            // predecessor_wrapper.as_arc() is &Arc<GSSNode<T>>
+            for node in predecessor_wrapper.as_arc().popn(n - 1) {
                 let ptr = Arc::as_ptr(&node);
                 if seen.insert(ptr) {
                     result.push(node);
@@ -146,8 +94,9 @@ impl<T> GSSNode<T> {
             if node.predecessors.is_empty() {
                 result.push(path);
             } else {
-                for predecessor_ptr in &node.predecessors {
-                    stack.push((&*predecessor_ptr, path.clone())); // &*predecessor_ptr is &Arc<GSSNode<T>>
+                for predecessor_wrapper in &node.predecessors { // predecessor_wrapper is &ArcPtrWrapper<GSSNode<T>>
+                    // predecessor_wrapper.as_ref() is &GSSNode<T> (due to Deref)
+                    stack.push((predecessor_wrapper.as_ref(), path.clone()));
                 }
             }
         }
@@ -181,7 +130,8 @@ impl<T> GSSNode<T> {
         GSSNode {
             value: f(&self.value),
             predecessors: self.predecessors.iter()
-                .map(|ptr| GSSNodePtr::new(Arc::new(ptr.as_ref().map(f)))) // ptr.as_ref() is &GSSNode<T>
+                // wrapper.as_ref() is &GSSNode<T>, then map is applied to the GSSNode
+                .map(|wrapper| ArcPtrWrapper::new(Arc::new(wrapper.as_ref().map(f))))
                 .collect(),
         }
     }
@@ -190,13 +140,16 @@ impl<T> GSSNode<T> {
 impl<T> Drop for GSSNode<T> {
     // Custom drop to iteratively drop predecessors and break potential cycles.
     fn drop(&mut self) {
-        let mut predecessors_to_process_further = std::mem::take(&mut self.predecessors);
-        let mut worklist: Vec<Arc<GSSNode<T>>> = predecessors_to_process_further.into_iter().map(|ptr| ptr.0).collect();
+        // Take the predecessors to drop them outside of holding the mutex
+        let predecessors_to_process_further = std::mem::take(&mut self.predecessors);
+        let mut worklist: Vec<Arc<GSSNode<T>>> = predecessors_to_process_further.into_iter().map(|wrapper| wrapper.into_arc()).collect(); // Use into_arc
 
         while let Some(node_arc) = worklist.pop() {
             if let Ok(mut inner_node) = Arc::try_unwrap(node_arc) {
-                worklist.extend(std::mem::take(&mut inner_node.predecessors).into_iter().map(|ptr| ptr.0));
+                // Successfully got unique ownership, take predecessors and add to worklist
+                worklist.extend(std::mem::take(&mut inner_node.predecessors).into_iter().map(|wrapper| wrapper.into_arc())); // Use into_arc
             }
+            // Else: Arc is still shared, it will be dropped when the last ArcPtrWrapper wrapper is dropped.
         }
     }
 }
@@ -218,12 +171,12 @@ impl<T: Clone> GSSTrait<T> for GSSNode<T> {
 
     fn push(&self, value: T) -> GSSNode<T> {
         let mut new_node = GSSNode::new(value);
-        new_node.predecessors.insert(GSSNodePtr::new(Arc::new(self.clone())));
+        new_node.predecessors.insert(ArcPtrWrapper::new(Arc::new(self.clone())));
         new_node
     }
 
     fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
-        self.predecessors.iter().map(|ptr| (*ptr).0.clone()).collect()
+        self.predecessors.iter().map(|wrapper| wrapper.as_arc().clone()).collect()
     }
 
     fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
@@ -241,12 +194,12 @@ impl<T: Clone> GSSTrait<T> for Arc<GSSNode<T>> {
 
     fn push(&self, value: T) -> GSSNode<T> {
         let mut new_node = GSSNode::new(value);
-        new_node.predecessors.insert(GSSNodePtr::new(self.clone()));
+        new_node.predecessors.insert(ArcPtrWrapper::new(self.clone()));
         new_node
     }
 
     fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
-        self.predecessors.iter().map(|ptr| (*ptr).0.clone()).collect()
+        self.predecessors.iter().map(|wrapper| wrapper.as_arc().clone()).collect()
     }
 
     fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
@@ -319,10 +272,10 @@ impl<T: Clone + Ord> BulkMerge<T> for Vec<Arc<GSSNode<T>>> {
                 let first_mut_ref = Arc::make_mut(&mut first);
                 // The original predecessors of `first` are already in `first_mut_ref.predecessors`.
                 // Add predecessors from all siblings.
-                // `BTreeSet::insert` handles deduplication based on GSSNodePtr's Ord impl (pointer address).
+                // `BTreeSet::insert` handles deduplication based on ArcPtrWrapper's Ord impl (pointer address).
                 for sibling_arc in group { // sibling_arc is Arc<GSSNode<T>>
-                    for pred_ptr in &sibling_arc.predecessors { // pred_ptr is &GSSNodePtr<T>
-                        first_mut_ref.predecessors.insert(pred_ptr.clone());
+                    for pred_wrapper in &sibling_arc.predecessors { // pred_wrapper is &ArcPtrWrapper<GSSNode<T>>
+                        first_mut_ref.predecessors.insert(pred_wrapper.clone());
                     }
                 }
                 self.push(first);
@@ -354,28 +307,27 @@ pub fn prune_and_transform_recursive<T: Clone>(
             let new_node_arc = if !continue_recursion {
                 // Stop recursion, create new node with original predecessors but new value
                 let mut transformed_predecessors = Vec::new();
-                for pred_ptr in &node_arc.predecessors { // pred_ptr is &GSSNodePtr<T>
-                    let pred_arc = &*pred_ptr; // pred_arc is &Arc<GSSNode<T>>
+                for pred_wrapper in &node_arc.predecessors { // pred_wrapper is &ArcPtrWrapper<GSSNode<T>>
+                     // pred_arc is &Arc<GSSNode<T>>
+                     let pred_arc = pred_wrapper.as_arc();
                      // Check memo for already transformed predecessor
                     if let Some(existing_transformed) = memo.get(&Arc::as_ptr(pred_arc)) {
                         if let Some(transformed_pred) = existing_transformed {
                             transformed_predecessors.push(transformed_pred.clone());
                         }
                         // If existing_transformed is None, the predecessor was pruned, so skip.
-                        println!("Skipping pruned predecessor");
+                        println!("Skipping pruned predecessor"); // TODO: remove or change to crate::debug
                     } else {
                         // This case *shouldn't* happen if traversal order is correct (parents processed after children),
                         // but as a fallback, keep the original if not found in memo. Or perhaps panic?
                         // Let's assume the caller manages the order or this closure handles cycles/shared nodes correctly.
-                        // For simplicity now, let's just clone original predecessors if we stop early.
-                        // A more robust solution might involve ensuring all nodes are visited before finalizing.
-                        // Revisit required: This might lead to incorrect sharing if predecessors weren't processed.
-                        // A better approach for early stop might be needed, maybe marking nodes instead.
-                        // For now, let's stick to the logic: if we stop, we keep original pointers below.
+                        // For simplicity now, let's stick to the logic: if we stop, we keep original pointers below.
                          transformed_predecessors = node_arc.predecessors.clone().into_iter()
-                             .map(|ptr| (*ptr).clone()) // ptr is GSSNodePtr, (*ptr).clone() is Arc<GSSNode<T>>
+                             .map(|wrapper| wrapper.as_arc().clone()) // wrapper is ArcPtrWrapper, wrapper.as_arc().clone() is Arc<GSSNode<T>>
                              .collect();
                          crate::debug!(3, "Keeping {} original predecessors", transformed_predecessors.len());
+                         // TODO: Revisit required: This might lead to incorrect sharing if predecessors weren't processed.
+                         // A better approach for early stop might be needed, maybe marking nodes instead.
                          break; // Exit loop once we decide to keep originals
                     }
                 }
@@ -384,9 +336,9 @@ pub fn prune_and_transform_recursive<T: Clone>(
             } else {
                 // Continue recursion for predecessors
                 let mut new_predecessors = Vec::new();
-                for pred_ptr in &node_arc.predecessors { // pred_ptr is &GSSNodePtr<T>
-                    // &*pred_ptr gives &Arc<GSSNode<T>>
-                    if let Some(new_pred) = prune_and_transform_recursive(&*pred_ptr, closure, memo) {
+                for pred_wrapper in &node_arc.predecessors { // pred_wrapper is &ArcPtrWrapper<GSSNode<T>>
+                    let pred_arc = pred_wrapper.as_arc(); // pred_arc is &Arc<GSSNode<T>>
+                    if let Some(new_pred) = prune_and_transform_recursive(pred_arc, closure, memo) {
                         new_predecessors.push(new_pred);
                     }
                 }
@@ -456,9 +408,9 @@ fn find_longest_path_recursive<T>(
 
     // Explore predecessors recursively
     if !node_arc.predecessors.is_empty() {
-        for pred_ptr in &node_arc.predecessors { // pred_ptr is &GSSNodePtr<T>
-            // &*pred_ptr gives &Arc<GSSNode<T>>
-            let pred_path = find_longest_path_recursive(&*pred_ptr, memo, visited_recursion);
+        for pred_wrapper in &node_arc.predecessors { // pred_wrapper is &ArcPtrWrapper<GSSNode<T>>
+            let pred_arc = pred_wrapper.as_arc(); // pred_arc is &Arc<GSSNode<T>>
+            let pred_path = find_longest_path_recursive(pred_arc, memo, visited_recursion);
             // Only update if the predecessor path is valid (non-empty, meaning no cycle encountered below)
             if !pred_path.is_empty() && pred_path.len() > longest_pred_path.len() {
                 longest_pred_path = pred_path;
@@ -546,11 +498,11 @@ pub fn gather_gss_stats<T: Clone>(roots: &[Arc<GSSNode<T>>]) -> GSSStats {
             stats.merge_points += 1;
         }
 
-        for pred_gss_ptr in &current_node.predecessors { // pred_gss_ptr is &GSSNodePtr<T>
-            let pred_arc = &*pred_gss_ptr; // pred_arc is &Arc<GSSNode<T>>
+        for pred_wrapper in &current_node.predecessors { // pred_wrapper is &ArcPtrWrapper<GSSNode<T>>
+            let pred_arc = pred_wrapper.as_arc(); // pred_arc is &Arc<GSSNode<T>>
             let pred_raw_ptr = Arc::as_ptr(pred_arc);
             if visited.insert(pred_raw_ptr) {
-                queue.push_back((pred_arc.0.clone(), current_depth + 1));
+                queue.push_back((pred_arc.clone(), current_depth + 1)); // Queue the Arc
             }
         }
     }
@@ -593,8 +545,8 @@ fn print_gss_node_recursive<T: Debug>(
     // Print predecessors
     if !node_arc.predecessors.is_empty() {
         writeln!(output, "{}  Predecessors:", prefix)?;
-        for pred_ptr in &node_arc.predecessors { // pred_ptr is &GSSNodePtr<T>
-            let pred_arc = &*pred_ptr; // pred_arc is &Arc<GSSNode<T>>
+        for pred_wrapper in &node_arc.predecessors { // pred_wrapper is &ArcPtrWrapper<GSSNode<T>>
+            let pred_arc = pred_wrapper.as_arc(); // pred_arc is &Arc<GSSNode<T>>
             // Recursively print predecessors
             print_gss_node_recursive(pred_arc, visited, indent + 2, node_count, max_nodes, output)?; // Corrected indent
             if *node_count >= max_nodes {

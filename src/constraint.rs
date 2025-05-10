@@ -19,7 +19,7 @@ use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::datastructures::trie::EdgeInserter;
 use indicatif::{ProgressBar, ProgressStyle};
 use crate::datastructures::hybrid_bitset::HybridBitset;
-use crate::datastructures::trie::ComparableArc;
+use crate::datastructures::ArcPtrWrapper; // Use the new wrapper struct
 use std::hash::{Hash, Hasher};
 
 
@@ -184,42 +184,20 @@ impl GrammarConstraint {
 
         const MERGE_THRESHOLD: usize = 100;
 
-        // ----  Ord-capable handle for `Arc<Mutex<PrecomputeNode>>` --------------------------
-        // `Arc<Mutex<PrecomputeNode>>` cannot live in a `BTreeSet` because `Mutex<T>` lacks
-        // an `Ord` implementation.  We wrap it and order by the (stable) pointer address.
-        #[derive(Clone)]
-        struct NodeHandle(Arc<Mutex<PrecomputeNode>>);
+        // ----  ArcPtrWrapper for `Arc<Mutex<PrecomputeNode>>` --------------------------
+        // We use ArcPtrWrapper to enable Ord and Hash based on pointer for BTreeSet/HashSet.
+        // #[derive(Clone)] // Removed NodeHandle
+        // struct NodeHandle(Arc<Mutex<PrecomputeNode>>); // Removed NodeHandle
 
-        use std::ops::Deref;
-        impl Deref for NodeHandle {
-            type Target = Arc<Mutex<PrecomputeNode>>;
-            fn deref(&self) -> &Self::Target {
-                &self.0
-            }
-        }
-        impl PartialEq for NodeHandle {
-            fn eq(&self, other: &Self) -> bool {
-                Arc::ptr_eq(&self.0, &other.0)
-            }
-        }
-        impl Eq for NodeHandle {}
-        impl PartialOrd for NodeHandle {
-            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-                Some(self.cmp(other))
-            }
-        }
-        impl Ord for NodeHandle {
-            fn cmp(&self, other: &Self) -> Ordering {
-                (Arc::as_ptr(&self.0) as usize).cmp(&(Arc::as_ptr(&other.0) as usize))
-            }
-        }
+        // use std::ops::Deref; // Deref is now part of ArcPtrWrapper impl
+        // impl Deref for NodeHandle { ... } // Removed NodeHandle impl
 
-        // Add this Hash implementation for NodeHandle
-        impl Hash for NodeHandle {
-            fn hash<H: Hasher>(&self, state: &mut H) {
-                (Arc::as_ptr(&self.0) as usize).hash(state);
-            }
-        }
+        // impl PartialEq for NodeHandle { ... } // Removed NodeHandle impl
+        // impl Eq for NodeHandle {} // Removed NodeHandle impl
+        // impl PartialOrd for NodeHandle { ... } // Removed NodeHandle impl
+        // impl Ord for NodeHandle { ... } // Removed NodeHandle impl
+
+        // impl Hash for NodeHandle { ... } // Removed NodeHandle impl
         // ------------------------------------------------------------------------------------
 
         // Create the vocab prefix tree.
@@ -255,12 +233,12 @@ impl GrammarConstraint {
         // merge_map for deduplicating PrecomputeNode structures resulting from merged paths
         let all_llm_tokens_for_merge_edge = HybridBitset::ones(max_llm_token_id);
 
-        // ---- Helper function to merge NodeHandles ----
+        // ---- Helper function to merge ArcPtrWrapper<Mutex<PrecomputeNode>> ----
         fn merge_node_handles_internal(
-            set_of_handles: &BTreeSet<NodeHandle>,
+            set_of_handles: &BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>, // Use ArcPtrWrapper
             all_llm_tokens_for_merge_edge: &HybridBitset,
             threshold: usize,
-        ) -> BTreeSet<NodeHandle> { // Changed return type
+        ) -> BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> { // Changed return type to ArcPtrWrapper
             if set_of_handles.is_empty() {
                 return BTreeSet::new();
             }
@@ -275,8 +253,10 @@ impl GrammarConstraint {
             let mut result_set = BTreeSet::new();
 
             for handle_child in set_of_handles {
+                // handle_child is &ArcPtrWrapper<Mutex<PrecomputeNode>>
+                // Use handle_child.as_arc() to get &Arc<Mutex<PrecomputeNode>>
                 let mut insert_result = EdgeInserter::new(
-                    handle_child.0.clone(), // Source Arc<Mutex<PrecomputeNode>>
+                    handle_child.as_arc().clone(), // Source Arc<Mutex<PrecomputeNode>>
                     None,                           // Edge key: Option<GrammarTokenID> = None
                     all_llm_tokens_for_merge_edge.clone(), // Edge value: LLMTokenBV
                     // Merge function for edge values (LLMTokenBV)
@@ -285,12 +265,12 @@ impl GrammarConstraint {
 
                 insert_result = insert_result.try_children(); // Will do nothing as no children under "None"
 
-                if !insert_result.clone_into_option().is_some() {
+                if insert_result.clone_into_option().is_none() { // Check if destination was found by try_children
                     insert_result = insert_result.try_destination(new_merged_pc_node_arc.clone()); // Corrected destination
                 }
             }
 
-            result_set.insert(NodeHandle(new_merged_pc_node_arc)); // The result is the single new merge parent
+            result_set.insert(ArcPtrWrapper::new(new_merged_pc_node_arc)); // The result is the single new merge parent wrapped in ArcPtrWrapper
             result_set // Return a set containing only the new merged handle.
         }
         // --------------------------------------------
@@ -298,7 +278,7 @@ impl GrammarConstraint {
         // ---- Define the recursive helper function ----
         fn precompute_recursive_helper(
             vocab_node: &VocabPrefixTreeNode,
-            associated_pc_nodes_by_state_param: BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>>,
+            associated_pc_nodes_by_state_param: BTreeMap<TokenizerStateID, BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>, // Use ArcPtrWrapper
             // Captured or passed-in context:
             tokenizer_ref: &Regex,
             all_llm_tokens_for_merge_edge_ref: &HybridBitset,
@@ -316,7 +296,7 @@ impl GrammarConstraint {
             );
 
             // Step 1: For each TokenizerStateID, apply merge policy to the set of incoming PrecomputeNode handles.
-            let mut effective_source_pc_nodes_map: BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>> = BTreeMap::new(); // Changed name from merged_source_pc_nodes_map
+            let mut effective_source_pc_nodes_map: BTreeMap<TokenizerStateID, BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>> = BTreeMap::new(); // Use ArcPtrWrapper
             for (tokenizer_state_id, set_of_handles) in associated_pc_nodes_by_state_param {
                 let effective_handles_set = merge_node_handles_internal(
                     &set_of_handles,
@@ -336,25 +316,25 @@ impl GrammarConstraint {
                 );
 
                 // Initialize yellow_nodes set for the current segment
-                let mut yellow_nodes: HashSet<NodeHandle> = HashSet::new();
+                let mut yellow_nodes: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = HashSet::new(); // Use ArcPtrWrapper
 
 
                 // This map will collect PrecomputeNodes formed at the *end* of processing bytes_segment,
                 // to be associated with child_vocab_node for the next DFS level.
                 // Key: TokenizerStateID (at that offset within the segment processing).
                 // Value: Map from TokenizerStateID (at the end of the segment) to a SET of PrecomputeNode handles.
-                let mut next_level_associations_for_child: BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>> = BTreeMap::new();
+                let mut next_level_associations_for_child: BTreeMap<TokenizerStateID, BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>> = BTreeMap::new(); // Use ArcPtrWrapper
 
                 // Inner queue for processing bytes_segment (offset-based)
                 // Key: offset within bytes_segment.
                 // Value: Map from TokenizerStateID (at that offset) to a SET of PrecomputeNode handles that are sources for the *remaining* part of the segment.
-                let mut segment_processing_q: BTreeMap<usize, BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>>> = BTreeMap::new();
+                let mut segment_processing_q: BTreeMap<usize, BTreeMap<TokenizerStateID, BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>> = BTreeMap::new(); // Use ArcPtrWrapper
 
                 // Initialize segment_processing_q at offset 0 using effective_source_pc_nodes_map (nodes at current_vocab_node after merge policy)
                 for (initial_tokenizer_state_id, effective_source_handles_set) in &effective_source_pc_nodes_map {
                     segment_processing_q.entry(0).or_default()
                         .entry(*initial_tokenizer_state_id).or_default()
-                        .extend(effective_source_handles_set.iter().cloned());
+                        .extend(effective_source_handles_set.iter().cloned()); // cloning ArcPtrWrapper clones the inner Arc
                 }
 
                 // Process the current bytes_segment
@@ -365,7 +345,7 @@ impl GrammarConstraint {
                         }
 
                         // Apply the merge policy to the set of handles for this specific path in segment processing.
-                        let effective_source_handles_for_suffix: BTreeSet<NodeHandle> = merge_node_handles_internal(
+                        let effective_source_handles_for_suffix: BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = merge_node_handles_internal( // Use ArcPtrWrapper
                             &current_path_source_handles_set,
                             all_llm_tokens_for_merge_edge_ref,
                             MERGE_THRESHOLD_val,
@@ -377,7 +357,7 @@ impl GrammarConstraint {
 
                         // Paint the current source nodes yellow while processing edges originating from them in this segment step.
                         for handle in &effective_source_handles_for_suffix {
-                            yellow_nodes.insert(handle.clone());
+                            yellow_nodes.insert(handle.clone()); // clone ArcPtrWrapper
                         }
 
 
@@ -394,7 +374,9 @@ impl GrammarConstraint {
 
                             // Iterate over each effective source handle
                             for segment_source_pc_handle in &effective_source_handles_for_suffix {
-                                let source_for_inserter_arc = segment_source_pc_handle.0.clone();
+                                // segment_source_pc_handle is &ArcPtrWrapper<Mutex<PrecomputeNode>>
+                                // Use as_arc() to get &Arc<Mutex<PrecomputeNode>>
+                                let source_for_inserter_arc = segment_source_pc_handle.as_arc().clone(); // Clone Arc for EdgeInserter
                                 let edge_key_for_inserter = Some(grammar_token_id);
 
                                 let mut inserter = EdgeInserter::new(
@@ -410,8 +392,8 @@ impl GrammarConstraint {
                                         if let Some(set_at_state0) = map_at_offset.get(&TokenizerStateID(0)) {
                                             // Only add targets if they are NOT yellow
                                             potential_targets.extend(set_at_state0.iter()
-                                                .filter(|h| !yellow_nodes.contains(h))
-                                                .map(|h| h.0.clone()));
+                                                .filter(|h| !yellow_nodes.contains(h)) // h is &ArcPtrWrapper, yellow_nodes contains ArcPtrWrapper
+                                                .map(|h| h.as_arc().clone())); // h is &ArcPtrWrapper, use as_arc()
                                         }
                                     }
                                 }
@@ -419,8 +401,8 @@ impl GrammarConstraint {
                                     if let Some(set_at_state0) = next_level_associations_for_child.get(&TokenizerStateID(0)) {
                                         // Only add targets if they are NOT yellow
                                         potential_targets.extend(set_at_state0.iter()
-                                            .filter(|h| !yellow_nodes.contains(h))
-                                            .map(|h| h.0.clone()));
+                                            .filter(|h| !yellow_nodes.contains(h)) // h is &ArcPtrWrapper
+                                            .map(|h| h.as_arc().clone())); // h is &ArcPtrWrapper, use as_arc()
                                     }
                                 }
 
@@ -433,9 +415,10 @@ impl GrammarConstraint {
                                     let source_guard = source_for_inserter_arc.lock().unwrap(); // Lock the source node
                                     // edge_key_for_inserter is Option<GrammarTokenID> (Some(grammar_token_id))
                                     if let Some(dest_map_for_current_key) = source_guard.children().get(&edge_key_for_inserter) {
-                                        for child_comparable_arc in dest_map_for_current_key.keys() {
-                                            let child_arc = child_comparable_arc.as_arc();
-                                            let child_handle = NodeHandle(child_arc.clone()); // Create NodeHandle for the child
+                                        // dest_map_for_current_key is &BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
+                                        for child_wrapper_arc in dest_map_for_current_key.keys() { // Iterate over ArcPtrWrapper keys
+                                            let child_arc = child_wrapper_arc.as_arc();
+                                            let child_handle = ArcPtrWrapper::new(child_arc.clone()); // Create ArcPtrWrapper for the child
                                             if !yellow_nodes.contains(&child_handle) { // Check if child is NOT yellow
                                                 additional_potential_targets_from_children.push(child_arc.clone());
                                             }
@@ -462,7 +445,7 @@ impl GrammarConstraint {
                                     next_level_associations_for_child
                                         .entry(TokenizerStateID(0))
                                         .or_default()
-                                        .insert(NodeHandle(target_pc_node_arc.clone()));
+                                        .insert(ArcPtrWrapper::new(target_pc_node_arc.clone())); // Wrap in ArcPtrWrapper
 
                                     let mut target_guard = target_pc_node_arc.lock().unwrap();
                                     // Update stats for clean_end
@@ -473,7 +456,7 @@ impl GrammarConstraint {
                                         .or_default()
                                         .entry(TokenizerStateID(0))
                                         .or_default()
-                                        .insert(NodeHandle(target_pc_node_arc));
+                                        .insert(ArcPtrWrapper::new(target_pc_node_arc)); // Wrap in ArcPtrWrapper
                                 }
                             } // End for segment_source_pc_handle in effective_source_handles_for_suffix
                         } // End for match_info in results.matches
@@ -486,10 +469,12 @@ impl GrammarConstraint {
                                 next_level_associations_for_child
                                     .entry(final_tokenizer_state_id)
                                     .or_default()
-                                    .insert(NodeHandle(segment_source_pc_handle.0.clone()));
+                                    .insert(segment_source_pc_handle.clone()); // segment_source_pc_handle is &ArcPtrWrapper, clone it
 
+                                // segment_source_pc_handle is &ArcPtrWrapper<Mutex<PrecomputeNode>>
+                                // Use as_arc() to get &Arc<Mutex<PrecomputeNode>>
+                                let mut segment_source_guard = segment_source_pc_handle.as_arc().lock().unwrap();
                                 let possible_final_grammar_tokens = tokenizer_ref.tokens_accessible_from_state(final_tokenizer_state_id);
-                                let mut segment_source_guard = segment_source_pc_handle.0.lock().unwrap();
                                 for gtid in possible_final_grammar_tokens {
                                     segment_source_guard.value.push_finalizer_info(
                                         gtid,
@@ -501,7 +486,7 @@ impl GrammarConstraint {
                             }
                         }
                         for handle in &effective_source_handles_for_suffix {
-                            yellow_nodes.remove(handle);
+                            yellow_nodes.remove(handle); // handle is ArcPtrWrapper, yellow_nodes contains ArcPtrWrapper
                         }
                     }
                 }
@@ -509,11 +494,11 @@ impl GrammarConstraint {
                 precompute_recursive_helper(
                     child_vocab_node,
                     next_level_associations_for_child,
-                    tokenizer_ref,
-                    all_llm_tokens_for_merge_edge_ref,
-                    pb_ref,
-                    max_llm_token_id_val,
-                    MERGE_THRESHOLD_val,
+                    tokenizer_ref, // Pass the original tokenizer
+                    all_llm_tokens_for_merge_edge_ref, // Pass ref to original
+                    pb_ref, // Pass ref to original progress bar
+                    max_llm_token_id_val, // Pass original
+                    MERGE_THRESHOLD, // Pass original
                 );
             }
         }
@@ -524,7 +509,7 @@ impl GrammarConstraint {
         let mut initial_associations_at_vocab_root = BTreeMap::new();
         for (tokenizer_id, pc_root_arc) in &precomputed_roots {
             let mut set_for_state = BTreeSet::new();
-            set_for_state.insert(NodeHandle(pc_root_arc.clone())); // Each precomputed_root is a starting point
+            set_for_state.insert(ArcPtrWrapper::new(pc_root_arc.clone())); // Each precomputed_root is a starting point, wrap in ArcPtrWrapper
             initial_associations_at_vocab_root.insert(*tokenizer_id, set_for_state);
         }
 
@@ -562,13 +547,15 @@ impl GrammarConstraint {
 
         // --- Calculate Final Statistics from precomputed_roots before unwrapping ---
         crate::debug!(2, "Calculating final precompute statistics...");
-        let mut all_reachable_nodes_for_final_stats: HashSet<ComparableArc<PrecomputeNode>> = HashSet::new();
+        // Use ArcPtrWrapper<Mutex<PrecomputeNode>> for the set of unique nodes
+        let mut all_reachable_nodes_for_final_stats: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = HashSet::new();
         for root_arc_mutex_node in precomputed_roots.values() {
             // PrecomputeNode is type alias for Trie<...>
             // Trie::all_nodes expects Arc<Mutex<Trie<...>>>
             let nodes_from_this_root = PrecomputeNode::all_nodes(root_arc_mutex_node.clone());
             for node_arc in nodes_from_this_root {
-                all_reachable_nodes_for_final_stats.insert(ComparableArc::new(node_arc));
+                // Wrap the Arc<Mutex<PrecomputeNode>> in ArcPtrWrapper
+                all_reachable_nodes_for_final_stats.insert(ArcPtrWrapper::new(node_arc));
             }
         }
         stats.final_unique_nodes_count = all_reachable_nodes_for_final_stats.len();
@@ -581,10 +568,11 @@ impl GrammarConstraint {
 
 
         for comp_arc_node in &all_reachable_nodes_for_final_stats {
+            // comp_arc_node is &ArcPtrWrapper<Mutex<PrecomputeNode>>
             let node_arc = comp_arc_node.as_arc(); // Gets &Arc<Mutex<PrecomputeNode>>
             let node_guard = node_arc.lock().expect("Mutex poisoned during final stats calculation");
 
-            for (edge_key_opt, dest_map) in node_guard.children() { // dest_map is TrieMap<Arc<Mutex<PrecomputeNode>>, LLMTokenBV>
+            for (edge_key_opt, dest_map) in node_guard.children() { // dest_map is BTreeMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>
                 let num_edges_for_this_key_to_distinct_children = dest_map.len();
                 stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
 
@@ -824,7 +812,7 @@ impl<'a> GrammarConstraintState<'a> {
                     active_llm_tokens |= &parse_state.stack.value.t.active;
                 }
                 let node_ptr = std::ptr::addr_of!(*node);
-                crate::debug!(3, "Processing node {:?} with {} active states, {} LLM tokens, {} finalizers", node_ptr, current_glr_parse_state.active_states.len(), active_llm_tokens.len(), node.value.finalizers.len());
+                crate::debug!(3, "Processing node {:p} with {} active states, {} LLM tokens, {} finalizers", node_ptr, current_glr_parse_state.active_states.len(), active_llm_tokens.len(), node.value.finalizers.len());
                 // Handle clean end
                 if let Some(clean_end) = &node.value.clean_end {
                     let mut final_glr_parse_state = current_glr_parse_state.clone();

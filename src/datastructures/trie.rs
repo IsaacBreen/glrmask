@@ -6,58 +6,7 @@ use std::sync::{Arc, Mutex, TryLockError, MutexGuard};
 use std::sync::atomic::{AtomicUsize, Ordering}; // Added for tests
 
 use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
-
-// Wrapper for Arc<Mutex<N>> to make it Ord and Hashable based on its pointer.
-#[derive(Debug)]
-pub struct ComparableArc<N>(Arc<Mutex<N>>);
-
-impl<N> ComparableArc<N> {
-    pub(crate) fn new(arc: Arc<Mutex<N>>) -> Self {
-        ComparableArc(arc)
-    }
-
-    pub fn as_arc(&self) -> &Arc<Mutex<N>> {
-        &self.0
-    }
-
-    #[allow(dead_code)] // Potentially useful later
-    fn into_arc(self) -> Arc<Mutex<N>> {
-        self.0
-    }
-}
-
-impl<N> Clone for ComparableArc<N> {
-    fn clone(&self) -> Self {
-        ComparableArc(self.0.clone())
-    }
-}
-
-impl<N> PartialEq for ComparableArc<N> {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl<N> Eq for ComparableArc<N> {}
-
-impl<N> PartialOrd for ComparableArc<N> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<N> Ord for ComparableArc<N> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (Arc::as_ptr(&self.0) as usize).cmp(&(Arc::as_ptr(&other.0) as usize))
-    }
-}
-
-impl<N> std::hash::Hash for ComparableArc<N> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        (Arc::as_ptr(&self.0) as usize).hash(state);
-    }
-}
-
+use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
 
 /// Error type indicating that a cycle was detected during an operation
 /// that updates graph structure or properties like max_depth.
@@ -83,7 +32,7 @@ impl Error for CycleDetectedError {}
 pub struct Trie<EK: Ord, EV, T> {
     pub value: T,
     /// Stores a map from EdgeKey to (a map from ChildArc (wrapped) to EdgeValue).
-    children: BTreeMap<EK, BTreeMap<ComparableArc<Trie<EK, EV, T>>, EV>>,
+    children: BTreeMap<EK, BTreeMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>,
     /// The “longest distance” from some source node (as computed during insertion).
     /// This value is set (or updated) when an edge is inserted.
     pub max_depth: usize,
@@ -105,32 +54,32 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     // force_insert remains unchanged
     pub fn force_insert_to_new_node(&mut self, edge_key: EK, edge_value: EV, value: T) -> Arc<Mutex<Trie<EK, EV, T>>> {
         let new_node = Arc::new(Mutex::new(Trie::new(value)));
-        let new_node_comparable = ComparableArc::new(new_node.clone());
+        let new_node_comparable = ArcPtrWrapper::new(new_node.clone());
         self.children.entry(edge_key).or_default().insert(new_node_comparable, edge_value);
         // Note: force_insert does NOT update max_depth or check for cycles. Use with caution.
         new_node.clone()
     }
 
     pub fn force_insert_to_node(&mut self, edge_key: EK, edge_value: EV, dst: &Arc<Mutex<Trie<EK, EV, T>>>) {
-        let dst_comparable = ComparableArc::new(dst.clone());
+        let dst_comparable = ArcPtrWrapper::new(dst.clone());
         self.children.entry(edge_key).or_default().insert(dst_comparable, edge_value);
     }
 
     // already_has_dst remains unchanged
     pub fn already_has_dst(&self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> bool {
-        let lookup_key = ComparableArc::new(dst.clone()); // Clone Arc for temporary ownership in key
+        let lookup_key = ArcPtrWrapper::new(dst.clone()); // Clone Arc for temporary ownership in key
         self.children.get(&edge_key).map_or(false, |dest_map| dest_map.contains_key(&lookup_key))
     }
 
     // get_edge_value remains unchanged
     pub fn get_edge_value(&self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> Option<&EV> {
-        let lookup_key = ComparableArc::new(dst.clone());
+        let lookup_key = ArcPtrWrapper::new(dst.clone());
         self.children.get(&edge_key).and_then(|dest_map| dest_map.get(&lookup_key))
     }
 
     // get_edge_value_mut remains unchanged
     pub fn get_edge_value_mut(&mut self, edge_key: EK, dst: &Arc<Mutex<Trie<EK, EV, T>>>) -> Option<&mut EV> {
-        let lookup_key = ComparableArc::new(dst.clone());
+        let lookup_key = ArcPtrWrapper::new(dst.clone());
         self.children.get_mut(&edge_key).and_then(|dest_map| dest_map.get_mut(&lookup_key))
     }
 
@@ -192,7 +141,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         // ------------------------------------------------------------------
         // 3. All checks have passed – perform the real structural mutation.
         // ------------------------------------------------------------------
-        let child_comparable = ComparableArc::new(child.clone()); // child is an Arc, clone it
+        let child_comparable = ArcPtrWrapper::new(child.clone()); // child is an Arc, clone it
         self.children
             .entry(edge_key)
             .or_default()
@@ -235,8 +184,8 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
 
                     // Get children while holding the lock.
                     let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = node_guard.children
-                        .values() // Iterates over BTreeMap<ComparableArc, EV>
-                        .flat_map(|dest_map| dest_map.keys().map(|comparable_arc| comparable_arc.as_arc().clone()))
+                        .values() // Iterates over BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
+                        .flat_map(|dest_map| dest_map.keys().map(|wrapper_arc| wrapper_arc.as_arc().clone()))
                         .collect();
 
                     // Explicitly drop the guard before potentially long operations (queueing).
@@ -302,8 +251,8 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
                 .lock()
                 .expect("Mutex poisoned in _propagate_max_depth (getting children)");
             node.children
-                .values() // Iterates over BTreeMap<ComparableArc, EV>
-                .flat_map(|dest_map| dest_map.keys().map(|ca| ca.as_arc().clone()))
+                .values() // Iterates over BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
+                .flat_map(|dest_map| dest_map.keys().map(|wrapper_arc| wrapper_arc.as_arc().clone()))
                 .collect()
         }; // child_guard lock released here
 
@@ -339,7 +288,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     pub fn get(
         &self,
         edge_key: &EK,
-    ) -> Option<&BTreeMap<ComparableArc<Trie<EK, EV, T>>, EV>>
+    ) -> Option<&BTreeMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>
     {
         self.children.get(edge_key)
     }
@@ -348,13 +297,13 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     pub fn get_mut(
         &mut self,
         edge_key: &EK,
-    ) -> Option<&mut BTreeMap<ComparableArc<Trie<EK, EV, T>>, EV>>
+    ) -> Option<&mut BTreeMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>
     {
         self.children.get_mut(edge_key)
     }
 
     // children remains unchanged
-    pub fn children(&self) -> &BTreeMap<EK, BTreeMap<ComparableArc<Trie<EK, EV, T>>, EV>> {
+    pub fn children(&self) -> &BTreeMap<EK, BTreeMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
         &self.children
     }
 
@@ -381,9 +330,9 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
 
             // Lock the node to get its children
             let node = node_arc.lock().expect("Mutex poisoned during BFS");
-            for children_map in node.children.values() { // children_map is BTreeMap<ComparableArc, EV>
-                for child_comparable_arc in children_map.keys() { // Iterate over ComparableArc keys
-                    let child_arc = child_comparable_arc.as_arc();
+            for children_map in node.children.values() { // children_map is BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
+                for child_wrapper_arc in children_map.keys() { // Iterate over ArcPtrWrapper keys
+                    let child_arc = child_wrapper_arc.as_arc();
                     let child_arc_ptr = Arc::as_ptr(child_arc);
                     if visited_arcs.insert(child_arc_ptr) {
                         queue.push_back(child_arc.clone());
@@ -445,8 +394,8 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
             let node_guard = node_arc.lock().expect("Mutex poisoned during has_any_cycle traversal");
             node_guard.children
-                .values() // Iterate over BTreeMap<ComparableArc, EV>
-                .flat_map(|dest_map| dest_map.keys().map(|comparable_arc| comparable_arc.as_arc().clone()))
+                .values() // Iterate over BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
+                .flat_map(|dest_map| dest_map.keys().map(|wrapper_arc| wrapper_arc.as_arc().clone()))
                 .collect()
         }; // node_guard lock is released here.
 
@@ -581,9 +530,9 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                     let node = node_arc.lock().expect("Mutex poisoned while reading children");
                     node.children
                         .iter()
-                        .flat_map(|(edge_key, dest_map)| { // dest_map is &BTreeMap<ComparableArc, EV>
-                            dest_map.iter().map(move |(child_comparable_arc, edge_val)| {
-                                (edge_key.clone(), edge_val.clone(), child_comparable_arc.as_arc().clone())
+                        .flat_map(|(edge_key, dest_map)| { // dest_map is &BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
+                            dest_map.iter().map(move |(child_wrapper_arc, edge_val)| {
+                                (edge_key.clone(), edge_val.clone(), child_wrapper_arc.as_arc().clone())
                             })
                         })
                         .collect()
@@ -704,18 +653,18 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         T: Clone,
     {
         // --- Check Phase 1: Node Merge Possibility ---
-        // Find the first ComparableArc key `ca` where node merge IS POSSIBLE.
-        let target_ca_for_node_merge: Option<ComparableArc<Trie<EK, EV, T>>> =
-            if let Some(children_map) = self.children.get(&edge_key) { // children_map is &BTreeMap<ComparableArc, EV>
-                children_map.iter().find_map(|(ca, _current_edge_val)| { // ca is &ComparableArc, _current_edge_val is &EV
-                    let node_arc = ca.as_arc();
+        // Find the first ArcPtrWrapper key `ca` where node merge IS POSSIBLE.
+        let target_wrapper_arc_for_node_merge: Option<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>> =
+            if let Some(children_map) = self.children.get(&edge_key) { // children_map is &BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
+                children_map.iter().find_map(|(wrapper_arc, _current_edge_val)| { // wrapper_arc is &ArcPtrWrapper<...>, _current_edge_val is &EV
+                    let node_arc = wrapper_arc.as_arc();
                     let can_merge = {
                         let node_guard = node_arc.lock().expect("Lock failed during node merge check");
                         // Check if merge IS POSSIBLE without calculating the value yet
                         merge_node_value(&node_guard.value, new_node_value.clone()).is_some()
                     };
                     if can_merge {
-                        Some(ca.clone()) // Clone the ComparableArc key
+                        Some(wrapper_arc.clone()) // Clone the ArcPtrWrapper key
                     } else {
                         None
                     }
@@ -726,10 +675,10 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
 
         // --- Apply Phase 1: Node Merge ---
-        if let Some(target_ca) = target_ca_for_node_merge { // target_ca is ComparableArc
-            let node_arc = target_ca.as_arc().clone(); // Clone Arc for return
+        if let Some(target_wrapper_arc) = target_wrapper_arc_for_node_merge { // target_wrapper_arc is ArcPtrWrapper
+            let node_arc = target_wrapper_arc.as_arc().clone(); // Clone Arc for return
             {
-                let mut node_guard = target_ca.as_arc().lock().expect("Lock failed for node update");
+                let mut node_guard = target_wrapper_arc.as_arc().lock().expect("Lock failed for node update");
                 // Calculate the merged value NOW and update
                 // Pass the original new_node_value by value, consuming it here.
                 if let Some(merged_val) = merge_node_value(&node_guard.value, new_node_value) {
@@ -740,10 +689,10 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 }
             } // Lock released
 
-            // Try update edge value for the found target_ca
+            // Try update edge value for the found target_wrapper_arc
             let edge_val_mut = self.children.get_mut(&edge_key)
                 .expect("Children map disappeared for edge key")
-                .get_mut(&target_ca)
+                .get_mut(&target_wrapper_arc)
                 .expect("Child entry disappeared from map");
 
             // Pass the original edge_value by value, consuming it here if merge succeeds.
@@ -757,12 +706,12 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         // If Phase 1 did not run, they are still available for Phase 2/3.
 
         // --- Check Phase 2: Edge Merge Possibility ---
-        let target_ca_for_edge_merge: Option<ComparableArc<Trie<EK, EV, T>>> =
+        let target_wrapper_arc_for_edge_merge: Option<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>> =
             if let Some(children_map) = self.children.get(&edge_key) {
-                 children_map.iter().find_map(|(ca, existing_ev)| { // ca is &ComparableArc, existing_ev is &EV
+                 children_map.iter().find_map(|(wrapper_arc, existing_ev)| { // wrapper_arc is &ArcPtrWrapper<...>, existing_ev is &EV
                     // Check if merge IS POSSIBLE
                     if merge_edge_value(existing_ev, edge_value.clone()).is_some() { // Clone edge_value for check
-                        Some(ca.clone()) // Clone the ComparableArc key
+                        Some(wrapper_arc.clone()) // Clone the ArcPtrWrapper key
                     } else {
                         None
                     }
@@ -773,11 +722,11 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
 
         // --- Apply Phase 2: Edge Merge ---
-        if let Some(target_ca) = target_ca_for_edge_merge { // target_ca is ComparableArc
-            let node_arc = target_ca.as_arc().clone(); // Clone Arc for return
+        if let Some(target_wrapper_arc) = target_wrapper_arc_for_edge_merge { // target_wrapper_arc is ArcPtrWrapper
+            let node_arc = target_wrapper_arc.as_arc().clone(); // Clone Arc for return
             let edge_val_mut = self.children.get_mut(&edge_key)
                 .expect("Children map disappeared for edge key")
-                .get_mut(&target_ca)
+                .get_mut(&target_wrapper_arc)
                 .expect("Child entry disappeared from map");
             // Re-calculate merged edge value and update
             // Pass the original edge_value by value, consuming it here.
@@ -823,10 +772,10 @@ pub(crate) fn dump_structure<EK: Debug + Ord, EV: Debug, T: Debug>(root: Arc<Mut
         println!("{:p}: Value: {:?}, MaxDepth: {}", node_arc_ptr, node.value, node.max_depth);
 
         // Iterate through edges and their corresponding maps of children
-        for (edge_key, children_map) in node.children.iter() { // children_map is &BTreeMap<ComparableArc, EV>
-            // Iterate through each (ComparableArc, EV) tuple in the map
-            for (child_comparable_arc, edge_val) in children_map.iter() { // Iterate over map entries
-                let child_arc = child_comparable_arc.as_arc();
+        for (edge_key, children_map) in node.children.iter() { // children_map is &BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
+            // Iterate through each (ArcPtrWrapper, EV) tuple in the map
+            for (child_wrapper_arc, edge_val) in children_map.iter() { // Iterate over map entries
+                let child_arc = child_wrapper_arc.as_arc();
                 let child_arc_ptr = Arc::as_ptr(child_arc); // Get pointer for child node
                 // Use child_arc_ptr for printing identity
                 println!("  - Edge Key: {:?}, Edge Val: {:?} -> Child: {:p}", edge_key, edge_val, child_arc_ptr);
@@ -903,10 +852,10 @@ where
         }
 
         let mut source = self.source_arc.lock().expect("Mutex poisoned while locking source in try_destination");
-        let destination_comparable = ComparableArc::new(destination.clone());
+        let destination_wrapper = ArcPtrWrapper::new(destination.clone()); // Use ArcPtrWrapper
 
         // Check if edge already exists and try merging EV
-        if let Some(existing_ev_mut) = source.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_comparable)) {
+        if let Some(existing_ev_mut) = source.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
             if let Some(merged_ev) = (self.merge_edge_value)(existing_ev_mut, self.edge_value.clone()) {
                 *existing_ev_mut = merged_ev;
                 self.result = Some(destination); // Merge successful, destination found
@@ -992,7 +941,7 @@ where
         let children_for_this_key: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
             let source_guard = self.source_arc.lock().expect("Mutex poisoned while locking source in try_children");
             if let Some(dest_map) = source_guard.children.get(&self.edge_key) {
-                dest_map.keys().map(|ca| ca.as_arc().clone()).collect()
+                dest_map.keys().map(|wrapper_arc| wrapper_arc.as_arc().clone()).collect()
             } else {
                 Vec::new() // No children under this specific edge key
             }
@@ -1233,12 +1182,12 @@ mod tests {
         let root = root_node.lock().unwrap();
 
         // Test get for 'a'
-        let retrieved_children_a = root.get(&"a").expect("Failed to get children for 'a'"); // Now a &BTreeMap
+        let retrieved_children_a = root.get(&"a").expect("Failed to get children for 'a'"); // Now a &BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
         assert_eq!(retrieved_children_a.len(), 2);
         // Use Arc pointers for comparison
         let retrieved_data_a: HashSet<(&str, *const Mutex<TestTrieBasic>)> = retrieved_children_a
-            .iter() // Iterates yielding (&ComparableArc, &&str)
-            .map(|(ca, ev_ref)| (*ev_ref, arc_ptr(ca.as_arc()))) // Dereference ev_ref twice
+            .iter() // Iterates yielding (&ArcPtrWrapper<Mutex<...>>, &&str)
+            .map(|(wrapper_arc, ev_ref)| (*ev_ref, arc_ptr(wrapper_arc.as_arc()))) // Dereference ev_ref twice
             .collect();
         assert!(retrieved_data_a.contains(&("edge_a1", arc_ptr(&child1))));
         assert!(retrieved_data_a.contains(&("edge_a3", arc_ptr(&child3))));
@@ -1246,9 +1195,9 @@ mod tests {
         // Test get for 'b'
         let retrieved_children_b = root.get(&"b").expect("Failed to get child 'b'"); // Now a &BTreeMap
         assert_eq!(retrieved_children_b.len(), 1);
-        let (ca, ev_ref) = retrieved_children_b.iter().next().unwrap(); // Get the single entry
+        let (wrapper_arc, ev_ref) = retrieved_children_b.iter().next().unwrap(); // Get the single entry
         assert_eq!(*ev_ref, "edge_b"); // Check edge value
-        assert!(Arc::ptr_eq(ca.as_arc(), &child2)); // Check Arc pointer equality
+        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &child2)); // Check Arc pointer equality
 
         assert!(root.get(&"c").is_none());
 
@@ -1286,11 +1235,11 @@ mod tests {
         // Check retrieval - lock root again
         {
             let binding = root.lock().unwrap();
-            let children_map = binding.get(&"edge").unwrap(); // Now a &BTreeMap
+            let children_map = binding.get(&"edge").unwrap(); // Now a &BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
             assert_eq!(children_map.len(), 2);
             let child_data: HashSet<(&str, *const Mutex<TestTrieBasic>)> = children_map
-                .iter()
-                .map(|(ca, ev_ref)| (*ev_ref, arc_ptr(ca.as_arc())))
+                .iter() // Iterating over (&ArcPtrWrapper<Mutex<...>>, &EV)
+                .map(|(wrapper_arc, ev_ref)| (*ev_ref, arc_ptr(wrapper_arc.as_arc())))
                 .collect();
             assert!(child_data.contains(&("val1", arc_ptr(&child1))));
             assert!(child_data.contains(&("val2", arc_ptr(&child2))));
@@ -1371,6 +1320,10 @@ mod tests {
         {
             let mut c1 = child1.lock().unwrap();
             c1.try_insert("c1->gc", "e3", grandchild.clone()).unwrap();
+        }
+        {
+            let mut c2 = child2.lock().unwrap();
+            c2.try_insert("c2->gc", "e4", grandchild.clone()).unwrap();
         }
 
         let mut processed_node_values = Vec::new();
@@ -1576,7 +1529,7 @@ mod tests {
         // - The edge must *not* be present because the insertion was rejected.
         let child_locked = child.lock().unwrap();
         let has_edge_to_root = if let Some(dest_map) = child_locked.children.get("c->r") {
-             let lookup_key = ComparableArc::new(root.clone());
+             let lookup_key = ArcPtrWrapper::new(root.clone()); // Use ArcPtrWrapper
              dest_map.contains_key(&lookup_key)
          } else {
              false
@@ -1911,11 +1864,11 @@ mod tests {
 
         // Check that the edge was added to the root
         let root = root_node.lock().unwrap(); // Re-lock read-only
-        let children_map = root.children.get(edge_key).unwrap(); // Now a BTreeMap
+        let children_map = root.children.get(edge_key).unwrap(); // Now a BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
         assert_eq!(children_map.len(), 1);
-        let (ca, ev) = children_map.iter().next().unwrap(); // Get the single entry
+        let (wrapper_arc, ev) = children_map.iter().next().unwrap(); // Get the single entry
         assert_eq!(*ev, edge_val); // Original edge value
-        assert!(Arc::ptr_eq(ca.as_arc(), &returned_node));
+        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &returned_node));
         assert_eq!(root.max_depth, 0); // Root depth unchanged
     }
 
@@ -1954,9 +1907,9 @@ mod tests {
         let root = root_node.lock().unwrap(); // Re-lock read-only
         let children_map = root.children.get(edge_key).unwrap(); // Now a BTreeMap
         assert_eq!(children_map.len(), 1);
-        let (ca, ev) = children_map.iter().next().unwrap();
+        let (wrapper_arc, ev) = children_map.iter().next().unwrap();
         assert_eq!(*ev, vec![10, 1]); // Merged edge value
-        assert!(Arc::ptr_eq(ca.as_arc(), &existing_node));
+        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &existing_node));
     }
 
      #[test]
@@ -1994,9 +1947,9 @@ mod tests {
         let root = root_node.lock().unwrap(); // Re-lock read-only
         let children_map = root.children.get(edge_key).unwrap(); // Now a BTreeMap
         assert_eq!(children_map.len(), 1);
-        let (ca, ev) = children_map.iter().next().unwrap();
+        let (wrapper_arc, ev) = children_map.iter().next().unwrap();
         assert_eq!(*ev, Vec::<i32>::new()); // Original value remains
-        assert!(Arc::ptr_eq(ca.as_arc(), &existing_node));
+        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &existing_node));
     }
 
     #[test]
@@ -2034,9 +1987,9 @@ mod tests {
         let root = root_node.lock().unwrap(); // Re-lock read-only
         let children_map = root.children.get(edge_key).unwrap(); // Now a BTreeMap
         assert_eq!(children_map.len(), 1);
-        let (ca, ev) = children_map.iter().next().unwrap();
+        let (wrapper_arc, ev) = children_map.iter().next().unwrap();
         assert_eq!(*ev, vec![10, 1]); // Merged edge value
-        assert!(Arc::ptr_eq(ca.as_arc(), &existing_node));
+        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &existing_node));
     }
 
     #[test]
@@ -2049,7 +2002,7 @@ mod tests {
             root.try_insert("key", vec![], existing_node.clone()).unwrap();
             // Add assertion: check the edge value is indeed empty
             let children_map = root.children.get("key").unwrap();
-            let (ca, ev) = children_map.iter().find(|(ca, _)| Arc::ptr_eq(ca.as_arc(), &existing_node)).unwrap();
+            let (wrapper_arc, ev) = children_map.iter().find(|(ca, _)| Arc::ptr_eq(ca.as_arc(), &existing_node)).unwrap();
              assert_eq!(*ev, Vec::<i32>::new());
         }
 
@@ -2081,12 +2034,12 @@ mod tests {
         assert_eq!(children_map.len(), 2);
 
         // Find the original edge/node
-        let original_edge_entry = children_map.iter().find(|(ca, _)| Arc::ptr_eq(ca.as_arc(), &existing_node)).unwrap();
+        let original_edge_entry = children_map.iter().find(|(wrapper_arc, _)| Arc::ptr_eq(wrapper_arc.as_arc(), &existing_node)).unwrap();
         assert_eq!(*original_edge_entry.1, Vec::<i32>::new()); // Original edge value unchanged
         assert_eq!(existing_node.lock().unwrap().value, "child_not_mergeable"); // Original node value unchanged
 
         // Find the new edge/node
-        let new_edge_entry = children_map.iter().find(|(ca, _)| Arc::ptr_eq(ca.as_arc(), &returned_node)).unwrap();
+        let new_edge_entry = children_map.iter().find(|(wrapper_arc, _)| Arc::ptr_eq(wrapper_arc.as_arc(), &returned_node)).unwrap();
         assert_eq!(*new_edge_entry.1, edge_val); // New edge value used
     }
 
@@ -2134,12 +2087,12 @@ mod tests {
         assert_eq!(children_map.len(), 2);
 
         // Check node1 state
-        let edge1_info_entry = children_map.iter().find(|(ca, _ev)| Arc::ptr_eq(ca.as_arc(), &node1)).unwrap();
+        let edge1_info_entry = children_map.iter().find(|(wrapper_arc, _ev)| Arc::ptr_eq(wrapper_arc.as_arc(), &node1)).unwrap();
         assert_eq!(*edge1_info_entry.1, vec![10]); // Unchanged
         assert_eq!(node1.lock().unwrap().value, "node1_not_mergeable"); // Unchanged
 
         // Check node2 state
-        let edge2_info_entry = children_map.iter().find(|(ca, _ev)| Arc::ptr_eq(ca.as_arc(), &node2)).unwrap();
+        let edge2_info_entry = children_map.iter().find(|(wrapper_arc, _ev)| Arc::ptr_eq(wrapper_arc.as_arc(), &node2)).unwrap();
         assert!(Arc::ptr_eq(edge2_info_entry.0.as_arc(), &node2));
         assert_eq!(*edge2_info_entry.1, Vec::<i32>::new()); // Unchanged (edge merge failed for this edge in Pass 1)
         // Node value was updated (checked above).
@@ -2169,11 +2122,11 @@ mod tests {
 
         assert!(Arc::ptr_eq(&result_node, &dest));
         let s = source.lock().unwrap();
-        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
+        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
         assert_eq!(children_map.len(), 1);
-        let (ca, ev) = children_map.iter().next().unwrap();
+        let (wrapper_arc, ev) = children_map.iter().next().unwrap();
         assert_eq!(*ev, edge_val);
-        assert!(Arc::ptr_eq(ca.as_arc(), &dest));
+        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &dest));
         assert_eq!(dest.lock().unwrap().max_depth, 1); // Depth updated by try_insert
     }
 
@@ -2196,9 +2149,9 @@ mod tests {
         let s = source.lock().unwrap();
         let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
         assert_eq!(children_map.len(), 1); // Still one edge
-        let (ca, ev) = children_map.iter().next().unwrap();
+        let (wrapper_arc, ev) = children_map.iter().next().unwrap();
         assert_eq!(*ev, merged_edge_val); // Merged value
-        assert!(Arc::ptr_eq(ca.as_arc(), &dest));
+        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &dest));
         assert_eq!(dest.lock().unwrap().max_depth, 1); // Depth should remain 1
     }
 
@@ -2222,10 +2175,10 @@ mod tests {
         let s = source.lock().unwrap();
         let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
         assert_eq!(children_map.len(), 1);
-        let (ca, ev) = children_map.iter().next().unwrap();
+        let (wrapper_arc, ev) = children_map.iter().next().unwrap();
         // The result of merge_bitset_union(&empty, &new_edge_val) is new_edge_val
         assert_eq!(*ev, new_edge_val);
-        assert!(Arc::ptr_eq(ca.as_arc(), &dest));
+        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &dest));
     }
 
     #[test]
@@ -2272,8 +2225,8 @@ mod tests {
         let s = source.lock().unwrap();
         let children_map = s.get(&"key").unwrap();
         assert_eq!(children_map.len(), 1);
-        let (ca, ev) = children_map.iter().next().unwrap();
-        assert!(Arc::ptr_eq(ca.as_arc(), &dest1));
+        let (wrapper_arc, ev) = children_map.iter().next().unwrap();
+        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &dest1));
         assert_eq!(*ev, new_edge_val);
     }
 
@@ -2302,8 +2255,8 @@ mod tests {
         let s = source.lock().unwrap();
         let children_map = s.get(&"key").unwrap();
         assert_eq!(children_map.len(), 1);
-        let (ca, ev) = children_map.iter().next().unwrap();
-        assert!(Arc::ptr_eq(ca.as_arc(), &dest2));
+        let (wrapper_arc, ev) = children_map.iter().next().unwrap();
+        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &dest2));
         assert_eq!(*ev, new_edge_val);
     }
 
@@ -2577,10 +2530,10 @@ mod tests {
             let s_guard = source.lock().unwrap();
             let children_map_target_key = s_guard.get(&edge_key).expect("Target key should exist");
 
-            let ev_c1 = children_map_target_key.get(&ComparableArc::new(child1.clone())).expect("Child1 should be under target_key");
+            let ev_c1 = children_map_target_key.get(&ArcPtrWrapper::new(child1.clone())).expect("Child1 should be under target_key");
             assert_eq!(*ev_c1, merged_ev_c1, "Edge value for child1 should be merged");
 
-            let ev_c2 = children_map_target_key.get(&ComparableArc::new(child2.clone())).expect("Child2 should be under target_key");
+            let ev_c2 = children_map_target_key.get(&ArcPtrWrapper::new(child2.clone())).expect("Child2 should be under target_key");
             assert_eq!(*ev_c2, initial_ev_c2, "Edge value for child2 should be unchanged");
 
             let children_map_other_key = s_guard.get(&"other_key").expect("Other key should exist");
@@ -2610,7 +2563,7 @@ mod tests {
         let s_nm_guard = source_nm.lock().unwrap();
         let ev_c1_nm = s_nm_guard
             .get(&edge_key_nm).unwrap()
-            .get(&ComparableArc::new(child1_nm.clone())).unwrap();
+            .get(&ArcPtrWrapper::new(child1_nm.clone())).unwrap(); // Use ArcPtrWrapper
         assert_eq!(*ev_c1_nm, initial_ev_nm, "Edge value for child1_nm should be unchanged after failing merge");
 
 
@@ -2640,8 +2593,8 @@ mod tests {
         let s_chain_guard = source_chain.lock().unwrap();
         let children_map_chain = s_chain_guard.get(&edge_key_chain).expect("Chain key should now exist in source_chain");
         assert_eq!(children_map_chain.len(), 1, "One edge should be created under chain_key");
-        let (ca_chain, ev_chain) = children_map_chain.iter().next().unwrap();
-        assert!(Arc::ptr_eq(ca_chain.as_arc(), &result_node_chain), "Edge should point to the newly created node");
+        let (wrapper_chain, ev_chain) = children_map_chain.iter().next().unwrap();
+        assert!(Arc::ptr_eq(wrapper_chain.as_arc(), &result_node_chain), "Edge should point to the newly created node");
         assert_eq!(*ev_chain, new_ev_chain, "Edge should have the new_ev_chain value");
     }
 }
