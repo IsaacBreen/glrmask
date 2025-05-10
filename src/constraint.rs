@@ -733,35 +733,6 @@ impl<'a> GrammarConstraintState<'a> {
                                 Arc::make_mut(&mut parse_state.stack).value.t.active &= llm_tokens_from_finalizer;
                                 !parse_state.stack.value.t.active.is_empty()
                             });
-                            // Now, take the successfully filtered state and step it with the grammar token
-                            // This ensures that the GLR state is valid *before* stepping and also compatible with finalizer tokens.
-                            // However, the original logic applies the finalizer tokens to the *original* current_glr_parse_state,
-                            // and then merges *that* into self.state if it's compatible.
-                            // The `possible_next_glr_parse_state` is only used to check if the grammar token itself is valid.
-                            // Let's stick to the original logic structure for applying finalizer tokens:
-                            // Filter the `current_glr_parse_state` by `llm_tokens_from_finalizer`
-                            // If this filtered state is OK, then this is a valid terminal state for the *current* GLR configuration.
-                            // The `possible_next_glr_parse_state.is_ok()` check ensures the grammar token is valid from the *original* state.
-                            // The state stored is the *original* state, but filtered by the finalizer's tokens, and associated with the *next* tokenizer state.
-
-                            // Re-evaluating: The `glr_parse_state_filtered` should be based on `possible_next_glr_parse_state`
-                            // if the finalizer applies *after* the grammar token.
-                            // The current code filters `current_glr_parse_state` and if that's ok, stores it.
-                            // This implies the finalizer's `llm_tokens` are alternatives for the *current* position,
-                            // leading to a specific `tokenizer_state_id`.
-
-                            // The original logic:
-                            // 1. Clone `current_glr_parse_state` -> `possible_next_glr_parse_state`
-                            // 2. Step `possible_next_glr_parse_state` with `possible_final_grammar_token`.
-                            // 3. If `possible_next_glr_parse_state` is OK:
-                            //    For each (tokenizer_state_id, llm_tokens) in finalizer:
-                            //        Clone `current_glr_parse_state` -> `glr_parse_state_filtered` (this seems to be the point of confusion)
-                            //        Filter `glr_parse_state_filtered.t.active` by `llm_tokens`.
-                            //        If `glr_parse_state_filtered` is OK, add to `self.state[tokenizer_state_id]`.
-                            // This means the `llm_tokens` from the finalizer are applied to the GLR state *before* it's stepped by `possible_final_grammar_token`.
-                            // This seems correct if the finalizer represents LLM tokens that *complete* a grammar token.
-                            // The `possible_next_glr_parse_state.is_ok()` check ensures the grammar token is valid from the *original* state.
-                            // The state stored is the *original* state, but filtered by the finalizer's tokens, and associated with the *next* tokenizer state.
 
                             crate::debug!(3, "Processing finalizer for token_state_id {:?}", tokenizer_state_id);
                             if glr_parse_state_filtered.is_ok() { // This is current_glr_parse_state filtered by finalizer's llm_tokens
