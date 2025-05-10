@@ -16,9 +16,11 @@ from _sep1 import PyRegexExpr as Regex, PyGrammar, PyGrammarExpr as ge, PyGramma
 from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
-def regex(name, expr):
+def regex(expr, name=None):
         if name == "IGNORE":
             return name, ge.regex(expr)
+        if name is None:
+            return ge.regex(expr)
 #         return name, ge.regex(seq([ignore, expr]))
         return name, ge.sequence([ge.optional(ge.ref("IGNORE")), ge.regex(expr)])
 #         return name, ge.regex(expr)
@@ -152,7 +154,7 @@ def define_tokens() -> list[tuple[str, Any]]:
 #     ]))
 #     tokens["TYPE_COMMENT"] = eps()
 #     tokens["ENDMARKER"] = eps()
-    return [regex(name, expr) for name, expr in tokens.items()]
+    return [regex(expr, name) for name, expr in tokens.items()]
 #     # TODO: delete this
 #     return []
 
