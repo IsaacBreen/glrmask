@@ -107,7 +107,7 @@ pub fn eat_u8(c: u8) -> Expr {
 }
 
 pub fn eat_u8_negation(c: u8) -> Expr {
-    Expr::U8Seq(vec![c ^ 0xff])
+    Expr::U8Class(U8Set::from_u8(c).complement())
 }
 
 pub fn eat_u8_set(u8s: U8Set) -> Expr {
