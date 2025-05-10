@@ -111,24 +111,6 @@ pub struct GrammarConstraint {
 struct PrecomputeStats {
     // Gross counts (before sharing/merging reduces them in the final structure)
     initial_root_nodes_created: usize,
-    nodes_created_by_merge_policy_as_new_parent: usize, // Nodes created by merge_node_handles_internal to be the new parent
-    nodes_created_by_edge_inserter_else_create: usize,  // Nodes created by EdgeInserter's else_create in main loop
-
-    edges_inserted_by_merge_policy: usize,          // Edges from new parent to its constituents in merge_policy
-    edges_inserted_by_edge_inserter_main_loop: usize, // Edges created by EdgeInserter in main DFS loop
-
-    gross_edges_with_none_key: usize,
-    gross_edges_with_some_key: usize,
-
-    // Merge policy stats
-    merge_policy_invocations: usize,
-    merge_policy_merges_performed: usize,          // Actual merges (input size > threshold)
-    merge_policy_nodes_input_total: usize,         // Sum of set_of_handles.len() passed to merge_policy
-    merge_policy_nodes_effectively_merged_count: usize, // Sum of set_of_handles.len() for sets that *were* merged
-
-    // Gross counts for content modifications
-    finalizer_infos_pushed_to_nodes: usize, // How many times push_finalizer_info was called on a node's value
-    clean_end_tokens_inserted_to_nodes: usize, // How many times a token_id was inserted into a node's clean_end bitset
 
     // Final structure stats (net counts, after all processing and sharing)
     final_unique_nodes_count: usize,
@@ -302,14 +284,10 @@ impl GrammarConstraint {
 
         // ---- Helper function to merge NodeHandles ----
         fn merge_node_handles_internal(
-            stats: &mut PrecomputeStats,
             set_of_handles: &BTreeSet<NodeHandle>,
             all_llm_tokens_for_merge_edge: &HybridBitset,
             threshold: usize,
         ) -> BTreeSet<NodeHandle> { // Changed return type
-            stats.merge_policy_invocations += 1;
-            stats.merge_policy_nodes_input_total += set_of_handles.len();
-
             if set_of_handles.is_empty() {
                 return BTreeSet::new();
             }
@@ -318,12 +296,8 @@ impl GrammarConstraint {
                 return set_of_handles.clone();
             }
 
-            stats.merge_policy_merges_performed += 1;
-            stats.merge_policy_nodes_effectively_merged_count += set_of_handles.len();
-
             // Create a new node to represent the merged set.
             let new_merged_pc_node_arc = Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::default())));
-            stats.nodes_created_by_merge_policy_as_new_parent += 1;
 
             let mut result_set = BTreeSet::new();
 
@@ -333,15 +307,13 @@ impl GrammarConstraint {
                     None,                           // Edge key: Option<GrammarTokenID> = None
                     all_llm_tokens_for_merge_edge.clone(), // Edge value: LLMTokenBV
                     // Merge function for edge values (LLMTokenBV)
-                    |ev_exist: &LLMTokenBV, ev_new: LLMTokenBV| Some(ev_exist | &ev_new),
+                    |ev_exist: &LLMTokenBV, ev_new: HybridBitset| Some(ev_exist | &ev_new),
                 );
 
                 insert_result = insert_result.try_children(); // Will do nothing as no children under "None"
 
                 if !insert_result.clone_into_option().is_some() {
                     insert_result = insert_result.try_destination(new_merged_pc_node_arc.clone()); // Corrected destination
-                    stats.gross_edges_with_none_key += 1;
-                    stats.edges_inserted_by_merge_policy += 1;
                 }
             }
 
@@ -391,7 +363,6 @@ impl GrammarConstraint {
             let mut effective_source_pc_nodes_map: BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>> = BTreeMap::new(); // Changed name from merged_source_pc_nodes_map
             for (tokenizer_state_id, set_of_handles) in processing_item.associated_pc_nodes_by_state {
                 let effective_handles_set = merge_node_handles_internal(
-                    &mut stats,
                     &set_of_handles,
                     &all_llm_tokens_for_merge_edge,
                     MERGE_THRESHOLD,
@@ -443,7 +414,6 @@ impl GrammarConstraint {
 
                         // Apply the merge policy to the set of handles for this specific path in segment processing.
                         let effective_source_handles_for_suffix: BTreeSet<NodeHandle> = merge_node_handles_internal(
-                            &mut stats,
                             &current_path_source_handles_set,
                             &all_llm_tokens_for_merge_edge,
                             MERGE_THRESHOLD,
@@ -502,6 +472,7 @@ impl GrammarConstraint {
                                     }
                                 }
 
+
                                 inserter = inserter.try_destinations(&potential_targets);
 
                                 // ---- START: Replacement for try_children ----
@@ -532,11 +503,8 @@ impl GrammarConstraint {
                                     target_pc_node_arc = inserter.unwrap();
                                     // Edge was made to an existing node (or existing edge value merged)
                                 } else {
-                                    stats.nodes_created_by_edge_inserter_else_create += 1;
                                     target_pc_node_arc = inserter.else_create_destination_with_value(PrecomputedNodeContents::default()).unwrap();
                                 }
-                                stats.edges_inserted_by_edge_inserter_main_loop += 1;
-                                stats.gross_edges_with_some_key += 1; // Edge key is Some(grammar_token_id)
 
                                 if match_end_offset == bytes_segment.len() {
                                     next_level_associations_for_child
@@ -547,10 +515,7 @@ impl GrammarConstraint {
                                     let mut target_guard = target_pc_node_arc.lock().unwrap();
                                     // Update stats for clean_end
                                     let _ = target_guard.value.clean_end.get_or_insert_with(HybridBitset::new); // Ensure it exists
-                                    let inserted = target_guard.value.clean_end.as_mut().unwrap().insert(child_vocab_node.token_id());
-                                    if inserted { // HybridBitset::insert returns true if value was newly inserted
-                                        stats.clean_end_tokens_inserted_to_nodes += 1;
-                                    }
+                                    let _inserted = target_guard.value.clean_end.as_mut().unwrap().insert(child_vocab_node.token_id());
                                 } else {
                                     segment_processing_q.entry(match_end_offset)
                                         .or_default()
@@ -580,7 +545,6 @@ impl GrammarConstraint {
                                         final_tokenizer_state_id,
                                         max_llm_token_id,
                                     );
-                                    stats.finalizer_infos_pushed_to_nodes += 1;
                                 }
                             }
                         }
@@ -690,26 +654,7 @@ impl GrammarConstraint {
         } else { 0.0 };
 
         println!("--- Precomputation Statistics ---");
-        println!("Gross Counts (approximations during build):");
         println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
-        println!("  Nodes Created by Merge Policy (as new parent): {}", stats.nodes_created_by_merge_policy_as_new_parent);
-        println!("  Nodes Created by EdgeInserter (else_create in main loop): {}", stats.nodes_created_by_edge_inserter_else_create);
-        let total_gross_nodes = stats.initial_root_nodes_created + stats.nodes_created_by_merge_policy_as_new_parent + stats.nodes_created_by_edge_inserter_else_create;
-        println!("  Total Gross Nodes Approx.: {}", total_gross_nodes);
-        println!("  Edges Inserted by Merge Policy: {}", stats.edges_inserted_by_merge_policy);
-        println!("  Edges Inserted by EdgeInserter (main loop): {}", stats.edges_inserted_by_edge_inserter_main_loop);
-        let total_gross_edges = stats.edges_inserted_by_merge_policy + stats.edges_inserted_by_edge_inserter_main_loop;
-        println!("  Total Gross Edges Approx.: {}", total_gross_edges);
-        println!("    Gross Edges with None Key: {}", stats.gross_edges_with_none_key);
-        println!("    Gross Edges with Some Key: {}", stats.gross_edges_with_some_key);
-        println!("\nMerge Policy Details:");
-        println!("  Invocations: {}", stats.merge_policy_invocations);
-        println!("  Actual Merges Performed (input size > threshold): {}", stats.merge_policy_merges_performed);
-        println!("  Total Nodes Input to Policy: {}", stats.merge_policy_nodes_input_total);
-        println!("  Nodes Effectively Merged (sum of len of sets that were merged): {}", stats.merge_policy_nodes_effectively_merged_count);
-        println!("\nGross Content Modification Counts:");
-        println!("  Finalizer Infos Pushed to Node Values: {}", stats.finalizer_infos_pushed_to_nodes);
-        println!("  Clean End Token IDs Inserted into Node Values: {}", stats.clean_end_tokens_inserted_to_nodes);
         println!("\nFinal Graph Structure (after sharing and deduplication):");
         println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
         println!("  Total Edges: {}", stats.final_edges_count);
@@ -1319,9 +1264,9 @@ mod tests {
         let llm_tokens: Vec<Vec<u8>> = (0..2).map(|i| format!("abcdefghijk{}", i).as_bytes().to_vec()).collect();
         let llm_tokens_slices: Vec<&[u8]> = llm_tokens.iter().map(|token| &token[..]).collect();
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
-        let eof_llm_token_id = llm_tokens.len();
+        let _eof_llm_token_id = llm_tokens.len();
         let max_llm_token_id = llm_tokens.len();
-        let precomputed = GrammarConstraint::precompute(
+        let _precomputed = GrammarConstraint::precompute(
             &tokenizer,
             &llm_token_map,
             &BiBTreeMap::new(), // empty name‐map
@@ -1340,9 +1285,9 @@ mod tests {
 
         let llm_tokens: Vec<Vec<u8>> = vec![b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec()];
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
-        let eof_llm_token_id = llm_tokens.len();
+        let _eof_llm_token_id = llm_tokens.len();
         let max_llm_token_id = llm_tokens.len();
-        let precomputed = GrammarConstraint::precompute(
+        let _precomputed = GrammarConstraint::precompute(
             &tokenizer,
             &llm_token_map,
             &BiBTreeMap::new(), // empty name‐map
