@@ -23,7 +23,7 @@ const DENSE_TO_SPARSE_THRESHOLD: usize = 64;
 
 // --- Enum for Internal Representation ---
 
-#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
 enum BitsetRepr {
     Sparse(BTreeSet<usize>),
     Dense {
@@ -31,6 +31,15 @@ enum BitsetRepr {
         // Stores the exact count if known. None if dirty and needs recalculation.
         cached_exact_count: RefCell<Option<usize>>,
     },
+}
+
+impl Hash for BitsetRepr {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            BitsetRepr::Sparse(set) => set.hash(state),
+            BitsetRepr::Dense { bits, .. } => bits.hash(state),
+        }
+    }
 }
 
 // --- The Hybrid Bitset Struct ---
