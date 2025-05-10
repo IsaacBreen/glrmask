@@ -144,10 +144,10 @@ def define_tokens() -> list[tuple[str, Any]]:
         eat('"""'),
         eat("'''"),
     ])
-    tokens["FSTRING_MIDDLE"] = rep(choice([
-        eat_u8_negation(ord("{")),
-        eat("{{"),
-    ]))
+#     tokens["FSTRING_MIDDLE"] = rep(choice([
+#         eat_u8_negation(ord("{")),
+#         eat("{{"),
+#     ]))
     tokens["TYPE_COMMENT"] = eps()
     tokens["ENDMARKER"] = eps()
     return [(name, regex(expr)) for name, expr in tokens.items()]
@@ -377,7 +377,8 @@ if __name__ == "__main__":
 #     expected_next_token = "world"
 
     pre_input_text = ""
-    input_text = '# This Python script'
+#     input_text = '# This Python script'
+    input_text = 'NAME'
     expected_next_token = ""
 
     if expected_next_token:
