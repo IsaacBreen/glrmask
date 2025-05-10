@@ -22,7 +22,7 @@ def regex(expr, name=None):
     if name == "IGNORE":
         return name, expr
     if name is None:
-        return ge.regex(ge.sequence([ge.ref("IGNORE"), expr]))
+        return ge.sequence([ge.ref("IGNORE"), expr])
 #     return name, ge.regex(seq([ignore, expr]))
     return name, ge.sequence([ge.ref("IGNORE"), expr])
 #     return name, ge.regex(expr)
@@ -214,8 +214,8 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
             rhs = ge.choice([])
         else:
             rhs = pegen_to_sep1_regex(rule.rhs, memo)
-#        # TODO: uncomment this
-#         exprs.append((rule.name, rhs))
+       # TODO: uncomment this
+        exprs.append((rule.name, rhs))
 
 
     tokens = define_tokens()
