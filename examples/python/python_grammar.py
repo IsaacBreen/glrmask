@@ -170,9 +170,9 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
     seq = Regex.seq
     rep = Regex.rep
     eps = Regex.eps
-#     exprs.append(("start'''", ge.regex(seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]))))
+    exprs.append(("start'''", ge.regex(seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]))))
 #     exprs.append(("start'''", ge.regex(seq([eat_u8(ord("#")), seq([eat_u8(ord(c)) for c in " This"]), eat_u8(ord("\n"))]))))
-    exprs.append(("start'''", ge.sequence([ge.ref("NAME"), ge.regex(eat_u8(ord("$")))])))
+#     exprs.append(("start'''", ge.sequence([ge.ref("NAME"), ge.regex(eat_u8(ord("$")))])))
 #     exprs.append(("start'''", ge.ref("IGNORE")))
 
 #     # TODO: delete this
