@@ -101,10 +101,12 @@ def define_tokens() -> list[tuple[str, Any]]:
     ]))
     tokens["IGNORE"] = ignore
 
-    def regex(expr):
-#         return ge.regex(seq([ignore, expr]))
-        return ge.sequence([ge.ref("IGNORE"), ge.regex(expr)])
-#         return ge.regex(expr)
+    def regex(name, expr):
+        if name == "IGNORE":
+            return name, ge.regex(expr)
+#         return name, ge.regex(seq([ignore, expr]))
+#         return name, ge.sequence([ge.ref("IGNORE"), ge.regex(expr)])
+        return name, ge.regex(expr)
 
     # TODO: uncomment this
     digit = eat_range('0', '9')
@@ -151,7 +153,7 @@ def define_tokens() -> list[tuple[str, Any]]:
 #     ]))
 #     tokens["TYPE_COMMENT"] = eps()
 #     tokens["ENDMARKER"] = eps()
-    return [(name, regex(expr)) for name, expr in tokens.items()]
+    return [regex(name, expr) for name, expr in tokens.items()]
 #     # TODO: delete this
 #     return []
 
