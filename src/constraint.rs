@@ -585,14 +585,14 @@ impl<'r> Precomputer<'r> {
         };
 
         if match_end_offset_in_segment < segment_len {
-            if let Some(map) = queue.get(&match_end_offset_in_segment) {
-                if let Some(set) = map.get(&TokenizerStateID(0)) {
-                    gather_set(set, &mut pot, yellow, prospective_context_for_target);
+            if let Some(map_at_offset) = queue.get(&match_end_offset_in_segment) {
+                for set_of_nodes_at_offset_and_any_state in map_at_offset.values() {
+                    gather_set(set_of_nodes_at_offset_and_any_state, &mut pot, yellow, prospective_context_for_target);
                 }
             }
         } else {
-            if let Some(set) = next_level.get(&TokenizerStateID(0)) {
-                gather_set(set, &mut pot, yellow, prospective_context_for_target);
+             for set_of_nodes_at_next_level_any_state in next_level.values() {
+                gather_set(set_of_nodes_at_next_level_any_state, &mut pot, yellow, prospective_context_for_target);
             }
         }
 
