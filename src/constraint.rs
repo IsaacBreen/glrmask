@@ -295,50 +295,33 @@ impl GrammarConstraint {
         }
         // --------------------------------------------
 
-
-        // Struct for DFS item
-        struct VocabProcessingItem<'a> {
-            vocab_node: &'a VocabPrefixTreeNode,
-            // Maps TokenizerStateID (at this vocab_node) to a SET of PrecomputeNode handles that represent paths ending at (vocab_node, TokenizerStateID)
-            associated_pc_nodes_by_state: BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>>,
-        }
-
-        // --- Use a Vec as a stack for DFS ---
-        let mut dfs_vocab_stack: Vec<VocabProcessingItem> = Vec::new();
-
-        // Initialize the DFS stack with the root of the VocabPrefixTree.
-        let mut initial_associations_at_vocab_root = BTreeMap::new();
-        for (tokenizer_id, pc_root_arc) in &precomputed_roots {
-            let mut set_for_state = BTreeSet::new();
-            set_for_state.insert(NodeHandle(pc_root_arc.clone())); // Each precomputed_root is a starting point
-            initial_associations_at_vocab_root.insert(*tokenizer_id, set_for_state);
-        }
-
-        // --- Push root onto the DFS stack ---
-        dfs_vocab_stack.push(VocabProcessingItem {
-            vocab_node: &vocab_prefix_tree.root,
-            associated_pc_nodes_by_state: initial_associations_at_vocab_root,
-        });
-
-
-        crate::debug!(2, "Starting precompute main DFS loop over VocabPrefixTree");
-        // --- Main DFS loop ---
-        while let Some(processing_item) = dfs_vocab_stack.pop() {
+        // ---- Define the recursive helper function ----
+        fn precompute_recursive_helper(
+            vocab_node: &VocabPrefixTreeNode,
+            associated_pc_nodes_by_state_param: BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>>,
+            // Captured or passed-in context:
+            tokenizer_ref: &Regex,
+            all_llm_tokens_for_merge_edge_ref: &HybridBitset,
+            pb_ref: &ProgressBar,
+            max_llm_token_id_val: usize,
+            MERGE_THRESHOLD_val: usize,
+            // Note: merge_node_handles_internal is accessible as it's defined in the outer scope
+        ) {
             // --- Increment progress bar ---
-            pb.inc(1);
+            pb_ref.inc(1);
 
             crate::debug!(3, "Processing VocabPrefixTreeNode ({} children), prefix: '{}'",
-                processing_item.vocab_node.iter_children().count(),
-                String::from_utf8_lossy(processing_item.vocab_node.prefix())
+                vocab_node.iter_children().count(),
+                String::from_utf8_lossy(vocab_node.prefix())
             );
 
             // Step 1: For each TokenizerStateID, apply merge policy to the set of incoming PrecomputeNode handles.
             let mut effective_source_pc_nodes_map: BTreeMap<TokenizerStateID, BTreeSet<NodeHandle>> = BTreeMap::new(); // Changed name from merged_source_pc_nodes_map
-            for (tokenizer_state_id, set_of_handles) in processing_item.associated_pc_nodes_by_state {
+            for (tokenizer_state_id, set_of_handles) in associated_pc_nodes_by_state_param {
                 let effective_handles_set = merge_node_handles_internal(
                     &set_of_handles,
-                    &all_llm_tokens_for_merge_edge,
-                    MERGE_THRESHOLD,
+                    all_llm_tokens_for_merge_edge_ref,
+                    MERGE_THRESHOLD_val,
                 );
                 if !effective_handles_set.is_empty() {
                     effective_source_pc_nodes_map.insert(tokenizer_state_id, effective_handles_set);
@@ -346,11 +329,7 @@ impl GrammarConstraint {
             }
 
             // Step 2: Iterate over children of current_vocab_node in the VocabPrefixTree
-            // --- Collect children to process in reverse order for DFS ---
-            let mut children_to_process: Vec<(&Vec<u8>, &VocabPrefixTreeNode)> = processing_item.vocab_node.iter_children().collect();
-            children_to_process.reverse(); // Process in reverse order for DFS
-
-            for (bytes_segment, child_vocab_node) in children_to_process {
+            for (bytes_segment, child_vocab_node) in vocab_node.iter_children() {
                 crate::debug!(3, "  Transitioning via segment: '{}' to child_vocab_node (prefix: '{}')",
                     String::from_utf8_lossy(bytes_segment),
                     String::from_utf8_lossy(child_vocab_node.prefix())
@@ -388,8 +367,8 @@ impl GrammarConstraint {
                         // Apply the merge policy to the set of handles for this specific path in segment processing.
                         let effective_source_handles_for_suffix: BTreeSet<NodeHandle> = merge_node_handles_internal(
                             &current_path_source_handles_set,
-                            &all_llm_tokens_for_merge_edge,
-                            MERGE_THRESHOLD,
+                            all_llm_tokens_for_merge_edge_ref,
+                            MERGE_THRESHOLD_val,
                         );
 
                         if effective_source_handles_for_suffix.is_empty() {
@@ -403,7 +382,7 @@ impl GrammarConstraint {
 
 
                         let segment_suffix_to_process = &bytes_segment[current_offset..];
-                        let results = tokenizer.execute_from_state(segment_suffix_to_process, tokenizer_state_before_suffix);
+                        let results = tokenizer_ref.execute_from_state(segment_suffix_to_process, tokenizer_state_before_suffix);
 
                         // --- Existing logic for results.matches ---
                         for match_info in &results.matches {
@@ -509,14 +488,14 @@ impl GrammarConstraint {
                                     .or_default()
                                     .insert(NodeHandle(segment_source_pc_handle.0.clone()));
 
-                                let possible_final_grammar_tokens = tokenizer.tokens_accessible_from_state(final_tokenizer_state_id);
+                                let possible_final_grammar_tokens = tokenizer_ref.tokens_accessible_from_state(final_tokenizer_state_id);
                                 let mut segment_source_guard = segment_source_pc_handle.0.lock().unwrap();
                                 for gtid in possible_final_grammar_tokens {
                                     segment_source_guard.value.push_finalizer_info(
                                         gtid,
                                         LLMTokenID(child_vocab_node.token_id()),
                                         final_tokenizer_state_id,
-                                        max_llm_token_id,
+                                        max_llm_token_id_val,
                                     );
                                 }
                             }
@@ -526,14 +505,45 @@ impl GrammarConstraint {
                         }
                     }
                 }
-                dfs_vocab_stack.push(VocabProcessingItem {
-                    vocab_node: child_vocab_node,
-                    associated_pc_nodes_by_state: next_level_associations_for_child,
-                });
+                // RECURSIVE CALL INSTEAD OF PUSHING TO STACK
+                precompute_recursive_helper(
+                    child_vocab_node,
+                    next_level_associations_for_child,
+                    tokenizer_ref,
+                    all_llm_tokens_for_merge_edge_ref,
+                    pb_ref,
+                    max_llm_token_id_val,
+                    MERGE_THRESHOLD_val,
+                );
             }
         }
+        // ---- End of recursive helper function definition ----
+
+
+        // Initialize the DFS stack with the root of the VocabPrefixTree.
+        let mut initial_associations_at_vocab_root = BTreeMap::new();
+        for (tokenizer_id, pc_root_arc) in &precomputed_roots {
+            let mut set_for_state = BTreeSet::new();
+            set_for_state.insert(NodeHandle(pc_root_arc.clone())); // Each precomputed_root is a starting point
+            initial_associations_at_vocab_root.insert(*tokenizer_id, set_for_state);
+        }
+
+        crate::debug!(2, "Starting precompute DFS recursion over VocabPrefixTree"); // New/updated debug message
+        // Initial call to the recursive helper
+        precompute_recursive_helper(
+            &vocab_prefix_tree.root,
+            initial_associations_at_vocab_root,
+            tokenizer, // Pass the original tokenizer
+            &all_llm_tokens_for_merge_edge, // Pass ref to original
+            &pb, // Pass ref to original progress bar
+            max_llm_token_id, // Pass original
+            MERGE_THRESHOLD, // Pass original
+        );
+        crate::debug!(2, "Done with precompute DFS recursion."); // New/updated debug message
+
         pb.finish_with_message("Precomputation complete");
-        crate::debug!(2, "Done precomputing main DFS loop.");
+        // crate::debug!(2, "Done precomputing main DFS loop."); // This old message can be removed or adapted
+
 
         // ---- Perform final cycle check on the fully built graph ----
         crate::debug!(2, "Performing final cycle check on precomputed graph structure...");
