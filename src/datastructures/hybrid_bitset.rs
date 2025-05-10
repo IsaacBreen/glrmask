@@ -6,6 +6,7 @@ use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, I
 use std::cmp::{max, min};
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator; // Needed for collect into BTreeSet in tests
+use std::cell::RefCell; // Needed for caching
 
 // --- Static Assertions Dependency (Optional but Recommended) ---
 // Add `static_assertions = "1.1"` to your Cargo.toml if you want this compile-time check
@@ -27,11 +28,8 @@ enum BitsetRepr {
     Sparse(BTreeSet<usize>),
     Dense {
         bits: BitVec<usize, Lsb0>,
-        // Inclusive bounds on the number of set bits.
-        // If lower == upper, the count is exact.
-        // Otherwise, the exact count is unknown but within [lower, upper].
-        lower_bound_count: usize,
-        upper_bound_count: usize,
+        // Stores the exact count if known. None if dirty and needs recalculation.
+        cached_exact_count: RefCell<Option<usize>>,
     },
 }
 
@@ -69,7 +67,7 @@ impl HybridBitset {
             // Use Dense representation
             let bits = bitvec![usize, Lsb0; 1; num_elements]; // Create BitVec of `num_elements` length, all set to 1
             HybridBitset {
-                inner: BitsetRepr::Dense { bits, lower_bound_count: num_elements, upper_bound_count: num_elements }
+                inner: BitsetRepr::Dense { bits, cached_exact_count: RefCell::new(Some(num_elements)) }
             }
         } else {
             // Use Sparse representation
@@ -91,16 +89,15 @@ impl HybridBitset {
     pub fn len(&self) -> usize {
         match &self.inner {
             BitsetRepr::Sparse(set) => set.len(),
-            BitsetRepr::Dense { bits, lower_bound_count, upper_bound_count } => {
-                if *lower_bound_count == *upper_bound_count {
-                    // Bounds are exact, return the known count
-                    *lower_bound_count
+            BitsetRepr::Dense { bits, cached_exact_count } => {
+                let mut count_opt = cached_exact_count.borrow_mut(); // Borrow mutably to update
+                if let Some(count) = *count_opt {
+                    // Count is known
+                    count
                 } else {
-                    // Bounds are not exact, recalculate
+                    // Count is not known, recalculate and cache it
                     let exact_count = bits.count_ones();
-                     // Can't do this - needs mutable reference to self
-                    // *lower_bound_count = exact_count;
-                    // *upper_bound_count = exact_count;
+                    *count_opt = Some(exact_count);
                     exact_count
                 }
             }
@@ -111,18 +108,8 @@ impl HybridBitset {
     pub fn is_empty(&self) -> bool {
         match &self.inner { // Use mutable borrow to potentially update count
             BitsetRepr::Sparse(set) => set.is_empty(),
-            BitsetRepr::Dense { lower_bound_count, upper_bound_count, .. } => {
-                 // If bounds are exact and 0, it's empty.
-                 // If lower bound is > 0, it's not empty.
-                 // Otherwise, we need the exact count.
-                 if *lower_bound_count == *upper_bound_count {
-                     *lower_bound_count == 0
-                 } else if *lower_bound_count > 0 {
-                     false
-                 } else {
-                     // Need exact count if lower is 0 but upper > 0
-                     self.len() == 0 // len() will recalculate and update bounds if needed
-                 }
+            BitsetRepr::Dense { .. } => { // We don't need to destructure cached_exact_count here
+                 self.len() == 0 // len() now handles caching
             }
         }
     }
@@ -154,20 +141,12 @@ impl HybridBitset {
                     }
                 }
             }
-            BitsetRepr::Dense { bits, lower_bound_count, upper_bound_count } => {
+            BitsetRepr::Dense { bits, cached_exact_count } => {
                 // Ensure the BitVec is large enough
                 if index >= bits.len() {
                     // Calculate required capacity increase. Avoid excessive overallocation for single large indices.
                     let new_len = index + 1;
                     bits.resize(new_len, false);
-                    // Resizing might invalidate upper bound if we didn't know the exact count
-                     if *lower_bound_count != *upper_bound_count {
-                         // The safest upper bound after resize is the new capacity,
-                         // but adding 1 is also a valid (though potentially looser) upper bound update.
-                         // Let's stick to the simple increment for consistency, len() will fix it if needed.
-                         // *upper_bound_count = bits.len(); // Safest upper bound
-                         *upper_bound_count = upper_bound_count.saturating_add(1);
-                     }
                 }
 
                 // Check current state before setting using immutable borrow first
@@ -177,9 +156,10 @@ impl HybridBitset {
                 if !was_present {
                     // Now get mutable borrow to set
                     bits.set(index, true);
-                    // Increment bounds only if we actually changed the bit from 0 to 1
-                    *lower_bound_count = lower_bound_count.saturating_add(1);
-                    *upper_bound_count = upper_bound_count.saturating_add(1);
+                    // Update cached count if known
+                    if let Some(count_ref) = cached_exact_count.borrow_mut().as_mut() {
+                        *count_ref += 1;
+                    }
                 }
                 // No conversion check needed on insert for Dense
             }
@@ -201,14 +181,13 @@ impl HybridBitset {
     pub fn remove(&mut self, index: usize) -> bool {
         let was_present;
         let mut needs_conversion_check = false;
-        let mut current_upper_bound = 0; // To check threshold outside match
 
         match &mut self.inner {
             BitsetRepr::Sparse(set) => {
                 was_present = set.remove(&index);
                 // No conversion check needed on remove for Sparse
             }
-            BitsetRepr::Dense { bits, lower_bound_count, upper_bound_count } => {
+            BitsetRepr::Dense { bits, cached_exact_count } => {
                 // Check if index is within bounds first
                 if index < bits.len() {
                      // Check current state before clearing
@@ -217,18 +196,12 @@ impl HybridBitset {
 
                     if was_present {
                         bits.set(index, false);
-                        // Decrement bounds only if we actually changed the bit from 1 to 0
-                        // If bounds were exact, they remain exact after decrement.
-                        // If bounds were not exact, decrementing both is safe.
-                        *lower_bound_count = lower_bound_count.saturating_sub(1);
-                        *upper_bound_count = upper_bound_count.saturating_sub(1);
-
-                        // Check if we should convert to Sparse
-                        // Use the upper bound for the check, as it's the max possible count
-                        current_upper_bound = *upper_bound_count; // Store for check outside match
-                        if current_upper_bound < DENSE_TO_SPARSE_THRESHOLD {
-                            needs_conversion_check = true;
+                        // Update cached count if known
+                        if let Some(count_ref) = cached_exact_count.borrow_mut().as_mut() {
+                            *count_ref -= 1;
                         }
+                        // Signal that representation might need to be checked
+                        needs_conversion_check = true;
                     }
                 } else {
                     // Index out of bounds, definitely wasn't present
@@ -238,18 +211,9 @@ impl HybridBitset {
         }
 
         if needs_conversion_check {
-             // Recalculate exact count before potentially converting
-             // This requires getting a mutable borrow again
-             if let BitsetRepr::Dense { bits, lower_bound_count, upper_bound_count } = &mut self.inner {
-                 if *lower_bound_count != *upper_bound_count || *upper_bound_count < DENSE_TO_SPARSE_THRESHOLD {
-                     let exact_count = bits.count_ones();
-                     *lower_bound_count = exact_count;
-                     *upper_bound_count = exact_count;
-                     if exact_count < DENSE_TO_SPARSE_THRESHOLD {
-                         self.convert_to_sparse();
-                     }
-                 }
-             }
+            // This flag is set true only if a Dense set was modified by remove and might shrink.
+            // Call check_representation to handle potential conversion.
+            self.check_representation();
         }
 
         was_present
@@ -338,8 +302,7 @@ impl HybridBitset {
                 // Handle empty set case
                  self.inner = BitsetRepr::Dense {
                     bits: BitVec::new(),
-                    lower_bound_count: 0,
-                    upper_bound_count: 0,
+                    cached_exact_count: RefCell::new(Some(0)),
                 };
                 return;
             }
@@ -356,8 +319,7 @@ impl HybridBitset {
 
             self.inner = BitsetRepr::Dense {
                 bits,
-                lower_bound_count: count, // Exact count known after conversion
-                upper_bound_count: count,
+                cached_exact_count: RefCell::new(Some(count)),
             };
         }
         // If already Dense, do nothing
@@ -365,9 +327,7 @@ impl HybridBitset {
 
     // --- Helper: Convert Dense -> Sparse ---
     fn convert_to_sparse(&mut self) {
-        if let BitsetRepr::Dense { bits, lower_bound_count, .. } = &self.inner {
-            // Use lower_bound as a hint for capacity, though exact count is better if available
-            let capacity_hint = *lower_bound_count;
+        if let BitsetRepr::Dense { bits, .. } = &self.inner { // removed cached_exact_count from destructuring
             let mut set = BTreeSet::new();
             for index in bits.iter_ones() {
                 set.insert(index);
@@ -377,16 +337,6 @@ impl HybridBitset {
         // If already Sparse, do nothing
     }
 
-     // --- Helper: Recalculate count for Dense and update bounds ---
-    fn recalculate_dense_count(&mut self) {
-        if let BitsetRepr::Dense { bits, lower_bound_count, upper_bound_count } = &mut self.inner {
-            if *lower_bound_count != *upper_bound_count { // Only recalculate if needed
-                let exact_count = bits.count_ones();
-                *lower_bound_count = exact_count;
-                *upper_bound_count = exact_count;
-            }
-        }
-    }
 
     // --- Helper: Check and potentially convert after an operation ---
     // This should be called after operations that might change the count significantly.
@@ -397,16 +347,19 @@ impl HybridBitset {
                     self.convert_to_dense();
                 }
             }
-            BitsetRepr::Dense { lower_bound_count, upper_bound_count, bits } => {
-                 // Use upper bound for quick check, but recalculate if near threshold
-                 if *upper_bound_count < DENSE_TO_SPARSE_THRESHOLD {
-                     // Recalculate to be sure before converting
-                     let exact_count = bits.count_ones();
-                     *lower_bound_count = exact_count;
-                     *upper_bound_count = exact_count;
-                     if exact_count < DENSE_TO_SPARSE_THRESHOLD {
-                         self.convert_to_sparse();
+            BitsetRepr::Dense { bits, cached_exact_count } => {
+                 let count = {
+                     let mut count_opt = cached_exact_count.borrow_mut();
+                     if let Some(c) = *count_opt {
+                         c
+                     } else {
+                         let exact_c = bits.count_ones();
+                         *count_opt = Some(exact_c);
+                         exact_c
                      }
+                 };
+                 if count < DENSE_TO_SPARSE_THRESHOLD {
+                     self.convert_to_sparse();
                  }
             }
         }
@@ -590,8 +543,7 @@ impl BitAnd for &HybridBitset {
                 let mut result = HybridBitset {
                     inner: BitsetRepr::Dense {
                         bits: result_bits,
-                        lower_bound_count: exact_count,
-                        upper_bound_count: exact_count,
+                        cached_exact_count: RefCell::new(Some(exact_count)),
                     }
                 };
                 result.check_representation(); // Check if result should be Sparse
@@ -673,8 +625,7 @@ impl BitOr for &HybridBitset {
                 let mut result = HybridBitset {
                     inner: BitsetRepr::Dense {
                         bits: result_bits,
-                        lower_bound_count: exact_count,
-                        upper_bound_count: exact_count,
+                        cached_exact_count: RefCell::new(Some(exact_count)),
                     }
                 };
                 result.check_representation(); // Check if result should be Sparse (e.g., union of small dense sets)
@@ -694,8 +645,7 @@ impl BitOr for &HybridBitset {
                 let mut result = HybridBitset {
                     inner: BitsetRepr::Dense {
                         bits: result_bits,
-                        lower_bound_count: exact_count,
-                        upper_bound_count: exact_count,
+                        cached_exact_count: RefCell::new(Some(exact_count)),
                     }
                 };
                 result.check_representation(); // Check if result should be Sparse
@@ -715,8 +665,7 @@ impl BitOr for &HybridBitset {
                 let mut result = HybridBitset {
                     inner: BitsetRepr::Dense {
                         bits: result_bits,
-                        lower_bound_count: exact_count,
-                        upper_bound_count: exact_count,
+                        cached_exact_count: RefCell::new(Some(exact_count)),
                     }
                 };
                 result.check_representation(); // Check if result should be Sparse
@@ -770,8 +719,7 @@ impl BitXor for &HybridBitset {
                 let mut result = HybridBitset {
                     inner: BitsetRepr::Dense {
                         bits: result_bits,
-                        lower_bound_count: exact_count,
-                        upper_bound_count: exact_count,
+                        cached_exact_count: RefCell::new(Some(exact_count)),
                     }
                 };
                 result.check_representation(); // Result size could be small or large
@@ -799,8 +747,7 @@ impl BitXor for &HybridBitset {
                 let mut result = HybridBitset {
                     inner: BitsetRepr::Dense {
                         bits: result_bits,
-                        lower_bound_count: exact_count,
-                        upper_bound_count: exact_count,
+                        cached_exact_count: RefCell::new(Some(exact_count)),
                     }
                 };
                 result.check_representation(); // Check if result should be Sparse
@@ -825,8 +772,7 @@ impl BitXor for &HybridBitset {
                 let mut result = HybridBitset {
                     inner: BitsetRepr::Dense {
                         bits: result_bits,
-                        lower_bound_count: exact_count,
-                        upper_bound_count: exact_count,
+                        cached_exact_count: RefCell::new(Some(exact_count)),
                     }
                 };
                 result.check_representation();
@@ -873,8 +819,7 @@ impl Sub for &HybridBitset {
                 let mut result = HybridBitset {
                     inner: BitsetRepr::Dense {
                         bits: result_bits,
-                        lower_bound_count: exact_count,
-                        upper_bound_count: exact_count,
+                        cached_exact_count: RefCell::new(Some(exact_count)),
                     }
                 };
                 result.check_representation(); // Check if result should be Sparse
@@ -901,8 +846,7 @@ impl Sub for &HybridBitset {
                 let mut result = HybridBitset {
                     inner: BitsetRepr::Dense {
                         bits: result_bits,
-                        lower_bound_count: exact_count,
-                        upper_bound_count: exact_count,
+                        cached_exact_count: RefCell::new(Some(exact_count)),
                     }
                 };
                 result.check_representation();
@@ -940,7 +884,7 @@ impl BitOrAssign for HybridBitset {
      fn bitor_assign(&mut self, rhs: Self) {
         // Optimization: If self is Dense, rhs is Sparse, can be faster
         match (&mut self.inner, &rhs.inner) {
-            (BitsetRepr::Dense { bits, lower_bound_count, upper_bound_count }, BitsetRepr::Sparse(set2)) => {
+            (BitsetRepr::Dense { bits, cached_exact_count }, BitsetRepr::Sparse(set2)) => {
                 let mut new_bits_set = 0;
                 // let original_len = bits.len(); // Not needed for logic
                 for &index in set2 {
@@ -953,11 +897,10 @@ impl BitOrAssign for HybridBitset {
                     }
                 }
                 if new_bits_set > 0 {
-                    // Bounds updated approximately
-                    *lower_bound_count = lower_bound_count.saturating_add(new_bits_set);
-                    *upper_bound_count = upper_bound_count.saturating_add(new_bits_set);
-                    // If resize happened, upper bound might be too low, recalculate?
-                    // For simplicity, let's assume len() will fix it later if needed.
+                    if let Some(count_ref) = cached_exact_count.borrow_mut().as_mut() {
+                        *count_ref += new_bits_set;
+                    }
+                    // If cached_exact_count was None, it remains None.
                 }
                 // No representation check needed (usually grows)
                 return; // Done with optimized path
@@ -980,7 +923,7 @@ impl SubAssign for HybridBitset {
     fn sub_assign(&mut self, rhs: Self) {
          // Optimization: If self is Dense, rhs is Sparse, can be faster
         match (&mut self.inner, &rhs.inner) {
-            (BitsetRepr::Dense { bits, lower_bound_count, upper_bound_count }, BitsetRepr::Sparse(set2)) => {
+            (BitsetRepr::Dense { bits, cached_exact_count }, BitsetRepr::Sparse(set2)) => {
                 let mut bits_cleared = 0;
                 for &index in set2 {
                     if index < bits.len() {
@@ -990,11 +933,11 @@ impl SubAssign for HybridBitset {
                     }
                 }
                 if bits_cleared > 0 {
-                    // Update bounds approximately
-                    *lower_bound_count = lower_bound_count.saturating_sub(bits_cleared);
-                    *upper_bound_count = upper_bound_count.saturating_sub(bits_cleared);
+                     if let Some(count_ref) = cached_exact_count.borrow_mut().as_mut() {
+                        *count_ref -= bits_cleared;
+                    }
                     // Check representation
-                    self.check_representation();
+                    self.check_representation(); // This will use the updated cache or recompute
                 }
                 return; // Done with optimized path
             }
@@ -1019,7 +962,7 @@ impl BitOrAssign<&HybridBitset> for HybridBitset {
      fn bitor_assign(&mut self, rhs: &HybridBitset) {
         // Optimization: If self is Dense, rhs is Sparse, can be faster
         match (&mut self.inner, &rhs.inner) {
-            (BitsetRepr::Dense { bits, lower_bound_count, upper_bound_count }, BitsetRepr::Sparse(set2)) => {
+            (BitsetRepr::Dense { bits, cached_exact_count }, BitsetRepr::Sparse(set2)) => {
                 let mut new_bits_set = 0;
                 // let original_len = bits.len(); // Not needed for logic
                 for &index in set2 {
@@ -1032,11 +975,9 @@ impl BitOrAssign<&HybridBitset> for HybridBitset {
                     }
                 }
                 if new_bits_set > 0 {
-                    // Bounds updated approximately
-                    *lower_bound_count = lower_bound_count.saturating_add(new_bits_set);
-                    *upper_bound_count = upper_bound_count.saturating_add(new_bits_set);
-                    // If resize happened, upper bound might be too low, recalculate?
-                    // For simplicity, let's assume len() will fix it later if needed.
+                    if let Some(count_ref) = cached_exact_count.borrow_mut().as_mut() {
+                        *count_ref += new_bits_set;
+                    }
                 }
                 // No representation check needed (usually grows)
                 return; // Done with optimized path
@@ -1059,7 +1000,7 @@ impl SubAssign<&HybridBitset> for HybridBitset {
     fn sub_assign(&mut self, rhs: &HybridBitset) {
          // Optimization: If self is Dense, rhs is Sparse, can be faster
         match (&mut self.inner, &rhs.inner) {
-            (BitsetRepr::Dense { bits, lower_bound_count, upper_bound_count }, BitsetRepr::Sparse(set2)) => {
+            (BitsetRepr::Dense { bits, cached_exact_count }, BitsetRepr::Sparse(set2)) => {
                 let mut bits_cleared = 0;
                 for &index in set2 {
                     if index < bits.len() {
@@ -1069,10 +1010,9 @@ impl SubAssign<&HybridBitset> for HybridBitset {
                     }
                 }
                 if bits_cleared > 0 {
-                    // Update bounds approximately
-                    *lower_bound_count = lower_bound_count.saturating_sub(bits_cleared);
-                    *upper_bound_count = upper_bound_count.saturating_sub(bits_cleared);
-                    // Check representation
+                     if let Some(count_ref) = cached_exact_count.borrow_mut().as_mut() {
+                        *count_ref -= bits_cleared;
+                    }
                     self.check_representation();
                 }
                 return; // Done with optimized path
@@ -1095,12 +1035,24 @@ impl PartialEq for HybridBitset {
         // but this can be slow. Let's try optimizing common cases.
         match (&self.inner, &other.inner) {
             (BitsetRepr::Sparse(s1), BitsetRepr::Sparse(s2)) => s1 == s2,
-            (BitsetRepr::Dense { bits: b1, lower_bound_count: lc1, upper_bound_count: uc1 },
-             BitsetRepr::Dense { bits: b2, lower_bound_count: lc2, upper_bound_count: uc2 }) => {
-                // Quick check: if counts are known exact and differ, they aren't equal
-                if lc1 == uc1 && lc2 == uc2 && lc1 != lc2 {
-                    return false;
+            (BitsetRepr::Dense { bits: b1, cached_exact_count: c1_rc },
+             BitsetRepr::Dense { bits: b2, cached_exact_count: c2_rc }) => {
+                // Try to use cached counts for an early exit if they are known and different.
+                let c1_opt_borrow = c1_rc.borrow();
+                let c2_opt_borrow = c2_rc.borrow();
+                if let (Some(count1), Some(count2)) = (*c1_opt_borrow, *c2_opt_borrow) {
+                    if count1 != count2 {
+                        // Drop borrows before returning
+                        drop(c1_opt_borrow);
+                        drop(c2_opt_borrow);
+                        return false;
+                    }
+                    // If counts are known and equal, we still need to compare bits.
                 }
+                // Drop borrows if not already dropped
+                drop(c1_opt_borrow);
+                drop(c2_opt_borrow);
+
                 // Compare underlying bitvecs, considering trailing zeros implicitly
                 let len1 = b1.len();
                 let len2 = b2.len();
@@ -1270,9 +1222,10 @@ mod tests {
         assert!(!set.contains(1));
 
         // Check bounds are exact after conversion
-         if let BitsetRepr::Dense { lower_bound_count, upper_bound_count, .. } = &set.inner {
-             assert_eq!(*lower_bound_count, SPARSE_TO_DENSE_THRESHOLD);
-             assert_eq!(*upper_bound_count, SPARSE_TO_DENSE_THRESHOLD);
+         if let BitsetRepr::Dense { cached_exact_count, .. } = &set.inner {
+             assert_eq!(*cached_exact_count.borrow(), Some(SPARSE_TO_DENSE_THRESHOLD));
+         } else {
+             panic!("Expected Dense representation");
          }
     }
 
@@ -1291,10 +1244,16 @@ mod tests {
         for i in (DENSE_TO_SPARSE_THRESHOLD..SPARSE_TO_DENSE_THRESHOLD).rev() {
              assert!(set.remove(i));
         }
-        // At this point, len() might not have been called, bounds might be inexact
-        // Let's call len() to force recalculation if needed before checking state
+        // At this point, len() might not have been called, cached count might be updated approximately
+        // Call len() to force recalculation and caching if needed before checking state
         assert_eq!(set.len(), DENSE_TO_SPARSE_THRESHOLD);
         assert!(matches!(set.inner, BitsetRepr::Dense { .. }), "Should still be Dense at threshold");
+         if let BitsetRepr::Dense { cached_exact_count, .. } = &set.inner {
+             assert_eq!(*cached_exact_count.borrow(), Some(DENSE_TO_SPARSE_THRESHOLD));
+         } else {
+              panic!("Expected Dense representation");
+         }
+
 
         // Remove one more element to trigger conversion check
         assert!(set.remove(DENSE_TO_SPARSE_THRESHOLD - 1));
@@ -1315,46 +1274,50 @@ mod tests {
         assert!(matches!(set.inner, BitsetRepr::Dense { .. }));
         // Ensure bounds are exact initially
         assert_eq!(set.len(), SPARSE_TO_DENSE_THRESHOLD);
+        if let BitsetRepr::Dense { cached_exact_count, .. } = &set.inner {
+            assert_eq!(*cached_exact_count.borrow(), Some(SPARSE_TO_DENSE_THRESHOLD));
+        }
 
-        // Insert existing - bounds shouldn't change if exact
+
+        // Insert existing - cached count shouldn't change if known
         set.insert(10);
-         if let BitsetRepr::Dense { lower_bound_count, upper_bound_count, .. } = &set.inner {
-             assert_eq!(*lower_bound_count, SPARSE_TO_DENSE_THRESHOLD);
-             assert_eq!(*upper_bound_count, SPARSE_TO_DENSE_THRESHOLD);
+        assert_eq!(set.len(), SPARSE_TO_DENSE_THRESHOLD);
+         if let BitsetRepr::Dense { cached_exact_count, .. } = &set.inner {
+             assert_eq!(*cached_exact_count.borrow(), Some(SPARSE_TO_DENSE_THRESHOLD));
          }
+
 
         // Insert new
         set.insert(SPARSE_TO_DENSE_THRESHOLD + 100); // Also tests resize
-         if let BitsetRepr::Dense { lower_bound_count, upper_bound_count, .. } = &set.inner {
-             assert_eq!(*lower_bound_count, SPARSE_TO_DENSE_THRESHOLD + 1);
-             assert_eq!(*upper_bound_count, SPARSE_TO_DENSE_THRESHOLD + 1);
+        assert_eq!(set.len(), SPARSE_TO_DENSE_THRESHOLD + 1); // len() forces exact count check
+         if let BitsetRepr::Dense { cached_exact_count, .. } = &set.inner {
+             assert_eq!(*cached_exact_count.borrow(), Some(SPARSE_TO_DENSE_THRESHOLD + 1));
          }
-         assert_eq!(set.len(), SPARSE_TO_DENSE_THRESHOLD + 1); // len() forces exact count check
+
 
          // Remove existing
          set.remove(0);
-          if let BitsetRepr::Dense { lower_bound_count, upper_bound_count, .. } = &set.inner {
-             assert_eq!(*lower_bound_count, SPARSE_TO_DENSE_THRESHOLD);
-             assert_eq!(*upper_bound_count, SPARSE_TO_DENSE_THRESHOLD);
-         }
          assert_eq!(set.len(), SPARSE_TO_DENSE_THRESHOLD);
+          if let BitsetRepr::Dense { cached_exact_count, .. } = &set.inner {
+             assert_eq!(*cached_exact_count.borrow(), Some(SPARSE_TO_DENSE_THRESHOLD));
+         }
+
 
          // Remove non-existing (within bounds)
          set.remove(1); // Was present, now removed
          set.remove(1); // Try removing again
-          if let BitsetRepr::Dense { lower_bound_count, upper_bound_count, .. } = &set.inner {
-             assert_eq!(*lower_bound_count, SPARSE_TO_DENSE_THRESHOLD -1);
-             assert_eq!(*upper_bound_count, SPARSE_TO_DENSE_THRESHOLD -1);
-         }
          assert_eq!(set.len(), SPARSE_TO_DENSE_THRESHOLD-1);
+          if let BitsetRepr::Dense { cached_exact_count, .. } = &set.inner {
+             assert_eq!(*cached_exact_count.borrow(), Some(SPARSE_TO_DENSE_THRESHOLD -1));
+         }
+
 
          // Remove non-existing (out of bounds)
          set.remove(999999);
-          if let BitsetRepr::Dense { lower_bound_count, upper_bound_count, .. } = &set.inner {
-             assert_eq!(*lower_bound_count, SPARSE_TO_DENSE_THRESHOLD -1);
-             assert_eq!(*upper_bound_count, SPARSE_TO_DENSE_THRESHOLD -1);
-         }
          assert_eq!(set.len(), SPARSE_TO_DENSE_THRESHOLD-1);
+          if let BitsetRepr::Dense { cached_exact_count, .. } = &set.inner {
+             assert_eq!(*cached_exact_count.borrow(), Some(SPARSE_TO_DENSE_THRESHOLD -1));
+         }
     }
 
     #[test]
@@ -1751,28 +1714,11 @@ mod tests {
         assert_eq!(sparse_set.iter_bools().len(), expected_sparse_bools.len());
 
         // Test with a dense set
-        let mut dense_set_forced = HybridBitset::new();
-        for i in 0..5 { // Small range, will be sparse initially
-            if i == 1 || i == 3 {
-                dense_set_forced.insert(i);
-            }
-        }
-        // Manually convert to dense for this test case, assuming it has some internal length.
-        // If we want to test the dense path of iter_bools, we need a dense set.
-        // Let's assume convert_to_dense works and use it.
-        dense_set_forced.convert_to_dense(); // Now it's dense. Max index is 3, length might be 4 or more.
-                                             // If it was {1,3}, after convert_to_dense, bits might be [0,1,0,1] (len 4)
-
-        // Let's re-evaluate the dense test for iter_bools.
-        // The iter_bools for dense iterates up to bits.len().
-        // If we have a dense set with bits representing [false, true, false, true] (len 4)
-        // then iter_bools should yield exactly that.
-
         let mut test_dense = HybridBitset::new();
         test_dense.insert(1);
         test_dense.insert(3); // sparse: {1, 3}
         test_dense.convert_to_dense(); // dense: bits for [0,1,0,1], len=4
-                                       // lower_bound_count=2, upper_bound_count=2
+                                       // cached_exact_count should be Some(2) now
 
         let expected_dense_bools = vec![false, true, false, true];
         assert_eq!(test_dense.iter_bools().collect::<Vec<bool>>(), expected_dense_bools);
@@ -1780,7 +1726,7 @@ mod tests {
 
         // Test with an empty dense set
         let mut empty_dense_set = HybridBitset::new();
-        empty_dense_set.convert_to_dense(); // Becomes Dense { bits: [], ... }
+        empty_dense_set.convert_to_dense(); // Becomes Dense { bits: [], cached_exact_count: Some(0) }
         assert_eq!(empty_dense_set.iter_bools().collect::<Vec<bool>>(), Vec::<bool>::new());
         assert_eq!(empty_dense_set.iter_bools().len(), 0);
     }
