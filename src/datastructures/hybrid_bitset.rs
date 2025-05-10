@@ -680,18 +680,47 @@ impl BitOr for &HybridBitset {
                 result.check_representation(); // Check if result should be Sparse (e.g., union of small dense sets)
                 result
             }
-            // Mixed: Convert Sparse to Dense is usually required here
-            (BitsetRepr::Sparse(_), BitsetRepr::Dense { .. }) => {
-                let mut lhs_clone = self.clone();
-                lhs_clone.ensure_dense(); // Convert lhs to Dense
-                // Now it's Dense | Dense
-                // Need mutable borrow for ensure_dense, so use reference for op
-                &lhs_clone | rhs
+            // Mixed: Sparse | Dense (self is Sparse, rhs is Dense)
+            (BitsetRepr::Sparse(s_set), BitsetRepr::Dense { bits: d_bits, .. }) => {
+                let mut result_bits = d_bits.clone();
+                for &index in s_set {
+                    if index >= result_bits.len() {
+                        result_bits.resize(index + 1, false);
+                    }
+                    result_bits.set(index, true); // Set bit to true
+                }
+
+                let exact_count = result_bits.count_ones();
+                let mut result = HybridBitset {
+                    inner: BitsetRepr::Dense {
+                        bits: result_bits,
+                        lower_bound_count: exact_count,
+                        upper_bound_count: exact_count,
+                    }
+                };
+                result.check_representation(); // Check if result should be Sparse
+                result
             }
-            (BitsetRepr::Dense { .. }, BitsetRepr::Sparse(_)) => {
-                let mut rhs_clone = rhs.clone();
-                rhs_clone.ensure_dense();
-                self | &rhs_clone
+            // Mixed: Dense | Sparse (self is Dense, rhs is Sparse)
+            (BitsetRepr::Dense { bits: d_bits, .. }, BitsetRepr::Sparse(s_set)) => {
+                let mut result_bits = d_bits.clone();
+                for &index in s_set {
+                    if index >= result_bits.len() {
+                        result_bits.resize(index + 1, false);
+                    }
+                    result_bits.set(index, true); // Set bit to true
+                }
+
+                let exact_count = result_bits.count_ones();
+                let mut result = HybridBitset {
+                    inner: BitsetRepr::Dense {
+                        bits: result_bits,
+                        lower_bound_count: exact_count,
+                        upper_bound_count: exact_count,
+                    }
+                };
+                result.check_representation(); // Check if result should be Sparse
+                result
             }
         }
     }
@@ -748,16 +777,60 @@ impl BitXor for &HybridBitset {
                 result.check_representation(); // Result size could be small or large
                 result
             }
-            // Mixed: Convert Sparse to Dense
-            (BitsetRepr::Sparse(_), BitsetRepr::Dense { .. }) => {
-                let mut lhs_clone = self.clone();
-                lhs_clone.ensure_dense();
-                &lhs_clone ^ rhs
+            // Mixed: Sparse ^ Dense (self is Sparse, rhs is Dense)
+            (BitsetRepr::Sparse(s_set), BitsetRepr::Dense { bits: d_bits, .. }) => {
+                let mut result_bits = d_bits.clone();
+                // Determine the maximum index from the sparse set to correctly size the result_bits.
+                // BTreeSet::last() is efficient for getting the max element.
+                let max_s_idx_plus_1 = s_set.last().map_or(0, |&v| v.saturating_add(1));
+
+                let current_len = result_bits.len();
+                if max_s_idx_plus_1 > current_len {
+                    result_bits.resize(max_s_idx_plus_1, false);
+                }
+
+                for &index in s_set {
+                    // Index is guaranteed to be within the (potentially resized) bounds of result_bits.
+                    let current_val = result_bits[index];
+                    result_bits.set(index, !current_val); // Flip the bit
+                }
+
+                let exact_count = result_bits.count_ones();
+                let mut result = HybridBitset {
+                    inner: BitsetRepr::Dense {
+                        bits: result_bits,
+                        lower_bound_count: exact_count,
+                        upper_bound_count: exact_count,
+                    }
+                };
+                result.check_representation(); // Check if result should be Sparse
+                result
             }
-            (BitsetRepr::Dense { .. }, BitsetRepr::Sparse(_)) => {
-                let mut rhs_clone = rhs.clone();
-                rhs_clone.ensure_dense();
-                self ^ &rhs_clone
+            // Mixed: Dense ^ Sparse (self is Dense, rhs is Sparse)
+            (BitsetRepr::Dense { bits: d_bits, .. }, BitsetRepr::Sparse(s_set)) => {
+                let mut result_bits = d_bits.clone();
+                let max_s_idx_plus_1 = s_set.last().map_or(0, |&v| v.saturating_add(1));
+
+                let current_len = result_bits.len();
+                if max_s_idx_plus_1 > current_len {
+                    result_bits.resize(max_s_idx_plus_1, false);
+                }
+
+                for &index in s_set {
+                    let current_val = result_bits[index];
+                    result_bits.set(index, !current_val); // Flip the bit
+                }
+
+                let exact_count = result_bits.count_ones();
+                let mut result = HybridBitset {
+                    inner: BitsetRepr::Dense {
+                        bits: result_bits,
+                        lower_bound_count: exact_count,
+                        upper_bound_count: exact_count,
+                    }
+                };
+                result.check_representation();
+                result
             }
         }
     }
