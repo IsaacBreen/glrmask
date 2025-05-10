@@ -1372,7 +1372,7 @@ mod tests {
         let mut max_llm_token_id_val: u32 = 0;
 
         // Sample GPT-2 tokens to speed up this test
-        let prop = 0.001;
+        let prop = 0.01;
         let total_tokens = gpt2_raw_vocab.len();
         let sample_size = (total_tokens as f64 * prop) as usize;
         println!("Sampling {} out of {} GPT-2 tokens for precompute", sample_size, total_tokens);
