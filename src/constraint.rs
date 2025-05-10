@@ -280,15 +280,15 @@ impl GrammarConstraint {
             vocab_node: &VocabPrefixTreeNode,
             associated_pc_nodes_by_state_param: BTreeMap<TokenizerStateID, BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>, // Use ArcPtrWrapper
             // Captured or passed-in context:
-            tokenizer_ref: &Regex,
-            all_llm_tokens_for_merge_edge_ref: &HybridBitset,
-            pb_ref: &ProgressBar,
-            max_llm_token_id_val: usize,
+            tokenizer: &Regex,
+            all_llm_tokens_for_merge_edge: &HybridBitset,
+            pb: &ProgressBar,
+            max_llm_token_id: usize,
             MERGE_THRESHOLD_val: usize,
             // Note: merge_node_handles_internal is accessible as it's defined in the outer scope
         ) {
             // --- Increment progress bar ---
-            pb_ref.inc(1);
+            pb.inc(1);
 
             crate::debug!(3, "Processing VocabPrefixTreeNode ({} children), prefix: '{}'",
                 vocab_node.iter_children().count(),
@@ -300,7 +300,7 @@ impl GrammarConstraint {
             for (tokenizer_state_id, set_of_handles) in associated_pc_nodes_by_state_param {
                 let effective_handles_set = merge_node_handles_internal(
                     &set_of_handles,
-                    all_llm_tokens_for_merge_edge_ref,
+                    all_llm_tokens_for_merge_edge,
                     MERGE_THRESHOLD_val,
                 );
                 if !effective_handles_set.is_empty() {
@@ -346,9 +346,9 @@ impl GrammarConstraint {
 
                         // Apply the merge policy to the set of handles for this specific path in segment processing.
                         let effective_source_handles_for_suffix: BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = merge_node_handles_internal( // Use ArcPtrWrapper
-                            &current_path_source_handles_set,
-                            all_llm_tokens_for_merge_edge_ref,
-                            MERGE_THRESHOLD_val,
+                                                                                                                                               &current_path_source_handles_set,
+                                                                                                                                               all_llm_tokens_for_merge_edge,
+                                                                                                                                               MERGE_THRESHOLD_val,
                         );
 
                         if effective_source_handles_for_suffix.is_empty() {
@@ -362,7 +362,7 @@ impl GrammarConstraint {
 
 
                         let segment_suffix_to_process = &bytes_segment[current_offset..];
-                        let results = tokenizer_ref.execute_from_state(segment_suffix_to_process, tokenizer_state_before_suffix);
+                        let results = tokenizer.execute_from_state(segment_suffix_to_process, tokenizer_state_before_suffix);
 
                         // --- Existing logic for results.matches ---
                         for match_info in &results.matches {
@@ -474,13 +474,13 @@ impl GrammarConstraint {
                                 // segment_source_pc_handle is &ArcPtrWrapper<Mutex<PrecomputeNode>>
                                 // Use as_arc() to get &Arc<Mutex<PrecomputeNode>>
                                 let mut segment_source_guard = segment_source_pc_handle.as_arc().lock().unwrap();
-                                let possible_final_grammar_tokens = tokenizer_ref.tokens_accessible_from_state(final_tokenizer_state_id);
+                                let possible_final_grammar_tokens = tokenizer.tokens_accessible_from_state(final_tokenizer_state_id);
                                 for gtid in possible_final_grammar_tokens {
                                     segment_source_guard.value.push_finalizer_info(
                                         gtid,
                                         LLMTokenID(child_vocab_node.token_id()),
                                         final_tokenizer_state_id,
-                                        max_llm_token_id_val,
+                                        max_llm_token_id,
                                     );
                                 }
                             }
@@ -494,11 +494,11 @@ impl GrammarConstraint {
                 precompute_recursive_helper(
                     child_vocab_node,
                     next_level_associations_for_child,
-                    tokenizer_ref, // Pass the original tokenizer
-                    all_llm_tokens_for_merge_edge_ref, // Pass ref to original
-                    pb_ref, // Pass ref to original progress bar
-                    max_llm_token_id_val, // Pass original
-                    MERGE_THRESHOLD, // Pass original
+                    tokenizer,
+                    all_llm_tokens_for_merge_edge,
+                    pb,
+                    max_llm_token_id,
+                    MERGE_THRESHOLD,
                 );
             }
         }
