@@ -103,7 +103,8 @@ def define_tokens() -> list[tuple[str, Any]]:
 
     def regex(expr):
 #         return ge.regex(seq([ignore, expr]))
-        return ge.sequence([ge.ref("IGNORE"), ge.regex(expr)])
+#         return ge.sequence([ge.ref("IGNORE"), ge.regex(expr)])
+        return ge.regex(expr)
 
     # TODO: uncomment this
     digit = eat_range('0', '9')
