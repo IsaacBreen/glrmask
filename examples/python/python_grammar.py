@@ -150,22 +150,23 @@ def define_tokens() -> list[tuple[str, Any]]:
     ]))
     tokens["TYPE_COMMENT"] = eps()
     tokens["ENDMARKER"] = eps()
-#     return [(name, regex(expr)) for name, expr in tokens.items()]
-    # TODO: delete this
-    return []
+    return [(name, regex(expr)) for name, expr in tokens.items()]
+#     # TODO: delete this
+#     return []
 
 def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
     memo = {}
     exprs: list[tuple[str, Any]] = []
 
     # Make sure the start production is first
-#     exprs.append(("start'''", ge.ref("file")))choice = Regex.choice
+    exprs.append(("start'''", ge.ref("file")))
+    choice = Regex.choice
     eat_u8 = Regex.eat_u8
     eat_u8_negation = Regex.eat_u8_negation
     seq = Regex.seq
     rep = Regex.rep
     eps = Regex.eps
-    exprs.append(("start'''", ge.regex(seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]))))
+#     exprs.append(("start'''", ge.regex(seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]))))
 #     exprs.append(("start'''", ge.regex(seq([eat_u8(ord("#")), seq([eat_u8(ord(c)) for c in " This"]), eat_u8(ord("\n"))]))))
 
 #     # TODO: delete this
