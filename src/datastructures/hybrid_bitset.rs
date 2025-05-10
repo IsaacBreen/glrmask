@@ -252,16 +252,39 @@ impl HybridBitset {
     /// If the set is empty (either Sparse or Dense), the iterator is empty.
     pub fn iter_bools(&self) -> BoolIter<'_> {
         match &self.inner {
-            BoolIterInner::Sparse { set, current_idx, max_idx_to_iterate } => {
-                if *current_idx > *max_idx_to_iterate {
-                    None
+            BitsetRepr::Sparse(set) => {
+                if set.is_empty() {
+                    // For an empty set, create an iterator that yields nothing.
+                    // current_idx starts beyond max_idx_to_iterate.
+                    BoolIter {
+                        inner: BoolIterInner::Sparse {
+                            set,
+                            current_idx: 1,
+                            max_idx_to_iterate: 0,
+                        }
+                    }
                 } else {
-                    let val_to_yield = set.contains(current_idx);
-                    *current_idx += 1;
-                    Some(val_to_yield)
+                    // Find the maximum element to define the iteration range.
+                    // BTreeSet is sorted, so last() is efficient.
+                    // unwrap() is safe here because we've checked is_empty().
+                    let max_val_in_set = set.last().copied().unwrap_or(0);
+                    BoolIter {
+                        inner: BoolIterInner::Sparse {
+                            set,
+                            current_idx: 0,
+                            max_idx_to_iterate: max_val_in_set,
+                        }
+                    }
                 }
             }
-            BoolIterInner::Dense(iter) => iter.next().map(|bit_ref| *bit_ref),        }
+            BitsetRepr::Dense { bits, .. } => {
+                // bits.iter() yields bool values for each position in the bitvector.
+                // The length of this iterator is bits.len().
+                BoolIter {
+                    inner: BoolIterInner::Dense(bits.iter()),
+                }
+            }
+        }
     }
 
 
@@ -454,7 +477,8 @@ impl<'a> Iterator for BoolIter<'a> {
                     Some(val_to_yield)
                 }
             }
-            BoolIterInner::Dense(iter) => iter.next().map(|bit_ref| *bit_ref),        }
+            BoolIterInner::Dense(iter) => iter.next().map(|bit_ref| *bit_ref),
+        }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {

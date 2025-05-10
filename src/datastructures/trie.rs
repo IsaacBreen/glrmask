@@ -696,7 +696,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 .expect("Child entry disappeared from map");
 
             // Pass the original edge_value by reference.
-            if let Some(merged_ev) = merge_edge_value(edge_val_mut, &edge_value) { // Pass by reference
+            if let Some(merged_ev) = merge_edge_value(&*edge_val_mut, &edge_value) { // Pass immutable ref
                  *edge_val_mut = merged_ev;
             }
             // Return the Arc corresponding to the merged node
@@ -730,7 +730,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 .expect("Child entry disappeared from map");
             // Re-calculate merged edge value and update
             // Pass the original edge_value by reference.
-            if let Some(merged_ev) = merge_edge_value(edge_val_mut, &edge_value) { // Pass by reference
+            if let Some(merged_ev) = merge_edge_value(&*edge_val_mut, &edge_value) { // Pass immutable ref
                  *edge_val_mut = merged_ev;
             } else {
                  // This should not happen if the check phase logic is correct and merge_edge_value is deterministic
@@ -821,7 +821,7 @@ where
         // Check if edge already exists and try merging EV
         if let Some(existing_ev_mut) = source.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
             // Call merge_edge_value with references
-            if let Some(merged_ev) = (self.merge_edge_value)(existing_ev_mut, &self.edge_value) { // Pass by reference
+            if let Some(merged_ev) = (self.merge_edge_value)(&*existing_ev_mut, &self.edge_value) { // Pass immutable ref
                 *existing_ev_mut = merged_ev;
                 self.result = Some(destination); // Merge successful, destination found
             }
@@ -1771,7 +1771,7 @@ mod tests {
 
     // Helper merge functions for tests
     // Merge edge value (Vec<i32>): Append new vec to existing if existing is not empty
-    fn merge_ev_append(existing_ev: &mut Vec<i32>, new_ev: &Vec<i32>) -> Option<Vec<i32>> {
+    fn merge_ev_append(existing_ev: &Vec<i32>, new_ev: &Vec<i32>) -> Option<Vec<i32>> { // Changed existing_ev to &Vec<i32>
         if !existing_ev.is_empty() {
             let mut merged = existing_ev.clone();
             merged.extend(new_ev.iter().copied()); // Use iter().copied()
