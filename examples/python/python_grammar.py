@@ -17,12 +17,14 @@ from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
 def regex(expr, name=None):
+    if not isinstance(expr, ge.PyGrammarExpr):
+        expr = ge.regex(expr)
     if name == "IGNORE":
-        return name, ge.regex(expr)
+        return name, expr
     if name is None:
-        return ge.regex(ge.sequence([ge.ref("IGNORE"), ge.regex(expr)]))
+        return ge.regex(ge.sequence([ge.ref("IGNORE"), expr]))
 #     return name, ge.regex(seq([ignore, expr]))
-    return name, ge.sequence([ge.ref("IGNORE"), ge.regex(expr)])
+    return name, ge.sequence([ge.ref("IGNORE"), expr])
 #     return name, ge.regex(expr)
 
 def eat(s: bytes) -> Regex:
