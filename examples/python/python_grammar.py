@@ -109,7 +109,7 @@ def define_tokens() -> list[tuple[str, Any]]:
         eat_u8(ord("\n")),
         seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]),
     ]))))
-    tokens["IGNORE"] = ignore
+#     tokens["IGNORE"] = ignore
 
     # TODO: uncomment this
     digit = eat_range('0', '9')
@@ -130,42 +130,44 @@ def define_tokens() -> list[tuple[str, Any]]:
         digit,
     ])
 
-    tokens["NAME"] = seq([name_start, rep(name_middle)])
-    tokens["NUMBER"] = choice([
-        rep(digit),
-        seq([rep(digit), eat_u8(ord(".")), rep(digit)]),
-    ])
-    tokens["NEWLINE"] = eps()
-    tokens["INDENT"] = eps()
-    tokens["DEDENT"] = eps()
-    tokens["STRING"] = choice([
-        seq([eat_u8(ord('"')), rep(eat_u8_negation(ord('"'))), eat_u8(ord('"'))]),
-        seq([eat_u8(ord("'")), rep(eat_u8_negation(ord("'"))), eat_u8(ord("'"))]),
-    ])
-    tokens["FSTRING_START"] = choice([
-        eat('"""'),
-        eat("'''"),
-    ])
-    tokens["FSTRING_END"] = choice([
-        eat('"""'),
-        eat("'''"),
-    ])
+#     tokens["NAME"] = seq([name_start, rep(name_middle)])
+#     tokens["NUMBER"] = choice([
+#         rep(digit),
+#         seq([rep(digit), eat_u8(ord(".")), rep(digit)]),
+#     ])
+#     tokens["NEWLINE"] = eps()
+#     tokens["INDENT"] = eps()
+#     tokens["DEDENT"] = eps()
+#     tokens["STRING"] = choice([
+#         seq([eat_u8(ord('"')), rep(eat_u8_negation(ord('"'))), eat_u8(ord('"'))]),
+#         seq([eat_u8(ord("'")), rep(eat_u8_negation(ord("'"))), eat_u8(ord("'"))]),
+#     ])
+#     tokens["FSTRING_START"] = choice([
+#         eat('"""'),
+#         eat("'''"),
+#     ])
+#     tokens["FSTRING_END"] = choice([
+#         eat('"""'),
+#         eat("'''"),
+#     ])
     tokens["FSTRING_MIDDLE"] = rep(choice([
         eat_u8_negation(ord("{")),
         eat("{{"),
     ]))
-    tokens["TYPE_COMMENT"] = eps()
-    tokens["ENDMARKER"] = eps()
-    return [regex(expr, name) for name, expr in tokens.items()]
+#     tokens["TYPE_COMMENT"] = eps()
+#     tokens["ENDMARKER"] = eps()
+#     return [regex(expr, name) for name, expr in tokens.items()]
 #     # TODO: delete this
 #     return []
+    assert len(tokens) == len(set(tokens.keys()))
+    return [(name, ge.regex(expr)) for name, expr in tokens.items()]
 
 def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
     memo = {}
     exprs: list[tuple[str, Any]] = []
 
     # Make sure the start production is first
-    exprs.append(("start'''", ge.ref("file")))
+#     exprs.append(("start'''", ge.ref("file")))
 #     # TODO: delete this
 #     choice = Regex.choice
 #     eat_u8 = Regex.eat_u8
@@ -177,6 +179,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
 #     exprs.append(("start'''", ge.regex(seq([eat_u8(ord("#")), seq([eat_u8(ord(c)) for c in " This"]), eat_u8(ord("\n"))]))))
 #     exprs.append(("start'''", ge.sequence([ge.ref("NAME"), ge.regex(eat_u8(ord("$")))])))
 #     exprs.append(("start'''", ge.ref("IGNORE")))
+    exprs.append(("start'''", ge.ref("FSTRING_MIDDLE")))
 
 #     # TODO: delete this
 #     # Add a rule for "hello=world$" to the start rule
@@ -214,8 +217,8 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
             rhs = ge.choice([])
         else:
             rhs = pegen_to_sep1_regex(rule.rhs, memo)
-       # TODO: uncomment this
-        exprs.append((rule.name, rhs))
+#        # TODO: uncomment this
+#         exprs.append((rule.name, rhs))
 
 
     tokens = define_tokens()
