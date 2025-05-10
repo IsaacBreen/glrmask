@@ -106,12 +106,12 @@ pub fn eat_u8(c: u8) -> Expr {
     Expr::U8Seq(vec![c])
 }
 
-pub fn eat_u8_negation(c: u8) -> Expr {
-    Expr::U8Class(U8Set::from_u8(c).complement())
-}
-
 pub fn eat_u8_set(u8s: U8Set) -> Expr {
     Expr::U8Class(u8s)
+}
+
+pub fn eat_u8_negation(c: u8) -> Expr {
+    Expr::U8Class(U8Set::from_u8(c).complement())
 }
 
 pub fn rep<T: Into<Expr>>(expr: T) -> Expr {
