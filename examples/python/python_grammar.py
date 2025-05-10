@@ -17,13 +17,13 @@ from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
 def regex(expr, name=None):
-        if name == "IGNORE":
-            return name, ge.regex(expr)
-        if name is None:
-            return ge.regex(expr)
-#         return name, ge.regex(seq([ignore, expr]))
-        return name, ge.sequence([ge.optional(ge.ref("IGNORE")), ge.regex(expr)])
-#         return name, ge.regex(expr)
+    if name == "IGNORE":
+        return name, ge.regex(expr)
+    if name is None:
+        return ge.regex(expr)
+#     return name, ge.regex(seq([ignore, expr]))
+    return name, ge.sequence([ge.optional(ge.ref("IGNORE")), ge.regex(expr)])
+#     return name, ge.regex(expr)
 
 def eat(s: bytes) -> Regex:
     if len(s) == 1:
