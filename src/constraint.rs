@@ -293,7 +293,8 @@ impl<'r> Precomputer<'r> {
         }
 
         crate::debug!(2, "Starting precompute DFS");
-        self.dfs(&self.vocab.root, assoc);
+        let mut yellow = HashSet::new();
+        self.dfs(&self.vocab.root, assoc, &mut yellow);
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish_with_message("Precomputation complete");
     }
@@ -354,6 +355,7 @@ impl<'r> Precomputer<'r> {
             TokenizerStateID,
             BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
+        yellow: &mut HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
     ) {
         self.pb.inc(1);
 
@@ -381,7 +383,7 @@ impl<'r> Precomputer<'r> {
                 String::from_utf8_lossy(child_vocab.prefix())
             );
 
-            self.process_segment(segment, child_vocab, &effective);
+            self.process_segment(segment, child_vocab, &effective, yellow);
         }
     }
 
@@ -396,6 +398,7 @@ impl<'r> Precomputer<'r> {
             TokenizerStateID,
             BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
+        yellow: &mut HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
     ) {
         // Maps used while consuming the segment byte-by-byte.
         let mut next_level: BTreeMap<
@@ -419,7 +422,7 @@ impl<'r> Precomputer<'r> {
         }
 
         // Yellow nodes = currently processing (cycle-avoidance / duplicate work)
-        let mut yellow: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = HashSet::new();
+        let mut new_yellow: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = HashSet::new();
 
         while let Some((offset, map_at_offset)) = queue.pop_first() {
             for (state_before, src_set) in map_at_offset {
@@ -432,7 +435,8 @@ impl<'r> Precomputer<'r> {
                     continue;
                 }
 
-                yellow.extend(src_set.iter().cloned());
+                yellow.extend(yellow.clone());
+                new_yellow.extend(src_set.iter().cloned());
 
                 let suffix      = &segment[offset..];
                 let exec_result = self
@@ -496,7 +500,7 @@ impl<'r> Precomputer<'r> {
         }
 
         // Recurse into the child vocab node.
-        self.dfs(child_vocab, next_level);
+        self.dfs(child_vocab, next_level, yellow);
     }
 
     // Insert or merge an edge out of `source_arc`.
