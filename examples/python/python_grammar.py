@@ -105,7 +105,7 @@ def define_tokens() -> list[tuple[str, Any]]:
         if name == "IGNORE":
             return name, ge.regex(expr)
 #         return name, ge.regex(seq([ignore, expr]))
-        return name, ge.sequence([ge.ref("IGNORE"), ge.regex(expr)])
+        return name, ge.sequence([ge.optional(ge.ref("IGNORE")), ge.regex(expr)])
 #         return name, ge.regex(expr)
 
     # TODO: uncomment this
