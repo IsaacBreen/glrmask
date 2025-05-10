@@ -17,7 +17,7 @@ from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
 def regex(expr, name=None):
-    if not isinstance(expr, ge.PyGrammarExpr):
+    if not isinstance(expr, ge):
         expr = ge.regex(expr)
     if name == "IGNORE":
         return name, expr
