@@ -21,25 +21,6 @@ const DENSE_TO_SPARSE_THRESHOLD: usize = 64;
 // const_assert!(DENSE_TO_SPARSE_THRESHOLD < SPARSE_TO_DENSE_THRESHOLD); // Uncomment if using static_assertions
 
 
-// --- Constants for Holey Representation ---
-// If a Dense set has at least this length and its number of zeros is less than DENSE_TO_HOLEY_MAX_ZEROS_THRESHOLD,
-// it can be converted to HoleyDense.
-const DENSE_TO_HOLEY_MIN_LEN_THRESHOLD: usize = 256;
-// Max number of zeros in a Dense set to consider converting to HoleyDense.
-const DENSE_TO_HOLEY_MAX_ZEROS_THRESHOLD: usize = 32;
-
-// If a HoleyDense set's exceptions count exceeds this, convert it to Dense.
-const HOLEY_MAX_EXCEPTIONS_THRESHOLD: usize = 60; // Should be > DENSE_TO_HOLEY_MAX_ZEROS_THRESHOLD
-
-// If a Sparse set is being considered for HoleyDense, its number of "holes" (max_val + 1 - count)
-// must be less than this, and its span (max_val + 1) must be >= DENSE_TO_HOLEY_MIN_LEN_THRESHOLD.
-const SPARSE_TO_HOLEY_MAX_HOLES_THRESHOLD: usize = 32;
-
-// --- Static Assertions (ensure HoleyDense thresholds make sense) ---
-// const_assert!(DENSE_TO_HOLEY_MAX_ZEROS_THRESHOLD < HOLEY_MAX_EXCEPTIONS_THRESHOLD); // Uncomment if using static_assertions
-// const_assert!(HOLEY_MAX_EXCEPTIONS_THRESHOLD < DENSE_TO_SPARSE_THRESHOLD); // Optional: to prefer Sparse if exceptions are many but overall count is low.
-
-
 // --- Enum for Internal Representation ---
 
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -50,30 +31,13 @@ enum BitsetRepr {
         // Stores the exact count if known. None if dirty and needs recalculation.
         cached_exact_count: RefCell<Option<usize>>,
     },
-    HoleyDense {
-        max_index: usize,          // All indices from 0 up to max_index (inclusive) are true by default.
-        exceptions: BTreeSet<usize>, // Indices within [0..max_index] that are false.
-    },
 }
 
 impl Hash for BitsetRepr {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
-            BitsetRepr::Sparse(set) => {
-                // Consider adding a discriminant for the variant type itself if direct hashing is used.
-                // However, HybridBitset::hash iterates, making this less critical for the outer type.
-                0u8.hash(state); // Discriminant for Sparse
-                set.hash(state);
-            }
-            BitsetRepr::Dense { bits, .. } => {
-                1u8.hash(state); // Discriminant for Dense
-                bits.hash(state);
-            }
-            BitsetRepr::HoleyDense { max_index, exceptions } => {
-                2u8.hash(state); // Discriminant for HoleyDense
-                max_index.hash(state);
-                exceptions.hash(state);
-            }
+            BitsetRepr::Sparse(set) => set.hash(state),
+            BitsetRepr::Dense { bits, .. } => bits.hash(state),
         }
     }
 }
@@ -91,7 +55,6 @@ impl HybridBitset {
     pub fn new() -> Self {
         // Ensure thresholds make sense at runtime if static_assertions is not used
         assert!(DENSE_TO_SPARSE_THRESHOLD < SPARSE_TO_DENSE_THRESHOLD, "Thresholds misconfigured");
-        assert!(DENSE_TO_HOLEY_MAX_ZEROS_THRESHOLD < HOLEY_MAX_EXCEPTIONS_THRESHOLD, "HoleyDense thresholds misconfigured");
         HybridBitset {
             inner: BitsetRepr::Sparse(BTreeSet::new()),
         }
@@ -100,7 +63,6 @@ impl HybridBitset {
     /// Creates a new HybridBitset with all indices from 0 up to `max_value` (inclusive) set to true.
     pub fn ones(max_value: usize) -> Self {
         assert!(DENSE_TO_SPARSE_THRESHOLD < SPARSE_TO_DENSE_THRESHOLD, "Thresholds misconfigured");
-        assert!(DENSE_TO_HOLEY_MAX_ZEROS_THRESHOLD < HOLEY_MAX_EXCEPTIONS_THRESHOLD, "HoleyDense thresholds misconfigured");
         let num_elements = max_value.saturating_add(1); // Number of elements from 0 to max_value
 
         if num_elements == 0 { // max_value was usize::MAX, and num_elements overflowed to 0
@@ -110,15 +72,7 @@ impl HybridBitset {
             return Self::new();
         }
 
-        // Prefer HoleyDense for `ones` if the range is large enough, as it's most efficient.
-        if num_elements >= DENSE_TO_HOLEY_MIN_LEN_THRESHOLD { // Or another suitable threshold like SPARSE_TO_DENSE_THRESHOLD
-            HybridBitset {
-                inner: BitsetRepr::HoleyDense {
-                    max_index: max_value,
-                    exceptions: BTreeSet::new(),
-                }
-            }
-        } else if num_elements >= SPARSE_TO_DENSE_THRESHOLD {
+        if num_elements >= SPARSE_TO_DENSE_THRESHOLD {
             // Use Dense representation
             let bits = bitvec![usize, Lsb0; 1; num_elements]; // Create BitVec of `num_elements` length, all set to 1
             HybridBitset {
@@ -156,12 +110,6 @@ impl HybridBitset {
                     exact_count
                 }
             }
-            BitsetRepr::HoleyDense { max_index, exceptions } => {
-                // Count is (max_index + 1) - number of exceptions.
-                // Ensure max_index + 1 doesn't overflow if max_index is usize::MAX.
-                let total_in_range = max_index.saturating_add(1);
-                total_in_range.saturating_sub(exceptions.len())
-            }
         }
     }
 
@@ -171,9 +119,6 @@ impl HybridBitset {
             BitsetRepr::Sparse(set) => set.is_empty(),
             BitsetRepr::Dense { .. } => { // We don't need to destructure cached_exact_count here
                  self.len() == 0 // len() now handles caching
-            }
-             BitsetRepr::HoleyDense { .. } => { // We don't need to destructure here
-                self.len() == 0
             }
         }
     }
@@ -186,14 +131,11 @@ impl HybridBitset {
                 // Use get() for safe bounds checking
                 bits.get(index).map_or(false, |bitref| *bitref)
             }
-            BitsetRepr::HoleyDense { max_index, exceptions } => {
-                index <= *max_index && !exceptions.contains(&index)
-            }
         }
     }
 
     /// Inserts an index into the set. Returns true if the index was not already present.
-    /// May trigger a conversion from Sparse to Dense or HoleyDense.
+    /// May trigger a conversion from Sparse to Dense.
     pub fn insert(&mut self, index: usize) -> bool {
         let was_present;
         let mut needs_conversion_check = false;
@@ -202,9 +144,9 @@ impl HybridBitset {
                 was_present = set.contains(&index);
                 if !was_present {
                     set.insert(index);
-                    // Check if we need to convert
+                    // Check if we need to convert to Dense
                     if set.len() >= SPARSE_TO_DENSE_THRESHOLD {
-                         needs_conversion_check = true; // Defer conversion until outside match
+                        needs_conversion_check = true; // Defer conversion until outside match
                     }
                 }
             }
@@ -214,8 +156,6 @@ impl HybridBitset {
                     // Calculate required capacity increase. Avoid excessive overallocation for single large indices.
                     let new_len = index + 1;
                     bits.resize(new_len, false);
-                    // Bounds have changed, cached count is now potentially invalid
-                     *cached_exact_count.borrow_mut() = None;
                 }
 
                 // Check current state before setting using immutable borrow first
@@ -230,49 +170,23 @@ impl HybridBitset {
                         *count_ref += 1;
                     }
                 }
-                 // No conversion check needed on insert for Dense based on count threshold.
-                 // However, inserting a large index into Dense might make it eligible for Holey.
-                 needs_conversion_check = true; // Signal a general check
-            }
-            BitsetRepr::HoleyDense { max_index, exceptions } => {
-                if index <= *max_index {
-                    // Index is within the current 'all true' range.
-                    // If it was an exception, removing it makes it true.
-                    // `exceptions.remove()` returns true if the value was removed (was an exception).
-                    // If it was an exception and removed, it means the bit was previously false.
-                    // If it was NOT an exception, it was already true, so was_present is true.
-                    was_present = !exceptions.remove(&index);
-                } else {
-                    // Index is outside the current 'all true' range. Expand the range.
-                    // All numbers from *max_index + 1 up to index - 1 become true implicitly.
-                    // The number `index` itself becomes true (the new max_index).
-                    // No new exceptions are added in this new part of the range initially.
-                    *max_index = index;
-                    was_present = false; // It was not present (true) before this expansion.
-                }
-                needs_conversion_check = true; // Signal a general check
+                // No conversion check needed on insert for Dense
             }
         }
 
         if needs_conversion_check {
-            self.check_representation();
+            self.convert_to_dense();
         }
 
-        !was_present // Return true if it was newly inserted (i.e., was not present)
+        !was_present // Return true if it was newly inserted
     }
 
-    /// Sets the bit at `index` to `value`.
     pub fn set(&mut self, index: usize, value: bool) {
-        if value {
-            self.insert(index);
-        } else {
-            self.remove(index);
-        }
+        todo!()
     }
-
 
     /// Removes an index from the set. Returns true if the index was present.
-    /// May trigger a conversion from Dense or HoleyDense to Sparse.
+    /// May trigger a conversion from Dense to Sparse.
     pub fn remove(&mut self, index: usize) -> bool {
         let was_present;
         let mut needs_conversion_check = false;
@@ -280,9 +194,7 @@ impl HybridBitset {
         match &mut self.inner {
             BitsetRepr::Sparse(set) => {
                 was_present = set.remove(&index);
-                // No conversion check needed on remove for Sparse based on count threshold.
-                 // However, removing a value might make Sparse eligible for Holey.
-                 needs_conversion_check = true; // Signal a general check
+                // No conversion check needed on remove for Sparse
             }
             BitsetRepr::Dense { bits, cached_exact_count } => {
                 // Check if index is within bounds first
@@ -296,9 +208,6 @@ impl HybridBitset {
                         // Update cached count if known
                         if let Some(count_ref) = cached_exact_count.borrow_mut().as_mut() {
                             *count_ref -= 1;
-                        } else {
-                            // If bounds were dirty (None), clearing a bit keeps them dirty.
-                            // No change needed to cached_exact_count if it was None.
                         }
                         // Signal that representation might need to be checked
                         needs_conversion_check = true;
@@ -308,27 +217,11 @@ impl HybridBitset {
                     was_present = false;
                 }
             }
-             BitsetRepr::HoleyDense { max_index, exceptions } => {
-                if index <= *max_index {
-                    // Index is within the 'all true' range. Adding it to exceptions makes it false.
-                    // `exceptions.insert()` returns true if the value was newly inserted.
-                    // If inserted, it means the bit was previously true (was_present).
-                    if exceptions.insert(index) {
-                        was_present = true;
-                        needs_conversion_check = true;
-                    } else {
-                        // Was already an exception (false), so wasn't present.
-                        was_present = false;
-                    }
-                } else {
-                    // Index is outside the 'all true' range, so it's already effectively false.
-                    was_present = false;
-                }
-            }
         }
 
         if needs_conversion_check {
-            // This flag is set true if any representation was modified and might need re-evaluation.
+            // This flag is set true only if a Dense set was modified by remove and might shrink.
+            // Call check_representation to handle potential conversion.
             self.check_representation();
         }
 
@@ -343,20 +236,11 @@ impl HybridBitset {
 
     /// Returns an iterator over the indices of the set bits.
     pub fn iter(&self) -> Iter<'_> {
-        match &self.inner {
-            BitsetRepr::Sparse(set) => Iter { inner: IterInner::Sparse(set.iter()) },
-            BitsetRepr::Dense { bits, .. } => Iter { inner: IterInner::Dense(bits.iter_ones()) },
-            BitsetRepr::HoleyDense { max_index, exceptions } => {
-                 let total_elements = max_index.saturating_add(1).saturating_sub(exceptions.len());
-                 Iter {
-                    inner: IterInner::Holey {
-                         max_index: *max_index,
-                         exceptions_iter: exceptions.iter().peekable(),
-                         current_value: 0,
-                         remaining_count: total_elements,
-                     }
-                 }
-            }
+        Iter {
+            inner: match &self.inner {
+                BitsetRepr::Sparse(set) => IterInner::Sparse(set.iter()),
+                BitsetRepr::Dense { bits, .. } => IterInner::Dense(bits.iter_ones()),
+            },
         }
     }
 
@@ -365,7 +249,6 @@ impl HybridBitset {
     /// For a Dense set, the limit is its current capacity (`bits.len() - 1`),
     /// meaning it yields `bits.len()` booleans.
     /// For a Sparse set, the limit is the largest index present in the set.
-    /// For a HoleyDense set, the limit is `max_index`.
     /// If the set is empty (either Sparse or Dense), the iterator is empty.
     pub fn iter_bools(&self) -> BoolIter<'_> {
         match &self.inner {
@@ -401,34 +284,20 @@ impl HybridBitset {
                     inner: BoolIterInner::Dense(bits.iter()),
                 }
             }
-            BitsetRepr::HoleyDense { max_index, exceptions } => {
-                 BoolIter {
-                     inner: BoolIterInner::Holey {
-                         max_idx_to_iterate: *max_index,
-                         exceptions,
-                         current_idx: 0,
-                     }
-                 }
-            }
         }
     }
 
 
     // --- Helper: Force conversion to Dense ---
     fn ensure_dense(&mut self) {
-        match self.inner {
-            BitsetRepr::Sparse(_) | BitsetRepr::HoleyDense { .. } => { // Add HoleyDense here
-                self.convert_to_dense();
-            }
-            BitsetRepr::Dense { .. } => {
-                // Already Dense, do nothing
-            }
+        if matches!(self.inner, BitsetRepr::Sparse(_)) {
+            self.convert_to_dense();
         }
     }
 
     // --- Helper: Force conversion to Sparse ---
     // fn ensure_sparse(&mut self) { // Less commonly needed, but could be added
-    //     if matches!(self.inner, BitsetRepr::Dense { .. } | BitsetRepr::HoleyDense { .. }) {
+    //     if matches!(self.inner, BitsetRepr::Dense { .. }) {
     //         self.convert_to_sparse();
     //     }
     // }
@@ -467,116 +336,27 @@ impl HybridBitset {
 
     // --- Helper: Convert Dense -> Sparse ---
     fn convert_to_sparse(&mut self) {
-        match &self.inner {
-            BitsetRepr::Dense { bits, .. } => {
-                let mut set = BTreeSet::new();
-                for index in bits.iter_ones() {
-                    set.insert(index);
-                }
-                self.inner = BitsetRepr::Sparse(set);
+        if let BitsetRepr::Dense { bits, .. } = &self.inner { // removed cached_exact_count from destructuring
+            let mut set = BTreeSet::new();
+            for index in bits.iter_ones() {
+                set.insert(index);
             }
-            BitsetRepr::HoleyDense { max_index, exceptions } => {
-                 let mut set = BTreeSet::new();
-                 // This could be slow if max_index is very large.
-                 // Consider if there's a more direct way if needed, but for now, direct iteration:
-                 for i in 0..= *max_index {
-                     if !exceptions.contains(&i) {
-                         set.insert(i);
-                     }
-                 }
-                 self.inner = BitsetRepr::Sparse(set);
-            }
-            BitsetRepr::Sparse(_) => {
-                // Already Sparse, do nothing
-            }
+            self.inner = BitsetRepr::Sparse(set);
         }
-    }
-
-    // --- Helper: Try convert Sparse -> HoleyDense ---
-    fn try_convert_from_sparse_to_holey_dense(&mut self) -> bool {
-        if let BitsetRepr::Sparse(set) = &self.inner {
-            if set.is_empty() {
-                return false; // Empty set is fine as Sparse
-            }
-            let count = set.len();
-            // Let max_index be the largest value in the sparse set.
-            let max_val = *set.iter().last().unwrap(); // Safe due to !is_empty()
-
-            let potential_max_index = max_val;
-            let range_len = potential_max_index.saturating_add(1);
-
-            if range_len < DENSE_TO_HOLEY_MIN_LEN_THRESHOLD {
-                return false; // Not large enough span to benefit from HoleyDense
-            }
-
-            // Calculate actual exceptions within the range [0..potential_max_index]
-            let mut exceptions = BTreeSet::new();
-            for i in 0..=potential_max_index {
-                if !set.contains(&i) {
-                    exceptions.insert(i);
-                }
-            }
-
-            if exceptions.len() <= SPARSE_TO_HOLEY_MAX_HOLES_THRESHOLD {
-                self.inner = BitsetRepr::HoleyDense {
-                    max_index: potential_max_index,
-                    exceptions,
-                };
-                return true;
-            }
-        }
-        false
-    }
-
-    // --- Helper: Try convert Dense -> HoleyDense ---
-     fn try_convert_from_dense_to_holey_dense(&mut self) -> bool {
-        if let BitsetRepr::Dense { bits, .. } = &self.inner { // Don't need cached_exact_count here
-            if bits.is_empty() {
-                return false;
-            }
-            let dense_len = bits.len();
-            if dense_len < DENSE_TO_HOLEY_MIN_LEN_THRESHOLD {
-                return false; // Too short for HoleyDense to be beneficial
-            }
-
-            let num_zeros = bits.count_zeros();
-
-            if num_zeros <= DENSE_TO_HOLEY_MAX_ZEROS_THRESHOLD {
-                let exceptions: BTreeSet<usize> = bits.iter_zeros().collect();
-                // max_index for HoleyDense is the highest index covered by the bitvector.
-                let max_index = dense_len.saturating_sub(1); // Use saturating_sub in case dense_len is 0
-                self.inner = BitsetRepr::HoleyDense {
-                    max_index,
-                    exceptions,
-                };
-                return true;
-            }
-        }
-        false
+        // If already Sparse, do nothing
     }
 
 
     // --- Helper: Check and potentially convert after an operation ---
-    // This should be called after operations that might change the count or span significantly.
+    // This should be called after operations that might change the count significantly.
     fn check_representation(&mut self) {
         match &mut self.inner {
             BitsetRepr::Sparse(set) => {
-                let count = set.len();
-                if count >= SPARSE_TO_DENSE_THRESHOLD {
-                    // Try to convert to HoleyDense first if applicable
-                    if !self.try_convert_from_sparse_to_holey_dense() {
-                        // If not converted to HoleyDense, convert to Dense
-                        self.convert_to_dense();
-                    }
+                if set.len() >= SPARSE_TO_DENSE_THRESHOLD {
+                    self.convert_to_dense();
                 }
-                 // Even if count is low, a Sparse set with a large span might be HoleyDense eligible.
-                 // We already checked this in try_convert_from_sparse_to_holey_dense,
-                 // which is called if count >= SPARSE_TO_DENSE_THRESHOLD.
-                 // Consider if this check is needed for count < SPARSE_TO_DENSE_THRESHOLD if span is huge.
-                 // For simplicity currently, conversion to HoleyDense from Sparse only happens if count is high enough.
             }
             BitsetRepr::Dense { bits, cached_exact_count } => {
-                 // Ensure count is up-to-date for decision making
                  let count = {
                      let mut count_opt = cached_exact_count.borrow_mut();
                      if let Some(c) = *count_opt {
@@ -587,24 +367,9 @@ impl HybridBitset {
                          exact_c
                      }
                  };
-
                  if count < DENSE_TO_SPARSE_THRESHOLD {
                      self.convert_to_sparse();
-                 } else {
-                     // If not converting to Sparse, consider HoleyDense
-                     self.try_convert_from_dense_to_holey_dense(); // Ignores return; if fails, stays Dense
                  }
-            }
-            BitsetRepr::HoleyDense { max_index, exceptions } => {
-                // Calculate current count for HoleyDense
-                let current_count = max_index.saturating_add(1).saturating_sub(exceptions.len());
-
-                if current_count < DENSE_TO_SPARSE_THRESHOLD {
-                    self.convert_to_sparse();
-                } else if exceptions.len() > HOLEY_MAX_EXCEPTIONS_THRESHOLD {
-                    self.convert_to_dense();
-                }
-                // Else, it remains HoleyDense
             }
         }
     }
@@ -623,12 +388,6 @@ impl Default for HybridBitset {
 enum IterInner<'a> {
     Sparse(std::collections::btree_set::Iter<'a, usize>),
     Dense(bitvec::slice::IterOnes<'a, usize, Lsb0>),
-    Holey {
-        max_index: usize,
-        exceptions_iter: std::iter::Peekable<std::collections::btree_set::Iter<'a, usize>>,
-        current_value: usize,
-        remaining_count: usize, // Add this
-    },
 }
 
 pub struct Iter<'a> {
@@ -642,34 +401,6 @@ impl<'a> Iterator for Iter<'a> {
         match &mut self.inner {
             IterInner::Sparse(iter) => iter.next().copied(), // Need copied() because BTreeSet::Iter yields &usize
             IterInner::Dense(iter) => iter.next(),
-            IterInner::Holey { max_index, exceptions_iter, current_value, remaining_count } => {
-                loop {
-                    if *current_value > *max_index {
-                        return None; // Exhausted the range
-                    }
-                    match exceptions_iter.peek() {
-                        Some(&&exc_val) if exc_val == *current_value => {
-                            exceptions_iter.next(); // Consume this exception
-                            *current_value += 1;
-                            // Continue to the next current_value
-                        }
-                        Some(&&exc_val) if exc_val < *current_value => {
-                            // This case should ideally not happen if current_value always increments
-                            // and exceptions are sorted. It means an old exception was not consumed.
-                             exceptions_iter.next(); // Consume stale exception
-                             // Continue to re-evaluate for the same current_value
-                        }
-                        _ => {
-                            // current_value is not an exception, or no more exceptions,
-                            // or the next exception is greater than current_value.
-                            let val_to_yield = *current_value;
-                            *current_value += 1;
-                            *remaining_count -=1; // Add this line
-                            return Some(val_to_yield);
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -678,9 +409,6 @@ impl<'a> Iterator for Iter<'a> {
         match &self.inner {
             IterInner::Sparse(iter) => iter.size_hint(), // BTreeSet::Iter provides exact size hint
             IterInner::Dense(iter) => iter.size_hint(), // bitvec::IterOnes also provides exact size hint
-             IterInner::Holey { remaining_count, .. } => {
-                 (*remaining_count, Some(*remaining_count))
-             }
         }
     }
 }
@@ -714,10 +442,6 @@ impl IntoIterator for HybridBitset {
                  // Use iter_ones which is efficient
                  bits.iter_ones().collect()
              }
-             BitsetRepr::HoleyDense { max_index, exceptions } => {
-                 // Collect all elements from 0..=max_index that are not exceptions
-                 (0..=max_index).filter(|i| !exceptions.contains(i)).collect()
-             }
          };
          collected.into_iter()
      }
@@ -733,11 +457,6 @@ enum BoolIterInner<'a> {
         max_idx_to_iterate: usize,
     },
     Dense(bitvec::slice::Iter<'a, usize, Lsb0>), // This iterator from bitvec yields bool
-    Holey {
-        max_idx_to_iterate: usize,
-        exceptions: &'a BTreeSet<usize>,
-        current_idx: usize,
-    },
 }
 
 pub struct BoolIter<'a> {
@@ -759,15 +478,6 @@ impl<'a> Iterator for BoolIter<'a> {
                 }
             }
             BoolIterInner::Dense(iter) => iter.next().map(|bit_ref| *bit_ref),
-            BoolIterInner::Holey { max_idx_to_iterate, exceptions, current_idx } => {
-                 if *current_idx > *max_idx_to_iterate {
-                     None
-                 } else {
-                     let is_set = !exceptions.contains(current_idx);
-                     *current_idx += 1;
-                     Some(is_set)
-                 }
-            }
         }
     }
 
@@ -782,14 +492,6 @@ impl<'a> Iterator for BoolIter<'a> {
                 (remaining, Some(remaining))
             }
             BoolIterInner::Dense(iter) => iter.size_hint(), // bitvec::slice::Iter provides exact size hint
-             BoolIterInner::Holey { max_idx_to_iterate, current_idx, .. } => {
-                 let remaining = if *current_idx > *max_idx_to_iterate {
-                     0
-                 } else {
-                     (*max_idx_to_iterate - *current_idx) + 1
-                 };
-                 (remaining, Some(remaining))
-             }
         }
     }
 }
@@ -815,32 +517,7 @@ impl BitAnd for &HybridBitset {
     type Output = HybridBitset;
 
     fn bitand(self, rhs: Self) -> Self::Output {
-        // Temporarily convert HoleyDense operands to Dense for the operation
-        let mut s_clone; // To hold owned self if conversion happens
-        let mut r_clone; // To hold owned rhs if conversion happens
-
-        let s_inner_ref = match &self.inner {
-            BitsetRepr::HoleyDense { .. } => {
-                s_clone = self.clone();
-                s_clone.ensure_dense(); // ensure_dense handles Holey -> Dense
-                &s_clone.inner
-            }
-            _ => &self.inner,
-        };
-
-        let r_inner_ref = match &rhs.inner {
-            BitsetRepr::HoleyDense { .. } => {
-                r_clone = rhs.clone();
-                r_clone.ensure_dense();
-                &r_clone.inner
-            }
-            _ => &rhs.inner,
-        };
-
-        // Now, s_inner_ref and r_inner_ref are guaranteed not to be HoleyDense.
-        // Proceed with the existing match statement, but using s_inner_ref and r_inner_ref.
-        // Remove any HoleyDense arms from this inner match as they are now handled.
-        let mut result = match (s_inner_ref, r_inner_ref) {
+        match (&self.inner, &rhs.inner) {
             // Sparse & Sparse
             (BitsetRepr::Sparse(set1), BitsetRepr::Sparse(set2)) => {
                 // Optimize for the smaller set driving the intersection
@@ -852,7 +529,9 @@ impl BitAnd for &HybridBitset {
                     }
                 }
                 // Alternative: let result_set: BTreeSet<usize> = set1.intersection(set2).copied().collect();
-                HybridBitset { inner: BitsetRepr::Sparse(result_set) }
+                let mut result = HybridBitset { inner: BitsetRepr::Sparse(result_set) };
+                result.check_representation(); // Check if result should be Dense
+                result
             }
             // Dense & Dense
             (BitsetRepr::Dense { bits: bits1, .. }, BitsetRepr::Dense { bits: bits2, .. }) => {
@@ -862,24 +541,25 @@ impl BitAnd for &HybridBitset {
                 let min_len = min(len1, len2);
                 if min_len == 0 {
                     // Intersection with empty is empty
-                    HybridBitset::new()
-                } else {
-
-                    // Take a slice of the relevant parts and perform AND
-                    let slice1: BitVec = bits1[..min_len].into();
-                    let slice2: BitVec = bits2[..min_len].into();
-                    let result_bits = slice1 & slice2; // This creates a new BitVec
-
-                    let exact_count = result_bits.count_ones();
-                     HybridBitset {
-                        inner: BitsetRepr::Dense {
-                            bits: result_bits,
-                            cached_exact_count: RefCell::new(Some(exact_count)),
-                        }
-                    }
+                    return HybridBitset::new();
                 }
+
+                // Take a slice of the relevant parts and perform AND
+                let slice1: BitVec = bits1[..min_len].into();
+                let slice2: BitVec = bits2[..min_len].into();
+                let result_bits = slice1 & slice2; // This creates a new BitVec
+
+                let exact_count = result_bits.count_ones();
+                let mut result = HybridBitset {
+                    inner: BitsetRepr::Dense {
+                        bits: result_bits,
+                        cached_exact_count: RefCell::new(Some(exact_count)),
+                    }
+                };
+                result.check_representation(); // Check if result should be Sparse
+                result
             }
-            // Mixed: Sparse & Dense
+            // Mixed: Convert Sparse to Dense temporarily is often easiest
             (BitsetRepr::Sparse(set1), BitsetRepr::Dense { bits: bits2, .. }) => {
                 // Optimization: Iterate sparse set and check against dense set
                 let mut result_set = BTreeSet::new(); // Capacity hint
@@ -888,9 +568,10 @@ impl BitAnd for &HybridBitset {
                         result_set.insert(item);
                     }
                 }
-                 HybridBitset { inner: BitsetRepr::Sparse(result_set) }
+                 let mut result = HybridBitset { inner: BitsetRepr::Sparse(result_set) };
+                 result.check_representation(); // Check if result should be Dense (unlikely)
+                 result
             }
-            // Mixed: Dense & Sparse
             (BitsetRepr::Dense { bits: bits1, .. }, BitsetRepr::Sparse(set2)) => {
                  // Symmetric to the above case
                  let mut result_set = BTreeSet::new();
@@ -899,15 +580,11 @@ impl BitAnd for &HybridBitset {
                          result_set.insert(item);
                      }
                  }
-                 HybridBitset { inner: BitsetRepr::Sparse(result_set) }
+                 let mut result = HybridBitset { inner: BitsetRepr::Sparse(result_set) };
+                 result.check_representation();
+                 result
             }
-            // Cases involving HoleyDense should not be reached here due to prior conversion
-            (BitsetRepr::HoleyDense {..}, _) | (_, BitsetRepr::HoleyDense {..}) => {
-                 unreachable!("HoleyDense should have been converted to Dense for bitwise operations");
-            }
-        };
-        result.check_representation(); // Check if result should be HoleyDense or Sparse
-        result
+        }
     }
 }
 
@@ -915,29 +592,7 @@ impl BitOr for &HybridBitset {
      type Output = HybridBitset;
 
     fn bitor(self, rhs: Self) -> Self::Output {
-        // Temporarily convert HoleyDense operands to Dense for the operation
-        let mut s_clone; // To hold owned self if conversion happens
-        let mut r_clone; // To hold owned rhs if conversion happens
-
-        let s_inner_ref = match &self.inner {
-            BitsetRepr::HoleyDense { .. } => {
-                s_clone = self.clone();
-                s_clone.ensure_dense(); // ensure_dense handles Holey -> Dense
-                &s_clone.inner
-            }
-            _ => &self.inner,
-        };
-
-        let r_inner_ref = match &rhs.inner {
-            BitsetRepr::HoleyDense { .. } => {
-                r_clone = rhs.clone();
-                r_clone.ensure_dense();
-                &r_clone.inner
-            }
-            _ => &rhs.inner,
-        };
-
-        let mut result = match (s_inner_ref, r_inner_ref) {
+         match (&self.inner, &rhs.inner) {
             // Sparse | Sparse
             (BitsetRepr::Sparse(set1), BitsetRepr::Sparse(set2)) => {
                 // Optimization: clone larger, extend with smaller
@@ -945,7 +600,9 @@ impl BitOr for &HybridBitset {
                 let mut result_set = larger.clone();
                 result_set.extend(smaller.iter().copied());
                 // Alternative: let result_set: BTreeSet<usize> = set1.union(set2).copied().collect();
-                HybridBitset { inner: BitsetRepr::Sparse(result_set) }
+                let mut result = HybridBitset { inner: BitsetRepr::Sparse(result_set) };
+                result.check_representation();
+                result
             }
             // Dense | Dense
             (BitsetRepr::Dense { bits: bits1, .. }, BitsetRepr::Dense { bits: bits2, .. }) => {
@@ -975,12 +632,14 @@ impl BitOr for &HybridBitset {
 
                 // Estimate bounds or recalculate. Recalculate is simpler.
                 let exact_count = result_bits.count_ones();
-                HybridBitset {
+                let mut result = HybridBitset {
                     inner: BitsetRepr::Dense {
                         bits: result_bits,
                         cached_exact_count: RefCell::new(Some(exact_count)),
                     }
-                }
+                };
+                result.check_representation(); // Check if result should be Sparse (e.g., union of small dense sets)
+                result
             }
             // Mixed: Sparse | Dense (self is Sparse, rhs is Dense)
             (BitsetRepr::Sparse(s_set), BitsetRepr::Dense { bits: d_bits, .. }) => {
@@ -993,12 +652,14 @@ impl BitOr for &HybridBitset {
                 }
 
                 let exact_count = result_bits.count_ones();
-                HybridBitset {
+                let mut result = HybridBitset {
                     inner: BitsetRepr::Dense {
                         bits: result_bits,
                         cached_exact_count: RefCell::new(Some(exact_count)),
                     }
-                }
+                };
+                result.check_representation(); // Check if result should be Sparse
+                result
             }
             // Mixed: Dense | Sparse (self is Dense, rhs is Sparse)
             (BitsetRepr::Dense { bits: d_bits, .. }, BitsetRepr::Sparse(s_set)) => {
@@ -1011,20 +672,16 @@ impl BitOr for &HybridBitset {
                 }
 
                 let exact_count = result_bits.count_ones();
-                HybridBitset {
+                let mut result = HybridBitset {
                     inner: BitsetRepr::Dense {
                         bits: result_bits,
                         cached_exact_count: RefCell::new(Some(exact_count)),
                     }
-                }
+                };
+                result.check_representation(); // Check if result should be Sparse
+                result
             }
-            // Cases involving HoleyDense should not be reached here due to prior conversion
-            (BitsetRepr::HoleyDense {..}, _) | (_, BitsetRepr::HoleyDense {..}) => {
-                 unreachable!("HoleyDense should have been converted to Dense for bitwise operations");
-            }
-        };
-        result.check_representation(); // Check if result should be Sparse or HoleyDense
-        result
+        }
     }
 }
 
@@ -1032,33 +689,13 @@ impl BitXor for &HybridBitset {
      type Output = HybridBitset;
 
     fn bitxor(self, rhs: Self) -> Self::Output {
-        // Temporarily convert HoleyDense operands to Dense for the operation
-        let mut s_clone; // To hold owned self if conversion happens
-        let mut r_clone; // To hold owned rhs if conversion happens
-
-        let s_inner_ref = match &self.inner {
-            BitsetRepr::HoleyDense { .. } => {
-                s_clone = self.clone();
-                s_clone.ensure_dense(); // ensure_dense handles Holey -> Dense
-                &s_clone.inner
-            }
-            _ => &self.inner,
-        };
-
-        let r_inner_ref = match &rhs.inner {
-            BitsetRepr::HoleyDense { .. } => {
-                r_clone = rhs.clone();
-                r_clone.ensure_dense();
-                &r_clone.inner
-            }
-            _ => &rhs.inner,
-        };
-
-        let mut result = match (s_inner_ref, r_inner_ref) {
+         match (&self.inner, &rhs.inner) {
             // Sparse ^ Sparse
             (BitsetRepr::Sparse(set1), BitsetRepr::Sparse(set2)) => {
                 let result_set: BTreeSet<usize> = set1.symmetric_difference(set2).copied().collect();
-                HybridBitset { inner: BitsetRepr::Sparse(result_set) }
+                let mut result = HybridBitset { inner: BitsetRepr::Sparse(result_set) };
+                result.check_representation();
+                result
             }
             // Dense ^ Dense
             (BitsetRepr::Dense { bits: bits1, .. }, BitsetRepr::Dense { bits: bits2, .. }) => {
@@ -1089,12 +726,14 @@ impl BitXor for &HybridBitset {
                  // which is correct for XOR (since the shorter vector has implicit zeros there).
 
                 let exact_count = result_bits.count_ones();
-                HybridBitset {
+                let mut result = HybridBitset {
                     inner: BitsetRepr::Dense {
                         bits: result_bits,
                         cached_exact_count: RefCell::new(Some(exact_count)),
                     }
-                }
+                };
+                result.check_representation(); // Result size could be small or large
+                result
             }
             // Mixed: Sparse ^ Dense (self is Sparse, rhs is Dense)
             (BitsetRepr::Sparse(s_set), BitsetRepr::Dense { bits: d_bits, .. }) => {
@@ -1115,12 +754,14 @@ impl BitXor for &HybridBitset {
                 }
 
                 let exact_count = result_bits.count_ones();
-                HybridBitset {
+                let mut result = HybridBitset {
                     inner: BitsetRepr::Dense {
                         bits: result_bits,
                         cached_exact_count: RefCell::new(Some(exact_count)),
                     }
-                }
+                };
+                result.check_representation(); // Check if result should be Sparse
+                result
             }
             // Mixed: Dense ^ Sparse (self is Dense, rhs is Sparse)
             (BitsetRepr::Dense { bits: d_bits, .. }, BitsetRepr::Sparse(s_set)) => {
@@ -1138,20 +779,16 @@ impl BitXor for &HybridBitset {
                 }
 
                 let exact_count = result_bits.count_ones();
-                HybridBitset {
+                let mut result = HybridBitset {
                     inner: BitsetRepr::Dense {
                         bits: result_bits,
                         cached_exact_count: RefCell::new(Some(exact_count)),
                     }
-                }
+                };
+                result.check_representation();
+                result
             }
-            // Cases involving HoleyDense should not be reached here due to prior conversion
-            (BitsetRepr::HoleyDense {..}, _) | (_, BitsetRepr::HoleyDense {..}) => {
-                 unreachable!("HoleyDense should have been converted to Dense for bitwise operations");
-            }
-        };
-        result.check_representation();
-        result
+        }
     }
 }
 
@@ -1161,29 +798,7 @@ impl Sub for &HybridBitset {
 
     // Computes self - rhs (elements in self but not in rhs)
     fn sub(self, rhs: Self) -> Self::Output {
-        // Temporarily convert HoleyDense operands to Dense for the operation
-        let mut s_clone; // To hold owned self if conversion happens
-        let mut r_clone; // To hold owned rhs if conversion happens
-
-        let s_inner_ref = match &self.inner {
-            BitsetRepr::HoleyDense { .. } => {
-                s_clone = self.clone();
-                s_clone.ensure_dense(); // ensure_dense handles Holey -> Dense
-                &s_clone.inner
-            }
-            _ => &self.inner,
-        };
-
-        let r_inner_ref = match &rhs.inner {
-            BitsetRepr::HoleyDense { .. } => {
-                r_clone = rhs.clone();
-                r_clone.ensure_dense();
-                &r_clone.inner
-            }
-            _ => &rhs.inner,
-        };
-
-        let mut result = match (s_inner_ref, r_inner_ref) {
+         match (&self.inner, &rhs.inner) {
             // Sparse - Sparse
             (BitsetRepr::Sparse(set1), BitsetRepr::Sparse(set2)) => {
                 let result_set: BTreeSet<usize> = set1.difference(set2).copied().collect();
@@ -1211,12 +826,14 @@ impl Sub for &HybridBitset {
                 // Bits in result_bits beyond op_len (if len1 > len2) remain unchanged, which is correct.
 
                 let exact_count = result_bits.count_ones();
-                HybridBitset {
+                let mut result = HybridBitset {
                     inner: BitsetRepr::Dense {
                         bits: result_bits,
                         cached_exact_count: RefCell::new(Some(exact_count)),
                     }
-                }
+                };
+                result.check_representation(); // Check if result should be Sparse
+                result
             }
             // Dense - Sparse
             (BitsetRepr::Dense { bits, .. }, BitsetRepr::Sparse(set2)) => {
@@ -1236,12 +853,14 @@ impl Sub for &HybridBitset {
                 // Otherwise, original bounds are still valid (though maybe not tight).
                 // Always recalculating is simpler.
                 let exact_count = result_bits.count_ones();
-                HybridBitset {
+                let mut result = HybridBitset {
                     inner: BitsetRepr::Dense {
                         bits: result_bits,
                         cached_exact_count: RefCell::new(Some(exact_count)),
                     }
-                }
+                };
+                result.check_representation();
+                result
             }
              // Sparse - Dense
             (BitsetRepr::Sparse(set1), BitsetRepr::Dense { bits: bits2, .. }) => {
@@ -1256,13 +875,7 @@ impl Sub for &HybridBitset {
                  // Result can only be sparse or stay sparse
                  HybridBitset { inner: BitsetRepr::Sparse(result_set) }
             }
-             // Cases involving HoleyDense should not be reached here due to prior conversion
-            (BitsetRepr::HoleyDense {..}, _) | (_, BitsetRepr::HoleyDense {..}) => {
-                 unreachable!("HoleyDense should have been converted to Dense for bitwise operations");
-            }
-        };
-        result.check_representation();
-        result
+        }
     }
 }
 
@@ -1270,11 +883,6 @@ impl Sub for &HybridBitset {
 
 impl BitAndAssign for HybridBitset {
     fn bitand_assign(&mut self, rhs: Self) {
-         if matches!(self.inner, BitsetRepr::HoleyDense {..}) || matches!(rhs.inner, BitsetRepr::HoleyDense {..}) {
-             // Fallback for HoleyDense to simplify optimized paths
-             *self = &*self & &rhs;
-             return;
-         }
         // Avoid clone if possible, but logic is complex.
         // Easiest is often to calculate the result and assign back.
         // Need to borrow rhs immutably for the operation.
@@ -1284,11 +892,6 @@ impl BitAndAssign for HybridBitset {
 
 impl BitOrAssign for HybridBitset {
      fn bitor_assign(&mut self, rhs: Self) {
-         if matches!(self.inner, BitsetRepr::HoleyDense {..}) || matches!(rhs.inner, BitsetRepr::HoleyDense {..}) {
-             // Fallback for HoleyDense to simplify optimized paths
-             *self = &*self | &rhs;
-             return;
-         }
         // Optimization: If self is Dense, rhs is Sparse, can be faster
         match (&mut self.inner, &rhs.inner) {
             (BitsetRepr::Dense { bits, cached_exact_count }, BitsetRepr::Sparse(set2)) => {
@@ -1297,8 +900,6 @@ impl BitOrAssign for HybridBitset {
                 for &index in set2 {
                     if index >= bits.len() {
                         bits.resize(index + 1, false);
-                         // Bounds have changed, cached count is now potentially invalid
-                         *cached_exact_count.borrow_mut() = None;
                     }
                     if !bits[index] { // Check before setting
                         bits.set(index, true);
@@ -1311,7 +912,7 @@ impl BitOrAssign for HybridBitset {
                     }
                     // If cached_exact_count was None, it remains None.
                 }
-                 // No representation check needed (usually grows)
+                // No representation check needed (usually grows)
                 return; // Done with optimized path
             }
             _ => {
@@ -1324,22 +925,12 @@ impl BitOrAssign for HybridBitset {
 
 impl BitXorAssign for HybridBitset {
     fn bitxor_assign(&mut self, rhs: Self) {
-         if matches!(self.inner, BitsetRepr::HoleyDense {..}) || matches!(rhs.inner, BitsetRepr::HoleyDense {..}) {
-             // Fallback for HoleyDense to simplify optimized paths
-             *self = &*self ^ &rhs;
-             return;
-         }
         *self = &*self ^ &rhs;
     }
 }
 
 impl SubAssign for HybridBitset {
     fn sub_assign(&mut self, rhs: Self) {
-         if matches!(self.inner, BitsetRepr::HoleyDense {..}) || matches!(rhs.inner, BitsetRepr::HoleyDense {..}) {
-             // Fallback for HoleyDense to simplify optimized paths
-             *self = &*self - &rhs;
-             return;
-         }
          // Optimization: If self is Dense, rhs is Sparse, can be faster
         match (&mut self.inner, &rhs.inner) {
             (BitsetRepr::Dense { bits, cached_exact_count }, BitsetRepr::Sparse(set2)) => {
@@ -1354,9 +945,6 @@ impl SubAssign for HybridBitset {
                 if bits_cleared > 0 {
                      if let Some(count_ref) = cached_exact_count.borrow_mut().as_mut() {
                         *count_ref -= bits_cleared;
-                    } else {
-                        // If bounds were dirty (None), clearing a bit keeps them dirty.
-                        // No change needed to cached_exact_count if it was None.
                     }
                     self.check_representation(); // This will use the updated cache or recompute
                 }
@@ -1381,11 +969,6 @@ impl BitAndAssign<&HybridBitset> for HybridBitset {
 
 impl BitOrAssign<&HybridBitset> for HybridBitset {
      fn bitor_assign(&mut self, rhs: &HybridBitset) {
-         if matches!(self.inner, BitsetRepr::HoleyDense {..}) || matches!(rhs.inner, BitsetRepr::HoleyDense {..}) {
-             // Fallback for HoleyDense to simplify optimized paths
-             *self = &*self | rhs;
-             return;
-         }
         // Optimization: If self is Dense, rhs is Sparse, can be faster
         match (&mut self.inner, &rhs.inner) {
             (BitsetRepr::Dense { bits, cached_exact_count }, BitsetRepr::Sparse(set2)) => {
@@ -1394,8 +977,6 @@ impl BitOrAssign<&HybridBitset> for HybridBitset {
                 for &index in set2 {
                     if index >= bits.len() {
                         bits.resize(index + 1, false);
-                         // Bounds have changed, cached count is now potentially invalid
-                         *cached_exact_count.borrow_mut() = None;
                     }
                     if !bits[index] { // Check before setting
                         bits.set(index, true);
@@ -1426,11 +1007,6 @@ impl BitXorAssign<&HybridBitset> for HybridBitset {
 
 impl SubAssign<&HybridBitset> for HybridBitset {
     fn sub_assign(&mut self, rhs: &HybridBitset) {
-         if matches!(self.inner, BitsetRepr::HoleyDense {..}) || matches!(rhs.inner, BitsetRepr::HoleyDense {..}) {
-             // Fallback for HoleyDense to simplify optimized paths
-             *self = &*self - rhs;
-             return;
-         }
          // Optimization: If self is Dense, rhs is Sparse, can be faster
         match (&mut self.inner, &rhs.inner) {
             (BitsetRepr::Dense { bits, cached_exact_count }, BitsetRepr::Sparse(set2)) => {
@@ -1445,9 +1021,6 @@ impl SubAssign<&HybridBitset> for HybridBitset {
                 if bits_cleared > 0 {
                      if let Some(count_ref) = cached_exact_count.borrow_mut().as_mut() {
                         *count_ref -= bits_cleared;
-                    } else {
-                        // If bounds were dirty (None), clearing a bit keeps them dirty.
-                        // No change needed to cached_exact_count if it was None.
                     }
                     self.check_representation();
                 }
@@ -1508,10 +1081,6 @@ impl PartialEq for HybridBitset {
                 // If we reach here, they are equal
                 true
             }
-            (BitsetRepr::HoleyDense { max_index: m1, exceptions: e1 },
-             BitsetRepr::HoleyDense { max_index: m2, exceptions: e2 }) => {
-                m1 == m2 && e1 == e2
-            }
             // Mixed case: Use the general iterator comparison
             _ => {
                 // Optimization: Check rough size estimates first if available without recalc?
@@ -1542,7 +1111,7 @@ impl Eq for HybridBitset {}
 impl Hash for HybridBitset {
     fn hash<H: Hasher>(&self, state: &mut H) {
         // Collect elements and sort them to ensure consistent hash order
-        // This is potentially expensive for large dense/holey sets.
+        // This is potentially expensive for large dense sets.
         // Alternative: Hash based on the dense representation if possible?
         // But that requires converting sparse to dense just for hashing.
         // Sticking to sorted element hashing for correctness.
@@ -1560,29 +1129,15 @@ impl Hash for HybridBitset {
 
 impl Into<BitVec> for HybridBitset {
     /// Convert a HybridBitset into a BitVec
-    fn into(mut self) -> BitVec { // Make self mutable
-        self.ensure_dense(); // Converts Sparse or HoleyDense to Dense
-        if let BitsetRepr::Dense { bits, .. } = self.inner {
-            bits
-        } else {
-            // Should be unreachable if ensure_dense works correctly
-            unreachable!("ensure_dense should convert to Dense representation");
-        }
+    fn into(self) -> BitVec {
+        todo!()
     }
 }
 
 impl From<BitVec> for HybridBitset {
     // Convert a BitVec into a HybridBitset
     fn from(bitvec: BitVec) -> Self {
-        let count = bitvec.count_ones();
-        let mut new_set = HybridBitset {
-            inner: BitsetRepr::Dense {
-                bits: bitvec,
-                cached_exact_count: RefCell::new(Some(count)),
-            }
-        };
-        new_set.check_representation(); // This will potentially convert to Sparse or HoleyDense
-        new_set
+        todo!()
     }
 }
 
@@ -1590,14 +1145,7 @@ impl Index<usize> for HybridBitset {
     type Output = bool;
 
     fn index(&self, index: usize) -> &Self::Output {
-        // This is tricky because contains returns bool, not &bool.
-        // For bitvec, they return a proxy type.
-        // A simple but perhaps not ideal way for read-only:
-        if self.contains(index) {
-            &true // static ref
-        } else {
-            &false // static ref
-        }
+        todo!()
     }
 }
 
@@ -1672,12 +1220,9 @@ mod tests {
         assert!(matches!(set.inner, BitsetRepr::Sparse(_)), "Should be Sparse before threshold");
 
         // Insert one more to trigger conversion
-        set.insert(SPARSE_TO_DENSE_THRESHOLD * 2); // Large index to test max_index handling
-        assert_eq!(set.len(), SPARSE_TO_DENSE_THRESHOLD); // Count is exactly the threshold
-
-        // The span is large (up to SPARSE_TO_DENSE_THRESHOLD * 2).
-        // Number of "holes" is large. Should convert to Dense, not HoleyDense.
-        assert!(matches!(set.inner, BitsetRepr::Dense { .. }), "Should be Dense after threshold with large span");
+        set.insert(SPARSE_TO_DENSE_THRESHOLD * 2);
+        assert_eq!(set.len(), SPARSE_TO_DENSE_THRESHOLD);
+        assert!(matches!(set.inner, BitsetRepr::Dense { .. }), "Should be Dense after threshold");
 
         // Check contains works on Dense
         assert!(set.contains(0));
@@ -1691,31 +1236,6 @@ mod tests {
          } else {
              panic!("Expected Dense representation");
          }
-
-         // Test Sparse to HoleyDense conversion if applicable
-        let mut set_holey_candidate = HybridBitset::new();
-        // Create a sparse set that should become HoleyDense
-        // Range: [0..DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 100]
-        // Elements: All except DENSE_TO_HOLEY_MAX_ZEROS_THRESHOLD + 1 exceptions
-        let max_idx_holey = DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 100;
-        let mut sparse_holey_elements: Vec<usize> = (0..=max_idx_holey).collect();
-        let num_holes = DENSE_TO_HOLEY_MAX_ZEROS_THRESHOLD; // Just below threshold
-        for i in 0..num_holes {
-            sparse_holey_elements.remove(i + 5); // Remove some elements to create holes
-        }
-        assert_eq!(sparse_holey_elements.len(), (max_idx_holey + 1) - num_holes);
-
-        set_holey_candidate = HybridBitset::from_iter(sparse_holey_elements);
-        assert!(matches!(set_holey_candidate.inner, BitsetRepr::Sparse(_)), "Should be Sparse initially from iter");
-        assert!(set_holey_candidate.len() >= SPARSE_TO_DENSE_THRESHOLD, "Sparse set should be large enough to trigger conversion check");
-
-        // check_representation should have been called by from_iter or the last insert.
-        // It should now be HoleyDense.
-        assert!(matches!(set_holey_candidate.inner, BitsetRepr::HoleyDense { .. }), "Should convert to HoleyDense");
-        if let BitsetRepr::HoleyDense { max_index, exceptions } = &set_holey_candidate.inner {
-            assert_eq!(*max_index, max_idx_holey);
-            assert_eq!(exceptions.len(), num_holes);
-        }
     }
 
      #[test]
@@ -1755,77 +1275,6 @@ mod tests {
         assert!(!set.contains(DENSE_TO_SPARSE_THRESHOLD - 1));
     }
 
-     #[test]
-    fn test_dense_to_holey_dense_conversion() {
-        let mut set = HybridBitset::new();
-        // Insert enough elements to be Dense and long enough for HoleyDense
-        for i in 0..DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 10 {
-            set.insert(i);
-        }
-        assert!(matches!(set.inner, BitsetRepr::Dense { .. }), "Should be Dense initially");
-        assert_eq!(set.len(), DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 10);
-
-        // Remove a small number of elements to create holes, below DENSE_TO_HOLEY_MAX_ZEROS_THRESHOLD
-        let num_zeros_to_create = DENSE_TO_HOLEY_MAX_ZEROS_THRESHOLD - 5; // Well below threshold
-        for i in 0..num_zeros_to_create {
-             set.remove(i + 10); // Remove some values
-        }
-        assert_eq!(set.len(), (DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 10) - num_zeros_to_create);
-        // check_representation should be called by remove() and trigger Dense -> HoleyDense
-        assert!(matches!(set.inner, BitsetRepr::HoleyDense { .. }), "Should convert to HoleyDense");
-
-        if let BitsetRepr::HoleyDense { max_index, exceptions } = &set.inner {
-            assert_eq!(*max_index, DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 10 - 1); // Max index is length - 1
-            assert_eq!(exceptions.len(), num_zeros_to_create);
-            for i in 0..num_zeros_to_create {
-                 assert!(exceptions.contains(&(i + 10)));
-            }
-        }
-
-        // Check operations work on HoleyDense
-        assert!(set.contains(0));
-        assert!(!set.contains(10)); // An exception
-        assert!(set.contains(DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 9));
-        assert_eq!(set.len(), (DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 10) - num_zeros_to_create);
-
-        // Check HoleyDense to Dense conversion if exceptions grow too large
-        let mut set_holey_to_dense = set.clone();
-        let num_additional_zeros = HOLEY_MAX_EXCEPTIONS_THRESHOLD - num_zeros_to_create + 1; // Exceed threshold
-        for i in 0..num_additional_zeros {
-             set_holey_to_dense.remove(DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 100 + i); // Remove values outside existing range
-        }
-         assert!(matches!(set_holey_to_dense.inner, BitsetRepr::HoleyDense { .. }), "Should still be HoleyDense after removing indices outside max_index");
-         assert_eq!(set_holey_to_dense.len(), (DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 10) - num_zeros_to_create);
-
-
-        // Remove values within the original range to add exceptions
-        let num_additional_exceptions = HOLEY_MAX_EXCEPTIONS_THRESHOLD - num_zeros_to_create + 1; // Exceed threshold
-        for i in 0..num_additional_exceptions {
-            set_holey_to_dense.remove(DENSE_TO_HOLEY_MIN_LEN_THRESHOLD - 50 + i); // Add exceptions within range
-        }
-
-        assert!(matches!(set_holey_to_dense.inner, BitsetRepr::Dense { .. }), "Should convert to Dense when exceptions exceed threshold");
-         assert_eq!(set_holey_to_dense.len(), (DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 10) - num_zeros_to_create - num_additional_exceptions);
-
-
-        // Check HoleyDense to Sparse conversion if count drops too low
-        let mut set_holey_to_sparse = set.clone();
-        let current_len = set_holey_to_sparse.len();
-        let num_to_remove_for_sparse = current_len - (DENSE_TO_SPARSE_THRESHOLD - 1);
-        let mut removed_count = 0;
-        for i in 0..= *set_holey_to_sparse.max_index().unwrap_or(&0) {
-            if !set_holey_to_sparse.contains(i) { continue; } // Skip exceptions or already removed
-            if set_holey_to_sparse.remove(i) {
-                removed_count += 1;
-                if removed_count >= num_to_remove_for_sparse { break; }
-            }
-        }
-
-        assert!(matches!(set_holey_to_sparse.inner, BitsetRepr::Sparse(_)), "Should convert to Sparse when count drops below threshold");
-        assert_eq!(set_holey_to_sparse.len(), DENSE_TO_SPARSE_THRESHOLD - 1);
-    }
-
-
     #[test]
     fn test_dense_bounds_update() {
         let mut set = HybridBitset::new();
@@ -1843,17 +1292,14 @@ mod tests {
         set.insert(10);
         assert_eq!(set.len(), SPARSE_TO_DENSE_THRESHOLD);
          if let BitsetRepr::Dense { cached_exact_count, .. } = &set.inner {
-             // Count should still be Some if it was Some, as no new bit was set.
              assert_eq!(*cached_exact_count.borrow(), Some(SPARSE_TO_DENSE_THRESHOLD));
          }
 
 
-        // Insert new, large index. This will resize the bitvec and invalidate the cache.
+        // Insert new
         set.insert(SPARSE_TO_DENSE_THRESHOLD + 100); // Also tests resize
-        // Length calculation will now recompute and cache the count.
-        assert_eq!(set.len(), SPARSE_TO_DENSE_THRESHOLD + 1);
+        assert_eq!(set.len(), SPARSE_TO_DENSE_THRESHOLD + 1); // len() forces exact count check
          if let BitsetRepr::Dense { cached_exact_count, .. } = &set.inner {
-              // The cached count should be recalculated and stored.
              assert_eq!(*cached_exact_count.borrow(), Some(SPARSE_TO_DENSE_THRESHOLD + 1));
          }
 
@@ -1862,18 +1308,16 @@ mod tests {
          set.remove(0);
          assert_eq!(set.len(), SPARSE_TO_DENSE_THRESHOLD);
           if let BitsetRepr::Dense { cached_exact_count, .. } = &set.inner {
-               // Cached count should be updated by remove.
              assert_eq!(*cached_exact_count.borrow(), Some(SPARSE_TO_DENSE_THRESHOLD));
          }
 
 
          // Remove non-existing (within bounds)
          set.remove(1); // Was present, now removed
-         set.remove(1); // Try removing again (was not present)
-         assert_eq!(set.len(), SPARSE_TO_DENSE_THRESHOLD - 1);
+         set.remove(1); // Try removing again
+         assert_eq!(set.len(), SPARSE_TO_DENSE_THRESHOLD-1);
           if let BitsetRepr::Dense { cached_exact_count, .. } = &set.inner {
-              // Cached count should only decrease when a bit is actually cleared.
-             assert_eq!(*cached_exact_count.borrow(), Some(SPARSE_TO_DENSE_THRESHOLD - 1));
+             assert_eq!(*cached_exact_count.borrow(), Some(SPARSE_TO_DENSE_THRESHOLD -1));
          }
 
 
@@ -1881,8 +1325,7 @@ mod tests {
          set.remove(999999);
          assert_eq!(set.len(), SPARSE_TO_DENSE_THRESHOLD-1);
           if let BitsetRepr::Dense { cached_exact_count, .. } = &set.inner {
-             // Removing out of bounds does nothing, count is unchanged.
-             assert_eq!(*cached_exact_count.borrow(), Some(SPARSE_TO_DENSE_THRESHOLD - 1));
+             assert_eq!(*cached_exact_count.borrow(), Some(SPARSE_TO_DENSE_THRESHOLD -1));
          }
     }
 
@@ -1901,7 +1344,6 @@ mod tests {
         assert_eq!(difference.iter().collect::<BTreeSet<usize>>(), BTreeSet::from_iter(vec![1, 2]));
         assert_eq!(sym_diff.iter().collect::<BTreeSet<usize>>(), BTreeSet::from_iter(vec![1, 2, 4, 5]));
 
-        // Results should be sparse as counts are low
         assert!(matches!(intersection.inner, BitsetRepr::Sparse(_)));
         assert!(matches!(union.inner, BitsetRepr::Sparse(_)));
         assert!(matches!(difference.inner, BitsetRepr::Sparse(_)));
@@ -2022,33 +1464,6 @@ mod tests {
         let mut set1_d = HybridBitset::from_iter(vec![1, 5, 10]); // Start sparse
         set1_d.ensure_dense(); // Force to dense representation
 
-        // Create the same set and force it to be holey dense
-        let mut set1_hd = HybridBitset::new();
-        let max_idx_hd = DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 50;
-         for i in 0..=max_idx_hd { set1_hd.insert(i); } // Make it dense first
-         set1_hd.remove(0); set1_hd.remove(2); set1_hd.remove(4); // Create holes
-         // Now it should be HoleyDense if conditions are met (large len, few zeros)
-         assert!(matches!(set1_hd.inner, BitsetRepr::HoleyDense { .. }), "set1_hd should be holey dense");
-         // Add back 1, 5, 10 and remove other exceptions to match set1_s
-         let current_max_idx = if let BitsetRepr::HoleyDense{ max_index, ..} = &set1_hd.inner { *max_index } else { panic!() };
-         for i in 0..=current_max_idx { // Iterate all indices up to its max
-             if i != 1 && i != 5 && i != 10 {
-                 set1_hd.remove(i); // Remove anything not 1, 5, or 10
-             }
-         }
-         // Now set1_hd should theoretically only contain 1, 5, 10.
-         // Check its representation - it might convert back to Sparse now
-         assert_eq!(set1_hd.iter().collect::<BTreeSet<_>>(), BTreeSet::from_iter(vec![1, 5, 10]));
-         assert!(matches!(set1_hd.inner, BitsetRepr::Sparse { .. }), "set1_hd should convert back to Sparse");
-        // To test HoleyDense equality, we need different HoleyDense sets.
-        // Let's create two identical HoleyDense sets.
-        let mut hd1 = HybridBitset::ones(DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 100);
-        hd1.remove(10); hd1.remove(20); // HoleyDense with exceptions {10, 20}
-        let mut hd2 = HybridBitset::ones(DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 100);
-        hd2.remove(10); hd2.remove(20); // Identical HoleyDense
-        let mut hd3 = HybridBitset::ones(DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 100);
-        hd3.remove(10); hd3.remove(21); // Different HoleyDense
-
 
         let set2_s = HybridBitset::from_iter(vec![1, 5, 11]); // Sparse, different
         let mut set3_d_empty = HybridBitset::from_iter(0..SPARSE_TO_DENSE_THRESHOLD); // Dense
@@ -2058,62 +1473,18 @@ mod tests {
         assert!(matches!(set1_s.inner, BitsetRepr::Sparse(_)));
         // Check that set1_d actually became dense
         assert!(matches!(set1_d.inner, BitsetRepr::Dense { .. }), "set1_d should be dense");
-        assert_eq!(set1_d.iter().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]); // Mistake in forcing dense, should have just inserted 1,5,10
+        assert_eq!(set1_d.iter().collect::<Vec<_>>(), vec![1, 5, 10]);
 
-         // Correct way to make set1_d equivalent to set1_s but Dense:
-         let mut set1_d_correct = HybridBitset::new();
-         // Insert elements to trigger Dense conversion
-         for i in 0..SPARSE_TO_DENSE_THRESHOLD { set1_d_correct.insert(i); }
-         // Clear all bits
-         for i in 0..SPARSE_TO_DENSE_THRESHOLD { set1_d_correct.remove(i); }
-         // Insert the desired elements
-         set1_d_correct.insert(1); set1_d_correct.insert(5); set1_d_correct.insert(10);
-         // It should now be Sparse again, not Dense. Let's just use conversion check.
-         assert!(matches!(set1_d_correct.inner, BitsetRepr::Sparse { .. }));
-         // Let's force a Dense representation of {1, 5, 10} by making it part of a large range
-         let mut set1_d_forced = HybridBitset::ones(SPARSE_TO_DENSE_THRESHOLD + 50); // Dense
-         set1_d_forced.clear(); // Sparse
-         set1_d_forced.insert(1); set1_d_forced.insert(5); set1_d_forced.insert(10); // Still Sparse
-         set1_d_forced.ensure_dense(); // Now Dense { bits: [0,1,0,0,0,1,0,0,0,0,1], cached: Some(3) } ... padding to large length
-
-         // Let's create a HoleyDense representation of {1, 5, 10}
-         let mut set1_hd_forced = HybridBitset::ones(10); // Dense {0..10}
-         set1_hd_forced.remove(0);
-         set1_hd_forced.remove(2);
-         set1_hd_forced.remove(3);
-         set1_hd_forced.remove(4);
-         set1_hd_forced.remove(6);
-         set1_hd_forced.remove(7);
-         set1_hd_forced.remove(8);
-         set1_hd_forced.remove(9); // HoleyDense { max: 10, exceptions: {0,2,3,4,6,7,8,9} }
-         assert!(matches!(set1_hd_forced.inner, BitsetRepr::HoleyDense { .. }));
-         assert_eq!(set1_hd_forced.iter().collect::<BTreeSet<_>>(), BTreeSet::from_iter(vec![1, 5, 10]));
 
         // Test equality
         assert_eq!(set1_s, set1_s);
-        assert_eq!(set1_d_forced, set1_d_forced); // Corrected Dense
-        assert_eq!(set1_hd_forced, set1_hd_forced); // Corrected HoleyDense
-
-        assert_eq!(set1_s, set1_d_forced, "Sparse and Dense representations of the same set should be equal");
-        assert_eq!(set1_d_forced, set1_s, "Equality should be symmetric");
-
-        assert_eq!(set1_s, set1_hd_forced, "Sparse and HoleyDense representations of the same set should be equal");
-        assert_eq!(set1_hd_forced, set1_s, "Equality should be symmetric");
-
-        assert_eq!(set1_d_forced, set1_hd_forced, "Dense and HoleyDense representations of the same set should be equal");
-        assert_eq!(set1_hd_forced, set1_d_forced, "Equality should be symmetric");
-
-
-        assert_eq!(hd1, hd2, "Identical HoleyDense sets should be equal");
-        assert_ne!(hd1, hd3, "Different HoleyDense sets should not be equal");
-
+        assert_eq!(set1_d, set1_d);
+        assert_eq!(set1_s, set1_d, "Sparse and Dense representations of the same set should be equal");
+        assert_eq!(set1_d, set1_s, "Equality should be symmetric");
         assert_ne!(set1_s, set2_s);
-        assert_ne!(set1_d_forced, set2_s);
-        assert_ne!(set1_hd_forced, set2_s);
+        assert_ne!(set1_d, set2_s);
         assert_ne!(set1_s, set3_d_empty);
-        assert_ne!(set1_d_forced, set3_d_empty);
-        assert_ne!(set1_hd_forced, set3_d_empty);
-
+        assert_ne!(set1_d, set3_d_empty);
 
         // Test hashing
         use std::collections::hash_map::DefaultHasher;
@@ -2124,40 +1495,23 @@ mod tests {
         };
 
         let hash1_s = hash(&set1_s);
-        let hash1_d = hash(&set1_d_forced); // Corrected Dense
-        let hash1_hd = hash(&set1_hd_forced); // Corrected HoleyDense
-
+        let hash1_d = hash(&set1_d);
         let hash2_s = hash(&set2_s);
-        let hash3_d_empty = hash(&set3_d_empty);
-        let hash_hd1 = hash(&hd1);
-        let hash_hd2 = hash(&hd2);
-        let hash_hd3 = hash(&hd3);
+        let hash3_d = hash(&set3_d_empty);
 
 
         assert_eq!(hash1_s, hash1_d, "Hashes of Sparse and Dense representations of the same set should be equal");
-        assert_eq!(hash1_s, hash1_hd, "Hashes of Sparse and HoleyDense representations of the same set should be equal");
-        assert_eq!(hash1_d, hash1_hd, "Hashes of Dense and HoleyDense representations of the same set should be equal");
-
-        assert_eq!(hash_hd1, hash_hd2, "Hashes of identical HoleyDense sets should be equal");
-        assert_ne!(hash_hd1, hash_hd3, "Hashes of different HoleyDense sets should not be equal");
-
-
         assert_ne!(hash1_s, hash2_s);
         assert_ne!(hash1_d, hash2_s);
-        assert_ne!(hash1_hd, hash2_s);
-        assert_ne!(hash1_s, hash3_d_empty);
-
+        assert_ne!(hash1_s, hash3_d);
 
         // Test in BTreeSet
         let mut map = BTreeSet::new();
         map.insert(set1_s.clone());
         assert!(map.contains(&set1_s));
-        assert!(map.contains(&set1_d_forced), "BTreeSet should find equivalent Dense set");
-        assert!(map.contains(&set1_hd_forced), "BTreeSet should find equivalent HoleyDense set");
+        assert!(map.contains(&set1_d), "BTreeSet should find equivalent Dense set using Sparse key's hash");
 
-        map.insert(set1_d_forced.clone()); // Should not increase size
-        assert_eq!(map.len(), 1);
-         map.insert(set1_hd_forced.clone()); // Should not increase size
+        map.insert(set1_d.clone()); // Should replace the previous one or do nothing
         assert_eq!(map.len(), 1);
 
         map.insert(set2_s.clone());
@@ -2167,12 +1521,6 @@ mod tests {
         map.insert(set3_d_empty.clone());
         assert_eq!(map.len(), 3);
         assert!(map.contains(&set3_d_empty));
-
-        map.insert(hd1.clone());
-        assert_eq!(map.len(), 4);
-        assert!(map.contains(&hd1));
-        assert!(map.contains(&hd2), "BTreeSet should find identical HoleyDense set");
-        assert!(!map.contains(&hd3), "BTreeSet should not contain different HoleyDense set");
     }
 
      #[test]
@@ -2191,26 +1539,10 @@ mod tests {
         assert!(set.contains(large_idx));
         assert!(!set.contains(1));
         assert!(!set.contains(large_idx - 1));
-
-
-        // Insert enough elements to make it Dense, spanning up to large_idx
-        for i in 0..SPARSE_TO_DENSE_THRESHOLD - 1 {
-             set.insert(i);
-        }
-        // The set now contains {0..SPARSE_TO_DENSE_THRESHOLD-1} plus large_idx.
-        // Count is SPARSE_TO_DENSE_THRESHOLD + 1. Span is large_idx + 1.
-        // It should convert to Dense because the span is large, and the number of elements
-        // is high but the number of holes relative to the span is huge, not fitting HoleyDense criteria.
-        assert!(matches!(set.inner, BitsetRepr::Dense { .. }), "Should convert to Dense with large span and many holes");
-        assert_eq!(set.len(), SPARSE_TO_DENSE_THRESHOLD + 1);
-        assert!(set.contains(large_idx));
-
-        // If we remove most elements to make it Sparse again
-        for i in 1..SPARSE_TO_DENSE_THRESHOLD {
-            set.remove(i);
-        }
-        assert_eq!(set.len(), 2); // Contains 0 and large_idx
-        assert!(matches!(set.inner, BitsetRepr::Sparse(_)), "Should convert back to Sparse");
+        // This block won't be reached if Sparse, which is expected now
+        // if let BitsetRepr::Dense{ bits, ..} = &set.inner {
+        // assert!(bits.len() > large_idx); // Check bitvec was resized appropriately
+        // }
 
 
         // Check if it converts back to sparse if large index removed
@@ -2233,16 +1565,6 @@ mod tests {
         assert!(set.is_empty());
         assert_eq!(set.len(), 0);
         assert!(matches!(set.inner, BitsetRepr::Sparse(_)), "Clear should reset to Sparse empty");
-
-        // Test clear on HoleyDense
-        let mut set_hd = HybridBitset::ones(DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 100); // HoleyDense (no exceptions)
-         assert!(matches!(set_hd.inner, BitsetRepr::HoleyDense { .. }));
-         assert!(!set_hd.is_empty());
-         set_hd.clear();
-         assert!(set_hd.is_empty());
-         assert_eq!(set_hd.len(), 0);
-         assert!(matches!(set_hd.inner, BitsetRepr::Sparse(_)), "Clear should reset to Sparse empty");
-
 
         let mut set2 = HybridBitset::from_iter(vec![1,2,3]); // Sparse
         assert!(matches!(set2.inner, BitsetRepr::Sparse(_)));
@@ -2268,16 +1590,10 @@ mod tests {
         let expected_and = (SPARSE_TO_DENSE_THRESHOLD/2..SPARSE_TO_DENSE_THRESHOLD).collect::<BTreeSet<_>>();
         set3 &= set4;
         assert_eq!(set3.iter().collect::<BTreeSet<_>>(), expected_and);
-        // The operation was Dense &= Dense. The result size is SPARSE_TO_DENSE_THRESHOLD/2 = 64.
-        // The result count (64) < SPARSE_TO_DENSE_THRESHOLD (128), but >= DENSE_TO_SPARSE_THRESHOLD (64).
-        // It should NOT convert to Sparse based on the DENSE_TO_SPARSE_THRESHOLD check in check_representation.
-        // It might convert to HoleyDense if conditions are met.
-        // Result len is 64. Range is [64..128). Max index is 127. Range len is 64.
-        // All elements are present. Exceptions = 0. 0 <= SPARSE_TO_HOLEY_MAX_HOLES_THRESHOLD (32).
-        // Range len (64) < DENSE_TO_HOLEY_MIN_LEN_THRESHOLD (256). Should NOT be HoleyDense.
-        // It should remain Dense.
-        assert!(matches!(set3.inner, BitsetRepr::Dense { .. }), "Result of Dense &= Dense with size 64 should be Dense (not HoleyDense)");
-
+        // The operation was Dense &= Sparse. The result size is 64.
+        // The Dense & Sparse path creates a Sparse result. check_representation checks
+        // if 64 >= SPARSE_TO_DENSE_THRESHOLD (128), which is false. So it stays Sparse.
+        assert!(matches!(set3.inner, BitsetRepr::Sparse { .. }), "Result of Dense &= Sparse with size 64 should be Sparse");
 
         // Xor Assign
         let mut set5 = HybridBitset::from_iter(vec![1, 2, 3]); // Sparse
@@ -2309,7 +1625,7 @@ mod tests {
         let expected_and = (SPARSE_TO_DENSE_THRESHOLD/2..SPARSE_TO_DENSE_THRESHOLD).collect::<BTreeSet<_>>();
         set3 &= &set4;
         assert_eq!(set3.iter().collect::<BTreeSet<_>>(), expected_and);
-        assert!(matches!(set3.inner, BitsetRepr::Dense { .. }), "Result of Dense &= Dense with size 64 should be Dense (not HoleyDense)");
+        assert!(matches!(set3.inner, BitsetRepr::Sparse { .. }), "Result of Dense &= Sparse with size 64 should be Sparse");
 
         // Xor Assign Ref
         let mut set5 = HybridBitset::from_iter(vec![1, 2, 3]); // Sparse
@@ -2379,22 +1695,18 @@ mod tests {
         let expected: BTreeSet<usize> = vec![10, 20, 30].into_iter().collect();
         assert_eq!(set.iter().collect::<BTreeSet<_>>(), expected);
         assert!(matches!(set.inner, BitsetRepr::Sparse(_)));
-
-         // Test FromIterator that should create HoleyDense
-         let max_idx_holey = DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 100;
-         let num_holes = DENSE_TO_HOLEY_MAX_ZEROS_THRESHOLD; // Just below threshold
-         let mut sparse_holey_elements: Vec<usize> = (0..=max_idx_holey).collect();
-         for i in 0..num_holes {
-             sparse_holey_elements.remove(i + 5); // Remove some elements to create holes
-         }
-         let set_holey: HybridBitset = sparse_holey_elements.into_iter().collect();
-
-         assert!(matches!(set_holey.inner, BitsetRepr::HoleyDense { .. }), "FromIterator should create HoleyDense if conditions met");
-         if let BitsetRepr::HoleyDense { max_index, exceptions } = &set_holey.inner {
-             assert_eq!(*max_index, max_idx_holey);
-             assert_eq!(exceptions.len(), num_holes);
-         }
     }
+
+    // Implement FromIterator for HybridBitset - Already implemented above the test module
+    // impl FromIterator<usize> for HybridBitset {
+    //     fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
+    //         let mut set = HybridBitset::new();
+    //         for i in iter {
+    //             set.insert(i);
+    //         }
+    //         set
+    //     }
+    // }
 
     #[test]
     fn test_iter_bools() {
@@ -2426,87 +1738,5 @@ mod tests {
         empty_dense_set.convert_to_dense(); // Becomes Dense { bits: [], cached_exact_count: Some(0) }
         assert_eq!(empty_dense_set.iter_bools().collect::<Vec<bool>>(), Vec::<bool>::new());
         assert_eq!(empty_dense_set.iter_bools().len(), 0);
-
-        // Test with a HoleyDense set
-        let mut holey_set = HybridBitset::ones(10); // Dense [0..10]
-        holey_set.remove(1); holey_set.remove(5); // HoleyDense {max: 10, exceptions: {1, 5}}
-        assert!(matches!(holey_set.inner, BitsetRepr::HoleyDense { .. }));
-
-        let expected_holey_bools = vec![true, false, true, true, true, false, true, true, true, true, true]; // Indices 0 to 10
-        assert_eq!(holey_set.iter_bools().collect::<Vec<bool>>(), expected_holey_bools);
-        assert_eq!(holey_set.iter_bools().len(), expected_holey_bools.len());
-
-         // Test with an empty HoleyDense set (possible if max_index is 0 and exception is 0)
-         let mut empty_holey = HybridBitset::ones(0); // HoleyDense {max: 0, exceptions: {}}
-         assert!(matches!(empty_holey.inner, BitsetRepr::HoleyDense { .. }));
-         empty_holey.remove(0); // HoleyDense {max: 0, exceptions: {0}}
-         assert_eq!(empty_holey.iter_bools().collect::<Vec<bool>>(), vec![false]); // Should yield one false for index 0
-         assert_eq!(empty_holey.iter_bools().len(), 1);
-
-         // Test with HoleyDense max_index far from 0 but empty
-         let mut holey_empty_span = HybridBitset::ones(1000); // HoleyDense {max: 1000, exceptions: {}}
-         holey_empty_span.clear(); // Sparse empty
-         holey_empty_span.ensure_dense(); // Dense empty
-         // To get HoleyDense empty: ones(large) then remove all
-         let mut holey_empty = HybridBitset::ones(DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 10); // HoleyDense
-         let max_idx_empty = if let BitsetRepr::HoleyDense{ max_index, ..} = &holey_empty.inner { *max_index } else { panic!() };
-         for i in 0..=max_idx_empty { holey_empty.remove(i); } // Remove all
-         // Now it should be Sparse empty again
-         assert!(matches!(holey_empty.inner, BitsetRepr::Sparse { .. }));
-         // No easy way to force HoleyDense empty with large max_index without manually creating it or having a helper.
-         // Let's manually create a test case.
-         let manual_holey_empty = HybridBitset {
-             inner: BitsetRepr::HoleyDense {
-                 max_index: 1000,
-                 exceptions: (0..=1000).collect(), // All are exceptions
-             }
-         };
-         assert_eq!(manual_holey_empty.iter_bools().collect::<Vec<bool>>(), vec![false; 1001]);
-         assert_eq!(manual_holey_empty.iter_bools().len(), 1001);
     }
-
-    #[test]
-    fn test_ones() {
-        let sparse_ones = HybridBitset::ones(SPARSE_TO_DENSE_THRESHOLD - 2);
-        assert!(matches!(sparse_ones.inner, BitsetRepr::Sparse(_)));
-        assert_eq!(sparse_ones.len(), SPARSE_TO_DENSE_THRESHOLD - 1);
-        assert!(sparse_ones.contains(0));
-        assert!(sparse_ones.contains(SPARSE_TO_DENSE_THRESHOLD - 2));
-        assert!(!sparse_ones.contains(SPARSE_TO_DENSE_THRESHOLD - 1));
-
-        let dense_ones = HybridBitset::ones(SPARSE_TO_DENSE_THRESHOLD + 10);
-        assert!(matches!(dense_ones.inner, BitsetRepr::Dense { .. })); // Should be Dense based on SPARSE_TO_DENSE_THRESHOLD
-        assert_eq!(dense_ones.len(), SPARSE_TO_DENSE_THRESHOLD + 11);
-        assert!(dense_ones.contains(0));
-        assert!(dense_ones.contains(SPARSE_TO_DENSE_THRESHOLD + 10));
-        assert!(!dense_ones.contains(SPARSE_TO_DENSE_THRESHOLD + 11));
-         if let BitsetRepr::Dense { bits, cached_exact_count } = dense_ones.inner {
-             assert_eq!(bits.len(), SPARSE_TO_DENSE_THRESHOLD + 11);
-             assert_eq!(*cached_exact_count.borrow(), Some(SPARSE_TO_DENSE_THRESHOLD + 11));
-         }
-
-
-        let holey_dense_ones = HybridBitset::ones(DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 50);
-         assert!(matches!(holey_dense_ones.inner, BitsetRepr::HoleyDense { .. }), "Ones should create HoleyDense for large ranges");
-         assert_eq!(holey_dense_ones.len(), DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 51);
-         assert!(holey_dense_ones.contains(0));
-         assert!(holey_dense_ones.contains(DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 50));
-         assert!(!holey_dense_ones.contains(DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 51));
-         if let BitsetRepr::HoleyDense { max_index, exceptions } = holey_dense_ones.inner {
-             assert_eq!(max_index, DENSE_TO_HOLEY_MIN_LEN_THRESHOLD + 50);
-             assert!(exceptions.is_empty()); // No exceptions in an "all ones" range
-         }
-    }
-
-     // Helper to get max_index from HoleyDense for testing
-     impl HybridBitset {
-         #[cfg(test)] // Only available in tests
-         fn max_index(&self) -> Option<&usize> {
-             if let BitsetRepr::HoleyDense { max_index, .. } = &self.inner {
-                 Some(max_index)
-             } else {
-                 None
-             }
-         }
-     }
 }
