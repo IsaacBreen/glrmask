@@ -475,7 +475,8 @@ impl<'r> Precomputer<'r> {
                             &mut queue,
                             &mut next_level,
                             yellow,
-                            child_vocab_of_segment_ref
+                            child_vocab_of_segment_ref,
+                            TokenizerStateID(0)
                         );
                     }
                 }
@@ -510,7 +511,6 @@ impl<'r> Precomputer<'r> {
         }
 
         // Recurse into the child vocab node.
-        let child_vocab_of_segment_ref = child_vocab_of_segment as &VocabPrefixTreeNode;
         self.dfs(child_vocab_of_segment, next_level, yellow);
 
         // Remove the new yellow nodes
@@ -539,6 +539,7 @@ impl<'r> Precomputer<'r> {
         >,
         yellow: &HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, (*const VocabPrefixTreeNode, usize, TokenizerStateID)>,
         child_vocab_of_segment_ptr: *const VocabPrefixTreeNode,
+        end_state: TokenizerStateID,
     ) {
         let mut inserter = EdgeInserter::new(
             source_arc.clone(),
@@ -547,15 +548,7 @@ impl<'r> Precomputer<'r> {
             |existing: &HybridBitset, new_bv| Some(existing | &new_bv),
         );
 
-        let prospective_context_for_target = if match_end_offset_in_segment < segment_len {
-            // Target will be processed for the current segment (at current_expanding_vocab_node_ref)
-            // at match_end_offset_in_segment with TokenizerStateID(0).
-            (child_vocab_of_segment_ptr, match_end_offset_in_segment, TokenizerStateID(0))
-        } else {
-            // Target will be processed for segments starting from child_vocab_of_segment_ref
-            // at offset 0 with TokenizerStateID(0).
-            (child_vocab_of_segment_ptr, 0, TokenizerStateID(0))
-        };
+        let prospective_context_for_target = (child_vocab_of_segment_ptr, match_end_offset_in_segment, end_state);
 
 
         // First try existing children
