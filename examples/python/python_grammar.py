@@ -105,8 +105,8 @@ def define_tokens() -> list[tuple[str, Any]]:
         if name == "IGNORE":
             return name, ge.regex(expr)
 #         return name, ge.regex(seq([ignore, expr]))
-#         return name, ge.sequence([ge.ref("IGNORE"), ge.regex(expr)])
-        return name, ge.regex(expr)
+        return name, ge.sequence([ge.ref("IGNORE"), ge.regex(expr)])
+#         return name, ge.regex(expr)
 
     # TODO: uncomment this
     digit = eat_range('0', '9')
@@ -171,8 +171,8 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
     eps = Regex.eps
 #     exprs.append(("start'''", ge.regex(seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]))))
 #     exprs.append(("start'''", ge.regex(seq([eat_u8(ord("#")), seq([eat_u8(ord(c)) for c in " This"]), eat_u8(ord("\n"))]))))
-#     exprs.append(("start'''", ge.sequence([ge.ref("NAME"), ge.regex(eat_u8(ord("$")))])))
-    exprs.append(("start'''", ge.ref("IGNORE")))
+    exprs.append(("start'''", ge.sequence([ge.ref("NAME"), ge.regex(eat_u8(ord("$")))])))
+#     exprs.append(("start'''", ge.ref("IGNORE")))
 
 #     # TODO: delete this
 #     # Add a rule for "hello=world$" to the start rule
@@ -381,8 +381,8 @@ if __name__ == "__main__":
 #     expected_next_token = "world"
 
     pre_input_text = ""
-#     input_text = '# This Python script'
-    input_text = 'NAME'
+    input_text = '# This Python script'
+#     input_text = 'NAME'
     expected_next_token = ""
 
     if expected_next_token:
