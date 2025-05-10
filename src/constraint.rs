@@ -327,11 +327,9 @@ impl GrammarConstraint {
 
             let mut result_set = BTreeSet::new();
 
-            // Add each handle in the input set as a child of the new_merged_pc_node_arc
-            // using an EdgeInserter. The edge key will be None.
-            for handle_to_become_child in set_of_handles {
+            for handle_child in set_of_handles {
                 let mut insert_result = EdgeInserter::new(
-                    handle_to_become_child.0.clone(), // Source Arc<Mutex<PrecomputeNode>>
+                    handle_child.0.clone(), // Source Arc<Mutex<PrecomputeNode>>
                     None,                           // Edge key: Option<GrammarTokenID> = None
                     all_llm_tokens_for_merge_edge.clone(), // Edge value: LLMTokenBV
                     // Merge function for edge values (LLMTokenBV)
