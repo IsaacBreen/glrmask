@@ -20,9 +20,9 @@ def regex(expr, name=None):
     if name == "IGNORE":
         return name, ge.regex(expr)
     if name is None:
-        return ge.regex(expr)
+        return ge.regex(ge.sequence([ge.ref("IGNORE"), ge.regex(expr)]))
 #     return name, ge.regex(seq([ignore, expr]))
-    return name, ge.sequence([ge.optional(ge.ref("IGNORE")), ge.regex(expr)])
+    return name, ge.sequence([ge.ref("IGNORE"), ge.regex(expr)])
 #     return name, ge.regex(expr)
 
 def eat(s: bytes) -> Regex:
@@ -101,12 +101,12 @@ def define_tokens() -> list[tuple[str, Any]]:
 
     # TODO: Use eg eat("a") instead of eat_u8(ord("a")). It's a bit more readable.
 
-    ignore = rep(choice([
+    ignore = ge.optional(ge.regex(rep(choice([
         eat_u8(ord(" ")),
         # TODO: delete this?
         eat_u8(ord("\n")),
         seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]),
-    ]))
+    ]))))
     tokens["IGNORE"] = ignore
 
     # TODO: uncomment this
@@ -129,31 +129,31 @@ def define_tokens() -> list[tuple[str, Any]]:
     ])
 
     tokens["NAME"] = seq([name_start, rep(name_middle)])
-#     tokens["NUMBER"] = choice([
-#         rep(digit),
-#         seq([rep(digit), eat_u8(ord(".")), rep(digit)]),
-#     ])
-#     tokens["NEWLINE"] = eps()
-#     tokens["INDENT"] = eps()
-#     tokens["DEDENT"] = eps()
-#     tokens["STRING"] = choice([
-#         seq([eat_u8(ord('"')), rep(eat_u8_negation(ord('"'))), eat_u8(ord('"'))]),
-#         seq([eat_u8(ord("'")), rep(eat_u8_negation(ord("'"))), eat_u8(ord("'"))]),
-#     ])
-#     tokens["FSTRING_START"] = choice([
-#         eat('"""'),
-#         eat("'''"),
-#     ])
-#     tokens["FSTRING_END"] = choice([
-#         eat('"""'),
-#         eat("'''"),
-#     ])
-#     tokens["FSTRING_MIDDLE"] = rep(choice([
-#         eat_u8_negation(ord("{")),
-#         eat("{{"),
-#     ]))
-#     tokens["TYPE_COMMENT"] = eps()
-#     tokens["ENDMARKER"] = eps()
+    tokens["NUMBER"] = choice([
+        rep(digit),
+        seq([rep(digit), eat_u8(ord(".")), rep(digit)]),
+    ])
+    tokens["NEWLINE"] = eps()
+    tokens["INDENT"] = eps()
+    tokens["DEDENT"] = eps()
+    tokens["STRING"] = choice([
+        seq([eat_u8(ord('"')), rep(eat_u8_negation(ord('"'))), eat_u8(ord('"'))]),
+        seq([eat_u8(ord("'")), rep(eat_u8_negation(ord("'"))), eat_u8(ord("'"))]),
+    ])
+    tokens["FSTRING_START"] = choice([
+        eat('"""'),
+        eat("'''"),
+    ])
+    tokens["FSTRING_END"] = choice([
+        eat('"""'),
+        eat("'''"),
+    ])
+    tokens["FSTRING_MIDDLE"] = rep(choice([
+        eat_u8_negation(ord("{")),
+        eat("{{"),
+    ]))
+    tokens["TYPE_COMMENT"] = eps()
+    tokens["ENDMARKER"] = eps()
     return [regex(expr, name) for name, expr in tokens.items()]
 #     # TODO: delete this
 #     return []
@@ -163,14 +163,15 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
     exprs: list[tuple[str, Any]] = []
 
     # Make sure the start production is first
-#     exprs.append(("start'''", ge.ref("file")))
-    choice = Regex.choice
-    eat_u8 = Regex.eat_u8
-    eat_u8_negation = Regex.eat_u8_negation
-    seq = Regex.seq
-    rep = Regex.rep
-    eps = Regex.eps
-    exprs.append(("start'''", ge.regex(seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]))))
+    exprs.append(("start'''", ge.ref("file")))
+#     # TODO: delete this
+#     choice = Regex.choice
+#     eat_u8 = Regex.eat_u8
+#     eat_u8_negation = Regex.eat_u8_negation
+#     seq = Regex.seq
+#     rep = Regex.rep
+#     eps = Regex.eps
+#     exprs.append(("start'''", ge.regex(seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]))))
 #     exprs.append(("start'''", ge.regex(seq([eat_u8(ord("#")), seq([eat_u8(ord(c)) for c in " This"]), eat_u8(ord("\n"))]))))
 #     exprs.append(("start'''", ge.sequence([ge.ref("NAME"), ge.regex(eat_u8(ord("$")))])))
 #     exprs.append(("start'''", ge.ref("IGNORE")))
