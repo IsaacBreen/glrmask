@@ -656,6 +656,7 @@ impl<'a> GrammarConstraintState<'a> {
         self.step(&llm_tokens); 
     }
 
+    /// Prunes the GSS based on the committed token and resets the active token sets.
     pub fn commit(&mut self, llm_token_id: LLMTokenID) {
         let all_true_token_info = LLMTokenInfo {
             active: HybridBitset::ones(self.parent.max_llm_token_id),
@@ -663,8 +664,16 @@ impl<'a> GrammarConstraintState<'a> {
         };
         let all_true_intersection = all_true_token_info.intersection.clone();
 
+
+        // Closure for GSS transformation:
+        // - Prune if token not present in 'active'.
+        // - If token present:
+        //   - Reset 't' to 'all_true_token_info'.
+        //   - Stop recursion if token is present in 'intersection' (optimization).
         let closure = |content: &ParseStateNodeContent<LLMTokenInfo>| -> Option<(ParseStateNodeContent<LLMTokenInfo>, bool)> {
             if content.t.active.contains(llm_token_id.0) {
+                // If the intersection already guarantees this token, we can stop early.
+                // Check if intersection contains all possible tokens
                 if content.t.intersection == all_true_intersection { 
                      Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, false)) 
                 } else {
