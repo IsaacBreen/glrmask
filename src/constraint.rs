@@ -766,7 +766,7 @@ impl<'a> GrammarConstraintState<'a> {
         }
     }
 
-    fn prepare_initial_nodes_and_values_for_special_map(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'_, LLMTokenInfo>)> {
+    fn prepare_initial_nodes_and_values_for_special_map(&self, llm_tokens: &LLMTokenBV) -> Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'_, LLMTokenInfo>)> {
         let mut initial_nodes_and_values: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'_, LLMTokenInfo>)> = Vec::new();
         let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, GLRParserState<'_, LLMTokenInfo>> = BTreeMap::new();
 
@@ -790,7 +790,7 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(2, "Stepping grammar constraint state with tokenizer states {:?}", self.state.keys().map(|k| k.0).collect::<Vec<_>>());
         let initial_nodes_and_values = self.prepare_initial_nodes_and_values_for_special_map(llm_tokens);
 
-        self.state = BTreeMap::new();
+        let mut next_state_map: BTreeMap<TokenizerStateID, GLRParserState<'a, LLMTokenInfo>> = BTreeMap::new();
 
         Trie::special_map(
             initial_nodes_and_values,
@@ -834,10 +834,10 @@ impl<'a> GrammarConstraintState<'a> {
                     crate::debug!(3, "At clean end state");
                     if final_glr_parse_state.is_ok() {
                         crate::debug!(3, "GLR parse state at clean end is OK");
-                        if let Some(existing) = self.state.get_mut(&TokenizerStateID(0)) {
+                        if let Some(existing) = next_state_map.get_mut(&TokenizerStateID(0)) {
                             existing.merge_with(final_glr_parse_state.clone());
                         } else {
-                            self.state.insert(TokenizerStateID(0), final_glr_parse_state.clone());
+                            next_state_map.insert(TokenizerStateID(0), final_glr_parse_state.clone());
                         }
                     }
                 }
@@ -860,10 +860,10 @@ impl<'a> GrammarConstraintState<'a> {
                             crate::debug!(3, "Processing finalizer for token_state_id {:?}", tokenizer_state_id);
                             if glr_parse_state_filtered.is_ok() { // This is current_glr_parse_state filtered by finalizer's llm_tokens
                                 crate::debug!(3, "Finalizer is compatible with current GLR state (pre-step by final_grammar_token)");
-                                if let Some(existing) = self.state.get_mut(tokenizer_state_id) {
+                                if let Some(existing) = next_state_map.get_mut(tokenizer_state_id) {
                                     existing.merge_with(glr_parse_state_filtered.clone());
                                 } else {
-                                    self.state.insert(*tokenizer_state_id, glr_parse_state_filtered.clone());
+                                    next_state_map.insert(*tokenizer_state_id, glr_parse_state_filtered.clone());
                                 }
                             }
                         }
@@ -872,6 +872,7 @@ impl<'a> GrammarConstraintState<'a> {
                 !current_glr_parse_state.active_states.is_empty()
             },
         );
+
+        self.state = next_state_map;
     }
 }
-
