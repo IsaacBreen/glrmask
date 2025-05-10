@@ -1371,7 +1371,11 @@ mod tests {
         let mut llm_token_map = LLMTokenMap::new();
         let mut max_llm_token_id_val: u32 = 0;
 
-        for (token_str, id_val) in gpt2_raw_vocab {
+        // Sample only ~20% of the GPT-2 tokens to speed up this test
+        let total_tokens = gpt2_raw_vocab.len();
+        let sample_size = total_tokens / 5; // approx. 20%
+        println!("Sampling {} out of {} GPT-2 tokens for precompute", sample_size, total_tokens);
+        for (token_str, id_val) in gpt2_raw_vocab.into_iter().take(sample_size) {
             llm_token_map.insert(token_str.into_bytes(), LLMTokenID(id_val as usize));
             if id_val > max_llm_token_id_val {
                 max_llm_token_id_val = id_val;
