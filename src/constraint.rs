@@ -103,7 +103,7 @@ pub struct PrecomputedNodeContents {
 }
 
 impl PrecomputedNodeContents {
-    fn finalizers(&self) -> &BTreeMap<GrammarTokenID, PrecomputedFinalizer> {
+    pub(crate) fn finalizers(&self) -> &BTreeMap<GrammarTokenID, PrecomputedFinalizer> {
         &self.finalizers
     }
 
@@ -140,7 +140,7 @@ pub type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode>;
 pub struct GrammarConstraint {
     tokenizer:        Regex,
     parser:           GLRParser,
-    precomputed:      Precomputed,
+    pub(crate) precomputed:      Precomputed,
     llm_token_map:    BiBTreeMap<Vec<u8>, LLMTokenID>,
     token_name_map:   BiBTreeMap<String, usize>,
     max_llm_token_id: usize,
