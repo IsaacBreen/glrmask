@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque, HashSet};
 use std::ops::BitOr;
 use std::sync::{Arc, Mutex}; // Removed MutexGuard as it's not used in type signatures
 // Removed: use bitvec::macros::internal::funty::Fundamental;
-use crate::constraint_extra::{PrecomputeStats, print_precompute_stats}; // Removed print_finalizer
+use crate::constraint_extra::{PrecomputeStats, print_precompute_stats, calculate_final_stats}; // Added calculate_final_stats
 use crate::datastructures::charmap::TrieMap;
 use crate::datastructures::gss::prune_and_transform_recursive;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -48,6 +48,10 @@ impl PrecomputedFinalizer {
 pub(crate) struct PrecomputedNodeContents {
     finalizers: BTreeMap<GrammarTokenID, PrecomputedFinalizer>,
     pub(crate) clean_end: Option<LLMTokenBV>,
+}
+
+impl PrecomputedNodeContents {
+    pub(crate) fn finalizers(&self) -> &BTreeMap<GrammarTokenID, PrecomputedFinalizer> { &self.finalizers }
 }
 
 pub(crate) type PrecomputeNode = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
@@ -124,8 +128,6 @@ impl MergeAndIntersect for LLMTokenInfo {
 }
 
 impl PrecomputedNodeContents {
-    pub(crate) fn finalizers(&self) -> &BTreeMap<GrammarTokenID, PrecomputedFinalizer> { &self.finalizers }
-
     /// Adds information about a final state reachable via a specific grammar token.
     /// If an entry for the grammar token already exists, it merges the information.
     pub fn push_finalizer_info(&mut self, possible_final_grammar_token: GrammarTokenID, llm_token_id: LLMTokenID, tokenizer_state_id: TokenizerStateID) {
@@ -252,10 +254,10 @@ impl GrammarConstraint {
                     |ev_exist: &LLMTokenBV, ev_new: HybridBitset| Some(ev_exist | &ev_new),
                 );
 
-                insert_result = insert_result.try_children(); 
+                insert_result = insert_result.try_children();
 
                 if insert_result.clone_into_option().is_none() { // Check if destination was found by try_children
-                    insert_result = insert_result.try_destination(new_merged_pc_node_arc.clone()); 
+                    insert_result = insert_result.try_destination(new_merged_pc_node_arc.clone());
                 }
             }
 
@@ -486,7 +488,7 @@ impl GrammarConstraint {
                     tokenizer,
                     all_llm_tokens_for_merge_edge,
                     pb,
-                    // max_llm_token_id, // Removed
+                    // max_llm_token_id, // Removed from helper's signature
                     merge_threshold, // Use renamed parameter
                 );
             }
@@ -502,18 +504,18 @@ impl GrammarConstraint {
             initial_associations_at_vocab_root.insert(*tokenizer_id, set_for_state);
         }
 
-        crate::debug!(2, "Starting precompute DFS recursion over VocabPrefixTree"); 
+        crate::debug!(2, "Starting precompute DFS recursion over VocabPrefixTree");
         // Initial call to the recursive helper
         precompute_recursive_helper(
             &vocab_prefix_tree.root,
             initial_associations_at_vocab_root,
-            tokenizer, 
-            &all_llm_tokens_for_merge_edge, 
-            &pb, 
+            tokenizer,
+            &all_llm_tokens_for_merge_edge,
+            &pb,
             // max_llm_token_id, // Removed from helper's signature
-            MERGE_THRESHOLD, 
+            MERGE_THRESHOLD,
         );
-        crate::debug!(2, "Done with precompute DFS recursion."); 
+        crate::debug!(2, "Done with precompute DFS recursion.");
 
         pb.finish_with_message("Precomputation complete");
 
@@ -531,66 +533,11 @@ impl GrammarConstraint {
         crate::debug!(2, "Final cycle check passed: No cycles found in precomputed graph structure.");
         // -------------------------------------------------------------
 
-        // --- Calculate Final Statistics from precomputed_roots before unwrapping ---
-        crate::debug!(2, "Calculating final precompute statistics...");
-        let mut all_reachable_nodes_for_final_stats: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = HashSet::new();
-        for root_arc_mutex_node in precomputed_roots.values() {
-            let nodes_from_this_root = PrecomputeNode::all_nodes(root_arc_mutex_node.clone());
-            for node_arc in nodes_from_this_root {
-                all_reachable_nodes_for_final_stats.insert(ArcPtrWrapper::new(node_arc));
-            }
-        }
-        stats.final_unique_nodes_count = all_reachable_nodes_for_final_stats.len();
-
-        stats.final_total_occupancy_sum_for_some_keys = 0;
-        stats.final_num_occupied_some_edge_keys = 0;
-        stats.final_total_occupancy_sum_for_none_keys = 0;
-        stats.final_num_occupied_none_edge_keys = 0;
-
-
-        for comp_arc_node in &all_reachable_nodes_for_final_stats {
-            let node_arc = comp_arc_node.as_arc(); 
-            let node_guard = node_arc.lock().expect("Mutex poisoned during final stats calculation");
-
-            for (edge_key_opt, dest_map) in node_guard.children() { 
-                let num_edges_for_this_key_to_distinct_children = dest_map.len();
-                stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
-
-                if let Some(gtid) = edge_key_opt { 
-                    stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
-                    *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += 1;
-                    stats.final_grammar_token_edge_fanouts_dist
-                        .entry(*gtid)
-                        .or_default()
-                        .push(num_edges_for_this_key_to_distinct_children);
-                    for llm_token_bv_on_edge in dest_map.values() {
-                        stats.final_grammar_token_edge_token_set_sizes_dist
-                            .entry(*gtid)
-                            .or_default()
-                            .push(llm_token_bv_on_edge.len());
-                    }
-                    if num_edges_for_this_key_to_distinct_children > 0 {
-                        stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key_to_distinct_children;
-                        stats.final_num_occupied_some_edge_keys += 1;
-                    }
-                } else { 
-                    stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
-                    if num_edges_for_this_key_to_distinct_children > 0 {
-                        stats.final_total_occupancy_sum_for_none_keys += num_edges_for_this_key_to_distinct_children;
-                        stats.final_num_occupied_none_edge_keys += 1;
-                    }
-                }
-            }
-
-            if node_guard.value.clean_end.is_some() {
-                stats.final_nodes_with_clean_end += 1;
-            }
-            for finalizer_for_gtid in node_guard.value.finalizers.values() {
-                stats.final_total_finalizer_entries_in_graph += finalizer_for_gtid.content.len();
-            }
-        }
-
-        print_precompute_stats(&stats, token_name_map);
+        // --- Calculate and Print Final Statistics ---
+        // stats is already initialized at the beginning of the function
+        // and stats.initial_root_nodes_created is updated where roots are made.
+        crate::constraint_extra::calculate_final_stats(&precomputed_roots, &mut stats);
+        crate::constraint_extra::print_precompute_stats(&stats, token_name_map); // Call the function from constraint_extra
 
         let mut final_precomputed: Precomputed = BTreeMap::new();
         let mut clone_count = 0;
@@ -653,10 +600,9 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn step_with_llm_token(&mut self, llm_token_id: LLMTokenID) {
         let mut llm_tokens = HybridBitset::new();
         llm_tokens.insert(llm_token_id.0);
-        self.step(&llm_tokens); 
+        self.step(&llm_tokens);
     }
 
-    /// Prunes the GSS based on the committed token and resets the active token sets.
     pub fn commit(&mut self, llm_token_id: LLMTokenID) {
         let all_true_token_info = LLMTokenInfo {
             active: HybridBitset::ones(self.parent.max_llm_token_id),
@@ -664,32 +610,24 @@ impl<'a> GrammarConstraintState<'a> {
         };
         let all_true_intersection = all_true_token_info.intersection.clone();
 
-
-        // Closure for GSS transformation:
-        // - Prune if token not present in 'active'.
-        // - If token present:
-        //   - Reset 't' to 'all_true_token_info'.
-        //   - Stop recursion if token is present in 'intersection' (optimization).
         let closure = |content: &ParseStateNodeContent<LLMTokenInfo>| -> Option<(ParseStateNodeContent<LLMTokenInfo>, bool)> {
             if content.t.active.contains(llm_token_id.0) {
-                // If the intersection already guarantees this token, we can stop early.
-                // Check if intersection contains all possible tokens
-                if content.t.intersection == all_true_intersection { 
-                     Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, false)) 
+                if content.t.intersection == all_true_intersection {
+                     Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, false))
                 } else {
-                     Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, true)) 
+                     Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, true))
                 }
             } else {
-                None 
+                None
             }
         };
 
         let mut memo = HashMap::new();
         self.state.retain(|_tokenizer_state_id, glr_state| {
-            glr_state.active_states.retain(|_key, parse_state| { 
+            glr_state.active_states.retain(|_key, parse_state| {
                 let maybe_new_node = prune_and_transform_recursive(&parse_state.stack, &closure, &mut memo);
                 if let Some(new_node) = maybe_new_node {
-                    parse_state.stack = new_node; 
+                    parse_state.stack = new_node;
                     true
                 } else {
                     false
@@ -710,8 +648,8 @@ impl<'a> GrammarConstraintState<'a> {
         let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, GLRParserState<'_, LLMTokenInfo>> = BTreeMap::new();
 
         for (tokenizer_state_id, state) in &self.state {
-            let mut cloned_state = state.clone(); 
-            for parse_state in cloned_state.active_states.values_mut() { 
+            let mut cloned_state = state.clone();
+            for parse_state in cloned_state.active_states.values_mut() {
                 Arc::make_mut(&mut parse_state.stack).value.t.active &= llm_tokens;
             }
             tokenizer_state_id_to_parse_states.insert(*tokenizer_state_id, cloned_state);
@@ -737,11 +675,11 @@ impl<'a> GrammarConstraintState<'a> {
                 let node_ptr = std::ptr::addr_of!(*child_node);
                 crate::debug!(3, "Processing grammar node {:p} token {:?} with {} active states", node_ptr, grammar_token_id.map(|gtid| gtid.0), glr_parse_state.active_states.len());
                 let mut cloned_glr_parse_state = glr_parse_state.clone();
-                cloned_glr_parse_state.active_states.retain(|_key, parse_state| { 
+                cloned_glr_parse_state.active_states.retain(|_key, parse_state| {
                     let current_active_tokens = parse_state.stack.value.t.active.clone();
                     Arc::make_mut(&mut parse_state.stack).value.t.intersection &= &current_active_tokens;
                     Arc::make_mut(&mut parse_state.stack).value.t.active &= edge_llm_tokens;
-                    !parse_state.stack.value.t.active.is_empty() 
+                    !parse_state.stack.value.t.active.is_empty()
                 });
                 grammar_token_id.map(|gtid| cloned_glr_parse_state.step(gtid));
                 if cloned_glr_parse_state.active_states.is_empty() {
@@ -755,13 +693,13 @@ impl<'a> GrammarConstraintState<'a> {
             |managed_parse_state1, managed_parse_state2| {
                 managed_parse_state1.merge_with(managed_parse_state2);
             },
-            |node, current_glr_parse_state| { 
+            |node, current_glr_parse_state| {
                 let mut active_llm_tokens = HybridBitset::new();
                 for parse_state in current_glr_parse_state.active_states.values() {
                     active_llm_tokens |= &parse_state.stack.value.t.active;
                 }
                 let node_ptr = std::ptr::addr_of!(*node);
-                crate::debug!(3, "Processing node {:p} with {} active states, {} LLM tokens, {} finalizers", node_ptr, current_glr_parse_state.active_states.len(), active_llm_tokens.len(), node.value.finalizers.len());
+                crate::debug!(3, "Processing node {:p} with {} active states, {} LLM tokens, {} finalizers", node_ptr, current_glr_parse_state.active_states.len(), active_llm_tokens.len(), node.value.finalizers().len()); // Use .finalizers()
                 if let Some(clean_end) = &node.value.clean_end {
                     let mut final_glr_parse_state = current_glr_parse_state.clone();
                     final_glr_parse_state.active_states.retain(|_key, parse_state| {
@@ -781,7 +719,7 @@ impl<'a> GrammarConstraintState<'a> {
                     }
                 }
 
-                for (possible_final_grammar_token, precomputed_finalizer) in &node.value.finalizers {
+                for (possible_final_grammar_token, precomputed_finalizer) in node.value.finalizers().iter() { // Use .finalizers()
                     let mut possible_next_glr_parse_state = current_glr_parse_state.clone();
                     crate::debug!(3, "Stepping semi-final GLR parse state");
                     possible_next_glr_parse_state.step(*possible_final_grammar_token);
@@ -803,9 +741,8 @@ impl<'a> GrammarConstraintState<'a> {
                             // Let's stick to the original logic structure for applying finalizer tokens:
                             // Filter the `current_glr_parse_state` by `llm_tokens_from_finalizer`
                             // If this filtered state is OK, then this is a valid terminal state for the *current* GLR configuration.
-                            // The `possible_next_glr_parse_state.step` is a check that the grammar *could* accept this token.
-                            // The actual state to be stored is `glr_parse_state_filtered` (which is `current_glr_parse_state` filtered by `llm_tokens_from_finalizer`)
-                            // but associated with the *next* tokenizer_state_id.
+                            // The `possible_next_glr_parse_state.is_ok()` check ensures the grammar token is valid from the *original* state.
+                            // The state stored is the *original* state, but filtered by the finalizer's tokens, and associated with the *next* tokenizer state.
 
                             // Re-evaluating: The `glr_parse_state_filtered` should be based on `possible_next_glr_parse_state`
                             // if the finalizer applies *after* the grammar token.
@@ -843,4 +780,3 @@ impl<'a> GrammarConstraintState<'a> {
         );
     }
 }
-
