@@ -16,6 +16,12 @@ from _sep1 import PyRegexExpr as Regex, PyGrammar, PyGrammarExpr as ge, PyGramma
 from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
+def regex(name, expr):
+        if name == "IGNORE":
+            return name, ge.regex(expr)
+#         return name, ge.regex(seq([ignore, expr]))
+        return name, ge.sequence([ge.optional(ge.ref("IGNORE")), ge.regex(expr)])
+#         return name, ge.regex(expr)
 
 def eat(s: bytes) -> Regex:
     if len(s) == 1:
@@ -37,7 +43,7 @@ def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Regex:
             value = value[1:-1]
         else:
             raise ValueError(f"Invalid string literal: {value}")
-        return ge.regex(eat(value))
+        return regex(eat(value))
     elif isinstance(item, pegen.grammar.Opt):
         return ge.optional(pegen_to_sep1_regex(item.node, memo))
     elif isinstance(item, pegen.grammar.Gather):
@@ -100,13 +106,6 @@ def define_tokens() -> list[tuple[str, Any]]:
         seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]),
     ]))
     tokens["IGNORE"] = ignore
-
-    def regex(name, expr):
-        if name == "IGNORE":
-            return name, ge.regex(expr)
-#         return name, ge.regex(seq([ignore, expr]))
-        return name, ge.sequence([ge.optional(ge.ref("IGNORE")), ge.regex(expr)])
-#         return name, ge.regex(expr)
 
     # TODO: uncomment this
     digit = eat_range('0', '9')
