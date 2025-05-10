@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque, HashSet};
 use std::ops::BitOr;
 use std::sync::{Arc, Mutex, MutexGuard};
 use bitvec::macros::internal::funty::Fundamental;
-use crate::constraint_extra::print_finalizer;
+use crate::constraint_extra::{print_finalizer, PrecomputeStats, print_precompute_stats};
 use crate::datastructures::charmap::TrieMap;
 use crate::datastructures::gss::prune_and_transform_recursive;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -19,8 +19,8 @@ use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::datastructures::trie::EdgeInserter;
 use indicatif::{ProgressBar, ProgressStyle};
 use crate::datastructures::hybrid_bitset::HybridBitset;
-use crate::datastructures::trie::ComparableArc; // Need ComparableArc for HashSet in final stats calculation
-use std::hash::{Hash, Hasher}; // Import Hash and Hasher
+use crate::datastructures::trie::ComparableArc;
+use std::hash::{Hash, Hasher};
 
 
 pub type LLMTokenBV = HybridBitset;
@@ -103,33 +103,6 @@ pub struct GrammarConstraint {
     /// Bidirectional map: token name ↔ grammar-ID
     pub(crate) token_name_map: BiBTreeMap<String, usize>,
     pub(crate) max_llm_token_id: usize,
-}
-
-
-// Add this struct definition before impl GrammarConstraint
-#[derive(Default, Debug)]
-struct PrecomputeStats {
-    // Gross counts (before sharing/merging reduces them in the final structure)
-    initial_root_nodes_created: usize,
-
-    // Final structure stats (net counts, after all processing and sharing)
-    final_unique_nodes_count: usize,
-    final_edges_count: usize,
-    final_edges_with_none_key: usize,
-    final_edges_with_some_key: usize,
-    final_nodes_with_clean_end: usize,
-    final_total_finalizer_entries_in_graph: usize, // Sum of node.value.finalizers.values().map(|pf| pf.content.len()).sum() across unique nodes
-
-    // For average edge occupancy per key type
-    final_total_occupancy_sum_for_some_keys: usize,
-    final_num_occupied_some_edge_keys: usize,
-    final_total_occupancy_sum_for_none_keys: usize,
-    final_num_occupied_none_edge_keys: usize,
-
-    // New fields for grammar token edge key statistics
-    final_grammar_token_edge_key_counts: BTreeMap<GrammarTokenID, usize>,
-    final_grammar_token_edge_fanouts_dist: BTreeMap<GrammarTokenID, Vec<usize>>,
-    final_grammar_token_edge_token_set_sizes_dist: BTreeMap<GrammarTokenID, Vec<usize>>,
 }
 
 
@@ -646,116 +619,7 @@ impl GrammarConstraint {
             }
         }
 
-        let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
-            stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
-        } else { 0.0 };
-        let avg_none = if stats.final_num_occupied_none_edge_keys > 0 {
-            stats.final_total_occupancy_sum_for_none_keys as f64 / stats.final_num_occupied_none_edge_keys as f64
-        } else { 0.0 };
-
-        println!("--- Precomputation Statistics ---");
-        println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
-        println!("\nFinal Graph Structure (after sharing and deduplication):");
-        println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
-        println!("  Total Edges: {}", stats.final_edges_count);
-        println!("    Edges with None Key: {}", stats.final_edges_with_none_key);
-        println!("    Edges with Some Key: {}", stats.final_edges_with_some_key);
-        println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
-        println!("  Total Finalizer Entries (sum of map sizes in all unique nodes): {}", stats.final_total_finalizer_entries_in_graph);
-        println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
-        println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
-
-        // Helper function to calculate sum, mean, and median from Vec<usize>
-        fn calculate_stats_from_vec_usize(numbers: &Vec<usize>) -> (usize, Option<f64>, Option<f64>) {
-            if numbers.is_empty() {
-                return (0, None, None);
-            }
-            let sum: usize = numbers.iter().sum();
-            let mean: Option<f64> = Some(sum as f64 / numbers.len() as f64);
-
-            let mut sorted_numbers = numbers.clone();
-            sorted_numbers.sort_unstable();
-            let len = sorted_numbers.len();
-            let mid = len / 2;
-            let median: Option<f64> = if len == 0 {
-                None
-            } else if len % 2 == 0 {
-                Some((sorted_numbers[mid - 1] as f64 + sorted_numbers[mid] as f64) / 2.0)
-            } else {
-                Some(sorted_numbers[mid] as f64)
-            };
-            (sum, mean, median)
-        }
-
-        let mut grammar_token_stats_new: Vec<(
-            GrammarTokenID,
-            usize, // key_usages (KeyUse)
-            (usize, Option<f64>, Option<f64>), // fanout_stats (SumChild, AvgChild, MedChild)
-            (usize, Option<f64>, Option<f64>)  // token_set_size_stats (SumToks, AvgToks, MedToks)
-        )> = Vec::new();
-
-        for (gtid, key_usages_count) in &stats.final_grammar_token_edge_key_counts {
-            let fanouts_for_gtid = stats.final_grammar_token_edge_fanouts_dist
-                                        .get(gtid)
-                                        .cloned()
-                                        .unwrap_or_else(Vec::new);
-            let child_stats = calculate_stats_from_vec_usize(&fanouts_for_gtid);
-
-            let token_set_sizes_for_gtid = stats.final_grammar_token_edge_token_set_sizes_dist
-                                                .get(gtid)
-                                                .cloned()
-                                                .unwrap_or_else(Vec::new);
-            let toks_stats = calculate_stats_from_vec_usize(&token_set_sizes_for_gtid);
-
-            grammar_token_stats_new.push((*gtid, *key_usages_count, child_stats, toks_stats));
-        }
-
-        grammar_token_stats_new.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by KeyUse (key_usages_count)
-
-        println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
-    // Updated to add an AvgKeyToks column
-    println!(
-        "  {:<25} {:<5} {:<8} {:<10} {:<10} {:<10} {:<12} {:<10} {:<10} {:<10}",
-        "Token Name", "ID", "KeyUse", "SumChild", "AvgChild", "MedChild",
-        "AvgKeyToks", "SumToks", "AvgToks", "MedToks"
-    );
-    println!(
-        "  {:-<25} {:-<5} {:-<8} {:-<10} {:-<10} {:-<10} {:-<12} {:-<10} {:-<10} {:-<10}",
-        "", "", "", "", "", "", "", "", "", ""
-    );
-
-        for (gtid, key_usages, child_stats, toks_stats) in grammar_token_stats_new {
-            let name = token_name_map
-                .get_by_right(&gtid.0) // gtid is GrammarTokenID
-                .cloned()
-                .unwrap_or_else(|| gtid.0.to_string());
-
-            let (sum_child, avg_child, med_child) = child_stats;
-            let (sum_toks, avg_toks, med_toks) = toks_stats;
-            // compute average LLM-token count per edge-key use
-            let avg_key_toks = if key_usages > 0 {
-                Some(sum_toks as f64 / key_usages as f64)
-            } else {
-                None
-            };
-
-            let format_opt_f64 = |val: Option<f64>| val.map_or_else(|| "N/A".to_string(), |v| format!("{:.2}", v));
-
-            println!(
-                "  {:<25} {:>5} {:>8} {:>10} {:>10} {:>10} {:>12} {:>10} {:>10} {:>10}",
-                name,
-                gtid.0,
-                key_usages,
-                sum_child,
-                format_opt_f64(avg_child),
-                format_opt_f64(med_child),
-                format_opt_f64(avg_key_toks),
-                sum_toks,
-                format_opt_f64(avg_toks),
-                format_opt_f64(med_toks)
-            );
-        }
-        println!("---------------------------------");
+        print_precompute_stats(&stats, token_name_map);
 
         let mut final_precomputed: Precomputed = BTreeMap::new();
         let mut clone_count = 0;
