@@ -1081,8 +1081,16 @@ mod tests {
     use super::*;
     use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
     use std::hash::{Hash, Hasher};
-    use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast};
+    use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast}; // Added eat_any_fast
     // Ensure Hash and Hasher are in scope for the test module
+
+    use std::fs::{self, File};
+    use std::io::{BufReader, Read, Write};
+    use std::path::Path;
+    use serde_json; // Already a main dependency, but good to be explicit if used directly
+    // reqwest will be used if the file isn't cached, ensure it's in dev-dependencies
+    use crate::tokenizer::LLMTokenMap;
+
 
     // Use concrete types for merge tests
     type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;
@@ -1099,6 +1107,36 @@ mod tests {
     fn arc_ptr<N>(arc: &Arc<Mutex<N>>) -> *const Mutex<N> {
         Arc::as_ptr(arc)
     }
+
+    // Helper function to load or download GPT-2 vocab
+    fn load_or_download_gpt2_vocab(
+        cache_dir: &Path,
+        file_name: &str,
+        url: &str,
+    ) -> Result<BTreeMap<String, u32>, Box<dyn std::error::Error>> {
+        fs::create_dir_all(cache_dir)?;
+        let cache_path = cache_dir.join(file_name);
+
+        if cache_path.exists() {
+            println!("Loading GPT-2 vocab from cache: {:?}", cache_path);
+            let file = File::open(cache_path)?;
+            let reader = BufReader::new(file);
+            let vocab: BTreeMap<String, u32> = serde_json::from_reader(reader)?;
+            Ok(vocab)
+        } else {
+            println!("Downloading GPT-2 vocab from: {}", url);
+            let response = reqwest::blocking::get(url)?.error_for_status()?;
+            let content = response.text()?;
+
+            let mut file = File::create(&cache_path)?;
+            file.write_all(content.as_bytes())?;
+            println!("Saved GPT-2 vocab to cache: {:?}", cache_path);
+
+            let vocab: BTreeMap<String, u32> = serde_json::from_str(&content)?;
+            Ok(vocab)
+        }
+    }
+
 
     #[test]
     fn test_constraint_simple() {
@@ -1315,4 +1353,58 @@ mod tests {
         // print_precomputed(&precomputed);
         println!("Done precomputing");
     }
+
+    #[test]
+    fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
+        // 1. Define tokenizer: matches anything
+        // The tokenizer will have one group (ID 0)
+        let tokenizer_expr = groups![repeat0_fast(eat_any_fast())];
+        let tokenizer = tokenizer_expr.build();
+
+        // 2. Load LLM tokens from GPT-2 vocab.json
+        let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
+        let cache_dir = Path::new(".cache/test_vocabs");
+        let vocab_file_name = "gpt2_vocab.json";
+
+        let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
+
+        let mut llm_token_map = LLMTokenMap::new();
+        let mut max_llm_token_id_val: u32 = 0;
+
+        for (token_str, id_val) in gpt2_raw_vocab {
+            llm_token_map.insert(token_str.into_bytes(), LLMTokenID(id_val as usize));
+            if id_val > max_llm_token_id_val {
+                max_llm_token_id_val = id_val;
+            }
+        }
+
+        // max_llm_token_id for HybridBitset::ones should be count of tokens,
+        // or max_id + 1 if IDs are 0-indexed.
+        let max_llm_token_id_param = (max_llm_token_id_val + 1) as usize;
+
+        // 3. Create token_name_map for grammar tokens
+        // Our tokenizer has one grammar token (GroupID 0)
+        let mut token_name_map = BiBTreeMap::new();
+        token_name_map.insert("ANYTHING_GRAMMAR_TOKEN".to_string(), 0 as usize); // GrammarTokenID 0
+
+        // 4. Call precompute
+        println!(
+            "Starting precompute with GPT-2 vocab ({} tokens, max_id_val: {}, param: {})...",
+            llm_token_map.len(),
+            max_llm_token_id_val,
+            max_llm_token_id_param
+        );
+
+        // This is the main part of the test: ensure it runs without error.
+        let _precomputed = GrammarConstraint::precompute(
+            &tokenizer,
+            &llm_token_map,
+            &token_name_map,
+            max_llm_token_id_param,
+        );
+
+        println!("Successfully precomputed with GPT-2 vocab.");
+        Ok(())
+    }
 }
+

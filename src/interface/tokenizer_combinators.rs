@@ -95,6 +95,11 @@ pub fn eat_string_choice_fast(strings: &[&str]) -> Expr {
     choice_fast(strings.iter().map(|s| eat_string_fast(s)).collect())
 }
 
+/// Eats any byte
+pub fn eat_any_fast() -> Expr {
+    Expr::U8Class(U8Set::all())
+}
+
 /// Allows zero or more occurrences of a parser
 pub fn repeat0_fast(parser: Expr) -> Expr {
     opt_fast(repeat1_fast(parser))
