@@ -12,6 +12,7 @@ use std::io::{BufReader, Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use bimap::BiBTreeMap;
+use reqwest::blocking;
 use serde_json;
 use crate::constraint::GrammarConstraint;
 use crate::datastructures::trie::Trie;
@@ -53,7 +54,7 @@ fn load_or_download_gpt2_vocab(
         Ok(vocab)
     } else {
         println!("Downloading GPT-2 vocab from: {}", url);
-        let response = reqwest::blocking::get(url)?.error_for_status()?;
+        let response = blocking::get(url)?.error_for_status()?;
         let content = response.text()?;
 
         let mut file = File::create(&cache_path)?;
