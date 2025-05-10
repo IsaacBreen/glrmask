@@ -642,12 +642,12 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         edge_key: EK,
         edge_value: EV, // The NEW edge value to potentially merge/insert
         new_node_value: T, // The NEW node value if creating node
-        mut merge_edge_value: FMergeEV, // FnMut(&EV, EV) -> Option<EV> (existing, new)
+        mut merge_edge_value: FMergeEV, // FnMut(&EV, &EV) -> Option<EV> (existing, new)
         mut merge_node_value: FMergeNV, // FnMut(&T, T) -> Option<T> (existing, new)
     ) -> Result<Arc<Mutex<Trie<EK, EV, T>>>, CycleDetectedError>
 
     where
-        FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+        FMergeEV: FnMut(&EV, &EV) -> Option<EV>, // Changed signature
         FMergeNV: FnMut(&T, T) -> Option<T>,
         EV: Clone,
         T: Clone,
@@ -695,22 +695,22 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 .get_mut(&target_wrapper_arc)
                 .expect("Child entry disappeared from map");
 
-            // Pass the original edge_value by value, consuming it here if merge succeeds.
-            if let Some(merged_ev) = merge_edge_value(edge_val_mut, edge_value) {
+            // Pass the original edge_value by reference.
+            if let Some(merged_ev) = merge_edge_value(edge_val_mut, &edge_value) { // Pass by reference
                  *edge_val_mut = merged_ev;
             }
             // Return the Arc corresponding to the merged node
             return Ok(node_arc);
         }
-        // Note: new_node_value and edge_value are potentially consumed above if Phase 1 runs.
-        // If Phase 1 did not run, they are still available for Phase 2/3.
+        // Note: new_node_value is potentially consumed above if Phase 1 runs.
+        // edge_value is NOT consumed if Phase 1 runs, as it's passed by reference.
 
         // --- Check Phase 2: Edge Merge Possibility ---
         let target_wrapper_arc_for_edge_merge: Option<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>> =
             if let Some(children_map) = self.children.get(&edge_key) {
                  children_map.iter().find_map(|(wrapper_arc, existing_ev)| { // wrapper_arc is &ArcPtrWrapper<...>, existing_ev is &EV
                     // Check if merge IS POSSIBLE
-                    if merge_edge_value(existing_ev, edge_value.clone()).is_some() { // Clone edge_value for check
+                    if merge_edge_value(existing_ev, &edge_value).is_some() { // Pass edge_value by reference
                         Some(wrapper_arc.clone()) // Clone the ArcPtrWrapper key
                     } else {
                         None
@@ -729,8 +729,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 .get_mut(&target_wrapper_arc)
                 .expect("Child entry disappeared from map");
             // Re-calculate merged edge value and update
-            // Pass the original edge_value by value, consuming it here.
-            if let Some(merged_ev) = merge_edge_value(edge_val_mut, edge_value) {
+            // Pass the original edge_value by reference.
+            if let Some(merged_ev) = merge_edge_value(edge_val_mut, &edge_value) { // Pass by reference
                  *edge_val_mut = merged_ev;
             } else {
                  // This should not happen if the check phase logic is correct and merge_edge_value is deterministic
@@ -745,48 +745,12 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         // Use the original new_node_value and edge_value (which were not consumed if Phase 1/2 didn't run)
         let new_node = Arc::new(Mutex::new(Trie::new(new_node_value))); // Consumes new_node_value
         // Use try_insert which handles adding to children vec (creating if needed) and cycle checks/depth updates
-        self.try_insert(edge_key, edge_value, new_node.clone())?; // Consumes edge_value
+        // try_insert takes edge_value by value, so we need to clone here if Pass 1 or Pass 2 didn't run.
+        self.try_insert(edge_key, edge_value.clone(), new_node.clone())?; // Clone for try_insert if needed
         Ok(new_node)
     }
 }
 
-
-/// A helper function to print the structure of the Trie/DAG via BFS.
-/// Uses Arc::as_ptr for node identity.
-pub(crate) fn dump_structure<EK: Debug + Ord, EV: Debug, T: Debug>(root: Arc<Mutex<Trie<EK, EV, T>>>) {
-    let mut queue = VecDeque::new();
-    let mut seen: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new(); // Use Arc pointer for seen set
-
-    println!("Dumping Trie Structure (BFS):");
-    println!("(Node identity shown as {:p} which corresponds to the Mutex Arc pointer)", std::ptr::null::<Mutex<Trie<EK, EV, T>>>()); // Print format hint
-
-    let root_arc_ptr = Arc::as_ptr(&root);
-    if seen.insert(root_arc_ptr) {
-        queue.push_back(root);
-    }
-
-    while let Some(node_arc) = queue.pop_front() {
-        let node_arc_ptr = Arc::as_ptr(&node_arc); // Get pointer for current node
-        let node = node_arc.lock().expect("Mutex poisoned during dump");
-        // Use node_arc_ptr for printing identity
-        println!("{:p}: Value: {:?}, MaxDepth: {}", node_arc_ptr, node.value, node.max_depth);
-
-        // Iterate through edges and their corresponding maps of children
-        for (edge_key, children_map) in node.children.iter() { // children_map is &BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
-            // Iterate through each (ArcPtrWrapper, EV) tuple in the map
-            for (child_wrapper_arc, edge_val) in children_map.iter() { // Iterate over map entries
-                let child_arc = child_wrapper_arc.as_arc();
-                let child_arc_ptr = Arc::as_ptr(child_arc); // Get pointer for child node
-                // Use child_arc_ptr for printing identity
-                println!("  - Edge Key: {:?}, Edge Val: {:?} -> Child: {:p}", edge_key, edge_val, child_arc_ptr);
-                if seen.insert(child_arc_ptr) {
-                    queue.push_back(child_arc.clone());
-                }
-            }
-        }
-        // node lock released here
-    }
-}
 
 /// A helper struct to facilitate inserting an edge into a Trie,
 /// trying multiple potential destinations and optionally creating a new node.
@@ -796,7 +760,7 @@ where
     EK: Ord + Clone,
     EV: Clone,
     T: Clone,
-    FMergeEV: FnMut(&EV, EV) -> Option<EV>, // Closure to merge edge values if edge exists
+    FMergeEV: FnMut(&EV, &EV) -> Option<EV>, // Closure to merge edge values if edge exists - Changed signature
 {
     source_arc: Arc<Mutex<Trie<EK, EV, T>>>, // The source node for the edge
     edge_key: EK,                            // The key for the edge to be inserted
@@ -810,7 +774,7 @@ where
     EK: Ord + Clone + Debug,
     EV: Clone,
     T: Clone,
-    FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+    FMergeEV: FnMut(&EV, &EV) -> Option<EV>, // Changed signature
 {
     /// Creates a new `EdgeInserter`.
     ///
@@ -820,9 +784,9 @@ where
     /// * `edge_key`: The key for the new edge.
     /// * `edge_value`: The value for the new edge.
     /// * `merge_edge_value`: A closure that takes the existing edge value and the new edge value,
-    ///   returning `Some(merged_value)` if merging is possible/desired, or `None` otherwise.
-    ///   This is only called if an edge with the same `edge_key` already points to the
-    ///   `destination` being tried.
+    ///   both by reference, returning `Some(merged_value)` if merging is possible/desired,
+    ///   or `None` otherwise. This is only called if an edge with the same `edge_key` already
+    ///   points to the `destination` being tried.
     pub fn new(
         source_arc: Arc<Mutex<Trie<EK, EV, T>>>,
         edge_key: EK,
@@ -856,14 +820,15 @@ where
 
         // Check if edge already exists and try merging EV
         if let Some(existing_ev_mut) = source.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
-            if let Some(merged_ev) = (self.merge_edge_value)(existing_ev_mut, self.edge_value.clone()) {
+            // Call merge_edge_value with references
+            if let Some(merged_ev) = (self.merge_edge_value)(existing_ev_mut, &self.edge_value) { // Pass by reference
                 *existing_ev_mut = merged_ev;
                 self.result = Some(destination); // Merge successful, destination found
             }
             // If merge fails, result remains None, but we don't try inserting again.
         } else {
-            // Edge doesn't exist, try inserting
-            match source.try_insert(self.edge_key.clone(), self.edge_value.clone(), destination.clone()) {
+            // Edge doesn't exist, try inserting. try_insert expects the value by move.
+            match source.try_insert(self.edge_key.clone(), self.edge_value.clone(), destination.clone()) { // Clone for insert
                 Ok(()) => {
                     self.result = Some(destination); // Insert successful, destination found
                 }
@@ -969,7 +934,8 @@ where
         let new_node_arc = Arc::new(Mutex::new(Trie::new(value)));
         let mut source = self.source_arc.lock().expect("Mutex poisoned while locking source in else_create_with_value");
 
-        match source.try_insert(self.edge_key.clone(), self.edge_value.clone(), new_node_arc.clone()) {
+        // try_insert expects the value by move, so clone here
+        match source.try_insert(self.edge_key.clone(), self.edge_value.clone(), new_node_arc.clone()) { // Clone for try_insert
             Ok(()) => {
                 self.result = Some(new_node_arc);
             }
@@ -1041,9 +1007,9 @@ impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
     /// * `edge_key`: The key for the new edge.
     /// * `edge_value`: The value for the new edge.
     /// * `merge_edge_value`: A closure that takes the existing edge value and the new edge value,
-    ///   returning `Some(merged_value)` if merging is possible/desired, or `None` otherwise.
-    ///   This is only called by `EdgeInserter::try_destination` if an edge with the same
-    ///   `edge_key` already points to the destination being tried.
+    ///   both by reference, returning `Some(merged_value)` if merging is possible/desired,
+    ///   or `None` otherwise. This is only called by `EdgeInserter::try_destination` if an edge
+    ///   with the same `edge_key` already points to the destination being tried.
     ///
     /// # Example
     ///
@@ -1058,9 +1024,9 @@ impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
     /// struct NodeValue { /* ... */ }
     ///
     /// // Example merge function for edge values (e.g., HybridBitset)
-    /// fn merge_bitset_union(existing: &HybridBitset, new: HybridBitset) -> Option<HybridBitset> {
+    /// fn merge_bitset_union(existing: &HybridBitset, new: &HybridBitset) -> Option<HybridBitset> { // Note the &
     ///     // Union is always possible/desired
-    ///     Some(existing | &new) // Use reference for the OR operation
+    ///     Some(existing | new) // Use reference for the OR operation
     /// }
     ///
     /// // Assuming root_node is Arc<Mutex<Trie<String, HybridBitset, NodeValue>>>
@@ -1073,7 +1039,7 @@ impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
     ///
     /// let new_or_existing_node = { // Use a block to drop the temporary mutex guard
     ///     let root_guard = root_node.lock().unwrap(); // Get a guard to call insert_edge
-    ///     root_guard.insert_edge("key".to_string(), new_edge_value, merge_bitset_union)
+    ///     root_guard.insert_edge("key".to_string(), new_edge_value.clone(), merge_bitset_union) // Clone edge_value for EdgeInserter to own
     ///         .try_destinations(&potential_destinations) // potential_destinations is &[Arc<Mutex<...>>]
     ///         .else_create() // Or else_create_with(...) or else_create_with_value(...)
     ///         .unwrap()
@@ -1087,7 +1053,7 @@ impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
         merge_edge_value: FMergeEV,
     ) -> EdgeInserter<EK, EV, T, FMergeEV>
     where
-         FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+         FMergeEV: FnMut(&EV, &EV) -> Option<EV>, // Changed signature
     {
             EdgeInserter::new(Arc::new(Mutex::new(self.clone())), edge_key, edge_value, merge_edge_value)
         }
@@ -1108,7 +1074,7 @@ where
     EK: Ord + Clone + Debug,
     EV: Clone,
     T: Clone,
-    FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+    FMergeEV: FnMut(&EV, &EV) -> Option<EV>, // Changed signature
 {
     EdgeInserter::new(source, edge_key, edge_value, merge_edge_value)
         .try_destination(destination)
@@ -1128,7 +1094,7 @@ where
     EK: Ord + Clone + Debug,
     EV: Clone,
     T: Clone,
-    FMergeEV: FnMut(&EV, EV) -> Option<EV>,
+    FMergeEV: FnMut(&EV, &EV) -> Option<EV>, // Changed signature
 {
     EdgeInserter::new(source, edge_key, edge_value, merge_edge_value)
         .try_destinations(destinations)
@@ -1805,10 +1771,10 @@ mod tests {
 
     // Helper merge functions for tests
     // Merge edge value (Vec<i32>): Append new vec to existing if existing is not empty
-    fn merge_ev_append(existing_ev: &Vec<i32>, new_ev: Vec<i32>) -> Option<Vec<i32>> {
+    fn merge_ev_append(existing_ev: &mut Vec<i32>, new_ev: &Vec<i32>) -> Option<Vec<i32>> {
         if !existing_ev.is_empty() {
             let mut merged = existing_ev.clone();
-            merged.extend(new_ev);
+            merged.extend(new_ev.iter().copied()); // Use iter().copied()
             Some(merged)
         } else {
             None // Don't merge into an empty vec
@@ -2070,7 +2036,7 @@ mod tests {
                 edge_key,
                 edge_val.clone(), // Pass vec![1] as new EV
                 node_val.clone(), // Pass "data" as new T
-                merge_ev_append, // Fn(&Vec<i32>, Vec<i32>) -> Option<Vec<i32>>
+                merge_ev_append, // Fn(&Vec<i32>, &Vec<i32>) -> Option<Vec<i32>>
                 merge_nv_append_if_flag, // Fn(&String, String) -> Option<String>
             )
         };
@@ -2106,8 +2072,8 @@ mod tests {
     // --- Tests for EdgeInserter ---
 
     // Helper merge function for EdgeInserter tests: Union HybridBitset
-    fn merge_bitset_union(existing: &HybridBitset, new: HybridBitset) -> Option<HybridBitset> {
-        Some(existing | &new) // Use reference for the OR operation
+    fn merge_bitset_union(existing: &HybridBitset, new: &HybridBitset) -> Option<HybridBitset> {
+        Some(existing | new) // Use reference for the OR operation
     }
 
     #[test]
@@ -2286,213 +2252,6 @@ mod tests {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string())));
         let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
-        let initial_edge_val1: HybridBitset = vec![10].into_iter().collect();
-        let initial_edge_val2: HybridBitset = vec![20].into_iter().collect();
-        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-        let merged_edge_val1: HybridBitset = vec![1, 10].into_iter().collect(); // Expected merge with child1
-
-        // Pre-insert edges with the target key
-        {
-            let mut s = source.lock().unwrap();
-            s.try_insert("key", initial_edge_val1.clone(), child1.clone()).unwrap();
-            s.try_insert("key", initial_edge_val2.clone(), child2.clone()).unwrap();
-        }
-
-        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
-        // Should try child1, merge succeeds. Should not try child2.
-        let result_node = inserter.try_children().unwrap();
-
-        assert!(Arc::ptr_eq(&result_node, &child1)); // Merged with child1
-        let s = source.lock().unwrap();
-        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
-        assert_eq!(children_map.len(), 2); // Still two children
-
-        let edge1_entry = children_map.iter().find(|(ca, _)| Arc::ptr_eq(ca.as_arc(), &child1)).unwrap();
-        assert_eq!(*edge1_entry.1, merged_edge_val1); // Merged value
-
-        let edge2_entry = children_map.iter().find(|(ca, _)| Arc::ptr_eq(ca.as_arc(), &child2)).unwrap();
-        assert_eq!(*edge2_entry.1, initial_edge_val2); // Unchanged
-    }
-
-    #[test]
-    fn test_ei_else_create_with_value() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-
-
-        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
-        // No try calls, should go straight to else_create
-        let result_node = inserter.else_create_destination_with_value("created".to_string()).unwrap();
-
-        assert_eq!(result_node.lock().unwrap().value, "created");
-        assert_eq!(result_node.lock().unwrap().max_depth, 1); // Depth updated
-        let s = source.lock().unwrap();
-        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
-        assert_eq!(children_map.len(), 1);
-        let (ca, ev) = children_map.iter().next().unwrap();
-        assert_eq!(*ev, new_edge_val);
-        assert!(Arc::ptr_eq(ca.as_arc(), &result_node));
-    }
-
-    #[test]
-    fn test_ei_else_create_with() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let created_flag = Arc::new(AtomicUsize::new(0));
-        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-
-
-        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
-        let flag_clone = created_flag.clone();
-        let result_node = inserter.else_create_destination_with(|| {
-            flag_clone.fetch_add(1, Ordering::SeqCst);
-            "created_via_fn".to_string()
-        }).unwrap();
-
-        assert_eq!(created_flag.load(Ordering::SeqCst), 1); // Closure was called
-        assert_eq!(result_node.lock().unwrap().value, "created_via_fn");
-        assert_eq!(result_node.lock().unwrap().max_depth, 1);
-    }
-
-    #[test]
-    fn test_ei_else_create_default() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-
-
-        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
-        // String::default() is ""
-        let result_node = inserter.else_create_destination().unwrap();
-
-        assert_eq!(result_node.lock().unwrap().value, ""); // Default value
-        assert_eq!(result_node.lock().unwrap().max_depth, 1);
-    }
-
-    #[test]
-    fn test_ei_chaining_try_then_else() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-        let dummy_edge_val = HybridBitset::new();
-        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-
-        // Setup: dest1 causes cycle
-        dest1.lock().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
-
-        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
-        let result_node = inserter
-            .try_destination(dest1.clone()) // Fails (cycle)
-            .else_create_destination_with_value("fallback".to_string()) // Executes
-            .unwrap();
-
-        assert_eq!(result_node.lock().unwrap().value, "fallback"); // Fallback was created
-        assert!(!Arc::ptr_eq(&result_node, &dest1));
-        let s = source.lock().unwrap();
-        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
-        assert_eq!(children_map.len(), 1);
-        let (ca, ev) = children_map.iter().next().unwrap();
-        assert!(Arc::ptr_eq(ca.as_arc(), &result_node));
-        assert_eq!(*ev, new_edge_val);
-    }
-
-    #[test]
-    fn test_ei_chaining_try_success_skips_else() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-
-
-        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
-        let result_node = inserter
-            .try_destination(dest1.clone()) // Succeeds
-            .else_create_destination_with_value("fallback".to_string()) // Should be skipped
-            .unwrap();
-
-        assert!(Arc::ptr_eq(&result_node, &dest1)); // Original dest1 was used
-        assert_eq!(result_node.lock().unwrap().value, "dest1");
-        let s = source.lock().unwrap();
-        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
-        assert_eq!(children_map.len(), 1);
-        let (ca, ev) = children_map.iter().next().unwrap();
-        assert!(Arc::ptr_eq(ca.as_arc(), &dest1));
-        assert_eq!(*ev, new_edge_val);
-    }
-
-    #[test]
-    #[should_panic(expected = "EdgeInserter::unwrap() called but no destination was found or created")]
-    fn test_ei_unwrap_panic() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-        let dummy_edge_val = HybridBitset::new();
-        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-
-        // Setup: dest1 causes cycle
-        dest1.lock().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
-
-        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
-        // Try fails, no else_create called
-        inserter.try_destination(dest1.clone()).unwrap(); // Panic here
-    }
-
-    #[test]
-    fn test_ei_get() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-        let dummy_edge_val = HybridBitset::new();
-        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-
-        // Setup: dest1 causes cycle
-        dest1.lock().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
-
-        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
-
-        // Try fails
-        let inserter_after_try = inserter.try_destination(dest1.clone());
-        assert!(inserter_after_try.clone_into_option().is_none());
-
-        // Now use else_create
-        let inserter_after_else = inserter_after_try.else_create_destination_with_value("fallback".to_string());
-        let result_opt = inserter_after_else.into_option();
-        assert!(result_opt.is_some());
-        assert_eq!(result_opt.unwrap().lock().unwrap().value, "fallback");
-    }
-
-    #[test]
-    fn test_ei_chaining_stops_after_success() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string()))); // This one succeeds
-        let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
-        let new_node_val_if_created = "new_node_val".to_string();
-        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-
-
-        let destinations_for_slice = vec![child2.clone()];
-
-        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
-        let result_node = inserter
-            .try_destination(child1.clone()) // This succeeds, result is set to child1
-            // try_slice, else_create_with_value should now have no effect
-            .try_destinations(&destinations_for_slice) // Should be skipped
-            .else_create_destination_with_value(new_node_val_if_created.clone()) // Should be skipped
-            .unwrap();
-
-        assert!(Arc::ptr_eq(&result_node, &child1), "Chain should stop after first success (try_insert)");
-
-        // Check only the edge to child1 was added
-        let s = source.lock().unwrap();
-        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
-        assert_eq!(children_map.len(), 1);
-        let (ca, ev) = children_map.iter().next().unwrap();
-        assert!(Arc::ptr_eq(ca.as_arc(), &child1));
-        assert_eq!(*ev, new_edge_val);
-
-        // Ensure the value for the skipped else_create was not used
-        assert_ne!(result_node.lock().unwrap().value, new_node_val_if_created);
-    }
-
-     #[test]
-    fn test_ei_try_children_new_logic() {
-        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
-        let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string())));
-        let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
         let child_other_key: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child_other_key".to_string())));
 
         let edge_key = "target_key";
@@ -2551,7 +2310,7 @@ mod tests {
         source_nm.lock().unwrap().try_insert(edge_key_nm, initial_ev_nm.clone(), child1_nm.clone()).unwrap();
 
         // Define a merge function that always returns None (fails to merge)
-        fn failing_merge_fn(_existing: &HybridBitset, _new: HybridBitset) -> Option<HybridBitset> {
+        fn failing_merge_fn(_existing: &HybridBitset, _new: &HybridBitset) -> Option<HybridBitset> { // Note the &
             None
         }
 

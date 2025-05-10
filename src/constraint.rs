@@ -527,7 +527,7 @@ impl<'r> Precomputer<'r> {
             source_arc.clone(),
             Some(grammar_tok),
             edge_tokens,
-            |existing: &HybridBitset, new_bv| Some(existing | &new_bv),
+            |existing: &HybridBitset, new_bv_ref: &HybridBitset| Some(existing | new_bv_ref),
         );
 
         // First try existing children
@@ -622,7 +622,7 @@ impl<'r> Precomputer<'r> {
                 child.as_arc().clone(),
                 None::<GrammarTokenID>,
                 self.all_llm_tokens.clone(),
-                |ev: &HybridBitset, new| Some(ev | &new),
+                |ev: &HybridBitset, new| Some(ev | new), // Pass new by reference
             )
             .try_children();
 

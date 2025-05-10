@@ -252,39 +252,16 @@ impl HybridBitset {
     /// If the set is empty (either Sparse or Dense), the iterator is empty.
     pub fn iter_bools(&self) -> BoolIter<'_> {
         match &self.inner {
-            BitsetRepr::Sparse(set) => {
-                if set.is_empty() {
-                    // For an empty set, create an iterator that yields nothing.
-                    // current_idx starts beyond max_idx_to_iterate.
-                    BoolIter {
-                        inner: BoolIterInner::Sparse {
-                            set,
-                            current_idx: 1,
-                            max_idx_to_iterate: 0,
-                        }
-                    }
+            BoolIterInner::Sparse { set, current_idx, max_idx_to_iterate } => {
+                if *current_idx > *max_idx_to_iterate {
+                    None
                 } else {
-                    // Find the maximum element to define the iteration range.
-                    // BTreeSet is sorted, so last() is efficient.
-                    // unwrap() is safe here because we've checked is_empty().
-                    let max_val_in_set = set.last().copied().unwrap();
-                    BoolIter {
-                        inner: BoolIterInner::Sparse {
-                            set,
-                            current_idx: 0,
-                            max_idx_to_iterate: max_val_in_set,
-                        }
-                    }
+                    let val_to_yield = set.contains(current_idx);
+                    *current_idx += 1;
+                    Some(val_to_yield)
                 }
             }
-            BitsetRepr::Dense { bits, .. } => {
-                // bits.iter() yields bool values for each position in the bitvector.
-                // The length of this iterator is bits.len().
-                BoolIter {
-                    inner: BoolIterInner::Dense(bits.iter()),
-                }
-            }
-        }
+            BoolIterInner::Dense(iter) => iter.next().map(|bit_ref| *bit_ref),        }
     }
 
 
@@ -945,7 +922,6 @@ impl SubAssign for HybridBitset {
                      if let Some(count_ref) = cached_exact_count.borrow_mut().as_mut() {
                         *count_ref -= bits_cleared;
                     }
-                    // Check representation
                     self.check_representation(); // This will use the updated cache or recompute
                 }
                 return; // Done with optimized path
