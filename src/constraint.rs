@@ -538,7 +538,7 @@ impl<'r> Precomputer<'r> {
             BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
         yellow: &HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, (*const VocabPrefixTreeNode, usize, TokenizerStateID)>,
-        child_vocab_of_segment_ref: &VocabPrefixTreeNode,
+        child_vocab_of_segment_ptr: *const VocabPrefixTreeNode,
     ) {
         let mut inserter = EdgeInserter::new(
             source_arc.clone(),
@@ -550,11 +550,11 @@ impl<'r> Precomputer<'r> {
         let prospective_context_for_target = if match_end_offset_in_segment < segment_len {
             // Target will be processed for the current segment (at current_expanding_vocab_node_ref)
             // at match_end_offset_in_segment with TokenizerStateID(0).
-            (child_vocab_of_segment_ref as *const VocabPrefixTreeNode, match_end_offset_in_segment, TokenizerStateID(0))
+            (child_vocab_of_segment_ptr, match_end_offset_in_segment, TokenizerStateID(0))
         } else {
             // Target will be processed for segments starting from child_vocab_of_segment_ref
             // at offset 0 with TokenizerStateID(0).
-            (child_vocab_of_segment_ref as *const VocabPrefixTreeNode, 0, TokenizerStateID(0))
+            (child_vocab_of_segment_ptr, 0, TokenizerStateID(0))
         };
 
 
