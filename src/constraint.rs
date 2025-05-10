@@ -492,15 +492,16 @@ impl<'r> Precomputer<'r> {
                         }
                     }
                 }
-
-                for h in &src_set {
-                    yellow.remove(h);
-                }
             }
         }
 
         // Recurse into the child vocab node.
         self.dfs(child_vocab, next_level, yellow);
+
+        // Remove the new yellow nodes
+        for node in new_yellow {
+            yellow.remove(&node);
+        }
     }
 
     // Insert or merge an edge out of `source_arc`.
