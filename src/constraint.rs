@@ -294,7 +294,7 @@ impl<'r> Precomputer<'r> {
 
         crate::debug!(2, "Starting precompute DFS");
         let mut yellow = HashMap::new();
-        self.dfs(&self.vocab.root, &self.vocab.root as *const VocabPrefixTreeNode, assoc, &mut yellow);
+        self.dfs(&self.vocab.root, assoc, &mut yellow);
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish_with_message("Precomputation complete");
     }
@@ -351,7 +351,6 @@ impl<'r> Precomputer<'r> {
     fn dfs(
         &self,
         vocab_node: &VocabPrefixTreeNode,
-        vocab_node_ptr: *const VocabPrefixTreeNode,
         assoc_by_state: BTreeMap<
             TokenizerStateID,
             BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
@@ -385,7 +384,7 @@ impl<'r> Precomputer<'r> {
                 String::from_utf8_lossy(child_vocab_ref.prefix())
             );
 
-            self.process_segment(segment_bytes, child_vocab_ref, vocab_node_ptr, &effective, yellow);
+            self.process_segment(segment_bytes, child_vocab_ref, &effective, yellow);
         }
     }
 
@@ -396,7 +395,6 @@ impl<'r> Precomputer<'r> {
         &self,
         segment_bytes: &[u8],
         child_vocab_of_segment: &VocabPrefixTreeNode,
-        current_expanding_vocab_node_ptr: *const VocabPrefixTreeNode,
         sources_per_state: &BTreeMap<
             TokenizerStateID,
             BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
@@ -442,11 +440,11 @@ impl<'r> Precomputer<'r> {
                 for src_node_wrapper in &src_set { // src_set is the BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> after merging
                     if !yellow.contains_key(src_node_wrapper) {
                         // Only consider it a "newly yellowed" node for this scope if not already yellow from an outer scope.
-                        // The context is: current_expanding_vocab_node_ptr, at current offset, with state_before.
-                        current_scope_additions_to_yellow.insert(src_node_wrapper.clone(), (current_expanding_vocab_node_ptr, offset, state_before));
+                        // The context is: current_expanding_vocab_node_ref, at current offset, with state_before.
+                        current_scope_additions_to_yellow.insert(src_node_wrapper.clone(), (child_vocab_of_segment as *const VocabPrefixTreeNode, offset, state_before));
                     }
                 }
-                yellow.extend(current_scope_additions_to_yellow.iter().map(|(k, v)| (k.clone(), *v)));
+                yellow.extend(current_scope_additions_to_yellow.iter().map(|(k, v)| (k.clone(), *v))); // extend yellow with the new yellow nodes
                 // new_yellow will be used to track what to remove when this scope exits.
                 // So, new_yellow should store what current_scope_additions_to_yellow stored.
                 new_yellow.extend(current_scope_additions_to_yellow); // new_yellow tracks keys added in this iteration for later removal
@@ -464,7 +462,7 @@ impl<'r> Precomputer<'r> {
                     let grammar_tok = GrammarTokenID(m.id);
                     let match_end_offset = offset + m.width;
                     let edge_tokens = child_vocab_of_segment.reachable_token_ids().clone();
-                    let child_vocab_of_segment_ptr = child_vocab_of_segment as *const VocabPrefixTreeNode;
+                    let child_vocab_of_segment_ref = child_vocab_of_segment as &VocabPrefixTreeNode;
 
                     for src in &src_set {
                         self.insert_edge(
@@ -477,8 +475,7 @@ impl<'r> Precomputer<'r> {
                             &mut queue,
                             &mut next_level,
                             yellow,
-                            current_expanding_vocab_node_ptr,
-                            child_vocab_of_segment_ptr
+                            child_vocab_of_segment_ref
                         );
                     }
                 }
@@ -513,8 +510,8 @@ impl<'r> Precomputer<'r> {
         }
 
         // Recurse into the child vocab node.
-        let child_vocab_of_segment_ptr = child_vocab_of_segment as *const VocabPrefixTreeNode;
-        self.dfs(child_vocab_of_segment, child_vocab_of_segment_ptr, next_level, yellow);
+        let child_vocab_of_segment_ref = child_vocab_of_segment as &VocabPrefixTreeNode;
+        self.dfs(child_vocab_of_segment, next_level, yellow);
 
         // Remove the new yellow nodes
         for node_wrapper_key in new_yellow.keys() {
@@ -541,8 +538,7 @@ impl<'r> Precomputer<'r> {
             BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
         yellow: &HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, (*const VocabPrefixTreeNode, usize, TokenizerStateID)>,
-        current_expanding_vocab_node_ptr: *const VocabPrefixTreeNode,
-        child_vocab_of_segment_ptr: *const VocabPrefixTreeNode,
+        child_vocab_of_segment_ref: &VocabPrefixTreeNode,
     ) {
         let mut inserter = EdgeInserter::new(
             source_arc.clone(),
@@ -552,13 +548,13 @@ impl<'r> Precomputer<'r> {
         );
 
         let prospective_context_for_target = if match_end_offset_in_segment < segment_len {
-            // Target will be processed for the current segment (at current_expanding_vocab_node_ptr)
+            // Target will be processed for the current segment (at current_expanding_vocab_node_ref)
             // at match_end_offset_in_segment with TokenizerStateID(0).
-            (current_expanding_vocab_node_ptr, match_end_offset_in_segment, TokenizerStateID(0))
+            (child_vocab_of_segment_ref as *const VocabPrefixTreeNode, match_end_offset_in_segment, TokenizerStateID(0))
         } else {
-            // Target will be processed for segments starting from child_vocab_of_segment_ptr
+            // Target will be processed for segments starting from child_vocab_of_segment_ref
             // at offset 0 with TokenizerStateID(0).
-            (child_vocab_of_segment_ptr, 0, TokenizerStateID(0))
+            (child_vocab_of_segment_ref as *const VocabPrefixTreeNode, 0, TokenizerStateID(0))
         };
 
 
