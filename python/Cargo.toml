@@ -15,7 +15,6 @@ numpy = { version = "0.24.0", features = [] }
 pyo3 = { version = "0.24.2", features = ["extension-module", "macros"] }
 sep1 = { path = "../" }
 ouroboros = "0.18.5"
-reqwest = "0.12.15"
 
 [build-dependencies]
 pyo3 = "0.24.2"

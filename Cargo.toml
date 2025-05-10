@@ -14,9 +14,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.107"
 chrono = "0.4.41"
 indicatif = "0.17.11"
-reqwest = "0.11"
+reqwest = { version = "0.12.15", features = ["blocking", "json"] }
 
 [dev-dependencies]
-reqwest = { version = "0.11", features = ["blocking", "json"] }
-# serde_json is already a main dependency, so it's available for tests.
-# Add other dev-dependencies if needed for tests.
+reqwest = { version = "0.12.15", features = ["blocking", "json"] }
