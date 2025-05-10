@@ -293,7 +293,7 @@ impl<'r> Precomputer<'r> {
         }
 
         crate::debug!(2, "Starting precompute DFS");
-        let mut yellow = HashMap::new();
+        let mut yellow = HashSet::new();
         self.dfs(&self.vocab.root, assoc, &mut yellow);
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish_with_message("Precomputation complete");
@@ -355,9 +355,16 @@ impl<'r> Precomputer<'r> {
             TokenizerStateID,
             BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
-        yellow: &mut HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, (*const VocabPrefixTreeNode, usize, TokenizerStateID)>,
+        yellow: &mut HashSet<*const VocabPrefixTreeNode>,
     ) {
         self.pb.inc(1);
+
+        let vocab_node_ptr = vocab_node as *const VocabPrefixTreeNode;
+        if yellow.contains(&vocab_node_ptr) {
+            // This vocab_node is already in the current DFS processing path, skip.
+            return;
+        }
+        yellow.insert(vocab_node_ptr);
 
         // Merge policy per tokenizer state
         let mut effective: BTreeMap<
@@ -386,6 +393,8 @@ impl<'r> Precomputer<'r> {
 
             self.process_segment(segment_bytes, child_vocab_ref, &effective, yellow);
         }
+
+        yellow.remove(&vocab_node_ptr);
     }
 
     // -------------------------------------------------------------------------
@@ -399,7 +408,7 @@ impl<'r> Precomputer<'r> {
             TokenizerStateID,
             BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
-        yellow: &mut HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, (*const VocabPrefixTreeNode, usize, TokenizerStateID)>,
+        yellow: &mut HashSet<*const VocabPrefixTreeNode>,
     ) {
         // Maps used while consuming the segment byte-by-byte.
         let mut next_level: BTreeMap<
@@ -422,8 +431,6 @@ impl<'r> Precomputer<'r> {
                 .extend(set.iter().cloned());
         }
 
-        // Yellow nodes = currently processing (cycle-avoidance / duplicate work)
-        let mut new_yellow: HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, (*const VocabPrefixTreeNode, usize, TokenizerStateID)> = HashMap::new();
 
         while let Some((offset, map_at_offset)) = queue.pop_first() {
             for (state_before, src_set) in map_at_offset {
@@ -435,20 +442,6 @@ impl<'r> Precomputer<'r> {
                 if src_set.is_empty() {
                     continue;
                 }
-
-                let mut current_scope_additions_to_yellow = HashMap::new();
-                for src_node_wrapper in &src_set { // src_set is the BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> after merging
-                    if !yellow.contains_key(src_node_wrapper) {
-                        // Only consider it a "newly yellowed" node for this scope if not already yellow from an outer scope.
-                        // The context is: current_expanding_vocab_node_ref, at current offset, with state_before.
-                        current_scope_additions_to_yellow.insert(src_node_wrapper.clone(), (child_vocab_of_segment as *const VocabPrefixTreeNode, offset, state_before));
-                    }
-                }
-                yellow.extend(current_scope_additions_to_yellow.iter().map(|(k, v)| (k.clone(), *v))); // extend yellow with the new yellow nodes
-                // new_yellow will be used to track what to remove when this scope exits.
-                // So, new_yellow should store what current_scope_additions_to_yellow stored.
-                new_yellow.extend(current_scope_additions_to_yellow); // new_yellow tracks keys added in this iteration for later removal
-
 
                 let suffix      = &segment_bytes[offset..];
                 let exec_result = self
@@ -462,7 +455,7 @@ impl<'r> Precomputer<'r> {
                     let grammar_tok = GrammarTokenID(m.id);
                     let match_end_offset = offset + m.width;
                     let edge_tokens = child_vocab_of_segment.reachable_token_ids().clone();
-                    let child_vocab_of_segment_ref = child_vocab_of_segment as &VocabPrefixTreeNode;
+
 
                     for src in &src_set {
                         self.insert_edge(
@@ -473,10 +466,7 @@ impl<'r> Precomputer<'r> {
                             match_end_offset,
                             segment_bytes.len(),
                             &mut queue,
-                            &mut next_level,
-                            yellow,
-                            child_vocab_of_segment_ref,
-                            TokenizerStateID(0)
+                            &mut next_level
                         );
                     }
                 }
@@ -512,11 +502,6 @@ impl<'r> Precomputer<'r> {
 
         // Recurse into the child vocab node.
         self.dfs(child_vocab_of_segment, next_level, yellow);
-
-        // Remove the new yellow nodes
-        for node_wrapper_key in new_yellow.keys() {
-            yellow.remove(node_wrapper_key);
-        }
     }
 
     // Insert or merge an edge out of `source_arc`.
@@ -537,9 +522,6 @@ impl<'r> Precomputer<'r> {
             TokenizerStateID,
             BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
-        yellow: &HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, (*const VocabPrefixTreeNode, usize, TokenizerStateID)>,
-        child_vocab_of_segment_ptr: *const VocabPrefixTreeNode,
-        end_state: TokenizerStateID,
     ) {
         let mut inserter = EdgeInserter::new(
             source_arc.clone(),
@@ -548,27 +530,16 @@ impl<'r> Precomputer<'r> {
             |existing: &HybridBitset, new_bv| Some(existing | &new_bv),
         );
 
-        let prospective_context_for_target = (child_vocab_of_segment_ptr, match_end_offset_in_segment, end_state);
-
-
         // First try existing children
         inserter = inserter.try_children();
 
-        // gather potential targets (that are not yellow or are yellow with the same context)
+        // gather potential targets
         let mut pot: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
 
         let gather_set = |set: &BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
-                          pot: &mut Vec<Arc<Mutex<PrecomputeNode>>>,
-                          yellow: &HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, (*const VocabPrefixTreeNode, usize, TokenizerStateID)>,
-                          prospective_context: (*const VocabPrefixTreeNode, usize, TokenizerStateID)| {
+                          pot: &mut Vec<Arc<Mutex<PrecomputeNode>>>| {
             pot.extend(
                 set.iter()
-                    .filter(|h_wrap| {
-                        match yellow.get(h_wrap) {
-                            None => true, // Not yellow, can use.
-                            Some(&yellow_context) => yellow_context == prospective_context,
-                        }
-                    })
                     .map(|h| h.as_arc().clone()),
             );
         };
@@ -576,18 +547,18 @@ impl<'r> Precomputer<'r> {
         if match_end_offset_in_segment < segment_len {
             if let Some(map_at_offset) = queue.get(&match_end_offset_in_segment) {
                 for set_of_nodes_at_offset_and_any_state in map_at_offset.values() {
-                    gather_set(set_of_nodes_at_offset_and_any_state, &mut pot, yellow, prospective_context_for_target);
+                    gather_set(set_of_nodes_at_offset_and_any_state, &mut pot);
                 }
             }
         } else {
              for set_of_nodes_at_next_level_any_state in next_level.values() {
-                gather_set(set_of_nodes_at_next_level_any_state, &mut pot, yellow, prospective_context_for_target);
+                gather_set(set_of_nodes_at_next_level_any_state, &mut pot);
             }
         }
 
         inserter = inserter.try_destinations(&pot);
 
-        // As last resort – children of current key that are not yellow or are yellow with the same context
+        // As last resort – children of current key
         if inserter.clone_into_option().is_none() {
             let mut extra = Vec::new();
             {
@@ -595,15 +566,8 @@ impl<'r> Precomputer<'r> {
                 if let Some(dest_map) =
                     guard.children().get(&Some(grammar_tok))
                 {
-                    for child_wrap in dest_map.keys() { // child_wrap is &ArcPtrWrapper<...>
-                        // Assuming child_wrap is the &ArcPtrWrapper<Mutex<PrecomputeNode>> from the map keys:
-                        let can_use_child = match yellow.get(child_wrap) {
-                            None => true,
-                            Some(&yellow_context) => yellow_context == prospective_context_for_target,
-                        };
-                        if can_use_child {
-                            extra.push(child_wrap.as_arc().clone());
-                        }
+                    for child_wrap in dest_map.keys() {
+                         extra.push(child_wrap.as_arc().clone());
                     }
                 }
             }
@@ -863,4 +827,3 @@ impl<'a> GrammarConstraintState<'a> {
         );
     }
 }
-
