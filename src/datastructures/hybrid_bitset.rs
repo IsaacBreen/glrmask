@@ -229,6 +229,12 @@ impl BitOr for &HybridBitset {
     type Output = HybridBitset;
 
     fn bitor(self, rhs: Self) -> Self::Output {
+        let self_ranges_len = self.inner.ranges_len();
+        let rhs_ranges_len = rhs.inner.ranges_len();
+        let MAX_RANGES_LEN = 128;
+        if self_ranges_len > MAX_RANGES_LEN || rhs_ranges_len > MAX_RANGES_LEN {
+            panic!("BitOr of HybridBitset with more than {} ranges is not supported. Got {} and {}", MAX_RANGES_LEN, self_ranges_len, rhs_ranges_len);
+        }
         HybridBitset {
             inner: &self.inner | &rhs.inner,
         }
