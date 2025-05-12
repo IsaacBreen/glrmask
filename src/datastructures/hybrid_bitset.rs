@@ -236,7 +236,8 @@ impl BitOr for &HybridBitset {
         let self_compression_ratio: f64 = self_len as f64 / self_ranges_len as f64;
         let rhs_compression_ratio: f64 = rhs_len as f64 / rhs_ranges_len as f64;
         let MAX_RANGES_LEN = 1024;
-        if self_ranges_len > MAX_RANGES_LEN || rhs_ranges_len > MAX_RANGES_LEN {
+        let MIN_COMPRESSION_RATIO = 2.0;
+        if self_compression_ratio < MIN_COMPRESSION_RATIO && self_ranges_len > MAX_RANGES_LEN || rhs_compression_ratio < MIN_COMPRESSION_RATIO && rhs_ranges_len > MAX_RANGES_LEN {
             panic!("BitOr of HybridBitset with more than {} ranges is not supported. Got hybrid bitsets with length {} and {} but ranges lengths {} and {}, implying compression ratios of {:.2} and {:.2}, respectively", MAX_RANGES_LEN, self_len, rhs_len, self_ranges_len, rhs_ranges_len, self_compression_ratio, rhs_compression_ratio);
         }
         // Option 2: Using named arguments for better readability (especially with many args)
