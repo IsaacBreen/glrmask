@@ -318,8 +318,8 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     let mut max_llm_token_id_val: u32 = 0;
 
     // Sample GPT-2 tokens to speed up this test
-    // let prop = 1.0;
-    let prop = 0.05;
+    let prop = 1.0;
+    // let prop = 0.05;
     let total_tokens = gpt2_raw_vocab.len();
     let sample_size = (total_tokens as f64 * prop) as usize; // Changed 64 to 66 to introduce a compile error
     println!("Sampling {} out of {} GPT-2 tokens for precompute", sample_size, total_tokens);
