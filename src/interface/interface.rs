@@ -405,27 +405,7 @@ impl Grammar {
 
 impl GrammarConstraint {
     pub fn from_grammar(grammar: Grammar, llm_tokens: LLMTokenMap, eof_llm_token_id: usize, max_llm_token_id: usize) -> Self {
-        debug!(2, "GrammarConstraint::from_grammar");
-        let parser = grammar.glr_parser.clone(); // Use stored parser
-        debug!(2, "Precomputing");
-
-        // We already have a BiBTreeMap<String, usize> in
-        // grammar.terminal_name_to_group_id, so just clone it:
-        let terminal_name_map = grammar.terminal_name_to_group_id.clone();
-
-        let mut precomputed =
-            GrammarConstraint::precompute(&grammar.tokenizer, &llm_tokens, &terminal_name_map, max_llm_token_id);
-        debug!(2, "precomputed.len(): {}", precomputed.len());
-        debug!(2, "Done precomputing");
-
-        Self {
-            tokenizer: grammar.tokenizer,
-            parser,
-            precomputed,
-            llm_token_map: llm_tokens,
-            token_name_map: terminal_name_map,
-            max_llm_token_id,
-        }
+        GrammarConstraint::new(grammar.tokenizer, grammar.glr_parser, llm_tokens, grammar.terminal_name_to_group_id, max_llm_token_id)
     }
 }
 
