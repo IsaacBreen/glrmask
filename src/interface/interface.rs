@@ -793,7 +793,7 @@ mod tests {
         let precomputed = GrammarConstraint::precompute(
             &tokenizer,
             &llm_token_map,
-            &token_name_map, // Pass the name map here
+            &token_name_map,
             max_llm_token_id,
         );
         // print_precomputed(&precomputed);
