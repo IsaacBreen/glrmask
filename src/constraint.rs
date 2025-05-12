@@ -211,7 +211,7 @@ impl GrammarConstraint {
             llm_token_map, // Store the original llm_token_map (bytes -> original LLMTokenID)
             token_name_map,
             max_original_llm_token_id,
-            internal_to_original_id_bimap: original_to_internal_id_bimap,
+            original_to_internal_id_bimap,
             internal_num_llm_tokens,
         }
     }

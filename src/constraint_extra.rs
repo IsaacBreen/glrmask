@@ -393,7 +393,7 @@ mod tests {
         let mut bv = HybridBitset::new();
         bv.insert(0); // internal ID 0
         bv.insert(1); // internal ID 1
-        let mut mapping = BTreeMap::new();
+        let mut mapping = BiBTreeMap::new();
         mapping.insert(0, 100); // internal 0 -> original 100
         mapping.insert(1, 200); // internal 1 -> original 200
         assert_eq!(format_bv_indices(&bv, Some(&mapping)), "[100, 200]");
