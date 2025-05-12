@@ -239,7 +239,7 @@ impl BitOr for &HybridBitset {
         if self_ranges_len > MAX_RANGES_LEN || rhs_ranges_len > MAX_RANGES_LEN {
             panic!("BitOr of HybridBitset with more than {} ranges is not supported. Got hybrid bitsets with length {} and {} but ranges lengths {} and {}, implying fragmentation of {:.2} and {:.2}, respectively", MAX_RANGES_LEN, self_len, rhs_len, self_ranges_len, rhs_ranges_len, self_fragmentation, rhs_fragmentation);
         }
-        dbg!("BitOr of HybridBitsets with lengths {} and {} and ranges lengths {} and {}, implying fragmentation of {:.2} and {:.2}, respectively", self_len, rhs_len, self_ranges_len, rhs_ranges_len, self_fragmentation, rhs_fragmentation);
+        println!("BitOr of HybridBitsets with lengths {} and {} and ranges lengths {} and {}, implying fragmentation of {:.2} and {:.2}, respectively", self_len, rhs_len, self_ranges_len, rhs_ranges_len, self_fragmentation, rhs_fragmentation);
         HybridBitset {
             inner: &self.inner | &rhs.inner,
         }
