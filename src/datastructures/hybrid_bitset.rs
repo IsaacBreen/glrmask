@@ -231,10 +231,13 @@ impl BitOr for &HybridBitset {
     fn bitor(self, rhs: Self) -> Self::Output {
         let self_ranges_len = self.inner.ranges_len();
         let rhs_ranges_len = rhs.inner.ranges_len();
-        let MAX_RANGES_LEN = 128;
+        let self_len = self.inner.len();
+        let rhs_len = rhs.inner.len();
+        let MAX_RANGES_LEN = 1024;
         if self_ranges_len > MAX_RANGES_LEN || rhs_ranges_len > MAX_RANGES_LEN {
-            panic!("BitOr of HybridBitset with more than {} ranges is not supported. Got {} and {}", MAX_RANGES_LEN, self_ranges_len, rhs_ranges_len);
+            panic!("BitOr of HybridBitset with more than {} ranges is not supported. Got hybrid bitsets with length {} and {} but ranges lengths {} and {}", MAX_RANGES_LEN, self_len, rhs_len, self_ranges_len, rhs_ranges_len);
         }
+        dbg!("BitOr of HybridBitsets with lengths {} and {} and ranges lengths {} and {}", self_len, rhs_len, self_ranges_len, rhs_ranges_len);
         HybridBitset {
             inner: &self.inner | &rhs.inner,
         }
