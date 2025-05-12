@@ -151,15 +151,18 @@ pub struct GrammarConstraint {
 }
 
 impl GrammarConstraint {
-    pub fn new(
-        tokenizer:        Regex,
-        parser:           GLRParser,
-        llm_token_map:    LLMTokenMap, // This is BiBTreeMap<Vec<u8>, LLMTokenID> with original IDs
-        token_name_map:   BiBTreeMap<String, usize>,
-        max_original_llm_token_id: usize, // Max ID of original LLMTokenIDs from input
-    ) -> Self {
+    // Helper function to set up LLM token mappings
+    fn setup_llm_token_mappings(
+        original_llm_token_map: &LLMTokenMap, // Input: Original BiBTreeMap<Vec<u8>, LLMTokenID>
+    ) -> (
+        BTreeMap<usize, usize>,          // original_to_internal_mapping
+        BTreeMap<usize, usize>,          // internal_to_original_mapping
+        BiBTreeMap<Vec<u8>, LLMTokenID>, // internal_llm_token_map (bytes -> internal LLMTokenID)
+        usize,                           // internal_max_llm_token_id
+    ) {
         // 1. Create sorted list of tokens to define internal mapping
-        let mut sorted_tokens_with_original_ids: Vec<(Vec<u8>, LLMTokenID)> = llm_token_map.iter()
+        let mut sorted_tokens_with_original_ids: Vec<(Vec<u8>, LLMTokenID)> = original_llm_token_map
+            .iter()
             .map(|(bytes, original_id)| (bytes.clone(), *original_id))
             .collect();
         sorted_tokens_with_original_ids.sort_by(|(bytes_a, _), (bytes_b, _)| bytes_a.cmp(bytes_b));
@@ -180,8 +183,31 @@ impl GrammarConstraint {
 
         let internal_num_tokens = internal_id_counter as usize;
         // internal_max_llm_token_id is the largest ID, so it's num_tokens - 1.
-        // If num_tokens is 0, there's no largest ID. We use 0 as a placeholder.
+        // If num_tokens is 0, there's no largest ID. We use 0 as a placeholder,
+        // consistent with HybridBitset::ones(0) behavior.
         let internal_max_llm_token_id = if internal_num_tokens == 0 { 0 } else { internal_num_tokens - 1 };
+
+        (
+            original_to_internal_mapping,
+            internal_to_original_mapping,
+            internal_llm_token_map,
+            internal_max_llm_token_id,
+        )
+    }
+
+    pub fn new(
+        tokenizer:        Regex,
+        parser:           GLRParser,
+        llm_token_map:    LLMTokenMap, // This is BiBTreeMap<Vec<u8>, LLMTokenID> with original IDs
+        token_name_map:   BiBTreeMap<String, usize>,
+        max_original_llm_token_id: usize, // Max ID of original LLMTokenIDs from input
+    ) -> Self {
+        let (
+            original_to_internal_mapping,
+            internal_to_original_mapping,
+            internal_llm_token_map, // This map uses internal LLMTokenIDs
+            internal_max_llm_token_id,
+        ) = Self::setup_llm_token_mappings(&llm_token_map);
 
         let precomputed = Self::precompute(
             &tokenizer,
@@ -908,3 +934,4 @@ impl<'a> GrammarConstraintState<'a> {
         );
     }
 }
+
