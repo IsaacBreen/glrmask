@@ -241,7 +241,7 @@ impl BitOr for &HybridBitset {
         }
         // Option 2: Using named arguments for better readability (especially with many args)
         println!(
-            "BitOr of HybridBitsets with lengths {slen:>7} and {rlen:>7} and ranges lengths {srlen:>7} and {rrlen:>7}, implying compression ratios of {scratio:>7.2} and {rcratio:>7.2}, respectively",
+            "BitOr of HybridBitsets with lengths {slen:>5} and {rlen:>5} and ranges lengths {srlen:>5} and {rrlen:>5}, implying compression ratios of {scratio:>5.2} and {rcratio:>5.2}, respectively",
             slen = self_len,
             rlen = rhs_len,
             srlen = self_ranges_len,
