@@ -86,7 +86,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     pub fn try_insert(
         &mut self,
         edge_key: EK,
-        edge_value: EV,
+        edge_value: &mut Option<EV>,
         child: Arc<Mutex<Trie<EK, EV, T>>>,
     ) -> Result<(), CycleDetectedError> {
         // ------------------------------------------------------------------
@@ -145,7 +145,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         self.children
             .entry(edge_key)
             .or_default()
-            .insert(child_comparable, edge_value);
+            .insert(child_comparable, edge_value.take().unwrap());
 
 
         Ok(())
@@ -633,122 +633,6 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             }
         }
     }
-
-
-    /// Attempts to insert an edge, potentially merging with existing edges/nodes based on provided functions.
-    /// Uses a two-phase approach: check for merges immutably, then apply changes mutably.
-    pub fn try_insert_or_merge_edge<FMergeEV, FMergeNV>(
-        &mut self,
-        edge_key: EK,
-        edge_value: EV, // The NEW edge value to potentially merge/insert
-        new_node_value: T, // The NEW node value if creating node
-        mut merge_edge_value: FMergeEV, // FnMut(&EV, &EV) -> Option<EV> (existing, new)
-        mut merge_node_value: FMergeNV, // FnMut(&T, T) -> Option<T> (existing, new)
-    ) -> Result<Arc<Mutex<Trie<EK, EV, T>>>, CycleDetectedError>
-
-    where
-        FMergeEV: FnMut(&EV, &EV) -> Option<EV>, // Changed signature
-        FMergeNV: FnMut(&T, T) -> Option<T>,
-        EV: Clone,
-        T: Clone,
-    {
-        // --- Check Phase 1: Node Merge Possibility ---
-        // Find the first ArcPtrWrapper key `ca` where node merge IS POSSIBLE.
-        let target_wrapper_arc_for_node_merge: Option<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>> =
-            if let Some(children_map) = self.children.get(&edge_key) { // children_map is &BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
-                children_map.iter().find_map(|(wrapper_arc, _current_edge_val)| { // wrapper_arc is &ArcPtrWrapper<...>, _current_edge_val is &EV
-                    let node_arc = wrapper_arc.as_arc();
-                    let can_merge = {
-                        let node_guard = node_arc.lock().expect("Lock failed during node merge check");
-                        // Check if merge IS POSSIBLE without calculating the value yet
-                        merge_node_value(&node_guard.value, new_node_value.clone()).is_some()
-                    };
-                    if can_merge {
-                        Some(wrapper_arc.clone()) // Clone the ArcPtrWrapper key
-                    } else {
-                        None
-                    }
-                })
-            } else {
-                None
-            };
-
-
-        // --- Apply Phase 1: Node Merge ---
-        if let Some(target_wrapper_arc) = target_wrapper_arc_for_node_merge { // target_wrapper_arc is ArcPtrWrapper
-            let node_arc = target_wrapper_arc.as_arc().clone(); // Clone Arc for return
-            {
-                let mut node_guard = target_wrapper_arc.as_arc().lock().expect("Lock failed for node update");
-                // Calculate the merged value NOW and update
-                // Pass the original new_node_value by value, consuming it here.
-                if let Some(merged_val) = merge_node_value(&node_guard.value, new_node_value) {
-                     node_guard.value = merged_val;
-                } else {
-                    // This should not happen if the check phase logic is correct and merge_node_value is deterministic
-                    panic!("Node merge check succeeded but merge failed during apply phase");
-                }
-            } // Lock released
-
-            // Try update edge value for the found target_wrapper_arc
-            let edge_val_mut = self.children.get_mut(&edge_key)
-                .expect("Children map disappeared for edge key")
-                .get_mut(&target_wrapper_arc)
-                .expect("Child entry disappeared from map");
-
-            // Pass the original edge_value by reference.
-            if let Some(merged_ev) = merge_edge_value(&*edge_val_mut, &edge_value) { // Pass immutable ref
-                 *edge_val_mut = merged_ev;
-            }
-            // Return the Arc corresponding to the merged node
-            return Ok(node_arc);
-        }
-        // Note: new_node_value is potentially consumed above if Phase 1 runs.
-        // edge_value is NOT consumed if Phase 1 runs, as it's passed by reference.
-
-        // --- Check Phase 2: Edge Merge Possibility ---
-        let target_wrapper_arc_for_edge_merge: Option<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>> =
-            if let Some(children_map) = self.children.get(&edge_key) {
-                 children_map.iter().find_map(|(wrapper_arc, existing_ev)| { // wrapper_arc is &ArcPtrWrapper<...>, existing_ev is &EV
-                    // Check if merge IS POSSIBLE
-                    if merge_edge_value(existing_ev, &edge_value).is_some() { // Pass edge_value by reference
-                        Some(wrapper_arc.clone()) // Clone the ArcPtrWrapper key
-                    } else {
-                        None
-                    }
-                 })
-            } else {
-                None
-            };
-
-
-        // --- Apply Phase 2: Edge Merge ---
-        if let Some(target_wrapper_arc) = target_wrapper_arc_for_edge_merge { // target_wrapper_arc is ArcPtrWrapper
-            let node_arc = target_wrapper_arc.as_arc().clone(); // Clone Arc for return
-            let edge_val_mut = self.children.get_mut(&edge_key)
-                .expect("Children map disappeared for edge key")
-                .get_mut(&target_wrapper_arc)
-                .expect("Child entry disappeared from map");
-            // Re-calculate merged edge value and update
-            // Pass the original edge_value by reference.
-            if let Some(merged_ev) = merge_edge_value(&*edge_val_mut, &edge_value) { // Pass immutable ref
-                 *edge_val_mut = merged_ev;
-            } else {
-                 // This should not happen if the check phase logic is correct and merge_edge_value is deterministic
-                 panic!("Edge merge check succeeded but merge failed during apply phase");
-            }
-            // Return the Arc corresponding to the existing node with the merged edge
-            return Ok(node_arc);
-        }
-
-        // --- Apply Phase 3: Create New Node and Edge ---
-        // No suitable node/edge found for merging.
-        // Use the original new_node_value and edge_value (which were not consumed if Phase 1/2 didn't run)
-        let new_node = Arc::new(Mutex::new(Trie::new(new_node_value))); // Consumes new_node_value
-        // Use try_insert which handles adding to children vec (creating if needed) and cycle checks/depth updates
-        // try_insert takes edge_value by value, so we need to clone here if Pass 1 or Pass 2 didn't run.
-        self.try_insert(edge_key, edge_value.clone(), new_node.clone())?; // Clone for try_insert if needed
-        Ok(new_node)
-    }
 }
 
 
@@ -760,11 +644,11 @@ where
     EK: Ord + Clone,
     EV: Clone,
     T: Clone,
-    FMergeEV: FnMut(&EV, &EV) -> Option<EV>, // Closure to merge edge values if edge exists - Changed signature
+    FMergeEV: FnMut(&mut EV, EV), // Closure to merge edge values if edge exists - Changed signature
 {
     source_arc: Arc<Mutex<Trie<EK, EV, T>>>, // The source node for the edge
     edge_key: EK,                            // The key for the edge to be inserted
-    edge_value: EV,                          // The value for the edge to be inserted
+    edge_value: Option<EV>,                          // The value for the edge to be inserted
     merge_edge_value: FMergeEV,              // The function to merge edge values
     result: Option<Arc<Mutex<Trie<EK, EV, T>>>>, // Stores the successful destination node
 }
@@ -774,7 +658,7 @@ where
     EK: Ord + Clone + Debug,
     EV: Clone,
     T: Clone,
-    FMergeEV: FnMut(&EV, &EV) -> Option<EV>, // Changed signature
+    FMergeEV: FnMut(&mut EV, EV), // Changed signature
 {
     /// Creates a new `EdgeInserter`.
     ///
@@ -784,8 +668,7 @@ where
     /// * `edge_key`: The key for the new edge.
     /// * `edge_value`: The value for the new edge.
     /// * `merge_edge_value`: A closure that takes the existing edge value and the new edge value,
-    ///   both by reference, returning `Some(merged_value)` if merging is possible/desired,
-    ///   or `None` otherwise. This is only called if an edge with the same `edge_key` already
+    ///   both by value, returning a merged value. This is only called if an edge with the same `edge_key` already
     ///   points to the `destination` being tried.
     pub fn new(
         source_arc: Arc<Mutex<Trie<EK, EV, T>>>,
@@ -796,7 +679,7 @@ where
         EdgeInserter {
             source_arc,
             edge_key,
-            edge_value,
+            edge_value: Some(edge_value),
             merge_edge_value,
             result: None,
         }
@@ -820,15 +703,11 @@ where
 
         // Check if edge already exists and try merging EV
         if let Some(existing_ev_mut) = source.children.get_mut(&self.edge_key).and_then(|dest_map| dest_map.get_mut(&destination_wrapper)) {
-            // Call merge_edge_value with references
-            if let Some(merged_ev) = (self.merge_edge_value)(&*existing_ev_mut, &self.edge_value) { // Pass immutable ref
-                *existing_ev_mut = merged_ev;
-                self.result = Some(destination); // Merge successful, destination found
-            }
-            // If merge fails, result remains None, but we don't try inserting again.
+            (self.merge_edge_value)(existing_ev_mut, self.edge_value.take().unwrap());
+            self.result = Some(destination);
         } else {
             // Edge doesn't exist, try inserting. try_insert expects the value by move.
-            match source.try_insert(self.edge_key.clone(), self.edge_value.clone(), destination.clone()) { // Clone for insert
+            match source.try_insert(self.edge_key.clone(), &mut self.edge_value, destination.clone()) { // Clone for insert
                 Ok(()) => {
                     self.result = Some(destination); // Insert successful, destination found
                 }
@@ -935,7 +814,7 @@ where
         let mut source = self.source_arc.lock().expect("Mutex poisoned while locking source in else_create_with_value");
 
         // try_insert expects the value by move, so clone here
-        match source.try_insert(self.edge_key.clone(), self.edge_value.clone(), new_node_arc.clone()) { // Clone for try_insert
+        match source.try_insert(self.edge_key.clone(), &mut self.edge_value, new_node_arc.clone()) { // Clone for try_insert
             Ok(()) => {
                 self.result = Some(new_node_arc);
             }
@@ -1053,7 +932,7 @@ impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
         merge_edge_value: FMergeEV,
     ) -> EdgeInserter<EK, EV, T, FMergeEV>
     where
-         FMergeEV: FnMut(&EV, &EV) -> Option<EV>, // Changed signature
+         FMergeEV: FnMut(&mut EV, EV), // Changed signature
     {
             EdgeInserter::new(Arc::new(Mutex::new(self.clone())), edge_key, edge_value, merge_edge_value)
         }
@@ -1074,7 +953,7 @@ where
     EK: Ord + Clone + Debug,
     EV: Clone,
     T: Clone,
-    FMergeEV: FnMut(&EV, &EV) -> Option<EV>, // Changed signature
+    FMergeEV: FnMut(&mut EV, EV), // Changed signature
 {
     EdgeInserter::new(source, edge_key, edge_value, merge_edge_value)
         .try_destination(destination)
@@ -1094,7 +973,7 @@ where
     EK: Ord + Clone + Debug,
     EV: Clone,
     T: Clone,
-    FMergeEV: FnMut(&EV, &EV) -> Option<EV>, // Changed signature
+    FMergeEV: FnMut(&mut EV, EV), // Changed signature
 {
     EdgeInserter::new(source, edge_key, edge_value, merge_edge_value)
         .try_destinations(destinations)
@@ -1139,9 +1018,9 @@ mod tests {
 
         { // Scope for mutable borrow of root
             let mut root = root_node.lock().unwrap();
-            root.try_insert("a", "edge_a1", child1.clone()).expect("Insert failed");
-            root.try_insert("b", "edge_b", child2.clone()).expect("Insert failed");
-            root.try_insert("a", "edge_a3", child3.clone()).expect("Insert failed"); // Insert second child for 'a'
+            root.try_insert("a", &mut Some("edge_a1"), child1.clone()).expect("Insert failed");
+            root.try_insert("b", &mut Some( "edge_b"), child2.clone()).expect("Insert failed");
+            root.try_insert("a", &mut Some("edge_a3"), child3.clone()).expect("Insert failed"); // Insert second child for 'a'
         } // root lock released
 
         // Scope for read-only borrow of root
@@ -1194,8 +1073,8 @@ mod tests {
 
         {
             let mut r = root.lock().unwrap();
-            r.try_insert("edge", "val1", child1.clone()).unwrap();
-            r.try_insert("edge", "val2", child2.clone()).unwrap();
+            r.try_insert("edge", &mut Some("val1"), child1.clone()).unwrap();
+            r.try_insert("edge", &mut Some("val2"), child2.clone()).unwrap();
         } // root lock released
 
         // Check retrieval - lock root again
@@ -1280,16 +1159,16 @@ mod tests {
 
         {
             let mut r = root.lock().unwrap();
-            r.try_insert("r->c1", "e1", child1.clone()).unwrap();
-            r.try_insert("r->c2", "e2", child2.clone()).unwrap();
+            r.try_insert("r->c1", &mut Some("e1"), child1.clone()).unwrap();
+            r.try_insert("r->c2", &mut Some("e2"), child2.clone()).unwrap();
         }
         {
             let mut c1 = child1.lock().unwrap();
-            c1.try_insert("c1->gc", "e3", grandchild.clone()).unwrap();
+            c1.try_insert("c1->gc", &mut Some("e3"), grandchild.clone()).unwrap();
         }
         {
             let mut c2 = child2.lock().unwrap();
-            c2.try_insert("c2->gc", "e4", grandchild.clone()).unwrap();
+            c2.try_insert("c2->gc", &mut Some("e4"), grandchild.clone()).unwrap();
         }
 
         let mut processed_node_values = Vec::new();
@@ -1358,16 +1237,16 @@ mod tests {
 
         {
             let mut r = root.lock().unwrap();
-            r.try_insert("r1", "e1", child1.clone()).unwrap();
-            r.try_insert("r2", "e2", child2.clone()).unwrap();
+            r.try_insert("r1", &mut Some("e1"), child1.clone()).unwrap();
+            r.try_insert("r2", &mut Some("e2"), child2.clone()).unwrap();
         }
         {
             let mut c1 = child1.lock().unwrap();
-            c1.try_insert("c1", "e3", grandchild.clone()).unwrap();
+            c1.try_insert("c1", &mut Some("e3"), grandchild.clone()).unwrap();
         }
         {
             let mut c2 = child2.lock().unwrap();
-            c2.try_insert("c2", "e4", grandchild.clone()).unwrap(); // Diamond
+            c2.try_insert("c2", &mut Some("e4"), grandchild.clone()).unwrap(); // Diamond
         }
 
         let all_nodes = Trie::all_nodes(root.clone());
@@ -1393,16 +1272,16 @@ mod tests {
         // Build the structure
         {
             let mut r = root.lock().unwrap();
-            r.try_insert("r->c1", "edge1", child1.clone()).unwrap();
-            r.try_insert("r->c2", "edge2", child2.clone()).unwrap();
+            r.try_insert("r->c1", &mut Some("edge1"), child1.clone()).unwrap();
+            r.try_insert("r->c2", &mut Some("edge2"), child2.clone()).unwrap();
         }
         {
             let mut c1 = child1.lock().unwrap();
-            c1.try_insert("c1->gc", "edge3", grandchild.clone()).unwrap();
+            c1.try_insert("c1->gc", &mut Some("edge3"), grandchild.clone()).unwrap();
         }
         {
             let mut c2 = child2.lock().unwrap();
-            c2.try_insert("c2->gc", "edge4", grandchild.clone()).unwrap();
+            c2.try_insert("c2->gc", &mut Some("edge4"), grandchild.clone()).unwrap();
         }
 
         // Check max_depths after insertion
@@ -1474,7 +1353,7 @@ mod tests {
         // Insert root -> child
         let insert1_result = {
             let mut r = root.lock().unwrap();
-            r.try_insert("r->c", "e1", child.clone())
+            r.try_insert("r->c", &mut Some("e1"), child.clone())
         };
         assert!(insert1_result.is_ok());
         assert_eq!(child.lock().unwrap().max_depth, 1);
@@ -1484,7 +1363,7 @@ mod tests {
         let insert2_result = {
             let mut c = child.lock().unwrap();
             // This insert should call detect_cycle(child_ptr, &root), which should detect the cycle.
-            c.try_insert("c->r", "e2", root.clone())
+            c.try_insert("c->r", &mut Some("e2"), root.clone())
         };
 
         // Assert that cycle detection returned an error
@@ -1649,16 +1528,16 @@ mod tests {
 
         {
             let mut r = root.lock().unwrap();
-            r.try_insert("r->c1", "e1", child1.clone()).unwrap();
-            r.try_insert("r->c2", "e2", child2.clone()).unwrap();
+            r.try_insert("r->c1", &mut Some("edge1"), child1.clone()).unwrap();
+            r.try_insert("r->c2", &mut Some("edge2"), child2.clone()).unwrap();
         }
         {
             let mut c1 = child1.lock().unwrap();
-            c1.try_insert("c1->gc1", "e3", grandchild1.clone()).unwrap();
+            c1.try_insert("c1->gc", &mut Some("edge3"), grandchild1.clone()).unwrap();
         }
         {
             let mut c2 = child2.lock().unwrap();
-            c2.try_insert("c2->gc2", "e4", grandchild2.clone()).unwrap();
+            c2.try_insert("c2->gc", &mut Some("edge4"), grandchild2.clone()).unwrap();
         }
 
         let processed_nodes = Arc::new(Mutex::new(HashSet::<i32>::new()));
@@ -1716,12 +1595,12 @@ mod tests {
 
         {
             let mut r = root.lock().unwrap();
-            r.try_insert("keep", "e1", child1.clone()).unwrap();
-            r.try_insert("skip", "e2", child2.clone()).unwrap();
+            r.try_insert("keep", &mut Some("e1"), child1.clone()).unwrap();
+            r.try_insert("skip", &mut Some("e2"), child2.clone()).unwrap();
         }
         {
             let mut c2 = child2.lock().unwrap();
-            c2.try_insert("keep", "e3", grandchild2.clone()).unwrap();
+            c2.try_insert("keep", &mut Some("e3"), grandchild2.clone()).unwrap();
         }
 
         let processed_nodes = Arc::new(Mutex::new(HashSet::<i32>::new()));
@@ -1771,14 +1650,8 @@ mod tests {
 
     // Helper merge functions for tests
     // Merge edge value (Vec<i32>): Append new vec to existing if existing is not empty
-    fn merge_ev_append(existing_ev: &Vec<i32>, new_ev: &Vec<i32>) -> Option<Vec<i32>> { // Changed existing_ev to &Vec<i32>
-        if !existing_ev.is_empty() {
-            let mut merged = existing_ev.clone();
-            merged.extend(new_ev.iter().copied()); // Use iter().copied()
-            Some(merged)
-        } else {
-            None // Don't merge into an empty vec
-        }
+    fn merge_ev_append(existing_ev: &mut Vec<i32>, new_ev: Vec<i32>) { // Changed existing_ev to &Vec<i32>
+        existing_ev.extend(new_ev.iter().copied()); // Use iter().copied()
     }
 
     // Merge node value (String): Append new string if existing contains "mergeable"
@@ -1804,266 +1677,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_insert_or_merge_no_existing_key() {
-        let root_node: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("root".to_string())));
-        let edge_key = "new_key";
-        let edge_val = vec![1];
-        let node_val = "new_node".to_string();
-
-        let returned_node_res = { // Scope for mutable borrow
-            let mut root = root_node.lock().unwrap();
-            root.try_insert_or_merge_edge(
-                edge_key,
-                edge_val.clone(),
-                node_val.clone(),
-                merge_ev_append,
-                merge_nv_append_if_flag,
-            )
-        };
-        assert!(returned_node_res.is_ok());
-        let returned_node = returned_node_res.unwrap();
-
-        // Check that a new node was created
-        assert_eq!(returned_node.lock().unwrap().value, node_val);
-        assert_eq!(returned_node.lock().unwrap().max_depth, 1); // Depth updated by try_insert
-
-        // Check that the edge was added to the root
-        let root = root_node.lock().unwrap(); // Re-lock read-only
-        let children_map = root.children.get(edge_key).unwrap(); // Now a BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
-        assert_eq!(children_map.len(), 1);
-        let (wrapper_arc, ev) = children_map.iter().next().unwrap(); // Get the single entry
-        assert_eq!(*ev, edge_val); // Original edge value
-        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &returned_node));
-        assert_eq!(root.max_depth, 0); // Root depth unchanged
-    }
-
-    #[test]
-    fn test_insert_or_merge_node_merge_success_edge_merge_success() {
-        let root_node: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("root".to_string())));
-        let existing_node: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("child_mergeable".to_string())));
-        { // Initial insert
-            let mut root = root_node.lock().unwrap();
-            root.try_insert("key", vec![10], existing_node.clone()).unwrap();
-        }
-
-        let edge_key = "key";
-        let edge_val = vec![1]; // New edge value
-        let node_val = "data".to_string(); // New node value data
-
-        let returned_node_res = { // Scope for mutable borrow
-            let mut root = root_node.lock().unwrap();
-            root.try_insert_or_merge_edge(
-                edge_key,
-                edge_val.clone(),
-                node_val.clone(),
-                merge_ev_append, // Should succeed: [10] + [1] -> [10, 1]
-                merge_nv_append_if_flag, // Should succeed: "child_mergeable" + "data" -> "child_mergeable|data"
-            )
-        };
-        assert!(returned_node_res.is_ok());
-        let returned_node = returned_node_res.unwrap();
-
-        // Check that the existing node was returned and updated
-        assert!(Arc::ptr_eq(&returned_node, &existing_node));
-        assert_eq!(returned_node.lock().unwrap().value, "child_mergeable|data");
-        assert_eq!(returned_node.lock().unwrap().max_depth, 1); // Depth unchanged
-
-        // Check that the edge value was updated in the root
-        let root = root_node.lock().unwrap(); // Re-lock read-only
-        let children_map = root.children.get(edge_key).unwrap(); // Now a BTreeMap
-        assert_eq!(children_map.len(), 1);
-        let (wrapper_arc, ev) = children_map.iter().next().unwrap();
-        assert_eq!(*ev, vec![10, 1]); // Merged edge value
-        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &existing_node));
-    }
-
-     #[test]
-    fn test_insert_or_merge_node_merge_success_edge_merge_fail() {
-        let root_node: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("root".to_string())));
-        // Edge value is empty, so merge_ev_append will fail
-        let existing_node: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("child_mergeable".to_string())));
-        { // Initial insert
-            let mut root = root_node.lock().unwrap();
-            root.try_insert("key", vec![], existing_node.clone()).unwrap();
-        }
-
-        let edge_key = "key";
-        let edge_val = vec![1];
-        let node_val = "data".to_string();
-
-        let returned_node_res = { // Scope for mutable borrow
-            let mut root = root_node.lock().unwrap();
-            root.try_insert_or_merge_edge(
-                edge_key,
-                edge_val.clone(),
-                node_val.clone(),
-                merge_ev_append, // Should fail: existing is empty
-                merge_nv_append_if_flag, // Should succeed
-            )
-        };
-        assert!(returned_node_res.is_ok());
-        let returned_node = returned_node_res.unwrap();
-
-        // Check existing node returned and updated (due to node merge success)
-        assert!(Arc::ptr_eq(&returned_node, &existing_node));
-        assert_eq!(returned_node.lock().unwrap().value, "child_mergeable|data");
-
-        // Check edge value was *not* updated (because edge merge failed)
-        let root = root_node.lock().unwrap(); // Re-lock read-only
-        let children_map = root.children.get(edge_key).unwrap(); // Now a BTreeMap
-        assert_eq!(children_map.len(), 1);
-        let (wrapper_arc, ev) = children_map.iter().next().unwrap();
-        assert_eq!(*ev, Vec::<i32>::new()); // Original value remains
-        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &existing_node));
-    }
-
-    #[test]
-    fn test_insert_or_merge_node_merge_fail_edge_merge_success() {
-        let root_node: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("root".to_string())));
-        // Node value does not contain "mergeable", so merge_nv will fail
-        let existing_node: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("child_not_mergeable".to_string())));
-        { // Initial insert
-            let mut root = root_node.lock().unwrap();
-            root.try_insert("key", vec![10], existing_node.clone()).unwrap();
-        }
-
-        let edge_key = "key";
-        let edge_val = vec![1];
-        let node_val = "data".to_string();
-
-        let returned_node_res = { // Scope for mutable borrow
-            let mut root = root_node.lock().unwrap();
-            root.try_insert_or_merge_edge(
-                edge_key,
-                edge_val.clone(),
-                node_val.clone(),
-                merge_ev_append, // Should succeed
-                merge_nv_append_if_flag, // Should fail
-            )
-        };
-        assert!(returned_node_res.is_ok());
-        let returned_node = returned_node_res.unwrap();
-
-        // Check existing node returned, but *not* updated (node merge failed)
-        assert!(Arc::ptr_eq(&returned_node, &existing_node));
-        assert_eq!(returned_node.lock().unwrap().value, "child_not_mergeable"); // Original value
-
-        // Check edge value *was* updated (edge merge succeeded in Pass 2)
-        let root = root_node.lock().unwrap(); // Re-lock read-only
-        let children_map = root.children.get(edge_key).unwrap(); // Now a BTreeMap
-        assert_eq!(children_map.len(), 1);
-        let (wrapper_arc, ev) = children_map.iter().next().unwrap();
-        assert_eq!(*ev, vec![10, 1]); // Merged edge value
-        assert!(Arc::ptr_eq(wrapper_arc.as_arc(), &existing_node));
-    }
-
-    #[test]
-    fn test_insert_or_merge_both_merge_fail_creates_new() {
-        let root_node: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("root".to_string())));
-        // Node value not mergeable, edge value empty -> both merges fail
-        let existing_node: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("child_not_mergeable".to_string())));
-        { // Initial insert
-            let mut root = root_node.lock().unwrap();
-            root.try_insert("key", vec![], existing_node.clone()).unwrap();
-            // Add assertion: check the edge value is indeed empty
-            let children_map = root.children.get("key").unwrap();
-            let (wrapper_arc, ev) = children_map.iter().find(|(ca, _)| Arc::ptr_eq(ca.as_arc(), &existing_node)).unwrap();
-             assert_eq!(*ev, Vec::<i32>::new());
-        }
-
-        let edge_key = "key";
-        let edge_val = vec![1]; // New edge value
-        let node_val = "new_data".to_string(); // New node value
-
-        let returned_node_res = { // Scope for mutable borrow
-            let mut root = root_node.lock().unwrap();
-            root.try_insert_or_merge_edge(
-                edge_key,
-                edge_val.clone(),
-                node_val.clone(),
-                merge_ev_append, // Fails (existing empty)
-                merge_nv_append_if_flag, // Fails (existing doesn't contain "mergeable")
-            )
-        };
-        assert!(returned_node_res.is_ok());
-        let returned_node = returned_node_res.unwrap();
-
-        // Check a *new* node was returned (Pass 3 executed)
-        assert!(!Arc::ptr_eq(&returned_node, &existing_node));
-        assert_eq!(returned_node.lock().unwrap().value, node_val);
-        assert_eq!(returned_node.lock().unwrap().max_depth, 1); // New node depth
-
-        // Check root now has *two* children for "key"
-        let root = root_node.lock().unwrap(); // Re-lock read-only
-        let children_map = root.children.get(edge_key).unwrap(); // Now a BTreeMap
-        assert_eq!(children_map.len(), 2);
-
-        // Find the original edge/node
-        let original_edge_entry = children_map.iter().find(|(wrapper_arc, _)| Arc::ptr_eq(wrapper_arc.as_arc(), &existing_node)).unwrap();
-        assert_eq!(*original_edge_entry.1, Vec::<i32>::new()); // Original edge value unchanged
-        assert_eq!(existing_node.lock().unwrap().value, "child_not_mergeable"); // Original node value unchanged
-
-        // Find the new edge/node
-        let new_edge_entry = children_map.iter().find(|(wrapper_arc, _)| Arc::ptr_eq(wrapper_arc.as_arc(), &returned_node)).unwrap();
-        assert_eq!(*new_edge_entry.1, edge_val); // New edge value used
-    }
-
-     #[test]
-    fn test_insert_or_merge_multiple_edges_picks_first_match() {
-        let root_node: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("root".to_string())));
-
-        // Edge 1: Node merge fails, Edge merge succeeds
-        let node1: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("node1_not_mergeable".to_string())));
-        // Edge 2: Node merge succeeds, Edge merge fails
-        let node2: TestNodeMerge = Arc::new(Mutex::new(TestTrieMerge::new("node2_mergeable".to_string())));
-
-        { // Initial inserts
-            let mut root = root_node.lock().unwrap();
-            // Insert in specific order to test iteration
-            root.try_insert("key", vec![10], node1.clone()).unwrap(); // index 0
-            root.try_insert("key", vec![], node2.clone()).unwrap();   // index 1
-        }
-
-        let edge_key = "key";
-        let edge_val = vec![1]; // New EV
-        let node_val = "data".to_string(); // New T
-
-        // Since node merge is checked first (Pass 1), node2 (at index 1) should be selected.
-        let returned_node_res = { // Scope for mutable borrow
-            let mut root = root_node.lock().unwrap();
-            root.try_insert_or_merge_edge(
-                edge_key,
-                edge_val.clone(), // Pass vec![1] as new EV
-                node_val.clone(), // Pass "data" as new T
-                merge_ev_append, // Fn(&Vec<i32>, &Vec<i32>) -> Option<Vec<i32>>
-                merge_nv_append_if_flag, // Fn(&String, String) -> Option<String>
-            )
-        };
-        assert!(returned_node_res.is_ok());
-        let returned_node = returned_node_res.unwrap();
-
-        // Check node2 was returned and updated (Pass 1 succeeded for index 1)
-        assert!(Arc::ptr_eq(&returned_node, &node2), "Returned node should be node2"); // Check pointer equality
-        assert_eq!(returned_node.lock().unwrap().value, "node2_mergeable|data", "Node2 value should be merged");
-
-        // Check root's children: node1 unchanged, node2's edge unchanged (because edge merge failed for node2)
-        let root = root_node.lock().unwrap(); // Re-lock read-only
-        let children_map = root.children.get(edge_key).unwrap(); // Now a BTreeMap
-        assert_eq!(children_map.len(), 2);
-
-        // Check node1 state
-        let edge1_info_entry = children_map.iter().find(|(wrapper_arc, _ev)| Arc::ptr_eq(wrapper_arc.as_arc(), &node1)).unwrap();
-        assert_eq!(*edge1_info_entry.1, vec![10]); // Unchanged
-        assert_eq!(node1.lock().unwrap().value, "node1_not_mergeable"); // Unchanged
-
-        // Check node2 state
-        let edge2_info_entry = children_map.iter().find(|(wrapper_arc, _ev)| Arc::ptr_eq(wrapper_arc.as_arc(), &node2)).unwrap();
-        assert!(Arc::ptr_eq(edge2_info_entry.0.as_arc(), &node2));
-        assert_eq!(*edge2_info_entry.1, Vec::<i32>::new()); // Unchanged (edge merge failed for this edge in Pass 1)
-        // Node value was updated (checked above).
-    }
-
     // test_insert_or_merge_edge_detects_cycle removed as try_insert_or_merge_edge
     // doesn't attempt to re-insert an existing node in a way that would trigger
     // cycle detection based on the node itself being passed again. Cycle detection
@@ -2072,8 +1685,8 @@ mod tests {
     // --- Tests for EdgeInserter ---
 
     // Helper merge function for EdgeInserter tests: Union HybridBitset
-    fn merge_bitset_union(existing: &HybridBitset, new: &HybridBitset) -> Option<HybridBitset> {
-        Some(existing | new) // Use reference for the OR operation
+    fn merge_bitset_union(existing: &mut HybridBitset, new: HybridBitset) {
+        *existing |= new // Use reference for the OR operation
     }
 
     #[test]
@@ -2105,7 +1718,7 @@ mod tests {
         let merged_edge_val: HybridBitset = vec![1, 10].into_iter().collect();
 
         // Pre-insert edge
-        source.lock().unwrap().try_insert("key", initial_edge_val.clone(), dest.clone()).unwrap();
+        source.lock().unwrap().try_insert("key", &mut Some(initial_edge_val), dest.clone()).unwrap();
         assert_eq!(dest.lock().unwrap().max_depth, 1); // Check initial depth
 
         let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
@@ -2129,7 +1742,7 @@ mod tests {
         let initial_edge_val = HybridBitset::new();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
-        source.lock().unwrap().try_insert("key", initial_edge_val.clone(), dest.clone()).unwrap();
+        source.lock().unwrap().try_insert("key", &mut Some(initial_edge_val), dest.clone()).unwrap();
 
         // In this case, merge_bitset_union will always return Some, so merge should succeed.
         // To test a failing merge, we'd need a different merge function or EV type.
@@ -2260,8 +1873,8 @@ mod tests {
         // Pre-insert edges with the target key
         {
             let mut s = source.lock().unwrap();
-            s.try_insert("key", initial_edge_val1.clone(), child1.clone()).unwrap();
-            s.try_insert("key", initial_edge_val2.clone(), child2.clone()).unwrap();
+            s.try_insert("key", &mut Some(initial_edge_val1), child1.clone()).unwrap();
+            s.try_insert("key", &mut Some(initial_edge_val2.clone()), child2.clone()).unwrap();
         }
 
         let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
@@ -2473,9 +2086,9 @@ mod tests {
         // source --("other_key", dummy_ev)--> child_other_key
         {
             let mut s = source.lock().unwrap();
-            s.try_insert(edge_key, initial_ev_c1.clone(), child1.clone()).unwrap();
-            s.try_insert(edge_key, initial_ev_c2.clone(), child2.clone()).unwrap();
-            s.try_insert("other_key", HybridBitset::new(), child_other_key.clone()).unwrap();
+            s.try_insert(edge_key, &mut Some(initial_ev_c1), child1.clone()).unwrap();
+            s.try_insert(edge_key, &mut Some(initial_ev_c2.clone()), child2.clone()).unwrap();
+            s.try_insert("other_key", &mut Some(HybridBitset::new()), child_other_key.clone()).unwrap();
         }
 
         // 1. Test successful merge with the first child under the key.
@@ -2514,16 +2127,7 @@ mod tests {
         let initial_ev_nm: HybridBitset = vec![50].into_iter().collect();
         let new_ev_inserter_nm: HybridBitset = vec![5].into_iter().collect();
 
-        source_nm.lock().unwrap().try_insert(edge_key_nm, initial_ev_nm.clone(), child1_nm.clone()).unwrap();
-
-        // Define a merge function that always returns None (fails to merge)
-        fn failing_merge_fn(_existing: &HybridBitset, _new: &HybridBitset) -> Option<HybridBitset> { // Note the &
-            None
-        }
-
-        let inserter_nm = EdgeInserter::new(source_nm.clone(), edge_key_nm, new_ev_inserter_nm.clone(), failing_merge_fn);
-        let result_node_nm_opt = inserter_nm.try_children().into_option();
-        assert!(result_node_nm_opt.is_none(), "try_children should return None if all merges fail for children under the key");
+        source_nm.lock().unwrap().try_insert(edge_key_nm, &mut Some(initial_ev_nm.clone()), child1_nm.clone()).unwrap();
 
         // Check edge value for child1_nm is unchanged
         let s_nm_guard = source_nm.lock().unwrap();
