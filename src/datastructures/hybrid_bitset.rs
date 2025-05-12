@@ -233,13 +233,22 @@ impl BitOr for &HybridBitset {
         let rhs_ranges_len = rhs.inner.ranges_len();
         let self_len = self.inner.len();
         let rhs_len = rhs.inner.len();
-        let self_fragmentation: f64 = self_len as f64 / self_ranges_len as f64;
-        let rhs_fragmentation: f64 = rhs_len as f64 / rhs_ranges_len as f64;
+        let self_compression_ratio: f64 = self_len as f64 / self_ranges_len as f64;
+        let rhs_compression_ratio: f64 = rhs_len as f64 / rhs_ranges_len as f64;
         let MAX_RANGES_LEN = 1024;
         if self_ranges_len > MAX_RANGES_LEN || rhs_ranges_len > MAX_RANGES_LEN {
-            panic!("BitOr of HybridBitset with more than {} ranges is not supported. Got hybrid bitsets with length {} and {} but ranges lengths {} and {}, implying fragmentation of {:.2} and {:.2}, respectively", MAX_RANGES_LEN, self_len, rhs_len, self_ranges_len, rhs_ranges_len, self_fragmentation, rhs_fragmentation);
+            panic!("BitOr of HybridBitset with more than {} ranges is not supported. Got hybrid bitsets with length {} and {} but ranges lengths {} and {}, implying compression ratios of {:.2} and {:.2}, respectively", MAX_RANGES_LEN, self_len, rhs_len, self_ranges_len, rhs_ranges_len, self_compression_ratio, rhs_compression_ratio);
         }
-        println!("BitOr of HybridBitsets with lengths {} and {} and ranges lengths {} and {}, implying fragmentation of {:.2} and {:.2}, respectively", self_len, rhs_len, self_ranges_len, rhs_ranges_len, self_fragmentation, rhs_fragmentation);
+        // Option 2: Using named arguments for better readability (especially with many args)
+        println!(
+            "BitOr of HybridBitsets with lengths {slen:>7} and {rlen:>7} and ranges lengths {srlen:>7} and {rrlen:>7}, implying compression ratios of {scratio:>7.2} and {rcratio:>7.2}, respectively",
+            slen = self_len,
+            rlen = rhs_len,
+            srlen = self_ranges_len,
+            rrlen = rhs_ranges_len,
+            scratio = self_compression_ratio,
+            rcratio = rhs_compression_ratio
+        );
         HybridBitset {
             inner: &self.inner | &rhs.inner,
         }
