@@ -304,7 +304,7 @@ fn test_precompute_explosion() {
 fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define tokenizer: matches anything
     // The tokenizer will have one group (ID 0)
-    let tokenizer_expr = groups![repeat0_fast(eat_any_fast())];
+    let tokenizer_expr = groups![repeat0_fast(eat_any_fast()), repeat0_fast(eat_any_fast())];
     let tokenizer = tokenizer_expr.build();
 
     // 2. Load LLM tokens from GPT-2 vocab.json
@@ -353,6 +353,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     // Our tokenizer has one grammar token (GroupID 0)
     let mut token_name_map = BiBTreeMap::new();
     token_name_map.insert("ANYTHING_GRAMMAR_TOKEN".to_string(), 0 as usize); // GrammarTokenID 0
+    token_name_map.insert("ANYTHING_GRAMMAR_TOKEN2".to_string(), 1 as usize); // GrammarTokenID 0
 
 
     // 4. Call precompute
