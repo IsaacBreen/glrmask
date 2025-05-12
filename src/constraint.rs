@@ -152,7 +152,7 @@ pub struct GrammarConstraint {
 
 impl GrammarConstraint {
     // Helper function to set up LLM token mappings
-    fn setup_llm_token_mappings(
+    pub(crate) fn setup_llm_token_mappings(
         original_llm_token_map: &LLMTokenMap, // Input: Original BiBTreeMap<Vec<u8>, LLMTokenID>
     ) -> (
         BTreeMap<usize, usize>,          // original_to_internal_mapping
