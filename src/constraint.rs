@@ -141,33 +141,68 @@ pub struct GrammarConstraint {
     pub(crate) tokenizer:        Regex,
     pub(crate) parser:           GLRParser,
     pub(crate) precomputed:      Precomputed,
-    pub(crate) llm_token_map:    BiBTreeMap<Vec<u8>, LLMTokenID>,
+    pub(crate) llm_token_map:    BiBTreeMap<Vec<u8>, LLMTokenID>, // Stores original LLMTokenIDs
     pub(crate) token_name_map:   BiBTreeMap<String, usize>,
-    pub(crate) max_llm_token_id: usize,
+    pub(crate) max_original_llm_token_id: usize, // Max ID from the input llm_token_map
+    pub(crate) internal_num_tokens: usize,       // Number of unique internal LLM tokens
+    pub(crate) internal_max_llm_token_id: usize, // Max ID in the internal, sorted space (internal_num_tokens - 1)
+    // Mappings between original LLMTokenID.0 and internal LLMTokenID.0 (u32)
+    pub(crate) original_to_internal_mapping: BTreeMap<u32, u32>,
+    pub(crate) internal_to_original_mapping: BTreeMap<u32, u32>,
 }
 
 impl GrammarConstraint {
     pub fn new(
         tokenizer:        Regex,
         parser:           GLRParser,
-        llm_token_map:    LLMTokenMap,
+        llm_token_map:    LLMTokenMap, // This is BiBTreeMap<Vec<u8>, LLMTokenID> with original IDs
         token_name_map:   BiBTreeMap<String, usize>,
-        max_llm_token_id: usize,
+        max_original_llm_token_id: usize, // Max ID of original LLMTokenIDs from input
     ) -> Self {
+        // 1. Create sorted list of tokens to define internal mapping
+        let mut sorted_tokens_with_original_ids: Vec<(Vec<u8>, LLMTokenID)> = llm_token_map.iter()
+            .map(|(bytes, original_id)| (bytes.clone(), *original_id))
+            .collect();
+        sorted_tokens_with_original_ids.sort_by(|(bytes_a, _), (bytes_b, _)| bytes_a.cmp(bytes_b));
+
+        // 2. Build mapping tables and the internal_llm_token_map
+        let mut original_to_internal_mapping = BTreeMap::new();
+        let mut internal_to_original_mapping = BTreeMap::new();
+        let mut internal_llm_token_map = BiBTreeMap::new(); // bytes -> internal LLMTokenID
+        let mut internal_id_counter = 0u32;
+
+        for (bytes, original_llm_id) in sorted_tokens_with_original_ids {
+            let internal_llm_id = LLMTokenID(internal_id_counter);
+            original_to_internal_mapping.insert(original_llm_id.0, internal_llm_id.0);
+            internal_to_original_mapping.insert(internal_llm_id.0, original_llm_id.0);
+            internal_llm_token_map.insert(bytes, internal_llm_id);
+            internal_id_counter += 1;
+        }
+
+        let internal_num_tokens = internal_id_counter as usize;
+        // internal_max_llm_token_id is the largest ID, so it's num_tokens - 1.
+        // If num_tokens is 0, there's no largest ID. We use 0 as a placeholder.
+        let internal_max_llm_token_id = if internal_num_tokens == 0 { 0 } else { internal_num_tokens - 1 };
+
         let precomputed = Self::precompute(
             &tokenizer,
-            &llm_token_map,
+            &internal_llm_token_map, // Pass the map with internal IDs
             &token_name_map,
-            max_llm_token_id,
+            internal_num_tokens,       // Pass new parameter
+            internal_max_llm_token_id, // Pass new parameter name
         );
 
         Self {
             tokenizer,
             parser,
             precomputed,
-            llm_token_map,
+            llm_token_map, // Store the original llm_token_map (bytes -> original LLMTokenID)
             token_name_map,
-            max_llm_token_id,
+            max_original_llm_token_id,
+            internal_num_tokens,
+            internal_max_llm_token_id,
+            original_to_internal_mapping,
+            internal_to_original_mapping,
         }
     }
 
@@ -176,15 +211,17 @@ impl GrammarConstraint {
     // -------------------------------------------------------------------------
     pub fn precompute(
         tokenizer:        &Regex,
-        llm_token_map:    &BiBTreeMap<Vec<u8>, LLMTokenID>,
+        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, // Renamed and now contains internal IDs
         token_name_map:   &BiBTreeMap<String, usize>,
-        max_llm_token_id: usize,
+        internal_num_tokens: usize,                             // New parameter
+        internal_max_llm_token_id: usize,                       // Renamed
     ) -> Precomputed {
         // 1.  Kick off a helper object that contains all large mutable state.
         let mut helper = Precomputer::new(
             tokenizer,
-            llm_token_map,
-            max_llm_token_id,
+            internal_llm_token_map,    // Use new parameter name
+            internal_num_tokens,       // Pass new parameter
+            internal_max_llm_token_id, // Use new parameter name
             100, // merge threshold
         );
 
@@ -199,9 +236,14 @@ impl GrammarConstraint {
     // Runtime interface -------------------------------------------------------------------
     // -------------------------------------------------------------------------
     pub fn init(&self) -> GrammarConstraintState<'_> {
+        let base_set_for_info = if self.internal_num_tokens == 0 {
+            HybridBitset::new()
+        } else {
+            HybridBitset::ones(self.internal_max_llm_token_id)
+        };
         let info = LLMTokenInfo {
-            active:       HybridBitset::ones(self.max_llm_token_id),
-            intersection: HybridBitset::ones(self.max_llm_token_id),
+            active:       base_set_for_info.clone(),
+            intersection: base_set_for_info,
         };
         let mut state = BTreeMap::new();
         state.insert(
@@ -210,6 +252,37 @@ impl GrammarConstraint {
         );
 
         GrammarConstraintState { parent: self, state }
+    }
+
+    #[inline]
+    fn original_id_to_internal(&self, original_id: LLMTokenID) -> Option<LLMTokenID> {
+        self.original_to_internal_mapping.get(&original_id.0).map(|internal_val| LLMTokenID(*internal_val))
+    }
+
+    #[inline]
+    fn internal_id_to_original(&self, internal_id: LLMTokenID) -> Option<LLMTokenID> {
+        self.internal_to_original_mapping.get(&internal_id.0).map(|original_val| LLMTokenID(*original_val))
+    }
+
+    #[allow(dead_code)] // Might be useful later
+    fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
+        let mut internal_bv = HybridBitset::new();
+        for original_id_val in original_bv.iter() {
+            if let Some(internal_id_val) = self.original_to_internal_mapping.get(&(original_id_val as u32)) {
+                internal_bv.insert(*internal_id_val as usize);
+            }
+        }
+        internal_bv
+    }
+
+    fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
+        let mut original_bv = HybridBitset::new();
+        for internal_id_val in internal_bv.iter() {
+            if let Some(original_id_val) = self.internal_to_original_mapping.get(&(internal_id_val as u32)) {
+                original_bv.insert(*original_id_val as usize);
+            }
+        }
+        original_bv
     }
 }
 
@@ -229,14 +302,15 @@ struct Precomputer<'r> {
 impl<'r> Precomputer<'r> {
     fn new(
         tokenizer:        &'r Regex,
-        llm_token_map:    &BiBTreeMap<Vec<u8>, LLMTokenID>,
-        max_llm_token_id: usize,
+        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, // Renamed
+        internal_num_tokens: usize,                             // New
+        internal_max_llm_token_id: usize,                       // Renamed
         merge_threshold:  usize,
     ) -> Self {
         // -- Build vocab prefix tree ------------------------------------------------------
-        let tokens: Vec<(usize, Vec<u8>)> = llm_token_map
+        let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map // Use internal map
             .iter()
-            .map(|(bytes, id)| (id.0, bytes.clone()))
+            .map(|(bytes, id)| (id.0 as usize, bytes.clone())) // id.0 is already internal
             .collect();
 
         crate::debug!(2, "Building vocab prefix tree");
@@ -268,7 +342,11 @@ impl<'r> Precomputer<'r> {
             tokenizer,
             vocab,
             roots,
-            all_llm_tokens: HybridBitset::ones(max_llm_token_id),
+            all_llm_tokens: if internal_num_tokens == 0 {
+                HybridBitset::new() // No tokens means the set of all tokens is empty
+            } else {
+                HybridBitset::ones(internal_max_llm_token_id)
+            },
             merge_threshold,
             pb,
             stats: PrecomputeStats::default(),
@@ -659,41 +737,66 @@ pub struct GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&mut self) -> LLMTokenBV {
-        let mut mask = HybridBitset::new();
+        let mut internal_mask = HybridBitset::new(); // This will be composed of internal IDs
         for (_tokenizer_state_id, glr_parser_state) in &self.state {
             for active_state in glr_parser_state.active_states.values() {
-                mask |= &active_state.stack.peek().t.active;
+                internal_mask |= &active_state.stack.peek().t.active; // .active is already internal
             }
         }
-        mask
+        self.parent.internal_bv_to_original(&internal_mask) // Convert back to original IDs
     }
 
     pub fn step_with_all_llm_tokens(&mut self) {
-        let all_llm_tokens = HybridBitset::ones(self.parent.max_llm_token_id);
-        self.step(&all_llm_tokens);
+        // This creates a bitset of all *internal* LLM tokens
+        let all_internal_llm_tokens = if self.parent.internal_num_tokens == 0 {
+            HybridBitset::new()
+        } else {
+            HybridBitset::ones(self.parent.internal_max_llm_token_id)
+        };
+        self.step(&all_internal_llm_tokens);
     }
 
-    pub fn step_with_llm_token(&mut self, llm_token_id: LLMTokenID) {
-        let mut llm_tokens = HybridBitset::new();
-        llm_tokens.insert(llm_token_id.0);
-        self.step(&llm_tokens);
+    pub fn step_with_llm_token(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
+        // Convert original LLMTokenID to internal LLMTokenID
+        if let Some(internal_llm_id) = self.parent.original_id_to_internal(llm_token_id) {
+            let mut internal_llm_tokens_bv = HybridBitset::new();
+            internal_llm_tokens_bv.insert(internal_llm_id.0 as usize);
+            self.step(&internal_llm_tokens_bv); // step expects internal IDs
+        } else {
+            // Token ID not in map, treat as if it matches nothing by stepping with an empty set.
+            let empty_set = HybridBitset::new();
+            self.step(&empty_set);
+        }
     }
 
-    pub fn commit(&mut self, llm_token_id: LLMTokenID) {
+    pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
+        let all_true_set = if self.parent.internal_num_tokens == 0 {
+            HybridBitset::new()
+        } else {
+            HybridBitset::ones(self.parent.internal_max_llm_token_id)
+        };
         let all_true_token_info = LLMTokenInfo {
-            active: HybridBitset::ones(self.parent.max_llm_token_id),
-            intersection: HybridBitset::ones(self.parent.max_llm_token_id),
+            active: all_true_set.clone(),
+            intersection: all_true_set,
         };
         let all_true_intersection = all_true_token_info.intersection.clone();
 
+        // Convert original LLMTokenID to internal LLMTokenID for the closure
+        let maybe_internal_llm_id_val = self.parent.original_id_to_internal(llm_token_id)
+                                          .map(|id| id.0 as usize);
+
         let closure = |content: &ParseStateNodeContent<LLMTokenInfo>| -> Option<(ParseStateNodeContent<LLMTokenInfo>, bool)> {
-            if content.t.active.contains(llm_token_id.0) {
-                if content.t.intersection == all_true_intersection {
-                     Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, false))
-                } else {
-                     Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, true))
+            if let Some(internal_llm_id_val) = maybe_internal_llm_id_val {
+                if content.t.active.contains(internal_llm_id_val) { // .active is internal, compare with internal ID
+                    if content.t.intersection == all_true_intersection {
+                         Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, false))
+                    } else {
+                         Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, true))
+                    }
+                } else { // Original token ID not found in mapping, so it cannot be active
+                    None
                 }
-            } else {
+            } else { // Original token ID not found in mapping, so it cannot be active
                 None
             }
         };

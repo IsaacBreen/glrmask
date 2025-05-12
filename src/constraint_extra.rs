@@ -6,28 +6,42 @@ use std::collections::{HashSet, VecDeque, BTreeMap};
 use std::sync::{Arc, Mutex};
 use bitvec::prelude::BitVec;
 use crate::datastructures::hybrid_bitset::HybridBitset;
-use bimap::BiBTreeMap; // Added BiBTreeMap for print_precompute_stats
-use crate::datastructures::ArcPtrWrapper; // Added ArcPtrWrapper
+use bimap::BiBTreeMap;
+use crate::datastructures::ArcPtrWrapper;
 
-/// Helper function to print the indices of set bits in a HybridBitset.
-fn format_bv_indices(bv: &LLMTokenBV) -> String {
-    let indices: Vec<String> = bv.iter().map(|i| i.to_string()).collect();
+/// Helper function to print the indices of set bits in a HybridBitset, optionally mapping them.
+fn format_bv_indices(
+    bv: &LLMTokenBV,
+    id_map: Option<&BTreeMap<u32, u32>> // internal_to_original_mapping
+) -> String {
+    let indices: Vec<String> = bv.iter().map(|i| {
+        if let Some(map) = id_map {
+            map.get(&(i as u32)).map_or_else(|| format!("{} (unmapped internal)", i), |orig_id| orig_id.to_string())
+        } else {
+            i.to_string() // No map provided, print the number as is (likely internal ID)
+        }
+    }).collect();
     if indices.len() > 10 {
         format!("[{} indices starting with {}...]", indices.len(), indices[0..5].join(", "))
     } else if indices.is_empty() {
         "[]".to_string()
-    }
-     else {
+    } else {
         format!("[{}]", indices.join(", "))
     }
 }
 
 /// Helper function to print PrecomputedFinalizer details.
-pub(crate) fn print_finalizer(grammar_token_id: GrammarTokenID, finalizer: &PrecomputedFinalizer, indent: &str) {
+pub(crate) fn print_finalizer(
+    grammar_token_id: GrammarTokenID,
+    finalizer: &PrecomputedFinalizer,
+    indent: &str,
+    id_map: Option<&BTreeMap<u32, u32>> // New parameter
+) {
     println!("{}  - Finalizer for GrammarTokenID({}):", indent, grammar_token_id.0);
-    for (tokenizer_state_id, llm_tokens) in &finalizer.content {
+    for (tokenizer_state_id, llm_tokens) in &finalizer.content { // llm_tokens are internal
         println!("{}    Tokenizer State {}:", indent, tokenizer_state_id.0);
-        println!("{}      LLM Tokens: {}", indent, format_bv_indices(llm_tokens));
+        // Pass id_map to format_bv_indices
+        println!("{}      LLM Tokens: {}", indent, format_bv_indices(llm_tokens, id_map));
     }
 }
 
@@ -36,6 +50,7 @@ fn dump_precompute_trie_recursive(
     node_arc: &Arc<Mutex<PrecomputeNode>>,
     indent: String,
     visited: &mut HashSet<*const PrecomputeNode>,
+    id_map: Option<&BTreeMap<u32, u32>> // New parameter
 ) {
     let node_ptr_val = node_ptr(node_arc);
     if !visited.insert(node_ptr_val) {
@@ -51,11 +66,11 @@ fn dump_precompute_trie_recursive(
     if !node.value.finalizers().is_empty() {
         println!("{}  Finalizers:", indent);
         for (grammar_token_id, finalizer) in node.value.finalizers() {
-            print_finalizer(*grammar_token_id, finalizer, &indent);
+            print_finalizer(*grammar_token_id, finalizer, &indent, id_map); // Pass id_map
         }
     }
-    if let Some(clean_end) = &node.value.clean_end {
-        println!("{}  Clean End LLM Tokens: {}", indent, format_bv_indices(clean_end));
+    if let Some(clean_end) = &node.value.clean_end { // clean_end stores internal IDs
+        println!("{}  Clean End LLM Tokens: {}", indent, format_bv_indices(clean_end, id_map)); // Pass id_map
     }
 
     // Print Children (Edges)
@@ -70,20 +85,20 @@ fn dump_precompute_trie_recursive(
                     "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Ptr: {:p}",
                     indent,
                     edge_key.map(|grammar_token_id| grammar_token_id.0),
-                    format_bv_indices(edge_val_bv),
+                    format_bv_indices(edge_val_bv, id_map), // Pass id_map
                     node_ptr(child_wrapper_arc.as_arc()) // Use as_arc() to get the Arc
                 );
                 // Recurse
-                dump_precompute_trie_recursive(child_wrapper_arc.as_arc(), new_indent.clone(), visited); // Use as_arc()
+                dump_precompute_trie_recursive(child_wrapper_arc.as_arc(), new_indent.clone(), visited, id_map); // Pass id_map
             }
         }
     }
 }
 
-impl GrammarConstraint {
+impl GrammarConstraint { // This is in constraint_extra.rs
     /// Dumps the structure of the precomputed Trie map for visualization.
     pub fn dump_precomputed(&self) {
-        println!("Dumping Precomputed Trie Structure:");
+        println!("Dumping Precomputed Trie Structure (showing original LLM Token IDs):");
         println!("===================================");
 
         for (tokenizer_state_id, root_node_trie) in &self.precomputed {
@@ -95,7 +110,8 @@ impl GrammarConstraint {
             let root_node_arc = Arc::new(Mutex::new(root_node_trie.clone()));
 
             let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
-            dump_precompute_trie_recursive(&root_node_arc, "".to_string(), &mut visited);
+            // Pass the mapping
+            dump_precompute_trie_recursive(&root_node_arc, "".to_string(), &mut visited, Some(&self.internal_to_original_mapping));
         }
         println!("\n===================================");
         println!("Dump Complete.");
@@ -135,7 +151,7 @@ fn calculate_stats_from_vec_usize(numbers: &Vec<usize>) -> (usize, Option<f64>, 
         return (0, None, None);
     }
     let sum: usize = numbers.iter().sum();
-    let mean: Option<f64> = Some(sum as f64 / numbers.len() as f64);
+    let mean: Option<f66::map(mapping)> = Some(sum as f64 / numbers.len() as f64);
 
     let mut sorted_numbers = numbers.clone();
     sorted_numbers.sort_unstable();
@@ -342,29 +358,41 @@ mod tests {
     #[test]
     fn test_format_bv_indices_empty() {
         let bv = HybridBitset::new();
-        assert_eq!(format_bv_indices(&bv), "[]");
+        assert_eq!(format_bv_indices(&bv, None), "[]");
 
         let bv = HybridBitset::new();
-        assert_eq!(format_bv_indices(&bv), "[]");
+        assert_eq!(format_bv_indices(&bv, None), "[]");
     }
 
     #[test]
     fn test_format_bv_indices_single() {
         let bv = HybridBitset::from_iter(vec![3]);
-        assert_eq!(format_bv_indices(&bv), "[3]");
+        assert_eq!(format_bv_indices(&bv, None), "[3]");
     }
 
     #[test]
     fn test_format_bv_indices_multiple_few() {
         let bv = HybridBitset::from_iter(vec![1, 5, 8]);
-        assert_eq!(format_bv_indices(&bv), "[1, 5, 8]");
+        assert_eq!(format_bv_indices(&bv, None), "[1, 5, 8]");
     }
 
     #[test]
     fn test_format_bv_indices_multiple_many() {
         let bv = HybridBitset::from_iter(0..15);
-        assert_eq!(format_bv_indices(&bv), "[15 indices starting with 0, 1, 2, 3, 4...]");
+        assert_eq!(format_bv_indices(&bv, None), "[15 indices starting with 0, 1, 2, 3, 4...]");
     }
+
+    #[test]
+    fn test_format_bv_indices_with_mapping() {
+        let mut bv = HybridBitset::new();
+        bv.insert(0); // internal ID 0
+        bv.insert(1); // internal ID 1
+        let mut mapping = BTreeMap::new();
+        mapping.insert(0u32, 100u32); // internal 0 -> original 100
+        mapping.insert(1u32, 200u32); // internal 1 -> original 200
+        assert_eq!(format_bv_indices(&bv, Some(&mapping)), "[100, 200]");
+    }
+
 
     // Helper function to create a minimal constraint for testing dump
     fn create_minimal_constraint() -> GrammarConstraint {
