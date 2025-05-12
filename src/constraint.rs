@@ -145,9 +145,7 @@ pub struct GrammarConstraint {
     pub(crate) token_name_map:   BiBTreeMap<String, usize>,
     pub(crate) max_original_llm_token_id: usize, // Max ID from the input llm_token_map
     pub(crate) internal_max_llm_token_id: usize, // Max ID in the internal, sorted space (internal_num_tokens - 1)
-    // Mappings between original LLMTokenID.0 and internal LLMTokenID.0 (usize)
-    pub(crate) original_to_internal_mapping: BTreeMap<usize, usize>,
-    pub(crate) internal_to_original_mapping: BTreeMap<usize, usize>,
+    pub(crate) id_llm_token_mapping:         BiBTreeMap<LLMTokenID, LLMTokenID>, // Original LLMTokenID <-> Internal LLMTokenID
 }
 
 impl GrammarConstraint {
@@ -155,10 +153,9 @@ impl GrammarConstraint {
     pub(crate) fn setup_llm_token_mappings(
         original_llm_token_map: &LLMTokenMap, // Input: Original BiBTreeMap<Vec<u8>, LLMTokenID>
     ) -> (
-        BTreeMap<usize, usize>,          // original_to_internal_mapping
-        BTreeMap<usize, usize>,          // internal_to_original_mapping
-        BiBTreeMap<Vec<u8>, LLMTokenID>, // internal_llm_token_map (bytes -> internal LLMTokenID)
-        usize,                           // internal_max_llm_token_id
+        BiBTreeMap<LLMTokenID, LLMTokenID>, // id_llm_token_mapping (Original <-> Internal)
+        BiBTreeMap<Vec<u8>, LLMTokenID>,    // internal_llm_token_map (bytes -> internal LLMTokenID)
+        usize,                              // internal_max_llm_token_id
     ) {
         // 1. Create sorted list of tokens to define internal mapping
         let mut sorted_tokens_with_original_ids: Vec<(Vec<u8>, LLMTokenID)> = original_llm_token_map
@@ -168,15 +165,13 @@ impl GrammarConstraint {
         sorted_tokens_with_original_ids.sort_by(|(bytes_a, _), (bytes_b, _)| bytes_a.cmp(bytes_b));
 
         // 2. Build mapping tables and the internal_llm_token_map
-        let mut original_to_internal_mapping = BTreeMap::new();
-        let mut internal_to_original_mapping = BTreeMap::new();
+        let mut id_llm_token_mapping = BiBTreeMap::new();
         let mut internal_llm_token_map = BiBTreeMap::new(); // bytes -> internal LLMTokenID
         let mut internal_id_counter = 0;
 
         for (bytes, original_llm_id) in sorted_tokens_with_original_ids {
             let internal_llm_id = LLMTokenID(internal_id_counter);
-            original_to_internal_mapping.insert(original_llm_id.0, internal_llm_id.0);
-            internal_to_original_mapping.insert(internal_llm_id.0, original_llm_id.0);
+            id_llm_token_mapping.insert(original_llm_id, internal_llm_id);
             internal_llm_token_map.insert(bytes, internal_llm_id);
             internal_id_counter += 1;
         }
@@ -188,8 +183,7 @@ impl GrammarConstraint {
         let internal_max_llm_token_id = if internal_num_tokens == 0 { 0 } else { internal_num_tokens - 1 };
 
         (
-            original_to_internal_mapping,
-            internal_to_original_mapping,
+            id_llm_token_mapping,
             internal_llm_token_map,
             internal_max_llm_token_id,
         )
@@ -203,8 +197,7 @@ impl GrammarConstraint {
         max_original_llm_token_id: usize, // Max ID of original LLMTokenIDs from input
     ) -> Self {
         let (
-            original_to_internal_mapping,
-            internal_to_original_mapping,
+            id_llm_token_mapping,
             internal_llm_token_map, // This map uses internal LLMTokenIDs
             internal_max_llm_token_id,
         ) = Self::setup_llm_token_mappings(&llm_token_map);
@@ -224,8 +217,7 @@ impl GrammarConstraint {
             token_name_map,
             max_original_llm_token_id,
             internal_max_llm_token_id,
-            original_to_internal_mapping,
-            internal_to_original_mapping,
+            id_llm_token_mapping,
         }
     }
 
@@ -273,20 +265,21 @@ impl GrammarConstraint {
 
     #[inline]
     fn original_id_to_internal(&self, original_id: LLMTokenID) -> Option<LLMTokenID> {
-        self.original_to_internal_mapping.get(&original_id.0).map(|internal_val| LLMTokenID(*internal_val))
+        self.id_llm_token_mapping.get_by_left(&original_id).copied()
     }
 
     #[inline]
     fn internal_id_to_original(&self, internal_id: LLMTokenID) -> Option<LLMTokenID> {
-        self.internal_to_original_mapping.get(&internal_id.0).map(|original_val| LLMTokenID(*original_val))
+        self.id_llm_token_mapping.get_by_right(&internal_id).copied()
     }
 
     #[allow(dead_code)] // Might be useful later
     fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
         let mut internal_bv = HybridBitset::new();
-        for original_id_val in original_bv.iter() {
-            if let Some(internal_id_val) = self.original_to_internal_mapping.get(&(original_id_val as usize)) {
-                internal_bv.insert(*internal_id_val as usize);
+        for original_id_u32 in original_bv.iter() { // iter() yields u32
+            let original_llm_id = LLMTokenID(original_id_u32 as usize);
+            if let Some(internal_llm_id) = self.id_llm_token_mapping.get_by_left(&original_llm_id) {
+                internal_bv.insert(internal_llm_id.0 as usize); // HybridBitset::insert takes usize
             }
         }
         internal_bv
@@ -294,9 +287,10 @@ impl GrammarConstraint {
 
     fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
         let mut original_bv = HybridBitset::new();
-        for internal_id_val in internal_bv.iter() {
-            if let Some(original_id_val) = self.internal_to_original_mapping.get(&(internal_id_val as usize)) {
-                original_bv.insert(*original_id_val as usize);
+        for internal_id_u32 in internal_bv.iter() { // iter() yields u32
+            let internal_llm_id = LLMTokenID(internal_id_u32 as usize);
+            if let Some(original_llm_id) = self.id_llm_token_mapping.get_by_right(&internal_llm_id) {
+                original_bv.insert(original_llm_id.0 as usize); // HybridBitset::insert takes usize
             }
         }
         original_bv
@@ -934,4 +928,3 @@ impl<'a> GrammarConstraintState<'a> {
         );
     }
 }
-

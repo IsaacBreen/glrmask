@@ -12,11 +12,16 @@ use crate::datastructures::ArcPtrWrapper;
 /// Helper function to print the indices of set bits in a HybridBitset, optionally mapping them.
 fn format_bv_indices(
     bv: &LLMTokenBV,
-    id_map: Option<&BTreeMap<usize, usize>> // internal_to_original_mapping
+    id_map: Option<&BiBTreeMap<LLMTokenID, LLMTokenID>> // Original <-> Internal
 ) -> String {
     let indices: Vec<String> = bv.iter().map(|i| {
         if let Some(map) = id_map {
-            map.get(&(i as usize)).map_or_else(|| format!("{} (unmapped internal)", i), |orig_id| orig_id.to_string())
+            let internal_llm_id = LLMTokenID(i as usize); // i is u32 from iter()
+            map.get_by_right(&internal_llm_id) // get original from internal
+                .map_or_else(
+                    || format!("{} (unmapped internal)", i),
+                    |original_llm_id| original_llm_id.0.to_string()
+                )
         } else {
             i.to_string() // No map provided, print the number as is (likely internal ID)
         }
@@ -35,7 +40,7 @@ pub(crate) fn print_finalizer(
     grammar_token_id: GrammarTokenID,
     finalizer: &PrecomputedFinalizer,
     indent: &str,
-    id_map: Option<&BTreeMap<usize, usize>> // New parameter
+    id_map: Option<&BiBTreeMap<LLMTokenID, LLMTokenID>> // New parameter
 ) {
     println!("{}  - Finalizer for GrammarTokenID({}):", indent, grammar_token_id.0);
     for (tokenizer_state_id, llm_tokens) in &finalizer.content { // llm_tokens are internal
@@ -50,7 +55,7 @@ fn dump_precompute_trie_recursive(
     node_arc: &Arc<Mutex<PrecomputeNode>>,
     indent: String,
     visited: &mut HashSet<*const PrecomputeNode>,
-    id_map: Option<&BTreeMap<usize, usize>> // New parameter
+    id_map: Option<&BiBTreeMap<LLMTokenID, LLMTokenID>> // New parameter
 ) {
     let node_ptr_val = node_ptr(node_arc);
     if !visited.insert(node_ptr_val) {
@@ -111,7 +116,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
 
             let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
             // Pass the mapping
-            dump_precompute_trie_recursive(&root_node_arc, "".to_string(), &mut visited, Some(&self.internal_to_original_mapping));
+            dump_precompute_trie_recursive(&root_node_arc, "".to_string(), &mut visited, Some(&self.id_llm_token_mapping));
         }
         println!("\n===================================");
         println!("Dump Complete.");
@@ -387,9 +392,9 @@ mod tests {
         let mut bv = HybridBitset::new();
         bv.insert(0); // internal ID 0
         bv.insert(1); // internal ID 1
-        let mut mapping = BTreeMap::new();
-        mapping.insert(0, 100); // internal 0 -> original 100
-        mapping.insert(1, 200); // internal 1 -> original 200
+        let mut mapping = BiBTreeMap::new();
+        mapping.insert(LLMTokenID(100), LLMTokenID(0)); // original 100 <-> internal 0
+        mapping.insert(LLMTokenID(200), LLMTokenID(1)); // original 200 <-> internal 1
         assert_eq!(format_bv_indices(&bv, Some(&mapping)), "[100, 200]");
     }
 
