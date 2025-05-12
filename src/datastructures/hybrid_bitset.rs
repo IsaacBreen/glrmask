@@ -229,27 +229,27 @@ impl BitOr for &HybridBitset {
     type Output = HybridBitset;
 
     fn bitor(self, rhs: Self) -> Self::Output {
-        let self_ranges_len = self.inner.ranges_len();
-        let rhs_ranges_len = rhs.inner.ranges_len();
-        let self_len = self.inner.len();
-        let rhs_len = rhs.inner.len();
-        let self_compression_ratio: f64 = self_len as f64 / self_ranges_len as f64;
-        let rhs_compression_ratio: f64 = rhs_len as f64 / rhs_ranges_len as f64;
-        let MAX_RANGES_LEN = 1024;
-        let MIN_COMPRESSION_RATIO = 2.0;
-        if self_compression_ratio < MIN_COMPRESSION_RATIO && self_ranges_len > MAX_RANGES_LEN || rhs_compression_ratio < MIN_COMPRESSION_RATIO && rhs_ranges_len > MAX_RANGES_LEN {
-            panic!("BitOr of HybridBitset with more than {} ranges is not supported. Got hybrid bitsets with length {} and {} but ranges lengths {} and {}, implying compression ratios of {:.2} and {:.2}, respectively", MAX_RANGES_LEN, self_len, rhs_len, self_ranges_len, rhs_ranges_len, self_compression_ratio, rhs_compression_ratio);
-        }
-        // Option 2: Using named arguments for better readability (especially with many args)
-        println!(
-            "BitOr of HybridBitsets with lengths {slen:>5} and {rlen:>5} and ranges lengths {srlen:>5} and {rrlen:>5}, implying compression ratios of {scratio:>7.2} and {rcratio:>7.2}, respectively",
-            slen = self_len,
-            rlen = rhs_len,
-            srlen = self_ranges_len,
-            rrlen = rhs_ranges_len,
-            scratio = self_compression_ratio,
-            rcratio = rhs_compression_ratio
-        );
+        // let self_ranges_len = self.inner.ranges_len();
+        // let rhs_ranges_len = rhs.inner.ranges_len();
+        // let self_len = self.inner.len();
+        // let rhs_len = rhs.inner.len();
+        // let self_compression_ratio: f64 = self_len as f64 / self_ranges_len as f64;
+        // let rhs_compression_ratio: f64 = rhs_len as f64 / rhs_ranges_len as f64;
+        // let MAX_RANGES_LEN = 1024;
+        // let MIN_COMPRESSION_RATIO = 2.0;
+        // if self_compression_ratio < MIN_COMPRESSION_RATIO && self_ranges_len > MAX_RANGES_LEN || rhs_compression_ratio < MIN_COMPRESSION_RATIO && rhs_ranges_len > MAX_RANGES_LEN {
+        //     panic!("BitOr of HybridBitset with more than {} ranges is not supported. Got hybrid bitsets with length {} and {} but ranges lengths {} and {}, implying compression ratios of {:.2} and {:.2}, respectively", MAX_RANGES_LEN, self_len, rhs_len, self_ranges_len, rhs_ranges_len, self_compression_ratio, rhs_compression_ratio);
+        // }
+        // // Option 2: Using named arguments for better readability (especially with many args)
+        // println!(
+        //     "BitOr of HybridBitsets with lengths {slen:>5} and {rlen:>5} and ranges lengths {srlen:>5} and {rrlen:>5}, implying compression ratios of {scratio:>7.2} and {rcratio:>7.2}, respectively",
+        //     slen = self_len,
+        //     rlen = rhs_len,
+        //     srlen = self_ranges_len,
+        //     rrlen = rhs_ranges_len,
+        //     scratio = self_compression_ratio,
+        //     rcratio = rhs_compression_ratio
+        // );
         HybridBitset {
             inner: &self.inner | &rhs.inner,
         }
