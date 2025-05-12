@@ -322,6 +322,14 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     let mut token_name_map = BiBTreeMap::new();
     token_name_map.insert("ANYTHING_GRAMMAR_TOKEN".to_string(), 0 as usize); // GrammarTokenID 0
 
+    let (
+        original_to_internal_mapping,
+        internal_to_original_mapping,
+        internal_llm_token_map, // This map uses internal LLMTokenIDs
+        internal_max_llm_token_id,
+    ) = GrammarConstraint::setup_llm_token_mappings(&llm_token_map);
+
+
     // 4. Call precompute
     println!(
         "Starting precompute with GPT-2 vocab ({} tokens, max_id_val: {}, param: {})...",
@@ -333,7 +341,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     // This is the main part of the test: ensure it runs without error.
     let _precomputed = GrammarConstraint::precompute(
         &tokenizer,
-        &llm_token_map,
+        &internal_llm_token_map,
         &token_name_map,
         max_llm_token_id_param,
     );
