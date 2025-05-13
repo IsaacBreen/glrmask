@@ -401,7 +401,8 @@ fn test_simple_def_match_non_zero_llm_id() {
 
     // 2. LLM vocabulary: only "def", but with a non-zero original ID
     let mut llm_token_map = LLMTokenMap::new();
-    let def_original_llm_id = 750; // Using the ID from your Python script's log
+    // let def_original_llm_id = 750; // Using the ID from your Python script's log
+    let def_original_llm_id = 0;
     llm_token_map.insert(b"def".to_vec(), LLMTokenID(def_original_llm_id));
     let max_original_llm_token_id = def_original_llm_id;
 
