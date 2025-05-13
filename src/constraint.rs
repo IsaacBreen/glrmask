@@ -160,10 +160,8 @@ impl GrammarConstraint {
         // TODO: delete this
         // Temporarily just don't map
         let mut original_to_internal_id_bimap = BiBTreeMap::new();
-        let mut internal_id_counter = 0;
-        for _ in 0..original_llm_token_map.len() {
-            original_to_internal_id_bimap.insert(internal_id_counter, internal_id_counter);
-            internal_id_counter += 1;
+        for i in 0..original_llm_token_map.len() {
+            original_to_internal_id_bimap.insert(i, i);
         }
         return original_to_internal_id_bimap;
 
