@@ -172,7 +172,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
     exprs: list[tuple[str, Any]] = []
 
     # Make sure the start production is first
-    exprs.append(("start'''", ge.ref("file")))
+#     exprs.append(("start'''", ge.ref("file")))
 
 #     # TODO: delete this
 #     choice = Regex.choice
@@ -187,7 +187,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
 #     exprs.append(("start'''", ge.ref("IGNORE")))
 #     exprs.append(("start'''", ge.ref("FSTRING_MIDDLE")))
 
-#     exprs.append(("start'''", ge.sequence([regex(eat("def")), ge.ref("NAME"), ge.regex(eat("(")), ge.ref("NAME"), ge.regex(eat(")"))])))
+    exprs.append(("start'''", ge.sequence([regex(eat("def")), ge.ref("NAME"), ge.regex(eat("(")), ge.ref("NAME"), ge.regex(eat(")"))])))
 #     exprs.append(("start'''", regex(eat("def"))))
 
 #     # TODO: delete this
@@ -344,6 +344,7 @@ if __name__ == "__main__":
 
 #     tokenizer_vocab = {"def": 0, "$": 1}
 #     tokenizer_vocab = {"def": 0}
+    tokenizer_vocab = {"def": 0, " f": 1}
 
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
