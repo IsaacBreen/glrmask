@@ -171,7 +171,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
     exprs: list[tuple[str, Any]] = []
 
     # Make sure the start production is first
-    exprs.append(("start'''", ge.ref("file")))
+#     exprs.append(("start'''", ge.ref("file")))
 #     # TODO: delete this
 #     choice = Regex.choice
 #     eat_u8 = Regex.eat_u8
