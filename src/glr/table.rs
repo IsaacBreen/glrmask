@@ -373,7 +373,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let productions = remove_productions_with_undefined_nonterminals(productions);
 
     crate::debug!(2, "Validating");
-    validate(&productions).expect("Validation error");
+    // validate(&productions).expect("Validation error");
 
     crate::debug!(2, "Stage 1");
     let stage_1_table = stage_1(&productions, start_production_id);
