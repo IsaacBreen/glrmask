@@ -133,34 +133,34 @@ def define_tokens() -> list[tuple[str, Any]]:
         digit,
     ])
 
-#     tokens["NAME"] = seq([name_start, rep(name_middle)])
-    # TODO: delete this
-    tokens["NAME"] = eps()
-#     tokens["NUMBER"] = choice([
-#         rep(digit),
-#         seq([rep(digit), eat_u8(ord(".")), rep(digit)]),
-#     ])
-#     tokens["NEWLINE"] = eps()
-#     tokens["INDENT"] = eps()
-#     tokens["DEDENT"] = eps()
-#     tokens["STRING"] = choice([
-#         seq([eat_u8(ord('"')), rep(eat_u8_negation(ord('"'))), eat_u8(ord('"'))]),
-#         seq([eat_u8(ord("'")), rep(eat_u8_negation(ord("'"))), eat_u8(ord("'"))]),
-#     ])
-#     tokens["FSTRING_START"] = choice([
-#         eat('"""'),
-#         eat("'''"),
-#     ])
-#     tokens["FSTRING_END"] = choice([
-#         eat('"""'),
-#         eat("'''"),
-#     ])
-#     tokens["FSTRING_MIDDLE"] = rep(choice([
-#         eat_u8_negation(ord("{")),
-#         eat("{{"),
-#     ]))
-#     tokens["TYPE_COMMENT"] = eps()
-#     tokens["ENDMARKER"] = eps()
+    tokens["NAME"] = seq([name_start, rep(name_middle)])
+#     # TODO: delete this
+#     tokens["NAME"] = eps()
+    tokens["NUMBER"] = choice([
+        rep(digit),
+        seq([rep(digit), eat_u8(ord(".")), rep(digit)]),
+    ])
+    tokens["NEWLINE"] = eps()
+    tokens["INDENT"] = eps()
+    tokens["DEDENT"] = eps()
+    tokens["STRING"] = choice([
+        seq([eat_u8(ord('"')), rep(eat_u8_negation(ord('"'))), eat_u8(ord('"'))]),
+        seq([eat_u8(ord("'")), rep(eat_u8_negation(ord("'"))), eat_u8(ord("'"))]),
+    ])
+    tokens["FSTRING_START"] = choice([
+        eat('"""'),
+        eat("'''"),
+    ])
+    tokens["FSTRING_END"] = choice([
+        eat('"""'),
+        eat("'''"),
+    ])
+    tokens["FSTRING_MIDDLE"] = rep(choice([
+        eat_u8_negation(ord("{")),
+        eat("{{"),
+    ]))
+    tokens["TYPE_COMMENT"] = eps()
+    tokens["ENDMARKER"] = eps()
     return [regex(expr, name) for name, expr in tokens.items()]
 #     # TODO: delete this
 #     return []
@@ -172,7 +172,8 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
     exprs: list[tuple[str, Any]] = []
 
     # Make sure the start production is first
-#     exprs.append(("start'''", ge.ref("file")))
+    exprs.append(("start'''", ge.ref("file")))
+
 #     # TODO: delete this
 #     choice = Regex.choice
 #     eat_u8 = Regex.eat_u8
@@ -187,7 +188,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
 #     exprs.append(("start'''", ge.ref("FSTRING_MIDDLE")))
 
 #     exprs.append(("start'''", ge.sequence([regex(eat("def")), ge.ref("NAME"), ge.regex(eat("(")), ge.ref("NAME"), ge.regex(eat(")"))])))
-    exprs.append(("start'''", regex(eat("def"))))
+#     exprs.append(("start'''", regex(eat("def"))))
 
 #     # TODO: delete this
 #     # Add a rule for "hello=world$" to the start rule
@@ -226,7 +227,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
         else:
             rhs = pegen_to_sep1_regex(rule.rhs, memo)
        # TODO: uncomment this
-#         exprs.append((rule.name, rhs))
+        exprs.append((rule.name, rhs))
 
 
     tokens = define_tokens()
@@ -342,7 +343,7 @@ if __name__ == "__main__":
 #     tokenizer_vocab = {k: v for k, v in tokenizer.get_vocab().items() if k.isdigit() or k in "+-*/"}
 
 #     tokenizer_vocab = {"def": 0, "$": 1}
-    tokenizer_vocab = {"def": 0}
+#     tokenizer_vocab = {"def": 0}
 
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
@@ -399,8 +400,8 @@ if __name__ == "__main__":
 #     expected_next_token = "world"
 
     pre_input_text = ""
-#     input_text = 'def f('
-    input_text = 'def'
+    input_text = 'def f('
+#     input_text = 'def'
 #     input_text = 'NAME'
     expected_next_token = ""
 
@@ -448,8 +449,8 @@ if __name__ == "__main__":
     if expected_next_token:
         assert expected_next_token in mask_tokens, f"Expected '{expected_next_token}' in mask"
 
-#     # DEMO: Generate text.
-#     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
-# #     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
-#     output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
-#     print(output_text)
+    # DEMO: Generate text.
+    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
+#     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
+    output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
+    print(output_text)
