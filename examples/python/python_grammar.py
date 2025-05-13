@@ -344,7 +344,7 @@ if __name__ == "__main__":
 #     tokenizer_vocab = {k: v for k, v in tokenizer.get_vocab().items() if k.isdigit() or k in "+-*/"}
 
 #     tokenizer_vocab = {"def": 0, "$": 1}
-    tokenizer_vocab = {"def": 0}
+#     tokenizer_vocab = {"def": 0}
 #     tokenizer_vocab = {"def": 0, " f": 1, "(": 2, ")": 3}
 #     tokenizer_vocab = {"def": 0, " f": 1, "(": 2, ")": 3, "de": 4}
     tokenizer_vocab = {"def": 0, "de": 1}
@@ -404,8 +404,8 @@ if __name__ == "__main__":
 #     expected_next_token = "world"
 
     pre_input_text = ""
-    input_text = 'def f('
-#     input_text = 'def'
+#     input_text = 'def f('
+    input_text = 'def'
 #     input_text = 'NAME'
     expected_next_token = ""
 
