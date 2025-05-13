@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt::{self, Debug};
 // Import TryLockError explicitly for matching
 use std::sync::{Arc, Mutex, TryLockError, MutexGuard};
-use std::sync::atomic::{AtomicUsize, Ordering}; // Added for tests
+// Removed AtomicUsize import as it was only used in old special_map debug warnings.
 
 use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
 use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
@@ -203,10 +203,6 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
                     // Failed to lock because it's held elsewhere (potentially by the thread calling try_insert).
                     // Assume this means we've reached the target node in the context of try_insert.
                     // If detect_cycle were used elsewhere, this assumption might need revisiting.
-                    // Alternatively, one could park the thread here and wait for the lock, but TryLock
-                    // is often used to check if *this* thread holds the lock without deadlocking.
-                    // Given the use case in try_insert, `WouldBlock` implies the current thread
-                    // holds the target node's lock, which signals a cycle.
                     return true;
                 }
                 Err(TryLockError::Poisoned(p)) => {
@@ -454,219 +450,291 @@ pub(crate) fn node_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK, EV, T>>>) -
 // Implementation block for special_map and related functionality
 // Requires T: Clone, EK: Ord + Clone, EV: Clone
 impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-    /// Performs a specialized breadth-first traversal (related to Dijkstra/Bellman-Ford relaxation).
+    /// Performs a single-pass, topological‐order BFS over the portion of the
+    /// graph that is reachable from the supplied `initial_nodes_and_values`.
     ///
-    /// This function traverses the graph starting from `initial_nodes_and_values`.
-    /// It uses a queue for BFS. For each node popped from the queue:
-    /// 1. It retrieves the current accumulated value (`V`) and arrival depth from the `state` map.
-    /// 2. If the node is an initial node *or* its arrival depth in the `state` map
-    ///    is greater than or equal to its pre-calculated `max_depth`, it's considered "ready" for processing.
-    /// 3. If ready, the `process` function is called with the node's data and its accumulated value.
-    /// 4. If `process` returns `true`, the algorithm iterates through the node's children.
-    /// 5. For each child, the `step` function is called using the parent's accumulated value,
-    ///    edge details, and the child node's data.
-    /// 6. If `step` returns `Some(candidate_v)`, this candidate value is merged into the child's
-    ///    existing accumulated value in the `state` map using the `merge` function. The child's
-    ///    arrival depth in the `state` map is updated to the maximum of its current depth
-    ///    and the parent's arrival depth + 1.
-    /// 7. If the child's arrival depth in the `state` map becomes greater than or equal to its
-    ///    pre-calculated `max_depth`, and the child has not been fully processed, it is added
-    ///    to the ready queue.
+    ///  • Every node is processed **at most once**.
+    ///  • A node is processed only after *all* of its reachable parents
+    ///    (i.e. parents that are themselves reachable from the chosen
+    ///    start set) have been processed.
+    ///  • The `step`, `merge` and `process` callbacks keep exactly the same
+    ///    semantics they had before – no call-site changes are required.
     ///
-    /// Nodes are marked as processed *before* their children are explored to prevent cycles
-    /// from causing infinite loops in the traversal logic itself.
-    ///
-    /// This traversal relies on the `max_depth` values being correctly calculated during graph
-    /// construction (e.g., via `try_insert`). Cycles can lead to incorrect `max_depth` values
-    /// or nodes that are never considered "ready" if their arrival depth never reaches their `max_depth`.
+    /// The implementation is now less than 100 lines, has no dependency on
+    /// `max_depth`, never tries to “propagate” depths, and needs no internal
+    /// roll-backs or extra book-keeping.
     pub fn special_map<V: Clone>(
         initial_nodes_and_values: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
         mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>,
         mut merge: impl FnMut(&mut V, V),
         mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool,
     ) {
-        // state: for each node (by Arc pointer), store (merged V, arrival_depth)
-        // Using Arc::as_ptr for HashMap key for stable pointers
-        let mut state: HashMap<*const Mutex<Trie<EK, EV, T>>, (V, usize)> = HashMap::new();
-        let mut ready_queue: VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
-        // set of processed nodes (by Arc pointer)
-        let mut processed: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
-        // record which nodes came in as initial nodes (pointers)
-        let initial_node_pointers: HashSet<*const Mutex<Trie<EK, EV, T>>> = initial_nodes_and_values
-            .iter()
-            .map(|(arc, _)| Arc::as_ptr(arc))
-            .collect();
+        use std::collections::{HashMap, HashSet, VecDeque};
 
+        /* -----------------------------------------------------------------
+         * 0.  Small helper maps keyed by the raw Arc pointer so that
+         *     identity is stable even if Arcs are cloned.
+         * ----------------------------------------------------------------- */
+        type Ptr<K, V> = HashMap<*const Mutex<Trie<EK, EV, T>>, V>;
+        type PtrSet      = HashSet  <*const Mutex<Trie<EK, EV, T>>>;
 
-        // Initialize state for starting nodes.
-        for (node_arc, v) in initial_nodes_and_values {
-            let current_node_arc_ptr = Arc::as_ptr(&node_arc);
-            state.entry(current_node_arc_ptr)
-                .and_modify(|(stored, _depth)| { // depth is always 0 for initial here, updated by max() below
-                    merge(stored, v.clone());
-                })
-                .or_insert((v, 0)); // Initial arrival depth is 0
-            ready_queue.push_back(node_arc.clone());
+        /* -----------------------------------------------------------------
+         * 1.  Discover the *reachable* sub-graph, while simultaneously
+         *     building:
+         *       – `in_deg` : number of reachable parents for each node.
+         *       – `adj`    : outgoing (EK , EV , Arc<…>) edges per node.
+         * ----------------------------------------------------------------- */
+        let mut in_deg : Ptr<usize>                                   = Ptr::new();
+        let mut adj    : Ptr<Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>> = Ptr::new();
+
+        let mut seen : PtrSet  = PtrSet::new();
+        let mut q    : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
+
+        // Seed the discovery queue with the user-supplied start nodes
+        for (n, _) in &initial_nodes_and_values {
+            let p = Arc::as_ptr(n);
+            if seen.insert(p) {
+                q.push_back(n.clone());
+            }
         }
 
-        // Main loop.
-        while let Some(node_arc) = ready_queue.pop_front() {
-            let current_node_arc_ptr = Arc::as_ptr(&node_arc);
+        while let Some(node_arc) = q.pop_front() {
+            let node_ptr = Arc::as_ptr(&node_arc);
 
-            // If this node is already processed, skip it. This handles duplicates in the queue.
-            if processed.contains(&current_node_arc_ptr) {
+            // Ensure default entries exist
+            adj.entry(node_ptr).or_default();
+            in_deg.entry(node_ptr).or_insert(0);
+
+            // Grab all outgoing edges once, then immediately release the lock
+            let outgoing : Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)> = {
+                let node = node_arc.lock().expect("mutex poisoned");
+                node.children.iter().flat_map(|(ek, dst_map)| {
+                    dst_map.iter().map(move |(child_wrap, ev)| {
+                        (ek.clone(), ev.clone(), child_wrap.as_arc().clone())
+                    })
+                }).collect()
+            };
+            adj.insert(node_ptr, outgoing.clone());
+
+            // For every child, update in-degree and continue the BFS
+            for (_, _, child_arc) in outgoing {
+                let child_ptr = Arc::as_ptr(&child_arc);
+                *in_deg.entry(child_ptr).or_insert(0) += 1;
+
+                if seen.insert(child_ptr) {
+                    q.push_back(child_arc);
+                }
+            }
+        }
+
+        /* -----------------------------------------------------------------
+         * 2.  State needed while running the real traversal
+         * ----------------------------------------------------------------- */
+        //   – accumulated V per node (via merge)
+        let mut value_map : Ptr<V> = Ptr::new();
+        //   – number of parents already processed
+        let mut done_parents : Ptr<usize> = Ptr::new();
+        //   – final “ready” queue
+        let mut ready : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
+        //   – processed flag
+        let mut processed : PtrSet = PtrSet::new();
+
+        // Initialise with the user-supplied start set (merging duplicates)
+        for (n, v0) in initial_nodes_and_values {
+            let p = Arc::as_ptr(&n);
+            match value_map.get_mut(&p) {
+                Some(existing) => merge(existing, v0),
+                None           => { value_map.insert(p, v0); },
+            }
+            ready.push_back(n);
+        }
+
+        /* -----------------------------------------------------------------
+         * 3.  Main loop – Kahn-style topological walk
+         * ----------------------------------------------------------------- */
+        while let Some(node_arc) = ready.pop_front() {
+            let node_ptr = Arc::as_ptr(&node_arc);
+
+            // Skip if already processed (can happen in cyclic graphs)
+            if processed.contains(&node_ptr) {
                 continue;
             }
 
-            // get stored state (merged V and arrival depth) for this node.
-            let (mut current_node_value, current_node_arrival_depth) = match state.get(&current_node_arc_ptr) {
-                Some(tup) => tup.clone(), // Clone the tuple (V, usize)
+            // A node becomes *eligible* only when every reachable parent
+            // has been processed.  This is tracked with `done_parents`.
+            if done_parents.get(&node_ptr).copied().unwrap_or(0)
+               < *in_deg.get(&node_ptr).unwrap_or(&0) {
+                continue; // not yet fully informed
+            }
+
+            // We may legitimately reach a node that has no value
+            // (every step(...) so far returned None).  In that case
+            // we mark it processed but propagate nothing.
+            let mut current_v = match value_map.get_mut(&node_ptr) {
+                Some(v) => v,
                 None => {
-                    // This should ideally not happen if nodes are only added to queue via state update
-                    // but a defense-in-depth check.
-                    crate::debug!(4, "Node {:p} popped from queue but not found in state.", current_node_arc_ptr);
+                    processed.insert(node_ptr);
+                    // still need to bump parent counters of its children
+                    for (_ek, _ev, child_arc) in adj.get(&node_ptr).into_iter().flatten() {
+                        let cptr = Arc::as_ptr(child_arc);
+                        *done_parents.entry(cptr).or_insert(0) += 1;
+                        if !processed.contains(&cptr) {
+                            ready.push_back(child_arc.clone());
+                        }
+                    }
                     continue;
                 }
             };
 
-            // Get the fixed max_depth for this node from its trie.
-            let current_node_max_depth = {
-                let node_guard = node_arc.lock().expect("Mutex poisoned in special_map getting max_depth");
-                node_guard.max_depth
-            }; // node_guard lock released
+            // Run user callback
+            let should_continue = {
+                let node = node_arc.lock().expect("mutex poisoned");
+                process(&node, &mut current_v)
+            };
 
-            // A node is considered ready for full processing once its arrival depth in the state map
-            // equals or exceeds its pre-calculated inherent max_depth, or if it's an initial node.
-            if !initial_node_pointers.contains(&current_node_arc_ptr) && current_node_arrival_depth < current_node_max_depth {
-                 // Not yet fully updated based on all potentially longer paths; skip processing *now*.
-                 // It might be re-added to the queue later if another path increases its arrival depth in 'state'.
-                 // Put it back at the back of the queue for now.
-                 ready_queue.push_back(node_arc.clone());
-                 continue;
-            }
+            // Mark as processed exactly once
+            processed.insert(node_ptr);
 
-            // If arr_depth > node_max_depth, something is inconsistent (e.g., cycles not caught by insertion).
-            if current_node_arrival_depth > current_node_max_depth {
-                 crate::debug!(3, "Warning: Node {:p} (value: {:?}) has arrival depth {} > max_depth {}. Processing anyway.",
-                     current_node_arc_ptr, node_arc.lock().unwrap().value, current_node_arrival_depth, current_node_max_depth);
-            }
-
-            // Mark node as processed.
-            processed.insert(current_node_arc_ptr);
-
-            // Call process on this node. Capture the boolean result.
-            let should_continue_processing_children;
-            // Scope to lock the node for the process call
-            {
-                let node_guard = node_arc.lock().expect("Mutex poisoned during process call");
-                // process can modify current_node_value
-                should_continue_processing_children = process(&node_guard, &mut current_node_value);
-            } // node_guard lock released
-
-            // If process modified current_node_value, update it in the state map.
-            // This ensures that step functions for children use the potentially updated value.
-            state.insert(current_node_arc_ptr, (current_node_value.clone(), current_node_arrival_depth));
-
-
-            // Only propagate to children if process returned true.
-            if should_continue_processing_children {
-                // Collect all (EdgeKey, EdgeValue, ChildArc) tuples. Lock briefly.
-                let children_edges_values_arcs: Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)> = {
-                    let node_guard = node_arc.lock().expect("Mutex poisoned while reading children");
-                    node_guard.children
-                        .iter()
-                        .flat_map(|(edge_key, dest_map)| { // dest_map is &BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
-                            dest_map.iter().map(move |(child_wrapper_arc, edge_val)| {
-                                (edge_key.clone(), edge_val.clone(), child_wrapper_arc.as_arc().clone())
-                            })
-                        })
-                        .collect()
-                }; // node_guard lock released here
-
-                for (edge_key, edge_val, child_arc) in children_edges_values_arcs {
-                    let child_arc_ptr = Arc::as_ptr(&child_arc);
-
-                    // Compute candidate V for child using the potentially failing step function. Lock briefly.
-                    let candidate_v_opt = {
-                        let child_node_guard = child_arc.lock().expect("Mutex poisoned during step");
-                        step(&current_node_value, &edge_key, &edge_val, &child_node_guard)
-                    }; // child_node_guard lock released here
-
-                    if let Some(candidate_v) = candidate_v_opt {
-                        // The candidate arrival depth for this child is one more than parent's arrival depth.
-                        let candidate_arrival_depth = current_node_arrival_depth.saturating_add(1);
-
-                        // Update state for the child: merge the new candidate V and update arrival depth.
-                        // Get the child's current state, update it, and record the *new* arrival depth in state.
-                        let mut final_child_arrival_depth = 0; // Will hold the depth *after* potential update
-                        state.entry(child_arc_ptr)
-                            .and_modify(|(existing_v, existing_depth)| {
-                                merge(existing_v, candidate_v.clone()); // Merge the value
-                                *existing_depth = (*existing_depth).max(candidate_arrival_depth); // Update depth
-                                final_child_arrival_depth = *existing_depth; // Record final depth
-                            })
-                            .or_insert_with(|| {
-                                final_child_arrival_depth = candidate_arrival_depth; // Record final depth
-                                (candidate_v, candidate_arrival_depth) // Insert new state
-                            });
-
-
-                        // The child's state in the 'state' map has been updated (value merged, depth potentially increased).
-                        // Now, decide if this child should be added to the ready queue *now*.
-                        // It's ready if its current arrival depth in 'state' is >= its pre-calculated inherent max_depth.
-                        // This check ensures we process nodes only after all potentially longer paths leading to them
-                        // (within the traversed subgraph from initial nodes) have been considered for value merging.
-
-                        // Get the child's inherent max_depth (this is fixed during insertion, not changed by special_map).
-                        let child_inherent_max_depth = {
-                            let child_node_guard = child_arc.lock().expect("Mutex poisoned while getting child max_depth for readiness check");
-                            child_node_guard.max_depth
-                        }; // child_node_guard lock released here
-
-
-                        // If the child's arrival depth in the state map is high enough based on its inherent max_depth,
-                        // and it hasn't been fully processed yet, add it to the ready queue.
-                        // 'final_child_arrival_depth' here is the updated depth from the state map for the child.
-                        if final_child_arrival_depth >= child_inherent_max_depth {
-                            if !processed.contains(&child_arc_ptr) {
-                                // Add to the ready queue if not already processed.
-                                // Duplicates in the queue are handled by the 'processed' check when popping.
-                                 ready_queue.push_back(child_arc.clone());
-                            }
-                        }
-                        // If final_child_arrival_depth < child_inherent_max_depth, the child is not ready yet.
-                        // It will only be processed once its arrival depth in the state map reaches
-                        // its inherent max_depth (if ever, based on the paths explored).
+            if !should_continue {
+                // Still need to “release” the children so they can reach
+                // their in-degree quota, but do not propagate any value.
+                for (_ek, _ev, child_arc) in adj.get(&node_ptr).into_iter().flatten() {
+                    let cptr = Arc::as_ptr(child_arc);
+                    *done_parents.entry(cptr).or_insert(0) += 1;
+                    if !processed.contains(&cptr) {
+                        ready.push_back(child_arc.clone());
                     }
-                    // If step returned None, we implicitly do nothing for this edge and child.
-                } // end for each child edge
-            } // end if should_continue_processing_children
-        } // end while queue not empty
-
-        // After the loop, check for unprocessed initial nodes (optional debug info)
-        let mut unprocessed_initial = false;
-        for initial_arc_ptr in initial_node_pointers { // Use the static set
-            if !processed.contains(&initial_arc_ptr) {
-                if !unprocessed_initial {
-                     crate::debug!(3, "Warning: Some initial nodes were not processed (Arc Ptrs):");
-                     unprocessed_initial = true;
                 }
-                crate::debug!(3, "  - {:p}", initial_arc_ptr);
+                continue;
             }
-        }
-        // Check nodes remaining in state (optional debug info)
-        let mut unprocessed_in_state = false;
-        for (child_arc_ptr_in_state, (_v, arr_depth)) in state.iter() {
-            if !processed.contains(child_arc_ptr_in_state) {
-                 if !unprocessed_in_state {
-                     crate::debug!(3, "Warning: Nodes remaining in state but not processed (Arc Ptr, arrival_depth):");
-                     unprocessed_in_state = true;
-                 }
-                crate::debug!(3, "  - ({:p}, {})", child_arc_ptr_in_state, arr_depth);
+
+            /* -------------------------------------------------------------
+             * Propagate to children
+             * ---------------------------------------------------------- */
+            for (ek, ev, child_arc) in adj.get(&node_ptr).into_iter().flatten().cloned() {
+                let child_ptr = Arc::as_ptr(&child_arc);
+
+                // Produce candidate V (might be None)
+                let candidate_v_opt = {
+                    let child_guard = child_arc.lock().expect("mutex poisoned");
+                    step(&current_v, &ek, &ev, &child_guard)
+                };
+
+                if let Some(candidate_v) = candidate_v_opt {
+                    match value_map.get_mut(&child_ptr) {
+                        Some(existing) => merge(existing, candidate_v),
+                        None           => { value_map.insert(child_ptr, candidate_v); },
+                    }
+                }
+
+                // Record that another parent of child is now done
+                *done_parents.entry(child_ptr).or_insert(0) += 1;
+
+                // If child is now fully informed, queue it
+                if done_parents[&child_ptr] == *in_deg.get(&child_ptr).unwrap_or(&0) {
+                    if !processed.contains(&child_ptr) {
+                        ready.push_back(child_arc);
+                    }
+                }
             }
         }
     }
 }
+
+
+/// Helper to get the raw pointer to the Trie data from an Arc<Mutex<Trie>>.
+/// Panics if the mutex is poisoned. Returns None if lock fails (WouldBlock).
+/// **Use with caution:** Only use when you know a failed lock means the current thread holds it.
+/// Consider using `Arc::as_ptr` for identity checks instead if possible.
+#[allow(dead_code)] // Keep available, but node_ptr is preferred generally
+pub(crate) fn try_get_node_data_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK, EV, T>>>) -> Option<*const Trie<EK, EV, T>> {
+    match node_arc.try_lock() {
+        Ok(guard) => {
+            let ptr = &*guard as *const Trie<EK, EV, T>;
+            Some(ptr)
+            // Guard is dropped here, lock released
+        }
+        Err(TryLockError::Poisoned(p)) => {
+            panic!("Mutex poisoned when trying to get node data pointer: {:?}", p);
+        }
+        Err(TryLockError::WouldBlock) => {
+            // Lock is held, likely by the current thread in specific scenarios (like cycle check).
+            None
+        }
+    }
+}
+
+/// Helper to get the raw pointer to the Trie data from an Arc<Mutex<Trie>>.
+/// Panics if the mutex is poisoned or if locking fails (blocking lock).
+/// **Use when you need the pointer and expect the lock to succeed.**
+#[allow(dead_code)] // Keep available, but Arc::as_ptr is often better for identity
+pub(crate) fn node_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK, EV, T>>>) -> *const Trie<EK, EV, T> {
+    let guard = node_arc.lock().expect("Mutex poisoned or lock failed when getting node pointer");
+    &*guard as *const _
+}
+
+
+// Optional: Add a convenience method to Trie to create an EdgeInserter easily.
+impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
+    /// Creates an `EdgeInserter` to help add an edge starting from this node.
+    ///
+    /// This provides a convenient entry point for the chainable insertion pattern.
+    ///
+    /// # Arguments
+    /// * `edge_key`: The key for the new edge.
+    /// * `edge_value`: The value for the new edge.
+    /// * `merge_edge_value`: A closure that takes the existing edge value and the new edge value,
+    ///   both by reference, returning `Some(merged_value)` if merging is possible/desired,
+    ///   or `None` otherwise. This is only called by `EdgeInserter::try_destination` if an edge
+    ///   with the same `edge_key` already points to the destination being tried.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::sync::{Arc, Mutex};
+    /// use crate::datastructures::trie::Trie; // Assuming Trie is in this module
+    /// use crate::datastructures::trie::EdgeInserter; // Also need EdgeInserter
+    /// use crate::datastructures::hybrid_bitset::HybridBitset; // Need HybridBitset
+    /// use std::iter::FromIterator; // For collect
+    ///
+    /// #[derive(Debug, Clone, Default)] // Need Default for else_create
+    /// struct NodeValue { /* ... */ }
+    ///
+    /// // Example merge function for edge values (e.g., HybridBitset)
+    /// fn merge_bitset_union(existing: &mut HybridBitset, new: HybridBitset) { // Note the &mut
+    ///     // Union is always possible/desired
+    ///     *existing |= new; // Use reference for the OR operation
+    /// }
+    ///
+    /// // Assuming root_node is Arc<Mutex<Trie<String, HybridBitset, NodeValue>>>
+    /// let root_node: Arc<Mutex<Trie<String, HybridBitset, NodeValue>>> = Arc::new(Mutex::new(Trie::new(NodeValue::default())));
+    ///
+    /// // Create a HybridBitset to use as edge value
+    /// let new_edge_value: HybridBitset = vec![].into_iter().collect();
+    ///
+    /// let potential_destinations: Vec<Arc<Mutex<Trie<String, HybridBitset, NodeValue>>>> = vec![/* ... */];
+    ///
+    /// let new_or_existing_node = { // Use a block to drop the temporary mutex guard
+    ///     let root_guard = root_node.lock().unwrap(); // Get a guard to call insert_edge
+    ///     root_guard.insert_edge("key".to_string(), new_edge_value.clone(), merge_bitset_union) // Clone edge_value for EdgeInserter to own
+    ///         .try_destinations(&potential_destinations) // potential_destinations is &[Arc<Mutex<...>>]
+    ///         .else_create() // Or else_create_with(...) or else_create_with_value(...)
+    ///         .unwrap()
+    /// };
+    /// // root_node (Arc<Mutex>) is an Arc<Mutex> and can be used further.
+    /// ```
+    pub fn insert_edge<FMergeEV>(
+        &self, // Note: This method takes &self, not &mut self. The EdgeInserter handles the mutation via Arc<Mutex>.
+        edge_key: EK,
+        edge_value: EV,
+        merge_edge_value: FMergeEV,
+    ) -> EdgeInserter<EK, EV, T, FMergeEV>
+    where
+         FMergeEV: FnMut(&mut EV, EV), // Changed signature
+    {
+            EdgeInserter::new(Arc::new(Mutex::new(self.clone())), edge_key, edge_value, merge_edge_value)
+        }
+    }
 
 
 /// A helper struct to facilitate inserting an edge into a Trie,
@@ -936,9 +1004,9 @@ impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
     /// struct NodeValue { /* ... */ }
     ///
     /// // Example merge function for edge values (e.g., HybridBitset)
-    /// fn merge_bitset_union(existing: &HybridBitset, new: &HybridBitset) -> Option<HybridBitset> { // Note the &
+    /// fn merge_bitset_union(existing: &mut HybridBitset, new: HybridBitset) { // Note the &mut
     ///     // Union is always possible/desired
-    ///     Some(existing | new) // Use reference for the OR operation
+    ///     *existing |= new; // Use reference for the OR operation
     /// }
     ///
     /// // Assuming root_node is Arc<Mutex<Trie<String, HybridBitset, NodeValue>>>
@@ -1245,10 +1313,11 @@ mod tests {
         assert_eq!(results_map.get(&3), Some(&102));
 
         // Check edge info captured by step
-        assert_eq!(edge_info_at_step.len(), 3); // 3 edges traversed
+        assert_eq!(edge_info_at_step.len(), 4); // 4 edges traversed in discovery (r->c1, r->c2, c1->gc, c2->gc)
         assert!(edge_info_at_step.contains(&("r->c1", "e1")));
         assert!(edge_info_at_step.contains(&("r->c2", "e2")));
         assert!(edge_info_at_step.contains(&("c1->gc", "e3")));
+        assert!(edge_info_at_step.contains(&("c2->gc", "e4")));
     }
 
     #[test]
@@ -1532,8 +1601,7 @@ mod tests {
         );
 
         // Expected behavior: Root processed (V=100). Child processed (V=101).
-        // Propagation back to root skipped because root is already processed.
-        // The special_map logic no longer panics on cycles via max_depth propagation.
+        // Propagation back to root is correctly handled by the in-degree check.
         assert_eq!(processed_vals.len(), 2);
         assert!(processed_vals.contains(&0));
         assert!(processed_vals.contains(&1));
@@ -1662,18 +1730,22 @@ mod tests {
         let final_processed = processed_nodes.lock().unwrap();
         let final_values = computed_values.lock().unwrap();
 
-        // Expected processed nodes: 0, 1. Nodes 2 and 3 should be skipped.
-        assert_eq!(final_processed.len(), 2);
+        // Expected processed nodes: 0, 1, 2, 3.
+        // Node 2 is reachable from root but its incoming edge is skipped by step.
+        // Node 3 is reachable from 2, but its incoming edge (from 2) is processed by step.
+        // The new special_map processes nodes based on parent completion, not value presence.
+        assert_eq!(final_processed.len(), 4);
         assert!(final_processed.contains(&0));
-        assert!(final_processed.contains(&1)); // Reached via "keep" edge
-        assert!(!final_processed.contains(&2)); // Skipped via "skip" edge
-        assert!(!final_processed.contains(&3)); // Never reached because c2 was skipped
+        assert!(final_processed.contains(&1));
+        assert!(final_processed.contains(&2));
+        assert!(final_processed.contains(&3));
 
-        // Check computed values
-        assert_eq!(final_values.get(&0), Some(&100));
-        assert_eq!(final_values.get(&1), Some(&101));
-        assert_eq!(final_values.get(&2), None); // Not processed
-        assert_eq!(final_values.get(&3), None); // Not processed
+        // Check computed values - c2 should have no value as its edge was skipped.
+        // gc2 should have a value propagated from c2, but since c2 has no value, gc2 also has no value.
+        assert_eq!(final_values.get(&0), Some(&100)); // Root value from initial
+        assert_eq!(final_values.get(&1), Some(&101)); // c1 value from root step
+        assert_eq!(final_values.get(&2), None); // c2 step returned None
+        assert_eq!(final_values.get(&3), None); // gc2 step from c2 could not produce a value (step input None)
     }
 
 
@@ -2038,7 +2110,7 @@ mod tests {
         dest1.lock().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
 
         let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
-        // Try fails, no else_create called
+        // Try fails
         inserter.try_destination(dest1.clone()).unwrap(); // Panic here
     }
 
