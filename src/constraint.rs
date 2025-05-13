@@ -669,7 +669,7 @@ impl<'r> Precomputer<'r> {
         let handle = ArcPtrWrapper::new(target.clone());
 
         if match_end_offset_in_segment == segment_len {
-            crate::debug!(4, "Marking clean end for child vocab node {:p}", handle.as_ref());
+            crate::debug!(4, "Marking clean end for child vocab node {:p} representing LLM token {:?}", handle.as_ref(), final_llm_token_id_at_child_vocab);
             next_level
                 .entry(TokenizerStateID(0))
                 .or_default()
