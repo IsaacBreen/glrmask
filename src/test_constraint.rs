@@ -337,24 +337,9 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Manually perform mapping for the test, similar to setup_llm_token_mappings
-    // We need a map from bytes to internal IDs (0..N-1 sequence based on sorted bytes)
-    let mut sorted_tokens_for_test: Vec<(Vec<u8>, LLMTokenID)> = llm_token_map
-        .iter()
-        .map(|(bytes, original_id)| (bytes.clone(), *original_id))
-        .collect();
-    sorted_tokens_for_test.sort_by(|(bytes_a, _), (bytes_b, _)| bytes_a.cmp(bytes_b));
-
-    let mut test_internal_llm_token_map = BiBTreeMap::new(); // bytes -> internal LLMTokenID
-    let mut internal_id_counter_for_test = 0;
-
-    for (bytes, _original_llm_id) in sorted_tokens_for_test { // original_llm_id not directly used to make internal map
-        let internal_llm_id = LLMTokenID(internal_id_counter_for_test);
-        test_internal_llm_token_map.insert(bytes.clone(), internal_llm_id);
-        internal_id_counter_for_test += 1;
-    }
-    let test_internal_num_llm_tokens = internal_id_counter_for_test;
-
+    // 2. Map the LLM tokens
+    let mut internal_llm_token_map = GrammarConstraint::setup_llm_token_mappings(&llm_token_map);
+    let internal_token_name_map: BiBTreeMap<Vec<u8>, LLMTokenID> = llm_token_map.iter().map(|(bytes, id)| (bytes.clone(), *id)).collect();
 
     // 3. Create token_name_map for grammar tokens
     // Our tokenizer has one grammar token (GroupID 0)
@@ -364,18 +349,17 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Call precompute
     println!(
-        "Starting precompute with GPT-2 vocab ({} tokens, max_original_id_val: {}, internal_num_tokens: {})...",
+        "Starting precompute with GPT-2 vocab ({} tokens, max_original_id_val: {})...",
         llm_token_map.len(),
         max_llm_token_id_val, // Max original ID value encountered
-        test_internal_num_llm_tokens // Number of unique internal tokens for precompute
     );
 
     // This is the main part of the test: ensure it runs without error.
     let _precomputed = GrammarConstraint::precompute(
         &tokenizer,
-        &test_internal_llm_token_map,
+        &internal_token_name_map,
         &token_name_map,
-        test_internal_num_llm_tokens,
+        internal_llm_token_map.len(),
     );
 
     println!("Successfully precomputed with GPT-2 vocab.");
