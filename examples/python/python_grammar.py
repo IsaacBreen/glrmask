@@ -22,11 +22,11 @@ def regex(expr, name=None):
     if name == "IGNORE":
         return name, expr
     if name is None:
-#         return ge.sequence([ge.ref("IGNORE"), expr])
-        return expr
+        return ge.sequence([ge.ref("IGNORE"), expr])
+#         return expr
 #     return name, ge.regex(seq([ignore, expr]))
-#     return name, ge.sequence([ge.ref("IGNORE"), expr])
-    return name, expr
+    return name, ge.sequence([ge.ref("IGNORE"), expr])
+#     return name, expr
 
 def eat(s: bytes) -> Regex:
     if len(s) == 1:
@@ -134,33 +134,33 @@ def define_tokens() -> list[tuple[str, Any]]:
     ])
 
     tokens["NAME"] = seq([name_start, rep(name_middle)])
-#     # TODO: delete this
-#     tokens["NAME"] = eps()
-#     tokens["NUMBER"] = choice([
-#         rep(digit),
-#         seq([rep(digit), eat_u8(ord(".")), rep(digit)]),
-#     ])
-#     tokens["NEWLINE"] = eps()
-#     tokens["INDENT"] = eps()
-#     tokens["DEDENT"] = eps()
-#     tokens["STRING"] = choice([
-#         seq([eat_u8(ord('"')), rep(eat_u8_negation(ord('"'))), eat_u8(ord('"'))]),
-#         seq([eat_u8(ord("'")), rep(eat_u8_negation(ord("'"))), eat_u8(ord("'"))]),
-#     ])
-#     tokens["FSTRING_START"] = choice([
-#         eat('"""'),
-#         eat("'''"),
-#     ])
-#     tokens["FSTRING_END"] = choice([
-#         eat('"""'),
-#         eat("'''"),
-#     ])
-#     tokens["FSTRING_MIDDLE"] = rep(choice([
-#         eat_u8_negation(ord("{")),
-#         eat("{{"),
-#     ]))
-#     tokens["TYPE_COMMENT"] = eps()
-#     tokens["ENDMARKER"] = eps()
+    # TODO: delete this
+    tokens["NAME"] = eps()
+    tokens["NUMBER"] = choice([
+        rep(digit),
+        seq([rep(digit), eat_u8(ord(".")), rep(digit)]),
+    ])
+    tokens["NEWLINE"] = eps()
+    tokens["INDENT"] = eps()
+    tokens["DEDENT"] = eps()
+    tokens["STRING"] = choice([
+        seq([eat_u8(ord('"')), rep(eat_u8_negation(ord('"'))), eat_u8(ord('"'))]),
+        seq([eat_u8(ord("'")), rep(eat_u8_negation(ord("'"))), eat_u8(ord("'"))]),
+    ])
+    tokens["FSTRING_START"] = choice([
+        eat('"""'),
+        eat("'''"),
+    ])
+    tokens["FSTRING_END"] = choice([
+        eat('"""'),
+        eat("'''"),
+    ])
+    tokens["FSTRING_MIDDLE"] = rep(choice([
+        eat_u8_negation(ord("{")),
+        eat("{{"),
+    ]))
+    tokens["TYPE_COMMENT"] = eps()
+    tokens["ENDMARKER"] = eps()
     return [regex(expr, name) for name, expr in tokens.items()]
 #     # TODO: delete this
 #     return []
@@ -172,7 +172,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
     exprs: list[tuple[str, Any]] = []
 
     # Make sure the start production is first
-#     exprs.append(("start'''", ge.ref("file")))
+    exprs.append(("start'''", ge.ref("file")))
 
 #     # TODO: delete this
 #     choice = Regex.choice
@@ -188,7 +188,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
 #     exprs.append(("start'''", ge.ref("FSTRING_MIDDLE")))
 
 #     exprs.append(("start'''", ge.sequence([regex(eat("def")), ge.ref("IGNORE"), ge.ref("NAME"), ge.regex(eat("(")), ge.ref("NAME"), ge.regex(eat(")"))])))
-    exprs.append(("start'''", regex(eat("def"))))
+#     exprs.append(("start'''", regex(eat("def"))))
 #     exprs.append(("start'''", ge.sequence([regex(eat("def")), ge.ref("IGNORE"), ge.ref("NAME"), ge.regex(eat("(")), ge.ref("NAME"), ge.regex(eat(")"))])))
 
 #     # TODO: delete this
@@ -228,7 +228,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
         else:
             rhs = pegen_to_sep1_regex(rule.rhs, memo)
        # TODO: uncomment this
-#         exprs.append((rule.name, rhs))
+        exprs.append((rule.name, rhs))
 
 
     tokens = define_tokens()
@@ -347,7 +347,7 @@ if __name__ == "__main__":
 #     tokenizer_vocab = {"def": 0}
 #     tokenizer_vocab = {"def": 0, " f": 1, "(": 2, ")": 3}
 #     tokenizer_vocab = {"def": 0, " f": 1, "(": 2, ")": 3, "de": 4}
-    tokenizer_vocab = {"def": 0, "de": 1}
+#     tokenizer_vocab = {"def": 0, "de": 1}
 
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
