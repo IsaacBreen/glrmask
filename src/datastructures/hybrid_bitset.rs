@@ -27,7 +27,7 @@ impl HybridBitset {
     /// Creates a new HybridBitset with all indices from 0 up to `max_value` (inclusive) set to true.
     pub fn ones(max_value: usize) -> Self {
         HybridBitset {
-            inner: RangeSetBlaze::from_iter([0..=max_value]),
+            inner: RangeSetBlaze::from_iter([0..=max_value - 1]),
         }
     }
 
