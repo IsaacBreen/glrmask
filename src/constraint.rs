@@ -192,11 +192,9 @@ impl GrammarConstraint {
         token_name_map:   BiBTreeMap<String, usize>,
         max_original_llm_token_id: usize, // Max ID of original LLMTokenIDs from input
     ) -> Self {
-        dbg!(&llm_token_map);
         let original_to_internal_id_bimap = Self::setup_llm_token_mappings(&llm_token_map);
 
         let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap();
-        dbg!(&original_to_internal_id_bimap);
 
         // Reconstruct the internal_llm_token_map for precomputation (bytes -> internal LLMTokenID)
         let mut internal_llm_token_map_for_precompute = BiBTreeMap::new();
