@@ -181,6 +181,8 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
 #     exprs.append(("start'''", ge.ref("IGNORE")))
 #     exprs.append(("start'''", ge.ref("FSTRING_MIDDLE")))
 
+    exprs.append(("start'''", ge.sequence([regex(eat("def")), ge.ref("NAME"), ge.regex(eat("(")), ge.ref("NAME"), ge.regex(eat(")"))])))
+
 #     # TODO: delete this
 #     # Add a rule for "hello=world$" to the start rule
 #     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
@@ -218,7 +220,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
         else:
             rhs = pegen_to_sep1_regex(rule.rhs, memo)
        # TODO: uncomment this
-        exprs.append((rule.name, rhs))
+#         exprs.append((rule.name, rhs))
 
 
     tokens = define_tokens()
