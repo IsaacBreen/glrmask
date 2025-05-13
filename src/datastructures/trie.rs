@@ -460,12 +460,12 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     ) {
         // state: for each node (by Arc pointer), store (merged V, arrival_depth)
         // Using Arc::as_ptr for HashMap key for stable pointers
-        let mut state: BTreeMap<*const Mutex<Trie<EK, EV, T>>, (V, usize)> = BTreeMap::new();
+        let mut state: HashMap<*const Mutex<Trie<EK, EV, T>>, (V, usize)> = HashMap::new();
         let mut ready: VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
         // set of processed nodes (by Arc pointer)
-        let mut processed: BTreeSet<*const Mutex<Trie<EK, EV, T>>> = BTreeSet::new();
+        let mut processed: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
         // record which nodes came in as initial nodes
-        let mut initial_set: BTreeSet<*const Mutex<Trie<EK, EV, T>>> = BTreeSet::new();
+        let mut initial_set: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
 
         // Initialize state for starting nodes.
         for (node_arc, v) in initial_nodes_and_values {
