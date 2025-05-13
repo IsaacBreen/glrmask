@@ -5,7 +5,7 @@ use crate::glr::grammar::{nt, prod, t, NonTerminal, Terminal};
 use crate::glr::table::{generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
 use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
 use std::hash::{Hash, Hasher};
-use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast}; // Added eat_any_fast
+use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast, eat_string_fast}; // Added eat_any_fast
 
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
@@ -304,7 +304,11 @@ fn test_precompute_explosion() {
 fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define tokenizer: matches anything
     // The tokenizer will have one group (ID 0)
-    let tokenizer_expr = groups![repeat0_fast(eat_any_fast()), repeat0_fast(eat_any_fast())];
+    let tokenizer_expr = groups![
+        repeat0_fast(eat_any_fast()),
+        repeat0_fast(eat_any_fast()),
+        eat_string_fast("def"),
+    ];
     let tokenizer = tokenizer_expr.build();
 
     // 2. Load LLM tokens from GPT-2 vocab.json
@@ -354,6 +358,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     let mut token_name_map = BiBTreeMap::new();
     token_name_map.insert("ANYTHING_GRAMMAR_TOKEN".to_string(), 0 as usize); // GrammarTokenID 0
     token_name_map.insert("ANYTHING_GRAMMAR_TOKEN2".to_string(), 1 as usize); // GrammarTokenID 0
+    token_name_map.insert("def".to_string(), 2 as usize); // GrammarTokenID 0
 
 
     // 4. Call precompute
