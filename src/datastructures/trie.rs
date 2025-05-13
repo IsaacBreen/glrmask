@@ -1552,11 +1552,7 @@ mod tests {
         let final_values = computed_values.lock().unwrap();
 
         // Expected processed nodes: 0, 1, 3. Node 2 should be skipped. Node 3 reached from 2.
-        assert_eq!(final_processed.len(), 3);
-        assert!(final_processed.contains(&0));
-        assert!(final_processed.contains(&1)); // Reached via "keep" edge from root
-        assert!(!final_processed.contains(&2)); // Skipped via "skip" edge from root
-        assert!(final_processed.contains(&3)); // Reached via "keep" edge from c2 (even though c2 itself wasn't processed, its children were considered)
+        assert_eq!(final_processed.clone(), vec![0, 1, 3].into_iter().collect());
 
         // Check computed values
         assert_eq!(final_values.get(&0), Some(&100));
