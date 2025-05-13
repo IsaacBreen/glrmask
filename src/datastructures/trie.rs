@@ -475,8 +475,16 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
          * 0.  Small helper maps keyed by the raw Arc pointer so that
          *     identity is stable even if Arcs are cloned.
          * ----------------------------------------------------------------- */
-        type Ptr<T, EV, EK, V> = HashMap<*const Mutex<Trie<EK, EV, T>>, V>;
-        type PtrSet<T, EV, EK>      = HashSet  <*const Mutex<Trie<EK, EV, T>>>;
+            // EK, EV, T are from the surrounding impl block. V is from special_map's signature.
+            type NodePtr = *const Mutex<Trie<EK, EV, T>>;
+            // Type for the adjacency list stored in the 'adj' map
+            type AdjacencyList = Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>;
+
+            // Generic HashMap type using NodePtr as the key
+            type GenericMap<MapValue> = HashMap<NodePtr, MapValue>;
+            // HashSet type for NodePtr
+            type NodePointerSet = HashSet<NodePtr>;
+
 
         /* -----------------------------------------------------------------
          * 1.  Discover the *reachable* sub-graph, while simultaneously
@@ -484,10 +492,10 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
          *       – `in_deg` : number of reachable parents for each node.
          *       – `adj`    : outgoing (EK , EV , Arc<…>) edges per node.
          * ----------------------------------------------------------------- */
-        let mut in_deg : Ptr<usize, EV, EK, V>                                   = Ptr::new();
-        let mut adj    : Ptr<Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>, EV, EK, V> = Ptr::new();
+        let mut in_deg : GenericMap<usize> = GenericMap::new();
+        let mut adj    : GenericMap<AdjacencyList> = GenericMap::new();
 
-        let mut seen : PtrSet<T, EV, EK>  = PtrSet::new();
+        let mut seen   : NodePointerSet = NodePointerSet::new();
         let mut q    : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
 
         // Seed the discovery queue with the user-supplied start nodes
@@ -531,13 +539,14 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
          * 2.  State needed while running the real traversal
          * ----------------------------------------------------------------- */
         //   – accumulated V per node (via merge)
-        let mut value_map : Ptr<V, EV, EK, V> = Ptr::new();
+        let mut value_map    : GenericMap<V> = GenericMap::new(); // V is special_map's V
         //   – number of parents already processed
-        let mut done_parents : Ptr<usize, EV, EK, V> = Ptr::new();
+        let mut done_parents : GenericMap<usize> = GenericMap::new();
         //   – final “ready” queue
-        let mut ready : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
+        let mut ready : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new(); // This line is already correct
         //   – processed flag
-        let mut processed : PtrSet<T, EV, EK> = PtrSet::new();
+        let mut processed    : NodePointerSet = NodePointerSet::new();
+
 
         // Initialise with the user-supplied start set (merging duplicates)
         for (n, v0) in initial_nodes_and_values {
