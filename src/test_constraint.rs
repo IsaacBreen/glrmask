@@ -305,7 +305,6 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define tokenizer: matches anything
     // The tokenizer will have one group (ID 0)
     let tokenizer_expr = groups![
-        repeat0_fast(eat_any_fast()),
         // tokens["FSTRING_MIDDLE"] = rep(choice([
         //     eat_u8_negation(ord("{")),
         //     eat("{{"),
@@ -360,9 +359,8 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     // 3. Create token_name_map for grammar tokens
     // Our tokenizer has one grammar token (GroupID 0)
     let mut token_name_map: BiBTreeMap<String, usize> = BiBTreeMap::new();
-    token_name_map.insert("ANYTHING_GRAMMAR_TOKEN".to_string(), 0 as usize); // GrammarTokenID 0
-    token_name_map.insert("ANYTHING_GRAMMAR_TOKEN2".to_string(), 1 as usize); // GrammarTokenID 0
-    token_name_map.insert("DEF".to_string(), 2 as usize); // GrammarTokenID 0
+    token_name_map.insert("FSTRING_MIDDLE".to_string(), 0 as usize);
+    token_name_map.insert("DEF".to_string(), 1 as usize);
 
     // 4. Call precompute
     println!(
