@@ -22,10 +22,11 @@ def regex(expr, name=None):
     if name == "IGNORE":
         return name, expr
     if name is None:
-        return ge.sequence([ge.ref("IGNORE"), expr])
+#         return ge.sequence([ge.ref("IGNORE"), expr])
+        return expr
 #     return name, ge.regex(seq([ignore, expr]))
-    return name, ge.sequence([ge.ref("IGNORE"), expr])
-#     return name, ge.regex(expr)
+#     return name, ge.sequence([ge.ref("IGNORE"), expr])
+    return name, expr
 
 def eat(s: bytes) -> Regex:
     if len(s) == 1:
@@ -186,7 +187,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
 #     exprs.append(("start'''", ge.ref("FSTRING_MIDDLE")))
 
 #     exprs.append(("start'''", ge.sequence([regex(eat("def")), ge.ref("NAME"), ge.regex(eat("(")), ge.ref("NAME"), ge.regex(eat(")"))])))
-    exprs.append(("start'''", ge.sequence([regex(eat("def")), regex(eat("("))])))
+    exprs.append(("start'''", ge.sequence([regex(eat("def"))])))
 
 #     # TODO: delete this
 #     # Add a rule for "hello=world$" to the start rule
