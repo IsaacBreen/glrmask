@@ -475,8 +475,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
          * 0.  Small helper maps keyed by the raw Arc pointer so that
          *     identity is stable even if Arcs are cloned.
          * ----------------------------------------------------------------- */
-        type Ptr<K, V> = HashMap<*const Mutex<Trie<EK, EV, T>>, V>;
-        type PtrSet      = HashSet  <*const Mutex<Trie<EK, EV, T>>>;
+        type Ptr<T, EV, EK, V> = HashMap<*const Mutex<Trie<EK, EV, T>>, V>;
+        type PtrSet<T, EV, EK>      = HashSet  <*const Mutex<Trie<EK, EV, T>>>;
 
         /* -----------------------------------------------------------------
          * 1.  Discover the *reachable* sub-graph, while simultaneously
@@ -484,10 +484,10 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
          *       – `in_deg` : number of reachable parents for each node.
          *       – `adj`    : outgoing (EK , EV , Arc<…>) edges per node.
          * ----------------------------------------------------------------- */
-        let mut in_deg : Ptr<usize>                                   = Ptr::new();
-        let mut adj    : Ptr<Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>> = Ptr::new();
+        let mut in_deg : Ptr<usize, EV, EK, V>                                   = Ptr::new();
+        let mut adj    : Ptr<Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>, EV, EK, V> = Ptr::new();
 
-        let mut seen : PtrSet  = PtrSet::new();
+        let mut seen : PtrSet<T, EV, EK>  = PtrSet::new();
         let mut q    : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
 
         // Seed the discovery queue with the user-supplied start nodes
@@ -531,13 +531,13 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
          * 2.  State needed while running the real traversal
          * ----------------------------------------------------------------- */
         //   – accumulated V per node (via merge)
-        let mut value_map : Ptr<V> = Ptr::new();
+        let mut value_map : Ptr<V, EV, EK, V> = Ptr::new();
         //   – number of parents already processed
-        let mut done_parents : Ptr<usize> = Ptr::new();
+        let mut done_parents : Ptr<usize, EV, EK, V> = Ptr::new();
         //   – final “ready” queue
         let mut ready : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
         //   – processed flag
-        let mut processed : PtrSet = PtrSet::new();
+        let mut processed : PtrSet<T, EV, EK> = PtrSet::new();
 
         // Initialise with the user-supplied start set (merging duplicates)
         for (n, v0) in initial_nodes_and_values {
@@ -639,38 +639,6 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             }
         }
     }
-}
-
-
-/// Helper to get the raw pointer to the Trie data from an Arc<Mutex<Trie>>.
-/// Panics if the mutex is poisoned. Returns None if lock fails (WouldBlock).
-/// **Use with caution:** Only use when you know a failed lock means the current thread holds it.
-/// Consider using `Arc::as_ptr` for identity checks instead if possible.
-#[allow(dead_code)] // Keep available, but node_ptr is preferred generally
-pub(crate) fn try_get_node_data_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK, EV, T>>>) -> Option<*const Trie<EK, EV, T>> {
-    match node_arc.try_lock() {
-        Ok(guard) => {
-            let ptr = &*guard as *const Trie<EK, EV, T>;
-            Some(ptr)
-            // Guard is dropped here, lock released
-        }
-        Err(TryLockError::Poisoned(p)) => {
-            panic!("Mutex poisoned when trying to get node data pointer: {:?}", p);
-        }
-        Err(TryLockError::WouldBlock) => {
-            // Lock is held, likely by the current thread in specific scenarios (like cycle check).
-            None
-        }
-    }
-}
-
-/// Helper to get the raw pointer to the Trie data from an Arc<Mutex<Trie>>.
-/// Panics if the mutex is poisoned or if locking fails (blocking lock).
-/// **Use when you need the pointer and expect the lock to succeed.**
-#[allow(dead_code)] // Keep available, but Arc::as_ptr is often better for identity
-pub(crate) fn node_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK, EV, T>>>) -> *const Trie<EK, EV, T> {
-    let guard = node_arc.lock().expect("Mutex poisoned or lock failed when getting node pointer");
-    &*guard as *const _
 }
 
 
@@ -976,68 +944,6 @@ where
     }
 }
 
-
-// Optional: Add a convenience method to Trie to create an EdgeInserter easily.
-impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
-    /// Creates an `EdgeInserter` to help add an edge starting from this node.
-    ///
-    /// This provides a convenient entry point for the chainable insertion pattern.
-    ///
-    /// # Arguments
-    /// * `edge_key`: The key for the new edge.
-    /// * `edge_value`: The value for the new edge.
-    /// * `merge_edge_value`: A closure that takes the existing edge value and the new edge value,
-    ///   both by reference, returning `Some(merged_value)` if merging is possible/desired,
-    ///   or `None` otherwise. This is only called by `EdgeInserter::try_destination` if an edge
-    ///   with the same `edge_key` already points to the destination being tried.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use std::sync::{Arc, Mutex};
-    /// use crate::datastructures::trie::Trie; // Assuming Trie is in this module
-    /// use crate::datastructures::trie::EdgeInserter; // Also need EdgeInserter
-    /// use crate::datastructures::hybrid_bitset::HybridBitset; // Need HybridBitset
-    /// use std::iter::FromIterator; // For collect
-    ///
-    /// #[derive(Debug, Clone, Default)] // Need Default for else_create
-    /// struct NodeValue { /* ... */ }
-    ///
-    /// // Example merge function for edge values (e.g., HybridBitset)
-    /// fn merge_bitset_union(existing: &mut HybridBitset, new: HybridBitset) { // Note the &mut
-    ///     // Union is always possible/desired
-    ///     *existing |= new; // Use reference for the OR operation
-    /// }
-    ///
-    /// // Assuming root_node is Arc<Mutex<Trie<String, HybridBitset, NodeValue>>>
-    /// let root_node: Arc<Mutex<Trie<String, HybridBitset, NodeValue>>> = Arc::new(Mutex::new(Trie::new(NodeValue::default())));
-    ///
-    /// // Create a HybridBitset to use as edge value
-    /// let new_edge_value: HybridBitset = vec![].into_iter().collect();
-    ///
-    /// let potential_destinations: Vec<Arc<Mutex<Trie<String, HybridBitset, NodeValue>>>> = vec![/* ... */];
-    ///
-    /// let new_or_existing_node = { // Use a block to drop the temporary mutex guard
-    ///     let root_guard = root_node.lock().unwrap(); // Get a guard to call insert_edge
-    ///     root_guard.insert_edge("key".to_string(), new_edge_value.clone(), merge_bitset_union) // Clone edge_value for EdgeInserter to own
-    ///         .try_destinations(&potential_destinations) // potential_destinations is &[Arc<Mutex<...>>]
-    ///         .else_create() // Or else_create_with(...) or else_create_with_value(...)
-    ///         .unwrap()
-    /// };
-    /// // root_node (Arc<Mutex>) is an Arc<Mutex> and can be used further.
-    /// ```
-    pub fn insert_edge<FMergeEV>(
-        &self, // Note: This method takes &self, not &mut self. The EdgeInserter handles the mutation via Arc<Mutex>.
-        edge_key: EK,
-        edge_value: EV,
-        merge_edge_value: FMergeEV,
-    ) -> EdgeInserter<EK, EV, T, FMergeEV>
-    where
-         FMergeEV: FnMut(&mut EV, EV), // Changed signature
-    {
-            EdgeInserter::new(Arc::new(Mutex::new(self.clone())), edge_key, edge_value, merge_edge_value)
-        }
-    }
 
 /// Attempts to establish an edge from `source` to a single `destination`,
 /// optionally merging edge values if an edge already exists.
