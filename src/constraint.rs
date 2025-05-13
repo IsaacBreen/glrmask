@@ -196,7 +196,7 @@ impl GrammarConstraint {
     ) -> Self {
         let original_to_internal_id_bimap = Self::setup_llm_token_mappings(&llm_token_map);
 
-        let internal_max_llm_token = original_to_internal_id_bimap.len();
+        let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap();
 
         // Reconstruct the internal_llm_token_map for precomputation (bytes -> internal LLMTokenID)
         let mut internal_llm_token_map_for_precompute = BiBTreeMap::new();
