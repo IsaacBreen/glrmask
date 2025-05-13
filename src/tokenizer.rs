@@ -16,6 +16,7 @@ pub struct Token {
     pub width: usize,
 }
 
+#[derive(Debug)]
 pub struct ExecuteResult {
     pub matches: Vec<Token>,
     pub end_state: Option<usize>,
