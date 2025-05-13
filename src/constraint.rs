@@ -257,6 +257,7 @@ impl GrammarConstraint {
             intersection: base_set_for_info,
         };
         let mut state = BTreeMap::new();
+        dbg!(self.parser.init_glr_parser_with_t(info.clone()).active_states);
         state.insert(
             self.tokenizer.initial_state_id(),
             self.parser.init_glr_parser_with_t(info),
@@ -863,6 +864,10 @@ impl<'a> GrammarConstraintState<'a> {
                     let current_active_tokens = parse_state.stack.value.t.active.clone();
                     Arc::make_mut(&mut parse_state.stack).value.t.intersection &= &current_active_tokens;
                     Arc::make_mut(&mut parse_state.stack).value.t.active &= edge_llm_tokens;
+                    // TODO: delete this
+                    if parse_state.stack.value.t.active.is_empty() {
+                        crate::debug!(4, "Pruning parse state {:?} because it has no active tokens", parse_state.key());
+                    }
                     !parse_state.stack.value.t.active.is_empty()
                 });
                 grammar_token_id.map(|gtid| cloned_glr_parse_state.step(gtid));
