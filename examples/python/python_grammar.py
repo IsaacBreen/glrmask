@@ -132,7 +132,9 @@ def define_tokens() -> list[tuple[str, Any]]:
         digit,
     ])
 
-    tokens["NAME"] = seq([name_start, rep(name_middle)])
+#     tokens["NAME"] = seq([name_start, rep(name_middle)])
+    # TODO: delete this
+    tokens["NAME"] = eps()
 #     tokens["NUMBER"] = choice([
 #         rep(digit),
 #         seq([rep(digit), eat_u8(ord(".")), rep(digit)]),
@@ -392,7 +394,8 @@ if __name__ == "__main__":
 #     expected_next_token = "world"
 
     pre_input_text = ""
-    input_text = 'def f('
+#     input_text = 'def f('
+    input_text = 'def'
 #     input_text = 'NAME'
     expected_next_token = ""
 
