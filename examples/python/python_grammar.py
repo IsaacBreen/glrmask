@@ -344,7 +344,7 @@ if __name__ == "__main__":
 
 #     tokenizer_vocab = {"def": 0, "$": 1}
 #     tokenizer_vocab = {"def": 0}
-    tokenizer_vocab = {"def": 0, "Ġf": 1}
+    tokenizer_vocab = {"def": 0, "f": 1, " ": 2}
 
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
