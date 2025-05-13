@@ -489,7 +489,7 @@ fn test_hideous_ambiguity() {
 
     // 2. Tokenizer
     let tokenizer_expr = groups![
-        repeat0_fast(eat_u8(b'a')),
+        repeat1_fast(eat_u8(b'a')),
     ];
     let tokenizer = tokenizer_expr.build();
 
