@@ -265,7 +265,7 @@ fn test_precompute_for_python_name_token() {
         &tokenizer,
         &internal_llm_token_map_for_precompute, // Use the manually created internal map
         &BiBTreeMap::new(), // empty name‐map
-        internal_num_llm_tokens, // Pass the number of tokens
+        internal_llm_token_map_for_precompute.iter().map(|(_, id)| id.0).max().unwrap(),
     );
     // print_precomputed(&precomputed);
     println!("Done precomputing");
@@ -294,7 +294,7 @@ fn test_precompute_explosion() {
         &tokenizer,
         &internal_llm_token_map_for_precompute, // Use the manually created internal map
         &BiBTreeMap::new(), // empty name‐map
-        internal_num_llm_tokens, // Pass the number of tokens
+        internal_llm_token_map_for_precompute.iter().map(|(_, id)| id.0).max().unwrap(),
     );
     // print_precomputed(&precomputed);
     println!("Done precomputing");
@@ -359,7 +359,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
         &tokenizer,
         &internal_token_name_map,
         &token_name_map,
-        internal_llm_token_map.len(),
+        internal_llm_token_map.iter().map(|(_, id)| *id).max().unwrap(),
     );
 
     println!("Successfully precomputed with GPT-2 vocab.");
