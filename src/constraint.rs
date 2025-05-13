@@ -257,7 +257,6 @@ impl GrammarConstraint {
             intersection: base_set_for_info,
         };
         let mut state = BTreeMap::new();
-        dbg!(self.parser.init_glr_parser_with_t(info.clone()).active_states);
         state.insert(
             self.tokenizer.initial_state_id(),
             self.parser.init_glr_parser_with_t(info),
@@ -278,24 +277,20 @@ impl GrammarConstraint {
 
     #[allow(dead_code)] // Might be useful later
     fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
-        dbg!(original_bv);
         let mut internal_bv = HybridBitset::new();
         for original_id_val in original_bv.iter() {
             let internal_id_val = self.original_to_internal_id_bimap.get_by_left(&(original_id_val as usize)).expect(format!("Original ID {} not found in original_to_internal_id_bimap", original_id_val).as_str());
             internal_bv.insert(*internal_id_val as usize);
         }
-        dbg!(&internal_bv);
         internal_bv
     }
 
     fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
-        dbg!(internal_bv);
         let mut original_bv = HybridBitset::new();
         for internal_id_val in internal_bv.iter() {
             let original_id_val = self.original_to_internal_id_bimap.get_by_right(&(internal_id_val as usize)).expect(format!("Internal ID {} not found in original_to_internal_id_bimap", internal_id_val).as_str());
             original_bv.insert(*original_id_val as usize);
         }
-        dbg!(&original_bv);
         original_bv
     }
 }
@@ -351,7 +346,6 @@ impl<'r> Precomputer<'r> {
                 .expect("progress-bar"),
         );
 
-        dbg!(internal_max_llm_token);
         Self {
             tokenizer,
             vocab,
@@ -864,10 +858,10 @@ impl<'a> GrammarConstraintState<'a> {
                     let current_active_tokens = parse_state.stack.value.t.active.clone();
                     Arc::make_mut(&mut parse_state.stack).value.t.intersection &= &current_active_tokens;
                     Arc::make_mut(&mut parse_state.stack).value.t.active &= edge_llm_tokens;
-                    // TODO: delete this
-                    if parse_state.stack.value.t.active.is_empty() {
-                        crate::debug!(4, "Pruning parse state {:?} because it has no active tokens", parse_state.key());
-                    }
+                    // // TODO: delete this
+                    // if parse_state.stack.value.t.active.is_empty() {
+                    //     crate::debug!(4, "Pruning parse state {:?} because it has no active tokens", parse_state.key());
+                    // }
                     !parse_state.stack.value.t.active.is_empty()
                 });
                 grammar_token_id.map(|gtid| cloned_glr_parse_state.step(gtid));
