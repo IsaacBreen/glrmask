@@ -668,6 +668,7 @@ impl<'r> Precomputer<'r> {
         let handle = ArcPtrWrapper::new(target.clone());
 
         if match_end_offset_in_segment == segment_len {
+            crate::debug!(4, "Marking clean_end for child vocab node {:p}", handle.as_ref());
             next_level
                 .entry(TokenizerStateID(0))
                 .or_default()
