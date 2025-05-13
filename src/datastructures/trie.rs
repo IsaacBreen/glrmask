@@ -1551,14 +1551,14 @@ mod tests {
         let final_processed = processed_nodes.lock().unwrap();
         let final_values = computed_values.lock().unwrap();
 
-        // Expected processed nodes: 0, 1, 3. Node 2 should be skipped. Node 3 reached from 2.
-        assert_eq!(final_processed.clone(), vec![0, 1, 3].into_iter().collect());
+        // Expected processed nodes: 0, 1. Node 2 is skipped because step for root->child2 returns None. Node 3 is not reached as its parent (node 2) is not processed.
+        assert_eq!(final_processed.clone(), vec![0, 1].into_iter().collect());
 
         // Check computed values
         assert_eq!(final_values.get(&0), Some(&100));
         assert_eq!(final_values.get(&1), Some(&101));
         assert_eq!(final_values.get(&2), None); // Not processed
-        assert_eq!(final_values.get(&3), Some(&102)); // Reached from c2's value derived from root (100+1)
+        assert_eq!(final_values.get(&3), None); // Not reached, as c2 is not processed
     }
 
 
