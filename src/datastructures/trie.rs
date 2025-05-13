@@ -477,7 +477,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         // ------------------------------------------------------------------
         let mut values   : HashMap<*const Mutex<Self>, V> = HashMap::new();
         let mut done     : HashSet <*const Mutex<Self>>   = HashSet ::new();
-        let mut todo     : BTreeMap<usize, Arc<Mutex<Self>>> = BTreeMap::new();
+        let mut todo     : BTreeMap<usize, HashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
 
         // Seed with the user-supplied starting set
         for (node_arc, v0) in initial_nodes_and_values {
@@ -487,58 +487,60 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 .and_modify(|old| merge(old, v0.clone()))
                 .or_insert(v0);
             let depth = node_arc.lock().expect("poison").max_depth;
-            todo.insert(depth, node_arc);
+            todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
         }
 
         // Main loop ---------------------------------------------------------
-        while let Some((_depth, node_arc)) = todo.pop_first() {
-            let ptr = Arc::as_ptr(&node_arc);
-            if done.contains(&ptr) { continue; }               // already processed
+        while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
+            for node_arc_ptr_wrapper in &node_arc_ptr_wrappers {
+                let ptr = Arc::as_ptr(node_arc_ptr_wrapper.as_arc());
+                if done.contains(&ptr) { continue; }               // already processed
 
-            // Pull the merged value that all parents contributed
-            let mut agg_v = match values.remove(&ptr) {
-                Some(v) => v,
-                None    => continue,                            // can happen if every parent’s `step` returned None
-            };
-
-            // ---------- user ‘process’ callback ----------
-            let proceed = {
-                let guard = node_arc.lock().expect("poison");
-                process(&guard, &mut agg_v)
-            };
-            done.insert(ptr);
-
-            if !proceed { continue; }                           // user stopped traversal at this node
-
-            // ---------- propagate to children -------------
-            // We read children once, outside any long-lived locks
-            let edges : Vec<(EK, EV, Arc<Mutex<Self>>)> = {
-                let guard = node_arc.lock().expect("poison");
-                guard.children
-                     .iter()
-                     .flat_map(|(ek, dst_map)| {
-                         dst_map.iter().map(move |(wrap, ev)| (ek.clone(), ev.clone(), wrap.as_arc().clone()))
-                     })
-                     .collect()
-            };
-
-            for (ek, ev, child_arc) in edges {
-                let child_ptr = Arc::as_ptr(&child_arc);
-
-                // user ‘step’ callback
-                let maybe_v = {
-                    let child_guard = child_arc.lock().expect("poison");
-                    step(&agg_v, &ek, &ev, &child_guard)
+                // Pull the merged value that all parents contributed
+                let mut agg_v = match values.remove(&ptr) {
+                    Some(v) => v,
+                    None => continue,                            // can happen if every parent’s `step` returned None
                 };
-                if let Some(new_v) = maybe_v {
-                    values
-                        .entry(child_ptr)
-                        .and_modify(|old| merge(old, new_v.clone()))
-                        .or_insert(new_v);
 
-                    // Queue child by its declared depth
-                    let child_depth = child_arc.lock().expect("poison").max_depth;
-                    todo.insert(child_depth, child_arc);
+                // ---------- user ‘process’ callback ----------
+                let proceed = {
+                    let guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
+                    process(&guard, &mut agg_v)
+                };
+                done.insert(ptr);
+
+                if !proceed { continue; }                           // user stopped traversal at this node
+
+                // ---------- propagate to children -------------
+                // We read children once, outside any long-lived locks
+                let edges: Vec<(EK, EV, Arc<Mutex<Self>>)> = {
+                    let guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
+                    guard.children
+                        .iter()
+                        .flat_map(|(ek, dst_map)| {
+                            dst_map.iter().map(move |(wrap, ev)| (ek.clone(), ev.clone(), wrap.as_arc().clone()))
+                        })
+                        .collect()
+                };
+
+                for (ek, ev, child_arc) in edges {
+                    let child_ptr = Arc::as_ptr(&child_arc);
+
+                    // user ‘step’ callback
+                    let maybe_v = {
+                        let child_guard = child_arc.lock().expect("poison");
+                        step(&agg_v, &ek, &ev, &child_guard)
+                    };
+                    if let Some(new_v) = maybe_v {
+                        values
+                            .entry(child_ptr)
+                            .and_modify(|old| merge(old, new_v.clone()))
+                            .or_insert(new_v);
+
+                        // Queue child by its declared depth
+                        let child_depth = child_arc.lock().expect("poison").max_depth;
+                        todo.entry(child_depth).or_default().insert(ArcPtrWrapper::new(child_arc));
+                    }
                 }
             }
         }
