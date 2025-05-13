@@ -203,6 +203,10 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
                     // Failed to lock because it's held elsewhere (potentially by the thread calling try_insert).
                     // Assume this means we've reached the target node in the context of try_insert.
                     // If detect_cycle were used elsewhere, this assumption might need revisiting.
+                    // Alternatively, one could park the thread here and wait for the lock, but TryLock
+                    // is often used to check if *this* thread holds the lock without deadlocking.
+                    // Given the use case in try_insert, `WouldBlock` implies the current thread
+                    // holds the target node's lock, which signals a cycle.
                     return true;
                 }
                 Err(TryLockError::Poisoned(p)) => {
@@ -451,7 +455,30 @@ pub(crate) fn node_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK, EV, T>>>) -
 // Requires T: Clone, EK: Ord + Clone, EV: Clone
 impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     /// Performs a specialized breadth-first traversal (related to Dijkstra/Bellman-Ford relaxation).
-    /// (special_map implementation remains unchanged)
+    ///
+    /// This function traverses the graph starting from `initial_nodes_and_values`.
+    /// It uses a queue for BFS. For each node popped from the queue:
+    /// 1. It retrieves the current accumulated value (`V`) and arrival depth from the `state` map.
+    /// 2. If the node is an initial node *or* its arrival depth in the `state` map
+    ///    is greater than or equal to its pre-calculated `max_depth`, it's considered "ready" for processing.
+    /// 3. If ready, the `process` function is called with the node's data and its accumulated value.
+    /// 4. If `process` returns `true`, the algorithm iterates through the node's children.
+    /// 5. For each child, the `step` function is called using the parent's accumulated value,
+    ///    edge details, and the child node's data.
+    /// 6. If `step` returns `Some(candidate_v)`, this candidate value is merged into the child's
+    ///    existing accumulated value in the `state` map using the `merge` function. The child's
+    ///    arrival depth in the `state` map is updated to the maximum of its current depth
+    ///    and the parent's arrival depth + 1.
+    /// 7. If the child's arrival depth in the `state` map becomes greater than or equal to its
+    ///    pre-calculated `max_depth`, and the child has not been fully processed, it is added
+    ///    to the ready queue.
+    ///
+    /// Nodes are marked as processed *before* their children are explored to prevent cycles
+    /// from causing infinite loops in the traversal logic itself.
+    ///
+    /// This traversal relies on the `max_depth` values being correctly calculated during graph
+    /// construction (e.g., via `try_insert`). Cycles can lead to incorrect `max_depth` values
+    /// or nodes that are never considered "ready" if their arrival depth never reaches their `max_depth`.
     pub fn special_map<V: Clone>(
         initial_nodes_and_values: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
         mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>,
@@ -461,74 +488,92 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         // state: for each node (by Arc pointer), store (merged V, arrival_depth)
         // Using Arc::as_ptr for HashMap key for stable pointers
         let mut state: HashMap<*const Mutex<Trie<EK, EV, T>>, (V, usize)> = HashMap::new();
-        let mut ready: VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
+        let mut ready_queue: VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
         // set of processed nodes (by Arc pointer)
         let mut processed: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
-        // record which nodes came in as initial nodes
-        let mut initial_set: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
+        // record which nodes came in as initial nodes (pointers)
+        let initial_node_pointers: HashSet<*const Mutex<Trie<EK, EV, T>>> = initial_nodes_and_values
+            .iter()
+            .map(|(arc, _)| Arc::as_ptr(arc))
+            .collect();
+
 
         // Initialize state for starting nodes.
         for (node_arc, v) in initial_nodes_and_values {
-            let arc_ptr = Arc::as_ptr(&node_arc);
-            initial_set.insert(arc_ptr);
-            state.entry(arc_ptr)
-                .and_modify(|(stored, _depth)| { // depth is always 0 for initial
+            let current_node_arc_ptr = Arc::as_ptr(&node_arc);
+            state.entry(current_node_arc_ptr)
+                .and_modify(|(stored, _depth)| { // depth is always 0 for initial here, updated by max() below
                     merge(stored, v.clone());
                 })
                 .or_insert((v, 0)); // Initial arrival depth is 0
-            ready.push_back(node_arc.clone());
+            ready_queue.push_back(node_arc.clone());
         }
 
         // Main loop.
-        while let Some(node_arc) = ready.pop_front() {
-            let arc_ptr = Arc::as_ptr(&node_arc);
-            if processed.contains(&arc_ptr) {
+        while let Some(node_arc) = ready_queue.pop_front() {
+            let current_node_arc_ptr = Arc::as_ptr(&node_arc);
+
+            // If this node is already processed, skip it. This handles duplicates in the queue.
+            if processed.contains(&current_node_arc_ptr) {
                 continue;
             }
+
             // get stored state (merged V and arrival depth) for this node.
-            let (mut node_val_merged, arr_depth) = match state.get(&arc_ptr) {
+            let (mut current_node_value, current_node_arrival_depth) = match state.get(&current_node_arc_ptr) {
                 Some(tup) => tup.clone(), // Clone the tuple (V, usize)
                 None => {
-                    // Node might not be in state if path was pruned by step returning None or process returning false
+                    // This should ideally not happen if nodes are only added to queue via state update
+                    // but a defense-in-depth check.
+                    crate::debug!(4, "Node {:p} popped from queue but not found in state.", current_node_arc_ptr);
                     continue;
                 }
             };
+
             // Get the fixed max_depth for this node from its trie.
-            let node_max_depth = {
-                let node = node_arc.lock().expect("Mutex poisoned in special_map getting max_depth");
-                node.max_depth
-            };
+            let current_node_max_depth = {
+                let node_guard = node_arc.lock().expect("Mutex poisoned in special_map getting max_depth");
+                node_guard.max_depth
+            }; // node_guard lock released
 
-            // A non–initial node is considered ready once its arrival depth equals node.max_depth.
-            // Initial nodes are processed immediately when popped.
-            if !initial_set.contains(&arc_ptr) && arr_depth < node_max_depth {
-                 // Not yet fully updated based on longest path; skip processing now.
-                 // It might be re-added later when its arrival depth increases and matches max_depth.
-                continue;
-            }
-            // If arr_depth > node_max_depth, something is inconsistent. Warn?
-            if arr_depth > node_max_depth {
-                 // This can happen if max_depth was updated concurrently or if graph has cycles not caught by insertion
-                 crate::debug!(3, "Warning: Node {:p} has arrival depth {} > max_depth {}. Processing anyway.", arc_ptr, arr_depth, node_max_depth);
+            // A node is considered ready for full processing once its arrival depth in the state map
+            // equals or exceeds its pre-calculated inherent max_depth, or if it's an initial node.
+            if !initial_node_pointers.contains(&current_node_arc_ptr) && current_node_arrival_depth < current_node_max_depth {
+                 // Not yet fully updated based on all potentially longer paths; skip processing *now*.
+                 // It might be re-added to the queue later if another path increases its arrival depth in 'state'.
+                 // Put it back at the back of the queue for now.
+                 ready_queue.push_back(node_arc.clone());
+                 continue;
             }
 
+            // If arr_depth > node_max_depth, something is inconsistent (e.g., cycles not caught by insertion).
+            if current_node_arrival_depth > current_node_max_depth {
+                 crate::debug!(3, "Warning: Node {:p} (value: {:?}) has arrival depth {} > max_depth {}. Processing anyway.",
+                     current_node_arc_ptr, node_arc.lock().unwrap().value, current_node_arrival_depth, current_node_max_depth);
+            }
 
-            // Mark node as processed (and remove it from initial_set if it was there).
-            processed.insert(arc_ptr);
-            initial_set.remove(&arc_ptr); // Safe to call even if not present
+            // Mark node as processed.
+            processed.insert(current_node_arc_ptr);
 
             // Call process on this node. Capture the boolean result.
-            let should_continue_processing_children = {
-                let node = node_arc.lock().expect("Mutex poisoned during process call");
-                process(&node, &mut node_val_merged)
-            };
+            let should_continue_processing_children;
+            // Scope to lock the node for the process call
+            {
+                let node_guard = node_arc.lock().expect("Mutex poisoned during process call");
+                // process can modify current_node_value
+                should_continue_processing_children = process(&node_guard, &mut current_node_value);
+            } // node_guard lock released
+
+            // If process modified current_node_value, update it in the state map.
+            // This ensures that step functions for children use the potentially updated value.
+            state.insert(current_node_arc_ptr, (current_node_value.clone(), current_node_arrival_depth));
+
 
             // Only propagate to children if process returned true.
             if should_continue_processing_children {
                 // Collect all (EdgeKey, EdgeValue, ChildArc) tuples. Lock briefly.
                 let children_edges_values_arcs: Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)> = {
-                    let node = node_arc.lock().expect("Mutex poisoned while reading children");
-                    node.children
+                    let node_guard = node_arc.lock().expect("Mutex poisoned while reading children");
+                    node_guard.children
                         .iter()
                         .flat_map(|(edge_key, dest_map)| { // dest_map is &BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
                             dest_map.iter().map(move |(child_wrapper_arc, edge_val)| {
@@ -536,83 +581,71 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                             })
                         })
                         .collect()
-                }; // node lock released here
+                }; // node_guard lock released here
 
                 for (edge_key, edge_val, child_arc) in children_edges_values_arcs {
                     let child_arc_ptr = Arc::as_ptr(&child_arc);
-                    if processed.contains(&child_arc_ptr) {
-                        continue; // Skip already processed children
-                    }
-
-                    // The candidate arrival depth for this child is one more than parent's arrival depth.
-                    let candidate_arrival_depth = arr_depth.saturating_add(1);
 
                     // Compute candidate V for child using the potentially failing step function. Lock briefly.
                     let candidate_v_opt = {
-                        let child_node = child_arc.lock().expect("Mutex poisoned during step");
-                        step(&node_val_merged, &edge_key, &edge_val, &child_node)
-                    }; // child_node lock released here
+                        let child_node_guard = child_arc.lock().expect("Mutex poisoned during step");
+                        step(&current_node_value, &edge_key, &edge_val, &child_node_guard)
+                    }; // child_node_guard lock released here
 
                     if let Some(candidate_v) = candidate_v_opt {
+                        // The candidate arrival depth for this child is one more than parent's arrival depth.
+                        let candidate_arrival_depth = current_node_arrival_depth.saturating_add(1);
+
                         // Update state for the child: merge the new candidate V and update arrival depth.
-                        let mut current_child_arr_depth = 0; // Will be updated by entry API
+                        // Get the child's current state, update it, and record the *new* arrival depth in state.
+                        let mut final_child_arrival_depth = 0; // Will hold the depth *after* potential update
                         state.entry(child_arc_ptr)
                             .and_modify(|(existing_v, existing_depth)| {
                                 merge(existing_v, candidate_v.clone()); // Merge the value
                                 *existing_depth = (*existing_depth).max(candidate_arrival_depth); // Update depth
-                                current_child_arr_depth = *existing_depth; // Record current depth
+                                final_child_arrival_depth = *existing_depth; // Record final depth
                             })
                             .or_insert_with(|| {
-                                current_child_arr_depth = candidate_arrival_depth; // Record current depth
+                                final_child_arrival_depth = candidate_arrival_depth; // Record final depth
                                 (candidate_v, candidate_arrival_depth) // Insert new state
                             });
 
-                        // Check if the child's inherent max_depth needs updating *and propagate if necessary*.
-                        // This handles cases where special_map finds a longer path than insertion did.
-                        let child_current_max_depth;
-                        let mut propagation_result = Ok(()); // Track result of propagation
-                        { // Scope for child lock
-                            let mut child_node = child_arc.lock().expect("Mutex poisoned while updating child max_depth");
-                            if candidate_arrival_depth > child_node.max_depth {
-                                child_node.max_depth = candidate_arrival_depth;
-                                // Need to propagate this update downward. Must drop lock before calling.
-                                drop(child_node); // Explicit drop before propagation call
 
-                                // Handle the Result from propagate_max_depth. Currently panics on cycle.
-                                // TODO: Consider handling this error more gracefully if needed.
-                                propagation_result = Trie::<EK, EV, T>::propagate_max_depth(child_arc.clone(), candidate_arrival_depth);
-                                if propagation_result.is_err() {
-                                    // Panic, as per the function documentation note.
-                                    propagation_result.expect("Cycle detected during max_depth propagation within special_map");
-                                }
+                        // The child's state in the 'state' map has been updated (value merged, depth potentially increased).
+                        // Now, decide if this child should be added to the ready queue *now*.
+                        // It's ready if its current arrival depth in 'state' is >= its pre-calculated inherent max_depth.
+                        // This check ensures we process nodes only after all potentially longer paths leading to them
+                        // (within the traversed subgraph from initial nodes) have been considered for value merging.
 
-                                // Re-acquire lock briefly to get the potentially updated max_depth
-                                child_current_max_depth = child_arc.lock().expect("Mutex poisoned after propagate").max_depth;
-                            } else {
-                                child_current_max_depth = child_node.max_depth;
-                            }
-                        } // child_node lock released here
+                        // Get the child's inherent max_depth (this is fixed during insertion, not changed by special_map).
+                        let child_inherent_max_depth = {
+                            let child_node_guard = child_arc.lock().expect("Mutex poisoned while getting child max_depth for readiness check");
+                            child_node_guard.max_depth
+                        }; // child_node_guard lock released here
 
 
-                        // Check readiness: does the *current* arrival depth in state match the child's *current* max_depth?
-                        // Use >= to handle potential inconsistencies.
-                        if current_child_arr_depth >= child_current_max_depth {
-                            // Only queue if it's ready and not already processed
+                        // If the child's arrival depth in the state map is high enough based on its inherent max_depth,
+                        // and it hasn't been fully processed yet, add it to the ready queue.
+                        // 'final_child_arrival_depth' here is the updated depth from the state map for the child.
+                        if final_child_arrival_depth >= child_inherent_max_depth {
                             if !processed.contains(&child_arc_ptr) {
-                                 ready.push_back(child_arc.clone());
+                                // Add to the ready queue if not already processed.
+                                // Duplicates in the queue are handled by the 'processed' check when popping.
+                                 ready_queue.push_back(child_arc.clone());
                             }
                         }
-                        // else: Child is not ready yet (arrival depth < max_depth), it might be queued later.
+                        // If final_child_arrival_depth < child_inherent_max_depth, the child is not ready yet.
+                        // It will only be processed once its arrival depth in the state map reaches
+                        // its inherent max_depth (if ever, based on the paths explored).
                     }
-                    // If step returned None, we implicitly do nothing for this edge.
+                    // If step returned None, we implicitly do nothing for this edge and child.
                 } // end for each child edge
             } // end if should_continue_processing_children
         } // end while queue not empty
 
-        // After the loop, check for unprocessed nodes (optional debug info)
-        // Check initial nodes first
+        // After the loop, check for unprocessed initial nodes (optional debug info)
         let mut unprocessed_initial = false;
-        for initial_arc_ptr in initial_set {
+        for initial_arc_ptr in initial_node_pointers { // Use the static set
             if !processed.contains(&initial_arc_ptr) {
                 if !unprocessed_initial {
                      crate::debug!(3, "Warning: Some initial nodes were not processed (Arc Ptrs):");
@@ -621,15 +654,15 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 crate::debug!(3, "  - {:p}", initial_arc_ptr);
             }
         }
-        // Check nodes remaining in state
+        // Check nodes remaining in state (optional debug info)
         let mut unprocessed_in_state = false;
-        for (arc_ptr, (_v, arr_depth)) in state.iter() {
-            if !processed.contains(arc_ptr) {
+        for (child_arc_ptr_in_state, (_v, arr_depth)) in state.iter() {
+            if !processed.contains(child_arc_ptr_in_state) {
                  if !unprocessed_in_state {
                      crate::debug!(3, "Warning: Nodes remaining in state but not processed (Arc Ptr, arrival_depth):");
                      unprocessed_in_state = true;
                  }
-                crate::debug!(3, "  - ({:p}, {})", arc_ptr, arr_depth);
+                crate::debug!(3, "  - ({:p}, {})", child_arc_ptr_in_state, arr_depth);
             }
         }
     }
@@ -1500,9 +1533,7 @@ mod tests {
 
         // Expected behavior: Root processed (V=100). Child processed (V=101).
         // Propagation back to root skipped because root is already processed.
-        // The max_depth update inside special_map might trigger, but propagate_max_depth
-        // inside it should detect the cycle and panic (as documented).
-        // Let's assume the `processed` check prevents the panic path for this test.
+        // The special_map logic no longer panics on cycles via max_depth propagation.
         assert_eq!(processed_vals.len(), 2);
         assert!(processed_vals.contains(&0));
         assert!(processed_vals.contains(&1));
@@ -1909,8 +1940,8 @@ mod tests {
         let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
         assert_eq!(children_map.len(), 1);
         let (ca, ev) = children_map.iter().next().unwrap();
-        assert_eq!(*ev, new_edge_val);
         assert!(Arc::ptr_eq(ca.as_arc(), &result_node));
+        assert_eq!(*ev, new_edge_val);
     }
 
     #[test]
