@@ -422,7 +422,6 @@ if __name__ == "__main__":
         print(f"Mask Tokens (first chars): {"".join(sorted(list({m[0] for m in mask_tokens})))!r}")
         assert token_id in mask_ids, f"Expected token {id_to_llm_token[token_id].decode()!r} (id: {token_id}) in mask"
         print(f"--- Committing token {id_to_llm_token[token_id].decode()!r} (id: {token_id}) ---")
-        print(f"CALLING {grammar_constraint_state.commit}({token_id})")
         grammar_constraint_state.commit(token_id)
     print("--- End Committing Tokens ---")
 
@@ -439,8 +438,8 @@ if __name__ == "__main__":
     if expected_next_token:
         assert expected_next_token in mask_tokens, f"Expected '{expected_next_token}' in mask"
 
-    # DEMO: Generate text.
-    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
-#     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
-    output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
-    print(output_text)
+#     # DEMO: Generate text.
+#     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
+# #     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
+#     output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
+#     print(output_text)
