@@ -148,7 +148,7 @@ pub struct GrammarConstraint {
     // Mapping between original LLMTokenID.0 and internal LLMTokenID.0 (usize)
     // The number of unique internal tokens is derived from the size of this bimap.
     pub(crate) original_to_internal_id_bimap: BiBTreeMap<usize, usize>, // original_id.0 <-> internal_id.0
-    pub(crate) internal_num_llm_tokens: usize, // Number of unique internal LLM tokens (capacity for bitsets)
+    pub(crate) internal_max_llm_token: usize, // Number of unique internal LLM tokens (capacity for bitsets)
 }
 
 impl GrammarConstraint {
@@ -196,7 +196,7 @@ impl GrammarConstraint {
     ) -> Self {
         let original_to_internal_id_bimap = Self::setup_llm_token_mappings(&llm_token_map);
 
-        let internal_num_llm_tokens = original_to_internal_id_bimap.len();
+        let internal_max_llm_token = original_to_internal_id_bimap.len();
 
         // Reconstruct the internal_llm_token_map for precomputation (bytes -> internal LLMTokenID)
         let mut internal_llm_token_map_for_precompute = BiBTreeMap::new();
@@ -210,7 +210,7 @@ impl GrammarConstraint {
             &tokenizer,
             &internal_llm_token_map_for_precompute, // Pass the map with internal IDs
             &token_name_map,
-            internal_num_llm_tokens, // Pass the number of internal tokens
+            internal_max_llm_token, // Pass the number of internal tokens
         );
 
         Self {
@@ -221,7 +221,7 @@ impl GrammarConstraint {
             token_name_map,
             max_original_llm_token_id,
             original_to_internal_id_bimap,
-            internal_num_llm_tokens,
+            internal_max_llm_token,
         }
     }
 
@@ -232,13 +232,13 @@ impl GrammarConstraint {
         tokenizer:        &Regex,
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, // Renamed and now contains internal IDs
         token_name_map:   &BiBTreeMap<String, usize>,
-        internal_num_llm_tokens: usize,                       // Number of internal tokens
+        internal_max_llm_token: usize,                       // Number of internal tokens
     ) -> Precomputed {
         // 1.  Kick off a helper object that contains all large mutable state.
         let mut helper = Precomputer::new(
             tokenizer,
             internal_llm_token_map,    // Use new parameter name
-            internal_num_llm_tokens, // Use new parameter name
+            internal_max_llm_token, // Use new parameter name
             100, // merge threshold
         );
 
@@ -253,7 +253,7 @@ impl GrammarConstraint {
     // Runtime interface -------------------------------------------------------------------
     // -------------------------------------------------------------------------
     pub fn init(&self) -> GrammarConstraintState<'_> {
-        let base_set_for_info = HybridBitset::ones(self.internal_num_llm_tokens);
+        let base_set_for_info = HybridBitset::ones(self.internal_max_llm_token);
         let info = LLMTokenInfo {
             active:       base_set_for_info.clone(),
             intersection: base_set_for_info,
@@ -315,7 +315,7 @@ impl<'r> Precomputer<'r> {
     fn new(
         tokenizer:        &'r Regex,
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, // Renamed
-        internal_num_llm_tokens: usize,                       // Number of internal tokens
+        internal_max_llm_token: usize,                       // Number of internal tokens
         merge_threshold:  usize,
     ) -> Self {
         // -- Build vocab prefix tree ------------------------------------------------------
@@ -353,7 +353,7 @@ impl<'r> Precomputer<'r> {
             tokenizer,
             vocab,
             roots,
-            all_llm_tokens: HybridBitset::ones(internal_num_llm_tokens),
+            all_llm_tokens: HybridBitset::ones(internal_max_llm_token),
             merge_threshold,
             pb,
             stats: PrecomputeStats::default(),
@@ -757,7 +757,7 @@ impl<'a> GrammarConstraintState<'a> {
 
     pub fn step_with_all_llm_tokens(&mut self) {
         // This creates a bitset of all *internal* LLM tokens
-        let all_internal_llm_tokens = HybridBitset::ones(self.parent.internal_num_llm_tokens);
+        let all_internal_llm_tokens = HybridBitset::ones(self.parent.internal_max_llm_token);
         self.step(&all_internal_llm_tokens);
     }
 
@@ -775,7 +775,7 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
-        let all_true_set = HybridBitset::ones(self.parent.internal_num_llm_tokens);
+        let all_true_set = HybridBitset::ones(self.parent.internal_max_llm_token);
         let all_true_token_info = LLMTokenInfo {
             active: all_true_set.clone(),
             intersection: all_true_set,
