@@ -573,54 +573,76 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             // We may legitimately reach a node that has no value
             // (every step(...) so far returned None).  In that case
             // we mark it processed but propagate nothing.
-            let mut current_v = match value_map.get_mut(&node_ptr) {
-                Some(v) => v,
-                None => {
-                    processed.insert(node_ptr);
-                    // still need to bump parent counters of its children
-                    for (_ek, _ev, child_arc) in adj.get(&node_ptr).into_iter().flatten() {
-                        let cptr = Arc::as_ptr(child_arc);
-                        *done_parents.entry(cptr).or_insert(0) += 1;
-                        if !processed.contains(&cptr) {
-                            ready.push_back(child_arc.clone());
+            // Scope for the mutable borrow of value_map for the current node's value processing.
+            // v_for_step will hold the (cloned) value after `process` to be passed to `step` calls.
+            let v_for_step: V;
+            let should_continue_propagation: bool;
+
+            { // New scope to manage the lifetime of `current_node_value_in_map_mut`
+                let current_node_value_in_map_mut = match value_map.get_mut(&node_ptr) {
+                    Some(v) => v,
+                    None => {
+                        // This node has no accumulated value. Mark processed.
+                        processed.insert(node_ptr);
+                        // Increment done_parents for its children and queue them if ready.
+                        if let Some(children_of_node) = adj.get(&node_ptr) {
+                            for (_ek, _ev, child_arc) in children_of_node.iter().cloned() { // Clone items for iteration
+                                let cptr = Arc::as_ptr(&child_arc);
+                                *done_parents.entry(cptr).or_insert(0) += 1;
+                                if done_parents.get(&cptr).copied().unwrap_or(0) == in_deg.get(&cptr).copied().unwrap_or(0) {
+                                    if !processed.contains(&cptr) {
+                                        ready.push_back(child_arc);
+                                    }
+                                }
+                            }
                         }
+                        continue; // Skip to the next node in the ready queue
                     }
-                    continue;
-                }
-            };
+                };
 
-            // Run user callback
-            let should_continue = {
-                let node = node_arc.lock().expect("mutex poisoned");
-                process(&node, &mut current_v)
-            };
+                // Run user callback `process`. This can modify `current_node_value_in_map_mut`
+                // (and thus the value in `value_map`) in place.
+                let node_guard = node_arc.lock().expect("mutex poisoned for process callback");
+                should_continue_propagation = process(&node_guard, current_node_value_in_map_mut);
+                drop(node_guard); // Release lock on node_arc promptly
 
-            // Mark as processed exactly once
+                // Clone the (potentially modified) value. This owned clone will be used for `step`.
+                v_for_step = current_node_value_in_map_mut.clone();
+
+            } // `current_node_value_in_map_mut` goes out of scope here, releasing its mutable borrow on `value_map`.
+
+            // Mark current node as processed (if not already done in the None case above for value_map)
             processed.insert(node_ptr);
 
-            if !should_continue {
-                // Still need to “release” the children so they can reach
-                // their in-degree quota, but do not propagate any value.
-                for (_ek, _ev, child_arc) in adj.get(&node_ptr).into_iter().flatten() {
-                    let cptr = Arc::as_ptr(child_arc);
-                    *done_parents.entry(cptr).or_insert(0) += 1;
-                    if !processed.contains(&cptr) {
-                        ready.push_back(child_arc.clone());
+            if !should_continue_propagation {
+                // `process` returned false. Do not propagate value via `step`.
+                // However, children still need their `done_parents` count incremented,
+                // and they should be queued if they become ready.
+                if let Some(children_of_node) = adj.get(&node_ptr) {
+                    for (_ek, _ev, child_arc) in children_of_node.iter().cloned() { // Clone items for iteration
+                        let cptr = Arc::as_ptr(&child_arc);
+                        *done_parents.entry(cptr).or_insert(0) += 1;
+                        if done_parents.get(&cptr).copied().unwrap_or(0) == in_deg.get(&cptr).copied().unwrap_or(0) {
+                            if !processed.contains(&cptr) {
+                                ready.push_back(child_arc);
+                            }
+                        }
                     }
                 }
-                continue;
+                continue; // Skip to the next node in the ready queue
             }
 
             /* -------------------------------------------------------------
              * Propagate to children
              * ---------------------------------------------------------- */
+            // The loop for children will now use `v_for_step`
             for (ek, ev, child_arc) in adj.get(&node_ptr).into_iter().flatten().cloned() {
                 let child_ptr = Arc::as_ptr(&child_arc);
 
                 // Produce candidate V (might be None)
                 let candidate_v_opt = {
                     let child_guard = child_arc.lock().expect("mutex poisoned");
-                    step(&current_v, &ek, &ev, &child_guard)
+                    step(&v_for_step, &ek, &ev, &child_guard)
                 };
 
                 if let Some(candidate_v) = candidate_v_opt {
@@ -634,7 +656,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 *done_parents.entry(child_ptr).or_insert(0) += 1;
 
                 // If child is now fully informed, queue it
-                if done_parents[&child_ptr] == *in_deg.get(&child_ptr).unwrap_or(&0) {
+                if done_parents.get(&child_ptr).copied().unwrap_or(0) == in_deg.get(&child_ptr).copied().unwrap_or(0) {
                     if !processed.contains(&child_ptr) {
                         ready.push_back(child_arc);
                     }
