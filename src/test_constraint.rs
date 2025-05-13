@@ -395,6 +395,10 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
         max_llm_token_id,
     );
     let mut constraint_state = constraint.init();
+    constraint_state.step_with_all_llm_tokens();
+
+    let mask = constraint_state.get_mask();
+    assert_eq!(mask, HybridBitset::from_iter(vec![0, 1, 2]));
 
     Ok(())
 }
