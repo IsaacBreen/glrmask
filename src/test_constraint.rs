@@ -392,8 +392,8 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     // Step and commit the LLM token "a" repeatedly.
     let mut constraint_state = constraint.init();
     let a_id = llm_token_map.get_by_left(&b"a"[..]).unwrap().0;
-    for _ in 0..100 {
-        println!("Stepping with LLM token ID {}", a_id);
+    for i in 0..1000 {
+        println!("{}. Stepping with LLM token ID {}", i, a_id);
         constraint_state.step_with_all_llm_tokens();
         constraint_state.commit(LLMTokenID(a_id));
     }
