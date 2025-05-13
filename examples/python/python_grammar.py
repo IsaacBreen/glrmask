@@ -22,11 +22,11 @@ def regex(expr, name=None):
     if name == "IGNORE":
         return name, expr
     if name is None:
-#         return ge.sequence([ge.ref("IGNORE"), expr])
-        return expr
+        return ge.sequence([ge.ref("IGNORE"), expr])
+#         return expr
 #     return name, ge.regex(seq([ignore, expr]))
-#     return name, ge.sequence([ge.ref("IGNORE"), expr])
-    return name, expr
+    return name, ge.sequence([ge.ref("IGNORE"), expr])
+#     return name, expr
 
 def eat(s: bytes) -> Regex:
     if len(s) == 1:
@@ -110,9 +110,9 @@ def define_tokens() -> list[tuple[str, Any]]:
         eat_u8(ord("\n")),
         seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]),
     ]))))
-#     tokens["IGNORE"] = ignore
-    # TODO: delete this
-    tokens["IGNORE"] = eps()
+    tokens["IGNORE"] = ignore
+#     # TODO: delete this
+#     tokens["IGNORE"] = eps()
 
     # TODO: uncomment this
     digit = eat_range('0', '9')
