@@ -196,7 +196,6 @@ impl GrammarConstraint {
             }
         }
 
-
         let precomputed = Self::precompute(
             &tokenizer,
             &internal_llm_token_map_for_precompute, // Pass the map with internal IDs
