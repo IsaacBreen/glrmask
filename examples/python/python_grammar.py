@@ -344,7 +344,7 @@ if __name__ == "__main__":
 
 #     tokenizer_vocab = {"def": 0, "$": 1}
 #     tokenizer_vocab = {"def": 0}
-    tokenizer_vocab = {"def": 0, " f": 1}
+    tokenizer_vocab = {"def": 0, " f": 1, "(": 2, ")": 3}
 
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
@@ -450,8 +450,8 @@ if __name__ == "__main__":
     if expected_next_token:
         assert expected_next_token in mask_tokens, f"Expected '{expected_next_token}' in mask"
 
-    # DEMO: Generate text.
-    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
-#     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
-    output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
-    print(output_text)
+#     # DEMO: Generate text.
+#     grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
+# #     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
+#     output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
+#     print(output_text)
