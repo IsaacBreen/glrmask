@@ -391,3 +391,75 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+#[test]
+fn test_simple_def_match_non_zero_llm_id() {
+    // 1. Tokenizer for the grammar terminal "DEF_T" matching "def"
+    //    The tokenizer will have one group (GroupID 0) for "def".
+    let tokenizer_expr = groups![eat_string_fast("def")];
+    let tokenizer = tokenizer_expr.build();
+
+    // 2. LLM vocabulary: only "def", but with a non-zero original ID
+    let mut llm_token_map = LLMTokenMap::new();
+    let def_original_llm_id = 750; // Using the ID from your Python script's log
+    llm_token_map.insert(b"def".to_vec(), LLMTokenID(def_original_llm_id));
+    let max_original_llm_token_id = def_original_llm_id;
+
+    // 3. Grammar: S -> DEF_T
+    //    (S' -> S EOF_Terminal is implicitly added by generate_glr_parser)
+    let productions = vec![
+        prod("S", vec![t("DEF_T")]), // Production 0
+    ];
+
+    // 4. Map grammar terminal "DEF_T" to tokenizer group ID 0
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(Terminal("DEF_T".to_string()), TerminalID(0));
+    // Note: For this minimal test focusing on the initial mask for "def",
+    // we don't strictly need an EOF terminal in the grammar or tokenizer if
+    // the goal is just to see "def" allowed initially.
+    // If the grammar was S -> DEF_T EOF_T, then EOF_T would need a tokenizer group.
+
+    let parser = generate_glr_parser_with_terminal_map(
+        &productions,
+        0, // start_production_id
+        grammar_token_map.clone()
+    );
+
+    // 5. Token name map for stats/debugging (maps grammar terminal name to tokenizer group ID)
+    let mut token_name_map_for_stats = BiBTreeMap::new();
+    token_name_map_for_stats.insert("DEF_T".to_string(), 0);
+
+    // 6. Create the GrammarConstraint
+    let constraint = GrammarConstraint::new(
+        tokenizer,
+        parser,
+        llm_token_map.clone(), // Original LLMTokenID map
+        token_name_map_for_stats,
+        max_original_llm_token_id,
+    );
+
+    // constraint.dump_precomputed(); // Optional: for debugging precomputation
+
+    // 7. Initialize the constraint state.
+    //    This calls constraint.init() internally.
+    let mut constraint_state = constraint.init();
+
+    // 8. Get the initial mask.
+    //    In the Python script, get_mask is called *before* any step or commit.
+    //    The initial mask should reflect what's possible from the start.
+    let mask = constraint_state.get_mask();
+
+    // 9. Define the expected mask.
+    //    It should contain the original LLMTokenID for "def".
+    let mut expected_mask = HybridBitset::new();
+    expected_mask.insert(def_original_llm_id); // Expecting the original LLM ID
+
+    // 10. Assert that the mask matches the expected mask.
+    //     This assertion is expected to fail if the bug in setup_llm_token_mappings exists.
+    assert_eq!(
+        mask,
+        expected_mask,
+        "Mask should allow 'def' token (Original LLM ID {})",
+        def_original_llm_id
+    );
+}
