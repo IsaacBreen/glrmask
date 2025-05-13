@@ -518,7 +518,6 @@ impl<'r> Precomputer<'r> {
                 .extend(set.iter().cloned());
         }
 
-
         while let Some((offset, map_at_offset)) = queue.pop_first() {
             for (state_before, src_set) in map_at_offset {
                 if src_set.is_empty() {
@@ -534,6 +533,7 @@ impl<'r> Precomputer<'r> {
                 let exec_result = self
                     .tokenizer
                     .execute_from_state(suffix, state_before);
+                crate::debug!(4, "Executed tokenizer from state {:?} on suffix {:?}. Results: {:?}", state_before.0, String::from_utf8_lossy(suffix), exec_result);
 
                 // -------------------------------------------------------------
                 // Matches inside suffix
