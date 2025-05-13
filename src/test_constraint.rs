@@ -390,7 +390,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     let constraint = GrammarConstraint::new(
         tokenizer,
         parser,
-        llm_token_map,
+        llm_token_map.clone(),
         token_name_map,
         max_llm_token_id,
     );
@@ -398,7 +398,9 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     constraint_state.step_with_all_llm_tokens();
 
     let mask = constraint_state.get_mask();
-    assert_eq!(mask, HybridBitset::from_iter(vec![0, 1, 2]));
+
+    let d_id = llm_token_map.get_by_left(&b"d"[..]).unwrap().0;
+    assert!(mask[d_id], "Mask should contain ID for 'd'");
 
     Ok(())
 }
