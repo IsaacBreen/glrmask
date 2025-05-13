@@ -5,7 +5,7 @@ use crate::glr::grammar::{nt, prod, t, NonTerminal, Terminal};
 use crate::glr::table::{generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
 use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
 use std::hash::{Hash, Hasher};
-use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast, eat_string_fast, choice_fast}; // Added eat_any_fast
+use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast, eat_string_fast, choice_fast, eat_bytestring_fast}; // Added eat_any_fast
 
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
@@ -310,7 +310,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
         //     eat_u8_negation(ord("{")),
         //     eat("{{"),
         // ])),
-        repeat0_fast(choice_fast!(eat_u8_negation_fast(b'{'), eat_string_fast("{{"))),
+        repeat0_fast(choice_fast!(eat_u8_negation_fast(b'{'), eat_bytestring_fast(b"{{".to_vec()))),
         eat_string_fast("def"),
     ];
     let tokenizer = tokenizer_expr.build();
