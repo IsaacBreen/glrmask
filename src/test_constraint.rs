@@ -444,6 +444,7 @@ fn test_simple_def_match_non_zero_llm_id() {
     // 7. Initialize the constraint state.
     //    This calls constraint.init() internally.
     let mut constraint_state = constraint.init();
+    constraint_state.step_with_all_llm_tokens();
 
     // 8. Get the initial mask.
     //    In the Python script, get_mask is called *before* any step or commit.
