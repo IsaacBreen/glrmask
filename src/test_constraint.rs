@@ -503,6 +503,7 @@ fn test_hideous_ambiguity() {
 
     // 5. Create the Parser
     let parser = generate_glr_parser(&productions, 0);
+    println!("{}", parser);
 
     // 6. Create the Constraint
     let constraint = GrammarConstraint::new(
