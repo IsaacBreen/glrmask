@@ -366,6 +366,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Create a parser
     let productions = vec![
+        prod("S'", vec![nt("S")]), // Start
         prod("S", vec![nt("A"), t("DEF")]),
         // prod("S", vec![t("FSTRING_MIDDLE"), t("FSTRING_MIDDLE")]),
         prod("S", vec![t("FSTRING_MIDDLE")]),
@@ -393,6 +394,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     assert!(mask.contains(d_id), "Expected LLM token ID {} to be in mask", d_id);
 
     // Step and commit the LLM token "a" repeatedly.
+    println!("{}", constraint.parser);
     let mut constraint_state = constraint.init();
     let a_id = llm_token_map.get_by_left(&b"a"[..]).unwrap().0;
     for i in 0..1000 {
