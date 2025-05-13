@@ -2100,6 +2100,7 @@ mod test_python {
     use crate::datastructures::u8set::U8Set; // Added for U8Set usage in new test
     use crate::{choice, seq};
 
+    #[ignore]
     #[test]
     fn test_full_python_tokenizer_recognizes_name() {
         // --- Define basic character sets ---

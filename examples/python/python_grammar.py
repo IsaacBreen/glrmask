@@ -341,6 +341,8 @@ if __name__ == "__main__":
     # Set the vocab to digits and arithmetic operators
 #     tokenizer_vocab = {k: v for k, v in tokenizer.get_vocab().items() if k.isdigit() or k in "+-*/"}
 
+    tokenizer_vocab = {"def": 0, "$": 1}
+
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
     tokenizer_vocab = {token: actual_vocab[token] for token in tokenizer_vocab}
