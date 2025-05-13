@@ -450,7 +450,7 @@ impl<'r> Precomputer<'r> {
             crate::debug!(4, "Skipping vocab node {:p} because it's already in the current DFS processing path", vocab_node_ptr);
             return;
         }
-        crate::debug!(4, "Processing vocab node {:p}", vocab_node_ptr);
+        crate::debug!(4, "Processing vocab node {:p}", vocab_node_ptr); //
         yellow.insert(vocab_node_ptr);
 
         // Merge policy per tokenizer state
