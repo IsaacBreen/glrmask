@@ -372,7 +372,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     let terminal_map: BiBTreeMap<Terminal, TerminalID> = token_name_map.iter().map(|(name, id)| (Terminal(name.clone()), TerminalID(*id))).collect();
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, terminal_map);
 
-    // Ensure that the letter "d" is a valid initial LLM token
+    // Ensure that "def" is a valid initial LLM token
     let max_llm_token_id = token_name_map.iter().map(|(_, id)| *id).max().unwrap();
     let constraint = GrammarConstraint::new(
         tokenizer,
@@ -386,7 +386,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
 
     let mask = constraint_state.get_mask();
 
-    let d_id = llm_token_map.get_by_left(&b"d"[..]).unwrap().0;
+    let d_id = llm_token_map.get_by_left(&b"def"[..]).unwrap().0;
     assert!(mask.contains(d_id), "Expected LLM token ID {} to be in mask", d_id);
 
     Ok(())
