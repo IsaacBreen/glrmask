@@ -370,7 +370,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
         // prod("S", vec![t("FSTRING_MIDDLE"), t("FSTRING_MIDDLE")]),
         // prod("S", vec![t("FSTRING_MIDDLE")]),
         prod("S", vec![t("FSTRING_MIDDLE"), t("DEF")]),
-        prod("A", vec![]),
+        // prod("A", vec![]),
     ];
     let terminal_map: BiBTreeMap<Terminal, TerminalID> = token_name_map.iter().map(|(name, id)| (Terminal(name.clone()), TerminalID(*id))).collect();
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, terminal_map);
