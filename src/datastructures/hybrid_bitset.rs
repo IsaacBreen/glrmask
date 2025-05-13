@@ -26,11 +26,6 @@ impl HybridBitset {
 
     /// Creates a new HybridBitset with all indices from 0 up to `max_value` (inclusive) set to true.
     pub fn ones(max_value: usize) -> Self {
-        if max_value == usize::MAX {
-            // Original behavior: if max_value + 1 overflows, return empty.
-            // RangeSetBlaze could handle 0..=usize::MAX, but to match original:
-            return Self::new();
-        }
         HybridBitset {
             inner: RangeSetBlaze::from_iter([0..=max_value]),
         }
