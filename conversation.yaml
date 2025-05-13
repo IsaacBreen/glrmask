@@ -482,8 +482,16 @@ local_system:
                * 0.  Small helper maps keyed by the raw Arc pointer so that
                *     identity is stable even if Arcs are cloned.
                * ----------------------------------------------------------------- */
-              type Ptr<T, EV, EK, V> = HashMap<*const Mutex<Trie<EK, EV, T>>, V>;
-              type PtrSet<T, EV, EK>      = HashSet  <*const Mutex<Trie<EK, EV, T>>>;
+                  // EK, EV, T are from the surrounding impl block. V is from special_map's signature.
+                  type NodePtr = *const Mutex<Trie<EK, EV, T>>;
+                  // Type for the adjacency list stored in the 'adj' map
+                  type AdjacencyList = Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>;
+
+                  // Generic HashMap type using NodePtr as the key
+                  type GenericMap<MapValue> = HashMap<NodePtr, MapValue>;
+                  // HashSet type for NodePtr
+                  type NodePointerSet = HashSet<NodePtr>;
+
 
               /* -----------------------------------------------------------------
                * 1.  Discover the *reachable* sub-graph, while simultaneously
@@ -491,10 +499,10 @@ local_system:
                *       – `in_deg` : number of reachable parents for each node.
                *       – `adj`    : outgoing (EK , EV , Arc<…>) edges per node.
                * ----------------------------------------------------------------- */
-              let mut in_deg : Ptr<usize, EV, EK, V>                                   = Ptr::new();
-              let mut adj    : Ptr<Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>, EV, EK, V> = Ptr::new();
+              let mut in_deg : GenericMap<usize> = GenericMap::new();
+              let mut adj    : GenericMap<AdjacencyList> = GenericMap::new();
 
-              let mut seen : PtrSet<T, EV, EK>  = PtrSet::new();
+              let mut seen   : NodePointerSet = NodePointerSet::new();
               let mut q    : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
 
               // Seed the discovery queue with the user-supplied start nodes
@@ -538,13 +546,14 @@ local_system:
                * 2.  State needed while running the real traversal
                * ----------------------------------------------------------------- */
               //   – accumulated V per node (via merge)
-              let mut value_map : Ptr<V, EV, EK, V> = Ptr::new();
+              let mut value_map    : GenericMap<V> = GenericMap::new(); // V is special_map's V
               //   – number of parents already processed
-              let mut done_parents : Ptr<usize, EV, EK, V> = Ptr::new();
+              let mut done_parents : GenericMap<usize> = GenericMap::new();
               //   – final “ready” queue
-              let mut ready : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
+              let mut ready : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new(); // This line is already correct
               //   – processed flag
-              let mut processed : PtrSet<T, EV, EK> = PtrSet::new();
+              let mut processed    : NodePointerSet = NodePointerSet::new();
+
 
               // Initialise with the user-supplied start set (merging duplicates)
               for (n, v0) in initial_nodes_and_values {
@@ -2663,8 +2672,16 @@ local_system:
                * 0.  Small helper maps keyed by the raw Arc pointer so that
                *     identity is stable even if Arcs are cloned.
                * ----------------------------------------------------------------- */
-              type Ptr<T, EV, EK, V> = HashMap<*const Mutex<Trie<EK, EV, T>>, V>;
-              type PtrSet<T, EV, EK>      = HashSet  <*const Mutex<Trie<EK, EV, T>>>;
+                  // EK, EV, T are from the surrounding impl block. V is from special_map's signature.
+                  type NodePtr = *const Mutex<Trie<EK, EV, T>>;
+                  // Type for the adjacency list stored in the 'adj' map
+                  type AdjacencyList = Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>;
+
+                  // Generic HashMap type using NodePtr as the key
+                  type GenericMap<MapValue> = HashMap<NodePtr, MapValue>;
+                  // HashSet type for NodePtr
+                  type NodePointerSet = HashSet<NodePtr>;
+
 
               /* -----------------------------------------------------------------
                * 1.  Discover the *reachable* sub-graph, while simultaneously
@@ -2672,10 +2689,10 @@ local_system:
                *       – `in_deg` : number of reachable parents for each node.
                *       – `adj`    : outgoing (EK , EV , Arc<…>) edges per node.
                * ----------------------------------------------------------------- */
-              let mut in_deg : Ptr<usize, EV, EK, V>                                   = Ptr::new();
-              let mut adj    : Ptr<Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>, EV, EK, V> = Ptr::new();
+              let mut in_deg : GenericMap<usize> = GenericMap::new();
+              let mut adj    : GenericMap<AdjacencyList> = GenericMap::new();
 
-              let mut seen : PtrSet<T, EV, EK>  = PtrSet::new();
+              let mut seen   : NodePointerSet = NodePointerSet::new();
               let mut q    : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
 
               // Seed the discovery queue with the user-supplied start nodes
@@ -2719,13 +2736,14 @@ local_system:
                * 2.  State needed while running the real traversal
                * ----------------------------------------------------------------- */
               //   – accumulated V per node (via merge)
-              let mut value_map : Ptr<V, EV, EK, V> = Ptr::new();
+              let mut value_map    : GenericMap<V> = GenericMap::new(); // V is special_map's V
               //   – number of parents already processed
-              let mut done_parents : Ptr<usize, EV, EK, V> = Ptr::new();
+              let mut done_parents : GenericMap<usize> = GenericMap::new();
               //   – final “ready” queue
-              let mut ready : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
+              let mut ready : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new(); // This line is already correct
               //   – processed flag
-              let mut processed : PtrSet<T, EV, EK> = PtrSet::new();
+              let mut processed    : NodePointerSet = NodePointerSet::new();
+
 
               // Initialise with the user-supplied start set (merging duplicates)
               for (n, v0) in initial_nodes_and_values {
@@ -4869,8 +4887,16 @@ messages:
                * 0.  Small helper maps keyed by the raw Arc pointer so that
                *     identity is stable even if Arcs are cloned.
                * ----------------------------------------------------------------- */
-              type Ptr<T, EV, EK, V> = HashMap<*const Mutex<Trie<EK, EV, T>>, V>;
-              type PtrSet<T, EV, EK>      = HashSet  <*const Mutex<Trie<EK, EV, T>>>;
+                  // EK, EV, T are from the surrounding impl block. V is from special_map's signature.
+                  type NodePtr = *const Mutex<Trie<EK, EV, T>>;
+                  // Type for the adjacency list stored in the 'adj' map
+                  type AdjacencyList = Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>;
+
+                  // Generic HashMap type using NodePtr as the key
+                  type GenericMap<MapValue> = HashMap<NodePtr, MapValue>;
+                  // HashSet type for NodePtr
+                  type NodePointerSet = HashSet<NodePtr>;
+
 
               /* -----------------------------------------------------------------
                * 1.  Discover the *reachable* sub-graph, while simultaneously
@@ -4878,10 +4904,10 @@ messages:
                *       – `in_deg` : number of reachable parents for each node.
                *       – `adj`    : outgoing (EK , EV , Arc<…>) edges per node.
                * ----------------------------------------------------------------- */
-              let mut in_deg : Ptr<usize, EV, EK, V>                                   = Ptr::new();
-              let mut adj    : Ptr<Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>, EV, EK, V> = Ptr::new();
+              let mut in_deg : GenericMap<usize> = GenericMap::new();
+              let mut adj    : GenericMap<AdjacencyList> = GenericMap::new();
 
-              let mut seen : PtrSet<T, EV, EK>  = PtrSet::new();
+              let mut seen   : NodePointerSet = NodePointerSet::new();
               let mut q    : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
 
               // Seed the discovery queue with the user-supplied start nodes
@@ -4925,13 +4951,14 @@ messages:
                * 2.  State needed while running the real traversal
                * ----------------------------------------------------------------- */
               //   – accumulated V per node (via merge)
-              let mut value_map : Ptr<V, EV, EK, V> = Ptr::new();
+              let mut value_map    : GenericMap<V> = GenericMap::new(); // V is special_map's V
               //   – number of parents already processed
-              let mut done_parents : Ptr<usize, EV, EK, V> = Ptr::new();
+              let mut done_parents : GenericMap<usize> = GenericMap::new();
               //   – final “ready” queue
-              let mut ready : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
+              let mut ready : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new(); // This line is already correct
               //   – processed flag
-              let mut processed : PtrSet<T, EV, EK> = PtrSet::new();
+              let mut processed    : NodePointerSet = NodePointerSet::new();
+
 
               // Initialise with the user-supplied start set (merging duplicates)
               for (n, v0) in initial_nodes_and_values {
@@ -6578,861 +6605,185 @@ messages:
   - user: |-
       RUSTFLAGS=-Awarnings /Users/isaacbreen/.cargo/bin/cargo test --color=always --package sep1 --lib constraint::tests::test_precompute_with_gpt2_vocab --profile test --no-fail-fast -- unstable-options --show-output
          Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
-      error[E0308]: mismatched types
-         --> src/datastructures/trie.rs:505:23
+      error[E0401]: can't use generic parameters from outer item
+         --> src/datastructures/trie.rs:479:46
           |
       452 | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-          |      - found this type parameter
+          |                -- type parameter from outer item
       ...
-      505 |             adj.entry(node_ptr).or_default();
-          |                 ----- ^^^^^^^^ expected `*const Mutex<Trie<EK, EV, Vec<...>>>`, found `*const Mutex<Trie<EK, EV, T>>`
-          |                 |
-          |                 arguments to this method are incorrect
-          |
-          = note: expected raw pointer `*const std::sync::Mutex<trie::Trie<EK, EV, Vec<(EK, EV, std::sync::Arc<std::sync::Mutex<trie::Trie<EK, EV, T>>>)>>>`
-                     found raw pointer `*const std::sync::Mutex<trie::Trie<EK, EV, T>>`
-      help: the return type of this call is `*const std::sync::Mutex<trie::Trie<EK, EV, T>>` due to the type of the argument passed
-         --> src/datastructures/trie.rs:505:13
-          |
-      505 |             adj.entry(node_ptr).or_default();
-          |             ^^^^^^^^^^--------^
-          |                       |
-          |                       this argument influences the return type of `entry`
-      note: method defined here
-         --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:872:12
-          |
-      872 |     pub fn entry(&mut self, key: K) -> Entry<'_, K, V> {
-          |            ^^^^^
-
-      error[E0599]: the method `or_default` exists for enum `Entry<'_, *const Mutex<Trie<EK, EV, Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>>>, V>`, but its trait bounds were not satisfied
-         --> src/datastructures/trie.rs:505:33
-          |
-      505 |             adj.entry(node_ptr).or_default();
-          |                                 ^^^^^^^^^^ method cannot be called due to unsatisfied trait bounds
-          |
-          = note: the following trait bounds were not satisfied:
-                  `V: Default`
-
-      error[E0308]: mismatched types
-         --> src/datastructures/trie.rs:506:26
-          |
-      452 | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-          |      - found this type parameter
-      ...
-      506 |             in_deg.entry(node_ptr).or_insert(0);
-          |                    ----- ^^^^^^^^ expected `*const Mutex<Trie<EK, EV, usize>>`, found `*const Mutex<Trie<EK, EV, T>>`
-          |                    |
-          |                    arguments to this method are incorrect
-          |
-          = note: expected raw pointer `*const std::sync::Mutex<trie::Trie<EK, EV, usize>>`
-                     found raw pointer `*const std::sync::Mutex<trie::Trie<EK, EV, T>>`
-      help: the return type of this call is `*const std::sync::Mutex<trie::Trie<EK, EV, T>>` due to the type of the argument passed
-         --> src/datastructures/trie.rs:506:13
-          |
-      506 |             in_deg.entry(node_ptr).or_insert(0);
-          |             ^^^^^^^^^^^^^--------^
-          |                          |
-          |                          this argument influences the return type of `entry`
-      note: method defined here
-         --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:872:12
-          |
-      872 |     pub fn entry(&mut self, key: K) -> Entry<'_, K, V> {
-          |            ^^^^^
-
-      error[E0308]: mismatched types
-          --> src/datastructures/trie.rs:506:46
-           |
-      466  |     pub fn special_map<V: Clone>(
-           |                        - expected this type parameter
-      ...
-      506  |             in_deg.entry(node_ptr).or_insert(0);
-           |                                    --------- ^ expected type parameter `V`, found integer
-           |                                    |
-           |                                    arguments to this method are incorrect
-           |
-           = note: expected type parameter `V`
-                                found type `{integer}`
-      help: the return type of this call is `{integer}` due to the type of the argument passed
-          --> src/datastructures/trie.rs:506:13
-           |
-      506  |             in_deg.entry(node_ptr).or_insert(0);
-           |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-^
-           |                                              |
-           |                                              this argument influences the return type of `or_insert`
-      note: method defined here
-          --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:2798:12
-           |
-      2798 |     pub fn or_insert(self, default: V) -> &'a mut V {
-           |            ^^^^^^^^^
-
-      error[E0308]: arguments to this method are incorrect
-          --> src/datastructures/trie.rs:517:17
-           |
-      452  | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-           |      - found this type parameter
-      ...
-      466  |     pub fn special_map<V: Clone>(
-           |                        - expected this type parameter
-      ...
-      517  |             adj.insert(node_ptr, outgoing.clone());
-           |                 ^^^^^^
-           |
-      note: expected `*const Mutex<Trie<EK, EV, Vec<...>>>`, found `*const Mutex<Trie<EK, EV, T>>`
-          --> src/datastructures/trie.rs:517:24
-           |
-      517  |             adj.insert(node_ptr, outgoing.clone());
-           |                        ^^^^^^^^
-           = note: expected raw pointer `*const std::sync::Mutex<trie::Trie<EK, EV, Vec<(EK, EV, std::sync::Arc<std::sync::Mutex<trie::Trie<EK, EV, T>>>)>>>`
-                      found raw pointer `*const std::sync::Mutex<trie::Trie<EK, EV, T>>`
-      note: expected type parameter `V`, found `Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>`
-          --> src/datastructures/trie.rs:517:34
-           |
-      517  |             adj.insert(node_ptr, outgoing.clone());
-           |                                  ^^^^^^^^^^^^^^^^
-           = note: expected type parameter `V`
-                              found struct `Vec<(EK, EV, std::sync::Arc<std::sync::Mutex<trie::Trie<EK, EV, T>>>)>`
-      help: the return type of this call is `Vec<(EK, EV, std::sync::Arc<std::sync::Mutex<trie::Trie<EK, EV, T>>>)>` due to the type of the argument passed
-          --> src/datastructures/trie.rs:517:13
-           |
-      517  |             adj.insert(node_ptr, outgoing.clone());
-           |             ^^^^^^^^^^^^^^^^^^^^^----------------^
-           |                                  |
-           |                                  this argument influences the return type of `insert`
-      note: method defined here
-          --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:1189:12
-           |
-      1189 |     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
-           |            ^^^^^^
-
-      error[E0308]: mismatched types
-         --> src/datastructures/trie.rs:522:31
-          |
-      452 | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-          |      - found this type parameter
-      ...
-      522 |                 *in_deg.entry(child_ptr).or_insert(0) += 1;
-          |                         ----- ^^^^^^^^^ expected `*const Mutex<Trie<EK, EV, usize>>`, found `*const Mutex<Trie<EK, EV, T>>`
+      479 |             type NodePtr = *const Mutex<Trie<EK, EV, T>>;
+          |                         -                    ^^ use of generic parameter from outer item
           |                         |
-          |                         arguments to this method are incorrect
+          |                         help: try introducing a local generic parameter here: `<EK>`
+
+      error[E0401]: can't use generic parameters from outer item
+         --> src/datastructures/trie.rs:479:50
           |
-          = note: expected raw pointer `*const std::sync::Mutex<trie::Trie<EK, EV, usize>>`
-                     found raw pointer `*const std::sync::Mutex<trie::Trie<EK, EV, T>>`
-      help: the return type of this call is `*const std::sync::Mutex<trie::Trie<EK, EV, T>>` due to the type of the argument passed
-         --> src/datastructures/trie.rs:522:18
+      452 | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
+          |                                 -- type parameter from outer item
+      ...
+      479 |             type NodePtr = *const Mutex<Trie<EK, EV, T>>;
+          |                         -                        ^^ use of generic parameter from outer item
+          |                         |
+          |                         help: try introducing a local generic parameter here: `<EV>`
+
+      error[E0401]: can't use generic parameters from outer item
+         --> src/datastructures/trie.rs:479:54
           |
-      522 |                 *in_deg.entry(child_ptr).or_insert(0) += 1;
-          |                  ^^^^^^^^^^^^^---------^
+      452 | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
+          |      - type parameter from outer item
+      ...
+      479 |             type NodePtr = *const Mutex<Trie<EK, EV, T>>;
+          |                         -                            ^ use of generic parameter from outer item
+          |                         |
+          |                         help: try introducing a local generic parameter here: `<T>`
+
+      error[E0401]: can't use generic parameters from outer item
+         --> src/datastructures/trie.rs:481:39
+          |
+      452 | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
+          |                -- type parameter from outer item
+      ...
+      481 |             type AdjacencyList = Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>;
+          |                               -       ^^ use of generic parameter from outer item
           |                               |
-          |                               this argument influences the return type of `entry`
-      note: method defined here
-         --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:872:12
-          |
-      872 |     pub fn entry(&mut self, key: K) -> Entry<'_, K, V> {
-          |            ^^^^^
+          |                               help: try introducing a local generic parameter here: `<EK>`
 
-      error[E0308]: mismatched types
-          --> src/datastructures/trie.rs:522:52
-           |
-      466  |     pub fn special_map<V: Clone>(
-           |                        - expected this type parameter
-      ...
-      522  |                 *in_deg.entry(child_ptr).or_insert(0) += 1;
-           |                                          --------- ^ expected type parameter `V`, found integer
-           |                                          |
-           |                                          arguments to this method are incorrect
-           |
-           = note: expected type parameter `V`
-                                found type `{integer}`
-      help: the return type of this call is `{integer}` due to the type of the argument passed
-          --> src/datastructures/trie.rs:522:18
-           |
-      522  |                 *in_deg.entry(child_ptr).or_insert(0) += 1;
-           |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-^
-           |                                                    |
-           |                                                    this argument influences the return type of `or_insert`
-      note: method defined here
-          --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:2798:12
-           |
-      2798 |     pub fn or_insert(self, default: V) -> &'a mut V {
-           |            ^^^^^^^^^
-
-      error[E0368]: binary assignment operation `+=` cannot be applied to type `V`
-         --> src/datastructures/trie.rs:522:17
-          |
-      522 |                 *in_deg.entry(child_ptr).or_insert(0) += 1;
-          |                 -------------------------------------^^^^^
-          |                 |
-          |                 cannot use `+=` on type `V`
-          |
-      help: consider further restricting type parameter `V` with trait `AddAssign`
-          |
-      466 |     pub fn special_map<V: Clone + std::ops::AddAssign<i32>>(
-          |                                 ++++++++++++++++++++++++++
-
-      error[E0308]: mismatched types
-          --> src/datastructures/trie.rs:545:37
-           |
-      452  | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-           |      - found type parameter
-      ...
-      466  |     pub fn special_map<V: Clone>(
-           |                        - expected type parameter
-      ...
-      545  |             match value_map.get_mut(&p) {
-           |                             ------- ^^ expected `&*const Mutex<Trie<EK, EV, V>>`, found `&*const Mutex<Trie<EK, EV, T>>`
-           |                             |
-           |                             arguments to this method are incorrect
-           |
-           = note: expected reference `&*const std::sync::Mutex<trie::Trie<EK, EV, V>>`
-                      found reference `&*const std::sync::Mutex<trie::Trie<EK, EV, T>>`
-           = note: a type parameter was expected, but a different one was found; you might be missing a type parameter or trait bound
-           = note: for more information, visit https://doc.rust-lang.org/book/ch10-02-traits.html#traits-as-parameters
-      note: method defined here
-          --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:1153:12
-           |
-      1153 |     pub fn get_mut<Q: ?Sized>(&mut self, k: &Q) -> Option<&mut V>
-           |            ^^^^^^^
-
-      error[E0308]: mismatched types
-          --> src/datastructures/trie.rs:547:54
-           |
-      452  | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-           |      - found type parameter
-      ...
-      466  |     pub fn special_map<V: Clone>(
-           |                        - expected type parameter
-      ...
-      547  |                 None           => { value_map.insert(p, v0); },
-           |                                               ------ ^ expected `*const Mutex<Trie<EK, EV, V>>`, found `*const Mutex<Trie<EK, EV, T>>`
-           |                                               |
-           |                                               arguments to this method are incorrect
-           |
-           = note: expected raw pointer `*const std::sync::Mutex<trie::Trie<EK, EV, V>>`
-                      found raw pointer `*const std::sync::Mutex<trie::Trie<EK, EV, T>>`
-           = note: a type parameter was expected, but a different one was found; you might be missing a type parameter or trait bound
-           = note: for more information, visit https://doc.rust-lang.org/book/ch10-02-traits.html#traits-as-parameters
-      note: method defined here
-          --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:1189:12
-           |
-      1189 |     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
-           |            ^^^^^^
-
-      error[E0308]: mismatched types
-         --> src/datastructures/trie.rs:565:33
+      error[E0401]: can't use generic parameters from outer item
+         --> src/datastructures/trie.rs:481:43
           |
       452 | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-          |      - found this type parameter
+          |                                 -- type parameter from outer item
       ...
-      565 |             if done_parents.get(&node_ptr).copied().unwrap_or(0)
-          |                             --- ^^^^^^^^^ expected `&*const Mutex<Trie<EK, EV, usize>>`, found `&*const Mutex<Trie<EK, EV, T>>`
-          |                             |
-          |                             arguments to this method are incorrect
-          |
-          = note: expected reference `&*const std::sync::Mutex<trie::Trie<EK, EV, usize>>`
-                     found reference `&*const std::sync::Mutex<trie::Trie<EK, EV, T>>`
-      note: method defined here
-         --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:894:12
-          |
-      894 |     pub fn get<Q: ?Sized>(&self, k: &Q) -> Option<&V>
-          |            ^^^
+      481 |             type AdjacencyList = Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>;
+          |                               -           ^^ use of generic parameter from outer item
+          |                               |
+          |                               help: try introducing a local generic parameter here: `<EV>`
 
-      error[E0277]: the trait bound `V: std::marker::Copy` is not satisfied
-          --> src/datastructures/trie.rs:565:44
-           |
-      565  |             if done_parents.get(&node_ptr).copied().unwrap_or(0)
-           |                                            ^^^^^^ the trait `std::marker::Copy` is not implemented for `V`
-           |
-      note: required by a bound in `std::option::Option::<&T>::copied`
-          --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:1894:12
-           |
-      1892 |     pub const fn copied(self) -> Option<T>
-           |                  ------ required by a bound in this associated function
-      1893 |     where
-      1894 |         T: Copy,
-           |            ^^^^ required by this bound in `Option::<&T>::copied`
-      help: consider further restricting type parameter `V` with trait `Copy`
-           |
-      466  |     pub fn special_map<V: Clone + std::marker::Copy>(
-           |                                 +++++++++++++++++++
-
-      error[E0308]: mismatched types
-         --> src/datastructures/trie.rs:565:63
-          |
-      466 |     pub fn special_map<V: Clone>(
-          |                        - expected this type parameter
-      ...
-      565 |             if done_parents.get(&node_ptr).copied().unwrap_or(0)
-          |                                                     --------- ^ expected type parameter `V`, found integer
-          |                                                     |
-          |                                                     arguments to this method are incorrect
-          |
-          = note: expected type parameter `V`
-                               found type `{integer}`
-      help: the return type of this call is `{integer}` due to the type of the argument passed
-         --> src/datastructures/trie.rs:565:16
-          |
-      565 |             if done_parents.get(&node_ptr).copied().unwrap_or(0)
-          |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-^
-          |                                                               |
-          |                                                               this argument influences the return type of `unwrap_or`
-      note: method defined here
-         --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:998:12
-          |
-      998 |     pub fn unwrap_or(self, default: T) -> T {
-          |            ^^^^^^^^^
-
-      error[E0308]: mismatched types
-         --> src/datastructures/trie.rs:566:30
+      error[E0401]: can't use generic parameters from outer item
+         --> src/datastructures/trie.rs:481:62
           |
       452 | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-          |      - found this type parameter
+          |                -- type parameter from outer item
       ...
-      566 |                < *in_deg.get(&node_ptr).unwrap_or(&0) {
-          |                          --- ^^^^^^^^^ expected `&*const Mutex<Trie<EK, EV, usize>>`, found `&*const Mutex<Trie<EK, EV, T>>`
-          |                          |
-          |                          arguments to this method are incorrect
-          |
-          = note: expected reference `&*const std::sync::Mutex<trie::Trie<EK, EV, usize>>`
-                     found reference `&*const std::sync::Mutex<trie::Trie<EK, EV, T>>`
-      note: method defined here
-         --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:894:12
-          |
-      894 |     pub fn get<Q: ?Sized>(&self, k: &Q) -> Option<&V>
-          |            ^^^
+      481 |             type AdjacencyList = Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>;
+          |                               -                              ^^ use of generic parameter from outer item
+          |                               |
+          |                               help: try introducing a local generic parameter here: `<EK>`
 
-      error[E0308]: mismatched types
-         --> src/datastructures/trie.rs:566:51
-          |
-      466 |     pub fn special_map<V: Clone>(
-          |                        - expected this type parameter
-      ...
-      566 |                < *in_deg.get(&node_ptr).unwrap_or(&0) {
-          |                                         --------- ^^ expected `&V`, found `&{integer}`
-          |                                         |
-          |                                         arguments to this method are incorrect
-          |
-          = note: expected reference `&V`
-                     found reference `&{integer}`
-      help: the return type of this call is `&{integer}` due to the type of the argument passed
-         --> src/datastructures/trie.rs:566:19
-          |
-      566 |                < *in_deg.get(&node_ptr).unwrap_or(&0) {
-          |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--^
-          |                                                   |
-          |                                                   this argument influences the return type of `unwrap_or`
-      note: method defined here
-         --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:998:12
-          |
-      998 |     pub fn unwrap_or(self, default: T) -> T {
-          |            ^^^^^^^^^
-
-      error[E0369]: binary operation `<` cannot be applied to type `V`
-         --> src/datastructures/trie.rs:566:16
-          |
-      565 |             if done_parents.get(&node_ptr).copied().unwrap_or(0)
-          |                ------------------------------------------------- V
-      566 |                < *in_deg.get(&node_ptr).unwrap_or(&0) {
-          |                ^ ------------------------------------ V
-          |
-      help: consider further restricting type parameter `V` with trait `PartialOrd`
-          |
-      466 |     pub fn special_map<V: Clone + std::cmp::PartialOrd>(
-          |                                 ++++++++++++++++++++++
-
-      error[E0308]: mismatched types
-          --> src/datastructures/trie.rs:573:57
-           |
-      452  | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-           |      - found type parameter
-      ...
-      466  |     pub fn special_map<V: Clone>(
-           |                        - expected type parameter
-      ...
-      573  |             let mut current_v = match value_map.get_mut(&node_ptr) {
-           |                                                 ------- ^^^^^^^^^ expected `&*const Mutex<Trie<EK, EV, V>>`, found `&*const Mutex<Trie<EK, EV, T>>`
-           |                                                 |
-           |                                                 arguments to this method are incorrect
-           |
-           = note: expected reference `&*const std::sync::Mutex<trie::Trie<EK, EV, V>>`
-                      found reference `&*const std::sync::Mutex<trie::Trie<EK, EV, T>>`
-           = note: a type parameter was expected, but a different one was found; you might be missing a type parameter or trait bound
-           = note: for more information, visit https://doc.rust-lang.org/book/ch10-02-traits.html#traits-as-parameters
-      note: method defined here
-          --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:1153:12
-           |
-      1153 |     pub fn get_mut<Q: ?Sized>(&mut self, k: &Q) -> Option<&mut V>
-           |            ^^^^^^^
-
-      error[E0308]: mismatched types
-         --> src/datastructures/trie.rs:578:58
+      error[E0401]: can't use generic parameters from outer item
+         --> src/datastructures/trie.rs:481:66
           |
       452 | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-          |      - found this type parameter
+          |                                 -- type parameter from outer item
       ...
-      578 |                     for (_ek, _ev, child_arc) in adj.get(&node_ptr).into_iter().flatten() {
-          |                                                      --- ^^^^^^^^^ expected `&*const Mutex<Trie<EK, EV, Vec<...>>>`, found `&*const Mutex<Trie<EK, EV, T>>`
-          |                                                      |
-          |                                                      arguments to this method are incorrect
-          |
-          = note: expected reference `&*const std::sync::Mutex<trie::Trie<EK, EV, Vec<(EK, EV, std::sync::Arc<std::sync::Mutex<trie::Trie<EK, EV, T>>>)>>>`
-                     found reference `&*const std::sync::Mutex<trie::Trie<EK, EV, T>>`
-      note: method defined here
-         --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:894:12
-          |
-      894 |     pub fn get<Q: ?Sized>(&self, k: &Q) -> Option<&V>
-          |            ^^^
+      481 |             type AdjacencyList = Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>;
+          |                               -                                  ^^ use of generic parameter from outer item
+          |                               |
+          |                               help: try introducing a local generic parameter here: `<EV>`
 
-      error[E0277]: `&V` is not an iterator
-          --> src/datastructures/trie.rs:578:81
-           |
-      578  |                     for (_ek, _ev, child_arc) in adj.get(&node_ptr).into_iter().flatten() {
-           |                                                                                 ^^^^^^^ `&V` is not an iterator
-           |
-           = help: the trait `Iterator` is not implemented for `&V`
-           = help: the trait `Iterator` is implemented for `&mut I`
-           = note: required for `&V` to implement `IntoIterator`
-      note: required by a bound in `flatten`
-          --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:1517:21
-           |
-      1514 |     fn flatten(self) -> Flatten<Self>
-           |        ------- required by a bound in this associated function
-      ...
-      1517 |         Self::Item: IntoIterator,
-           |                     ^^^^^^^^^^^^ required by this bound in `Iterator::flatten`
-
-      error[E0277]: `&V` is not an iterator
-         --> src/datastructures/trie.rs:578:50
-          |
-      578 |                     for (_ek, _ev, child_arc) in adj.get(&node_ptr).into_iter().flatten() {
-          |                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&V` is not an iterator
-          |
-          = help: the trait `Iterator` is not implemented for `&V`
-          = help: the trait `Iterator` is implemented for `&mut I`
-          = note: required for `Flatten<std::option::IntoIter<&V>>` to implement `Iterator`
-          = note: required for `Flatten<std::option::IntoIter<&V>>` to implement `IntoIterator`
-
-      error[E0308]: mismatched types
-          --> src/datastructures/trie.rs:580:61
-           |
-      466  |     pub fn special_map<V: Clone>(
-           |                        - expected this type parameter
-      ...
-      580  |                         *done_parents.entry(cptr).or_insert(0) += 1;
-           |                                                   --------- ^ expected type parameter `V`, found integer
-           |                                                   |
-           |                                                   arguments to this method are incorrect
-           |
-           = note: expected type parameter `V`
-                                found type `{integer}`
-      help: the return type of this call is `{integer}` due to the type of the argument passed
-          --> src/datastructures/trie.rs:580:26
-           |
-      580  |                         *done_parents.entry(cptr).or_insert(0) += 1;
-           |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-^
-           |                                                             |
-           |                                                             this argument influences the return type of `or_insert`
-      note: method defined here
-          --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:2798:12
-           |
-      2798 |     pub fn or_insert(self, default: V) -> &'a mut V {
-           |            ^^^^^^^^^
-
-      error[E0368]: binary assignment operation `+=` cannot be applied to type `V`
-         --> src/datastructures/trie.rs:580:25
-          |
-      580 |                         *done_parents.entry(cptr).or_insert(0) += 1;
-          |                         --------------------------------------^^^^^
-          |                         |
-          |                         cannot use `+=` on type `V`
-          |
-      help: consider further restricting type parameter `V` with trait `AddAssign`
-          |
-      466 |     pub fn special_map<V: Clone + std::ops::AddAssign<i32>>(
-          |                                 ++++++++++++++++++++++++++
-
-      error[E0308]: mismatched types
-         --> src/datastructures/trie.rs:581:48
+      error[E0401]: can't use generic parameters from outer item
+         --> src/datastructures/trie.rs:481:70
           |
       452 | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-          |      - expected this type parameter
+          |      - type parameter from outer item
       ...
-      581 |                         if !processed.contains(&cptr) {
-          |                                       -------- ^^^^^ expected `&*const Mutex<Trie<EK, EV, T>>`, found `&*const Mutex<Trie<EK, EV, usize>>`
-          |                                       |
-          |                                       arguments to this method are incorrect
-          |
-          = note: expected reference `&*const std::sync::Mutex<trie::Trie<EK, EV, T>>`
-                     found reference `&*const std::sync::Mutex<trie::Trie<EK, EV, usize>>`
-      note: method defined here
-         --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/set.rs:689:12
-          |
-      689 |     pub fn contains<Q: ?Sized>(&self, value: &Q) -> bool
-          |            ^^^^^^^^
-
-      error[E0308]: mismatched types
-          --> src/datastructures/trie.rs:582:45
-           |
-      452  | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-           |      - expected this type parameter
-      ...
-      582  |                             ready.push_back(child_arc.clone());
-           |                                   --------- ^^^^^^^^^^^^^^^^^ expected `Arc<Mutex<Trie<EK, EV, T>>>`, found `Arc<Mutex<Trie<EK, EV, usize>>, _>`
-           |                                   |
-           |                                   arguments to this method are incorrect
-           |
-           = note: expected struct `std::sync::Arc<std::sync::Mutex<trie::Trie<_, _, T>>, std::alloc::Global>`
-                      found struct `std::sync::Arc<std::sync::Mutex<trie::Trie<_, _, usize>>, _>`
-      note: method defined here
-          --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/collections/vec_deque/mod.rs:1827:12
-           |
-      1827 |     pub fn push_back(&mut self, value: T) {
-           |            ^^^^^^^^^
-
-      error[E0308]: mismatched types
-         --> src/datastructures/trie.rs:601:54
-          |
-      452 | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-          |      - found this type parameter
-      ...
-      601 |                 for (_ek, _ev, child_arc) in adj.get(&node_ptr).into_iter().flatten() {
-          |                                                  --- ^^^^^^^^^ expected `&*const Mutex<Trie<EK, EV, Vec<...>>>`, found `&*const Mutex<Trie<EK, EV, T>>`
-          |                                                  |
-          |                                                  arguments to this method are incorrect
-          |
-          = note: expected reference `&*const std::sync::Mutex<trie::Trie<EK, EV, Vec<(EK, EV, std::sync::Arc<std::sync::Mutex<trie::Trie<EK, EV, T>>>)>>>`
-                     found reference `&*const std::sync::Mutex<trie::Trie<EK, EV, T>>`
-      note: method defined here
-         --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:894:12
-          |
-      894 |     pub fn get<Q: ?Sized>(&self, k: &Q) -> Option<&V>
-          |            ^^^
-
-      error[E0277]: `&V` is not an iterator
-          --> src/datastructures/trie.rs:601:77
-           |
-      601  |                 for (_ek, _ev, child_arc) in adj.get(&node_ptr).into_iter().flatten() {
-           |                                                                             ^^^^^^^ `&V` is not an iterator
-           |
-           = help: the trait `Iterator` is not implemented for `&V`
-           = help: the trait `Iterator` is implemented for `&mut I`
-           = note: required for `&V` to implement `IntoIterator`
-      note: required by a bound in `flatten`
-          --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:1517:21
-           |
-      1514 |     fn flatten(self) -> Flatten<Self>
-           |        ------- required by a bound in this associated function
-      ...
-      1517 |         Self::Item: IntoIterator,
-           |                     ^^^^^^^^^^^^ required by this bound in `Iterator::flatten`
-
-      error[E0277]: `&V` is not an iterator
-         --> src/datastructures/trie.rs:601:46
-          |
-      601 |                 for (_ek, _ev, child_arc) in adj.get(&node_ptr).into_iter().flatten() {
-          |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&V` is not an iterator
-          |
-          = help: the trait `Iterator` is not implemented for `&V`
-          = help: the trait `Iterator` is implemented for `&mut I`
-          = note: required for `Flatten<std::option::IntoIter<&V>>` to implement `Iterator`
-          = note: required for `Flatten<std::option::IntoIter<&V>>` to implement `IntoIterator`
-
-      error[E0308]: mismatched types
-          --> src/datastructures/trie.rs:603:57
-           |
-      466  |     pub fn special_map<V: Clone>(
-           |                        - expected this type parameter
-      ...
-      603  |                     *done_parents.entry(cptr).or_insert(0) += 1;
-           |                                               --------- ^ expected type parameter `V`, found integer
-           |                                               |
-           |                                               arguments to this method are incorrect
-           |
-           = note: expected type parameter `V`
-                                found type `{integer}`
-      help: the return type of this call is `{integer}` due to the type of the argument passed
-          --> src/datastructures/trie.rs:603:22
-           |
-      603  |                     *done_parents.entry(cptr).or_insert(0) += 1;
-           |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-^
-           |                                                         |
-           |                                                         this argument influences the return type of `or_insert`
-      note: method defined here
-          --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:2798:12
-           |
-      2798 |     pub fn or_insert(self, default: V) -> &'a mut V {
-           |            ^^^^^^^^^
-
-      error[E0368]: binary assignment operation `+=` cannot be applied to type `V`
-         --> src/datastructures/trie.rs:603:21
-          |
-      603 |                     *done_parents.entry(cptr).or_insert(0) += 1;
-          |                     --------------------------------------^^^^^
-          |                     |
-          |                     cannot use `+=` on type `V`
-          |
-      help: consider further restricting type parameter `V` with trait `AddAssign`
-          |
-      466 |     pub fn special_map<V: Clone + std::ops::AddAssign<i32>>(
-          |                                 ++++++++++++++++++++++++++
-
-      error[E0308]: mismatched types
-         --> src/datastructures/trie.rs:604:44
-          |
-      452 | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-          |      - expected this type parameter
-      ...
-      604 |                     if !processed.contains(&cptr) {
-          |                                   -------- ^^^^^ expected `&*const Mutex<Trie<EK, EV, T>>`, found `&*const Mutex<Trie<EK, EV, usize>>`
-          |                                   |
-          |                                   arguments to this method are incorrect
-          |
-          = note: expected reference `&*const std::sync::Mutex<trie::Trie<EK, EV, T>>`
-                     found reference `&*const std::sync::Mutex<trie::Trie<EK, EV, usize>>`
-      note: method defined here
-         --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/set.rs:689:12
-          |
-      689 |     pub fn contains<Q: ?Sized>(&self, value: &Q) -> bool
-          |            ^^^^^^^^
-
-      error[E0308]: mismatched types
-          --> src/datastructures/trie.rs:605:41
-           |
-      452  | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-           |      - expected this type parameter
-      ...
-      605  |                         ready.push_back(child_arc.clone());
-           |                               --------- ^^^^^^^^^^^^^^^^^ expected `Arc<Mutex<Trie<EK, EV, T>>>`, found `Arc<Mutex<Trie<EK, EV, usize>>, _>`
-           |                               |
-           |                               arguments to this method are incorrect
-           |
-           = note: expected struct `std::sync::Arc<std::sync::Mutex<trie::Trie<_, _, T>>, std::alloc::Global>`
-                      found struct `std::sync::Arc<std::sync::Mutex<trie::Trie<_, _, usize>>, _>`
-      note: method defined here
-          --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/collections/vec_deque/mod.rs:1827:12
-           |
-      1827 |     pub fn push_back(&mut self, value: T) {
-           |            ^^^^^^^^^
-
-      error[E0308]: mismatched types
-         --> src/datastructures/trie.rs:614:48
-          |
-      452 | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-          |      - found this type parameter
-      ...
-      614 |             for (ek, ev, child_arc) in adj.get(&node_ptr).into_iter().flatten().cloned() {
-          |                                            --- ^^^^^^^^^ expected `&*const Mutex<Trie<EK, EV, Vec<...>>>`, found `&*const Mutex<Trie<EK, EV, T>>`
-          |                                            |
-          |                                            arguments to this method are incorrect
-          |
-          = note: expected reference `&*const std::sync::Mutex<trie::Trie<EK, EV, Vec<(EK, EV, std::sync::Arc<std::sync::Mutex<trie::Trie<EK, EV, T>>>)>>>`
-                     found reference `&*const std::sync::Mutex<trie::Trie<EK, EV, T>>`
-      note: method defined here
-         --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:894:12
-          |
-      894 |     pub fn get<Q: ?Sized>(&self, k: &Q) -> Option<&V>
-          |            ^^^
-
-      error[E0277]: `&V` is not an iterator
-          --> src/datastructures/trie.rs:614:71
-           |
-      614  |             for (ek, ev, child_arc) in adj.get(&node_ptr).into_iter().flatten().cloned() {
-           |                                                                       ^^^^^^^ `&V` is not an iterator
-           |
-           = help: the trait `Iterator` is not implemented for `&V`
-           = help: the trait `Iterator` is implemented for `&mut I`
-           = note: required for `&V` to implement `IntoIterator`
-      note: required by a bound in `flatten`
-          --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:1517:21
-           |
-      1514 |     fn flatten(self) -> Flatten<Self>
-           |        ------- required by a bound in this associated function
-      ...
-      1517 |         Self::Item: IntoIterator,
-           |                     ^^^^^^^^^^^^ required by this bound in `Iterator::flatten`
-
-      error[E0599]: the method `cloned` exists for struct `Flatten<IntoIter<&V>>`, but its trait bounds were not satisfied
-         --> src/datastructures/trie.rs:614:81
-          |
-      614 |             for (ek, ev, child_arc) in adj.get(&node_ptr).into_iter().flatten().cloned() {
-          |                                                                                 ^^^^^^
-          |
-         ::: /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/flatten.rs:239:1
-          |
-      239 | pub struct Flatten<I: Iterator<Item: IntoIterator>> {
-          | --------------------------------------------------- doesn't satisfy `Flatten<std::option::IntoIter<&V>>: Iterator`
-          |
-          = note: the following trait bounds were not satisfied:
-                  `<&V as IntoIterator>::IntoIter = _`
-                  which is required by `Flatten<std::option::IntoIter<&V>>: Iterator`
-                  `<&V as IntoIterator>::Item = _`
-                  which is required by `Flatten<std::option::IntoIter<&V>>: Iterator`
-                  `&V: IntoIterator`
-                  which is required by `Flatten<std::option::IntoIter<&V>>: Iterator`
-                  `Flatten<std::option::IntoIter<&V>>: Iterator`
-                  which is required by `&mut Flatten<std::option::IntoIter<&V>>: Iterator`
+      481 |             type AdjacencyList = Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>;
+          |                               -                                      ^ use of generic parameter from outer item
+          |                               |
+          |                               help: try introducing a local generic parameter here: `<T>`
 
       error[E0282]: type annotations needed for `*const _`
-         --> src/datastructures/trie.rs:615:21
+         --> src/datastructures/trie.rs:588:29
           |
-      615 |                 let child_ptr = Arc::as_ptr(&child_arc);
+      588 |                         let cptr = Arc::as_ptr(child_arc);
+          |                             ^^^^
+      ...
+      591 |                             ready.push_back(child_arc.clone());
+          |                                                       ----- type must be known at this point
+          |
+      help: consider giving `cptr` an explicit type, where the type for type parameter `T` is specified
+          |
+      588 |                         let cptr: *const T = Arc::as_ptr(child_arc);
+          |                                 ++++++++++
+
+      error[E0282]: type annotations needed for `*const _`
+         --> src/datastructures/trie.rs:611:25
+          |
+      611 |                     let cptr = Arc::as_ptr(child_arc);
+          |                         ^^^^
+      ...
+      614 |                         ready.push_back(child_arc.clone());
+          |                                                   ----- type must be known at this point
+          |
+      help: consider giving `cptr` an explicit type, where the type for type parameter `T` is specified
+          |
+      611 |                     let cptr: *const T = Arc::as_ptr(child_arc);
+          |                             ++++++++++
+
+      error[E0282]: type annotations needed for `*const _`
+         --> src/datastructures/trie.rs:624:21
+          |
+      624 |                 let child_ptr = Arc::as_ptr(&child_arc);
           |                     ^^^^^^^^^
       ...
-      619 |                     let child_guard = child_arc.lock().expect("mutex poisoned");
+      628 |                     let child_guard = child_arc.lock().expect("mutex poisoned");
           |                                                 ---- type must be known at this point
           |
       help: consider giving `child_ptr` an explicit type, where the type for type parameter `T` is specified
           |
-      615 |                 let child_ptr: *const T = Arc::as_ptr(&child_arc);
+      624 |                 let child_ptr: *const T = Arc::as_ptr(&child_arc);
           |                              ++++++++++
 
-      error[E0308]: mismatched types
-          --> src/datastructures/trie.rs:631:58
-           |
-      466  |     pub fn special_map<V: Clone>(
-           |                        - expected this type parameter
-      ...
-      631  |                 *done_parents.entry(child_ptr).or_insert(0) += 1;
-           |                                                --------- ^ expected type parameter `V`, found integer
-           |                                                |
-           |                                                arguments to this method are incorrect
-           |
-           = note: expected type parameter `V`
-                                found type `{integer}`
-      help: the return type of this call is `{integer}` due to the type of the argument passed
-          --> src/datastructures/trie.rs:631:18
-           |
-      631  |                 *done_parents.entry(child_ptr).or_insert(0) += 1;
-           |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-^
-           |                                                          |
-           |                                                          this argument influences the return type of `or_insert`
-      note: method defined here
-          --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/collections/hash/map.rs:2798:12
-           |
-      2798 |     pub fn or_insert(self, default: V) -> &'a mut V {
-           |            ^^^^^^^^^
-
-      error[E0368]: binary assignment operation `+=` cannot be applied to type `V`
-         --> src/datastructures/trie.rs:631:17
-          |
-      631 |                 *done_parents.entry(child_ptr).or_insert(0) += 1;
-          |                 -------------------------------------------^^^^^
-          |                 |
-          |                 cannot use `+=` on type `V`
-          |
-      help: consider further restricting type parameter `V` with trait `AddAssign`
-          |
-      466 |     pub fn special_map<V: Clone + std::ops::AddAssign<i32>>(
-          |                                 ++++++++++++++++++++++++++
-
-      error[E0308]: mismatched types
-         --> src/datastructures/trie.rs:634:82
-          |
-      466 |     pub fn special_map<V: Clone>(
-          |                        - expected this type parameter
-      ...
-      634 |                 if done_parents[&child_ptr] == *in_deg.get(&child_ptr).unwrap_or(&0) {
-          |                                                                        --------- ^^ expected `&V`, found `&{integer}`
-          |                                                                        |
-          |                                                                        arguments to this method are incorrect
-          |
-          = note: expected reference `&V`
-                     found reference `&{integer}`
-      help: the return type of this call is `&{integer}` due to the type of the argument passed
-         --> src/datastructures/trie.rs:634:49
-          |
-      634 |                 if done_parents[&child_ptr] == *in_deg.get(&child_ptr).unwrap_or(&0) {
-          |                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--^
-          |                                                                                  |
-          |                                                                                  this argument influences the return type of `unwrap_or`
-      note: method defined here
-         --> /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:998:12
-          |
-      998 |     pub fn unwrap_or(self, default: T) -> T {
-          |            ^^^^^^^^^
-
-      error[E0308]: mismatched types
-         --> src/datastructures/trie.rs:634:48
-          |
-      452 | impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
-          |                -- expected type parameter
-      ...
-      466 |     pub fn special_map<V: Clone>(
-          |                        - found type parameter
-      ...
-      634 |                 if done_parents[&child_ptr] == *in_deg.get(&child_ptr).unwrap_or(&0) {
-          |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected type parameter `EK`, found type parameter `V`
-          |
-          = note: expected type parameter `EK`
-                     found type parameter `V`
-          = note: a type parameter was expected, but a different one was found; you might be missing a type parameter or trait bound
-          = note: for more information, visit https://doc.rust-lang.org/book/ch10-02-traits.html#traits-as-parameters
-
-      Some errors have detailed explanations: E0277, E0282, E0308, E0368, E0369, E0599.
-      For more information about an error, try `rustc --explain E0277`.
-      error: could not compile `sep1` (lib test) due to 39 previous errors
+      Some errors have detailed explanations: E0282, E0401.
+      For more information about an error, try `rustc --explain E0282`.
+      error: could not compile `sep1` (lib test) due to 11 previous errors
     metadata:
   - user: Fix all of these errors.
     metadata:
   - assistant: |-
-      The compilation errors in `special_map` stem from issues with how the type aliases `Ptr` and `PtrSet` were defined and used, leading to incorrect key types for the HashMaps. The `T` generic parameter in these aliases was shadowing the `T` from the `Trie`'s `impl` block, causing the compiler to expect incorrect pointer types like `*const Mutex<Trie<EK, EV, usize>>` instead of `*const Mutex<Trie<EK, EV, T>>`.
+      You're right, the `type` aliases inside the `special_map` function cannot directly use the generic parameters `EK`, `EV`, and `T` from the outer `impl` block in that manner. This is what's causing the `E0401` errors.
 
-      Here's how to fix it step-by-step:
+      We need to remove those problematic `type` aliases and use the full, explicit types for the `HashMap` and `HashSet` declarations. The `E0282` errors (type annotations needed) are likely a consequence of these primary `E0401` errors and should resolve once the map key types are correctly and explicitly defined.
 
-      1.  **Modify Type Aliases in `special_map`**:
-          The existing `Ptr` and `PtrSet` type aliases inside `special_map` need to be replaced. The new aliases will correctly use the generic types `EK`, `EV`, and `T` from the surrounding `impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T>` block, and `V` from the `special_map<V: Clone>` signature.
+      Here are the detailed steps:
 
-          Locate the section starting around line 493:
+      1.  **Remove Problematic Type Aliases**:
+          Inside the `special_map` function, locate and delete the following lines (these were introduced in the previous attempt and are causing the `E0401` errors). They are likely around lines 479-485 of your `src/datastructures/trie.rs` file:
           ```rust
-          /* -----------------------------------------------------------------
-           * 0.  Small helper maps keyed by the raw Arc pointer so that
-           *     identity is stable even if Arcs are cloned.
-           * ----------------------------------------------------------------- */
-          type Ptr<T, EV, EK, V> = HashMap<*const Mutex<Trie<EK, EV, T>>, V>;
-          type PtrSet<T, EV, EK>      = HashSet  <*const Mutex<Trie<EK, EV, T>>>;
+                      // EK, EV, T are from the surrounding impl block. V is from special_map's signature.
+                      type NodePtr = *const Mutex<Trie<EK, EV, T>>;
+                      // Type for the adjacency list stored in the 'adj' map
+                      type AdjacencyList = Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>;
+
+                      // Generic HashMap type using NodePtr as the key
+                      type GenericMap<MapValue> = HashMap<NodePtr, MapValue>;
+                      // HashSet type for NodePtr
+                      type NodePointerSet = HashSet<NodePtr>;
           ```
-          Replace these two lines with the following definitions:
+          Delete all of these lines.
+
+      2.  **Update `in_deg`, `adj`, and `seen` Declarations**:
+          Locate the declarations for `in_deg`, `adj`, and `seen` (around line 501 in the original file, likely shifted slightly after the previous changes).
+          Change:
           ```rust
-                  // EK, EV, T are from the surrounding impl block. V is from special_map's signature.
-                  type NodePtr = *const Mutex<Trie<EK, EV, T>>;
-                  // Type for the adjacency list stored in the 'adj' map
-                  type AdjacencyList = Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>;
-
-                  // Generic HashMap type using NodePtr as the key
-                  type GenericMap<MapValue> = HashMap<NodePtr, MapValue>;
-                  // HashSet type for NodePtr
-                  type NodePointerSet = HashSet<NodePtr>;
-          ```
-
-      2.  **Update HashMap and HashSet Declarations**:
-          Now, update the declarations of `in_deg`, `adj`, `seen`, `value_map`, `done_parents`, and `processed` to use these new, clearer type aliases.
-
-          *   Around line 501, change:
-              ```rust
-                      let mut in_deg : Ptr<usize, EV, EK, V>                                   = Ptr::new();
-                      let mut adj    : Ptr<Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>, EV, EK, V> = Ptr::new();
-
-                      let mut seen : PtrSet<T, EV, EK>  = PtrSet::new();
-              ```
-              to:
-              ```rust
                       let mut in_deg : GenericMap<usize> = GenericMap::new();
                       let mut adj    : GenericMap<AdjacencyList> = GenericMap::new();
 
                       let mut seen   : NodePointerSet = NodePointerSet::new();
-              ```
+          ```
+          to use the full explicit types:
+          ```rust
+                      let mut in_deg: HashMap<*const Mutex<Trie<EK, EV, T>>, usize> = HashMap::new();
+                      let mut adj: HashMap<*const Mutex<Trie<EK, EV, T>>, Vec<(EK, EV, Arc<Mutex<Trie<EK, EV, T>>>)>> = HashMap::new();
 
-          *   Around line 530, change:
-              ```rust
-                      let mut value_map : Ptr<V, EV, EK, V> = Ptr::new();
-                      //   – number of parents already processed
-                      let mut done_parents : Ptr<usize, EV, EK, V> = Ptr::new();
-                      //   – final “ready” queue
-                      let mut ready : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
-                      //   – processed flag
-                      let mut processed : PtrSet<T, EV, EK> = PtrSet::new();
-              ```
-              to:
-              ```rust
+                      let mut seen: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
+          ```
+
+      3.  **Update `value_map`, `done_parents`, and `processed` Declarations**:
+          Locate the declarations for `value_map`, `done_parents`, and `processed` (around line 530 in the original file, likely shifted).
+          Change:
+          ```rust
                       let mut value_map    : GenericMap<V> = GenericMap::new(); // V is special_map's V
                       //   – number of parents already processed
                       let mut done_parents : GenericMap<usize> = GenericMap::new();
@@ -7440,9 +6791,19 @@ messages:
                       let mut ready : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new(); // This line is already correct
                       //   – processed flag
                       let mut processed    : NodePointerSet = NodePointerSet::new();
-              ```
+          ```
+          to use the full explicit types (note that `V` comes from `special_map<V: Clone>` and is fine to use here):
+          ```rust
+                      let mut value_map: HashMap<*const Mutex<Trie<EK, EV, T>>, V> = HashMap::new();
+                      //   – number of parents already processed
+                      let mut done_parents: HashMap<*const Mutex<Trie<EK, EV, T>>, usize> = HashMap::new();
+                      //   – final “ready” queue
+                      let mut ready : VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new(); // This line remains correct
+                      //   – processed flag
+                      let mut processed: HashSet<*const Mutex<Trie<EK, EV, T>>> = HashSet::new();
+          ```
 
-      These changes correct the key types for all HashMaps and HashSets to be `*const Mutex<Trie<EK, EV, T>>` (which is `NodePtr`), and ensure their value types are also correctly specified (e.g., `usize` for `in_deg` and `done_parents`, `V` for `value_map`, and `AdjacencyList` for `adj`). This should resolve the vast majority of the type mismatch errors. The remaining errors, if any, were likely cascading from this fundamental type issue.
+      By making these changes, you are directly specifying the types for the HashMaps and HashSets using the generic parameters `EK`, `EV`, `T` (from the `impl` block) and `V` (from the `special_map` function signature), which is the correct way to do this within the function body. This should resolve the `E0401` errors, and consequently, the `E0282` errors should also be resolved as type inference for `Arc::as_ptr` will have the necessary context.
     metadata:
   - user: |
       Using model 'gemini/gemini-2.5-flash-preview-04-17' for code completion.
