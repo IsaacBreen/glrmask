@@ -576,6 +576,7 @@ impl<'r> Precomputer<'r> {
                             .tokenizer
                             .tokens_accessible_from_state(final_sid)
                         {
+                            crate::debug!(4, "Pushing finalizer info for token {:?} in state {:?}", gtid.0, final_sid.0);
                             guard.value.push_finalizer_info(
                                 gtid,
                                 LLMTokenID(child_vocab_of_segment.token_id()),
@@ -668,7 +669,7 @@ impl<'r> Precomputer<'r> {
         let handle = ArcPtrWrapper::new(target.clone());
 
         if match_end_offset_in_segment == segment_len {
-            crate::debug!(4, "Marking clean_end for child vocab node {:p}", handle.as_ref());
+            crate::debug!(4, "Marking clean end for child vocab node {:p}", handle.as_ref());
             next_level
                 .entry(TokenizerStateID(0))
                 .or_default()
