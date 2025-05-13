@@ -344,11 +344,11 @@ if __name__ == "__main__":
 
 #     tokenizer_vocab = {"def": 0, "$": 1}
 #     tokenizer_vocab = {"def": 0}
-    tokenizer_vocab = {"def": 0, " f": 1}
+    tokenizer_vocab = {"def": 0, "Ġf": 1}
 
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
-    tokenizer_vocab = {token: actual_vocab[token.replace("Ġ", " ")] for token in tokenizer_vocab}
+    tokenizer_vocab = {token: actual_vocab[token] for token in tokenizer_vocab}
     print(f"tokenizer_vocab: {textwrap.shorten(str(tokenizer_vocab), width=100)}")
 
     llm_token_to_id = {token.replace("Ġ", " ").encode(): i for token, i in tokenizer_vocab.items()}
