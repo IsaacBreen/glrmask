@@ -355,11 +355,10 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Create token_name_map for grammar tokens
     // Our tokenizer has one grammar token (GroupID 0)
-    let mut token_name_map = BiBTreeMap::new();
+    let mut token_name_map: BiBTreeMap<String, usize> = BiBTreeMap::new();
     token_name_map.insert("ANYTHING_GRAMMAR_TOKEN".to_string(), 0 as usize); // GrammarTokenID 0
     token_name_map.insert("ANYTHING_GRAMMAR_TOKEN2".to_string(), 1 as usize); // GrammarTokenID 0
-    token_name_map.insert("def".to_string(), 2 as usize); // GrammarTokenID 0
-
+    token_name_map.insert("DEF".to_string(), 2 as usize); // GrammarTokenID 0
 
     // 4. Call precompute
     println!(
@@ -378,5 +377,24 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("Successfully precomputed with GPT-2 vocab.");
+
+    // 2. Create a parser
+    let productions = vec![
+        prod("S", vec![t("DEF")]),
+    ];
+    let terminal_map: BiBTreeMap<Terminal, TerminalID> = token_name_map.iter().map(|(name, id)| (Terminal(name.clone()), TerminalID(*id))).collect();
+    let parser = generate_glr_parser_with_terminal_map(&productions, 0, terminal_map);
+
+    // Ensure that the letter "d" is a valid initial LLM token
+    let max_llm_token_id = token_name_map.iter().map(|(_, id)| *id).max().unwrap();
+    let constraint = GrammarConstraint::new(
+        tokenizer,
+        parser,
+        llm_token_map,
+        token_name_map,
+        max_llm_token_id,
+    );
+    let mut constraint_state = constraint.init();
+
     Ok(())
 }
