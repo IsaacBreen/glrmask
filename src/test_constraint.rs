@@ -370,8 +370,8 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
         prod("S", vec![nt("A"), t("DEF")]),
         // prod("S", vec![t("FSTRING_MIDDLE"), t("FSTRING_MIDDLE")]),
         // prod("S", vec![t("FSTRING_MIDDLE")]),
-        prod("S", vec![t("FSTRING_MIDDLE"), t("DEF")]),
-        // prod("A", vec![]),
+        // prod("S", vec![t("FSTRING_MIDDLE"), t("DEF")]),
+        prod("A", vec![]),
     ];
     let terminal_map: BiBTreeMap<Terminal, TerminalID> = token_name_map.iter().map(|(name, id)| (Terminal(name.clone()), TerminalID(*id))).collect();
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, terminal_map);
@@ -397,7 +397,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", constraint.parser);
     let mut constraint_state = constraint.init();
     let a_id = llm_token_map.get_by_left(&b"a"[..]).unwrap().0;
-    for i in 0..1000 {
+    for i in 0..100 {
         println!("{}. Stepping with LLM token ID {}", i, a_id);
         constraint_state.step_with_all_llm_tokens();
         constraint_state.commit(LLMTokenID(a_id));
@@ -478,4 +478,48 @@ fn test_simple_def_match_non_zero_llm_id() {
         "Mask should allow 'def' token (Original LLM ID {})",
         def_original_llm_id
     );
+}
+
+#[test]
+fn test_hideous_ambiguity() {
+    // 1. Define the grammar
+    let productions = vec![
+        prod("S", vec![t("FSTRING_MIDDLE"), t("FSTRING_MIDDLE")]),
+    ];
+
+    // 2. Tokenizer
+    let tokenizer_expr = groups![
+        repeat0_fast(eat_u8(b'a')),
+    ];
+    let tokenizer = tokenizer_expr.build();
+
+    // 3. LLM Token Map
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"a".to_vec(), LLMTokenID(0));
+
+    // 4. Token Name Map
+    let mut token_name_map = BiBTreeMap::new();
+    token_name_map.insert("FSTRING_MIDDLE".to_string(), 0);
+
+    // 5. Create the Parser
+    let parser = generate_glr_parser(&productions, 0);
+
+    // 6. Create the Constraint
+    let constraint = GrammarConstraint::new(
+        tokenizer,
+        parser,
+        llm_token_map.clone(),
+        token_name_map,
+        0,
+    );
+
+    // 7. Initialize the Constraint State
+    let mut constraint_state = constraint.init();
+
+    // 8. Step with LLM Token "a" repeatedly
+    let a_id = llm_token_map.get_by_left(&b"a"[..]).unwrap().0;
+    for i in 0..10000 {
+        println!("{}. Stepping with LLM token ID {}", i, a_id);
+        constraint_state.step_with_all_llm_tokens();
+    }
 }
