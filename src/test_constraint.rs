@@ -310,7 +310,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
         //     eat("{{"),
         // ])),
         repeat0_fast(choice_fast!(eat_u8_negation_fast(b'{'), eat_bytestring_fast(b"{{".to_vec()))),
-        eat_string_fast("def"),
+        eat_string_fast("def "),
     ];
     let tokenizer = tokenizer_expr.build();
 
