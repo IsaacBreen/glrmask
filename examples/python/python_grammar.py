@@ -136,31 +136,31 @@ def define_tokens() -> list[tuple[str, Any]]:
     tokens["NAME"] = seq([name_start, rep(name_middle)])
 #     # TODO: delete this
 #     tokens["NAME"] = eps()
-#     tokens["NUMBER"] = choice([
-#         rep(digit),
-#         seq([rep(digit), eat_u8(ord(".")), rep(digit)]),
-#     ])
-#     tokens["NEWLINE"] = eps()
-#     tokens["INDENT"] = eps()
-#     tokens["DEDENT"] = eps()
-#     tokens["STRING"] = choice([
-#         seq([eat_u8(ord('"')), rep(eat_u8_negation(ord('"'))), eat_u8(ord('"'))]),
-#         seq([eat_u8(ord("'")), rep(eat_u8_negation(ord("'"))), eat_u8(ord("'"))]),
-#     ])
-#     tokens["FSTRING_START"] = choice([
-#         eat('"""'),
-#         eat("'''"),
-#     ])
-#     tokens["FSTRING_END"] = choice([
-#         eat('"""'),
-#         eat("'''"),
-#     ])
-#     tokens["FSTRING_MIDDLE"] = rep(choice([
-#         eat_u8_negation(ord("{")),
-#         eat("{{"),
-#     ]))
-#     tokens["TYPE_COMMENT"] = eps()
-#     tokens["ENDMARKER"] = eps()
+    tokens["NUMBER"] = choice([
+        rep(digit),
+        seq([rep(digit), eat_u8(ord(".")), rep(digit)]),
+    ])
+    tokens["NEWLINE"] = eps()
+    tokens["INDENT"] = eps()
+    tokens["DEDENT"] = eps()
+    tokens["STRING"] = choice([
+        seq([eat_u8(ord('"')), rep(eat_u8_negation(ord('"'))), eat_u8(ord('"'))]),
+        seq([eat_u8(ord("'")), rep(eat_u8_negation(ord("'"))), eat_u8(ord("'"))]),
+    ])
+    tokens["FSTRING_START"] = choice([
+        eat('"""'),
+        eat("'''"),
+    ])
+    tokens["FSTRING_END"] = choice([
+        eat('"""'),
+        eat("'''"),
+    ])
+    tokens["FSTRING_MIDDLE"] = rep(choice([
+        eat_u8_negation(ord("{")),
+        eat("{{"),
+    ]))
+    tokens["TYPE_COMMENT"] = eps()
+    tokens["ENDMARKER"] = eps()
     return [regex(expr, name) for name, expr in tokens.items()]
 #     # TODO: delete this
 #     return []
