@@ -155,10 +155,10 @@ def define_tokens() -> list[tuple[str, Any]]:
 #         eat('"""'),
 #         eat("'''"),
 #     ])
-    tokens["FSTRING_MIDDLE"] = rep(choice([
-        eat_u8_negation(ord("{")),
-        eat("{{"),
-    ]))
+#     tokens["FSTRING_MIDDLE"] = rep(choice([
+#         eat_u8_negation(ord("{")),
+#         eat("{{"),
+#     ]))
 #     tokens["TYPE_COMMENT"] = eps()
 #     tokens["ENDMARKER"] = eps()
     return [regex(expr, name) for name, expr in tokens.items()]
@@ -187,7 +187,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
 #     exprs.append(("start'''", ge.ref("FSTRING_MIDDLE")))
 
 #     exprs.append(("start'''", ge.sequence([regex(eat("def")), ge.ref("NAME"), ge.regex(eat("(")), ge.ref("NAME"), ge.regex(eat(")"))])))
-    exprs.append(("start'''", ge.sequence([regex(eat("def")), regex(eat("$"))])))
+    exprs.append(("start'''", regex(eat("def"))))
 
 #     # TODO: delete this
 #     # Add a rule for "hello=world$" to the start rule
@@ -341,7 +341,8 @@ if __name__ == "__main__":
     # Set the vocab to digits and arithmetic operators
 #     tokenizer_vocab = {k: v for k, v in tokenizer.get_vocab().items() if k.isdigit() or k in "+-*/"}
 
-    tokenizer_vocab = {"def": 0, "$": 1}
+#     tokenizer_vocab = {"def": 0, "$": 1}
+    tokenizer_vocab = {"def": 0}
 
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
