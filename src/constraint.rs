@@ -277,21 +277,24 @@ impl GrammarConstraint {
 
     #[allow(dead_code)] // Might be useful later
     fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
+        dbg!(original_bv);
         let mut internal_bv = HybridBitset::new();
         for original_id_val in original_bv.iter() {
-            if let Some(internal_id_val) = self.original_to_internal_id_bimap.get_by_left(&(original_id_val as usize)) {
-                internal_bv.insert(*internal_id_val as usize);
-            }
+            let internal_id_val = self.original_to_internal_id_bimap.get_by_left(&(original_id_val as usize)).expect(format!("Original ID {} not found in original_to_internal_id_bimap", original_id_val).as_str());
+            internal_bv.insert(*internal_id_val as usize);
         }
+        dbg!(&internal_bv);
         internal_bv
     }
 
     fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
+        dbg!(internal_bv);
         let mut original_bv = HybridBitset::new();
         for internal_id_val in internal_bv.iter() {
             let original_id_val = self.original_to_internal_id_bimap.get_by_right(&(internal_id_val as usize)).expect(format!("Internal ID {} not found in original_to_internal_id_bimap", internal_id_val).as_str());
             original_bv.insert(*original_id_val as usize);
         }
+        dbg!(&original_bv);
         original_bv
     }
 }
