@@ -477,7 +477,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         // ------------------------------------------------------------------
         let mut values   : HashMap<*const Mutex<Self>, V> = HashMap::new();
         let mut done     : HashSet <*const Mutex<Self>>   = HashSet ::new();
-        let mut todo     : BinaryHeap<(Reverse<usize>, Arc<Mutex<Self>>)> = BinaryHeap::new();
+        let mut todo     : BTreeMap<usize, Arc<Mutex<Self>>> = BTreeMap::new();
 
         // Seed with the user-supplied starting set
         for (node_arc, v0) in initial_nodes_and_values {
@@ -487,11 +487,11 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 .and_modify(|old| merge(old, v0.clone()))
                 .or_insert(v0);
             let depth = node_arc.lock().expect("poison").max_depth;
-            todo.push((Reverse(depth), node_arc));
+            todo.insert(depth, node_arc);
         }
 
         // Main loop ---------------------------------------------------------
-        while let Some((Reverse(_depth), node_arc)) = todo.pop() {
+        while let Some((_depth, node_arc)) = todo.pop_first() {
             let ptr = Arc::as_ptr(&node_arc);
             if done.contains(&ptr) { continue; }               // already processed
 
@@ -538,7 +538,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
                     // Queue child by its declared depth
                     let child_depth = child_arc.lock().expect("poison").max_depth;
-                    todo.push((Reverse(child_depth), child_arc));
+                    todo.insert(child_depth, child_arc);
                 }
             }
         }
