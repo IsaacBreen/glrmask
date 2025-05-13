@@ -400,7 +400,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     let mask = constraint_state.get_mask();
 
     let d_id = llm_token_map.get_by_left(&b"d"[..]).unwrap().0;
-    assert!(mask[d_id], "Mask should contain ID for 'd'");
+    assert!(mask.contains(d_id), "Expected LLM token ID {} to be in mask", d_id);
 
     Ok(())
 }
