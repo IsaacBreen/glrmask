@@ -316,7 +316,7 @@ pub fn prune_and_transform_recursive<T: Clone>(
                             transformed_predecessors.push(transformed_pred.clone());
                         }
                         // If existing_transformed is None, the predecessor was pruned, so skip.
-                        println!("Skipping pruned predecessor"); // TODO: remove or change to crate::debug
+                        crate::debug!(4, "Skipping pruned predecessor");
                     } else {
                         // This case *shouldn't* happen if traversal order is correct (parents processed after children),
                         // but as a fallback, keep the original if not found in memo. Or perhaps panic?
