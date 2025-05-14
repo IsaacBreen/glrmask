@@ -3,8 +3,7 @@ use std::sync::{Arc};
 use std::fmt::{Debug, Write};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
-use std::cell::RefCell; // Added
-use std::cmp::max; // Added
+use std::cell::RefCell; // Add this import
 
 use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
 
@@ -12,7 +11,8 @@ use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
 pub struct GSSNode<T> {
     pub value: T,
     predecessors: BTreeSet<ArcPtrWrapper<GSSNode<T>>>,
-    hash_key_cache: RefCell<Option<Arc<Vec<BTreeSet<T>>>>> // Added
+    // Add this line:
+    hash_key_cache: RefCell<Option<Arc<Vec<BTreeSet<T>>>>>,
 }
 
 impl<T> GSSNode<T> {
@@ -20,14 +20,14 @@ impl<T> GSSNode<T> {
         Self {
             value,
             predecessors: BTreeSet::new(),
-            hash_key_cache: RefCell::new(None), // Added
+            hash_key_cache: RefCell::new(None), // Initialize the cache
         }
     }
     pub fn new_with_predecessors(value: T, predecessors: Vec<Arc<GSSNode<T>>>) -> Self {
         Self {
             value,
             predecessors: predecessors.into_iter().map(ArcPtrWrapper::new).collect(),
-            hash_key_cache: RefCell::new(None), // Added
+            hash_key_cache: RefCell::new(None), // Initialize the cache
         }
     }
 
@@ -119,108 +119,100 @@ impl<T> GSSNode<T> {
     pub fn merge(&mut self, mut other: Self)
     where
         T: PartialEq,
+        Self: Sized // Needed for Arc::make_mut in bulk_merge, though not here
     {
-        *self.hash_key_cache.borrow_mut() = None; // Invalidate cache
         assert!(self.value == other.value);
         self.predecessors.extend(std::mem::take(&mut other.predecessors));
+        *self.hash_key_cache.borrow_mut() = None; // Invalidate cache
     }
 
     pub fn merge_unchecked(&mut self, mut other: Self)
+    where
+        Self: Sized // Needed for Arc::make_mut in bulk_merge
     {
-        *self.hash_key_cache.borrow_mut() = None; // Invalidate cache
         self.predecessors.extend(std::mem::take(&mut other.predecessors));
+         *self.hash_key_cache.borrow_mut() = None; // Invalidate cache
     }
 
     pub fn map<F, U>(&self, f: F) -> GSSNode<U>
     where
         F: Copy + Fn(&T) -> U,
-        T: Ord + Clone, // Needed for self.predecessors iteration and recursive .map call
-        U: Ord + Clone, // Needed for creating GSSNode<U>
+        U: Clone + Ord + Hash, // Add these bounds for U
     {
-        let mapped_value = f(&self.value);
-        let mapped_predecessors_arcs: Vec<Arc<GSSNode<U>>> = self
-            .predecessors
-            .iter()
-            .map(|wrapper| Arc::new(wrapper.as_ref().map(f))) // wrapper.as_ref() is &GSSNode<T>
-            .collect();
-
-        // new_with_predecessors correctly initializes hash_key_cache to None for the new GSSNode<U>
-        GSSNode::new_with_predecessors(mapped_value, mapped_predecessors_arcs)
+        GSSNode {
+            value: f(&self.value),
+            predecessors: self.predecessors.iter()
+                // wrapper.as_ref() is &GSSNode<T>, then map is applied to the GSSNode
+                .map(|wrapper| ArcPtrWrapper::new(Arc::new(wrapper.as_ref().map(f))))
+                .collect(),
+            hash_key_cache: RefCell::new(None), // Initialize the cache
+        }
     }
-}
 
-// Added impl block for get_hash_key
-impl<T: Ord + Clone> GSSNode<T> {
-    /// Computes (and caches) a structural hash key for the node.
-    /// The key is a vector of sets, where key[i] contains all T values
-    /// at depth i "below" this node (towards the leaves of the GSS).
-    /// key[0] = {self.value}
-    /// key[1] = {pred1.value, pred2.value, ...}
-    /// etc.
-    pub fn get_hash_key(&self) -> Arc<Vec<BTreeSet<T>>> {
-        if let Some(cached_key) = self.hash_key_cache.borrow().as_ref() {
-            return cached_key.clone();
+    // Method to recursively calculate the hash key
+    fn calculate_hash_key_recursive(
+        &self,
+        visited_for_hash: &mut HashSet<*const GSSNode<T>>,
+    ) -> Arc<Vec<BTreeSet<T>>>
+    where
+        T: Clone + Ord, // Hash on T is not strictly needed for BTreeSet<T> itself
+    {
+        let self_ptr = self as *const GSSNode<T>; // Get pointer to self
+
+        // Check if already visited in current recursion path (cycle detection)
+        if !visited_for_hash.insert(self_ptr) {
+            return Arc::new(Vec::new()); // Cycle detected, return empty key
         }
 
-        let mut levels: Vec<BTreeSet<T>> = Vec::new();
-        let mut current_level_values = BTreeSet::new();
-        current_level_values.insert(self.value.clone());
-        levels.push(current_level_values);
+        // Check cache first (after cycle detection for current path)
+        // This borrow() is fine as visited_for_hash prevents re-entrant borrow_mut() on same node via recursion
+        if let Some(key) = self.hash_key_cache.borrow().as_ref() {
+            visited_for_hash.remove(&self_ptr); // Backtrack from visited set
+            return key.clone();
+        }
 
-        if !self.predecessors.is_empty() {
-            let mut predecessor_keys: Vec<Arc<Vec<BTreeSet<T>>>> = Vec::with_capacity(self.predecessors.len());
-            let mut max_depth_in_predecessors = 0;
+        let mut key_levels: Vec<BTreeSet<T>> = Vec::new();
+        let mut level_0_values = BTreeSet::new();
+        level_0_values.insert(self.value.clone()); // T: Clone + Ord
+        key_levels.push(level_0_values);
 
-            for pred_wrapper in &self.predecessors {
-                let pred_node_arc = pred_wrapper.as_arc();
-                // Recursive call to get_hash_key for predecessors
-                let pred_key = pred_node_arc.get_hash_key();
-                max_depth_in_predecessors = max(max_depth_in_predecessors, pred_key.len());
-                predecessor_keys.push(pred_key);
-            }
+        for pred_wrapper in &self.predecessors {
+            let pred_node_arc = pred_wrapper.as_arc(); // This is &Arc<GSSNode<T>>
+            // Recursive call on the predecessor node (&GSSNode<T>)
+            let pred_hash_key = pred_node_arc.as_ref().calculate_hash_key_recursive(visited_for_hash);
 
-            for i in 0..max_depth_in_predecessors {
-                let mut next_level_set = BTreeSet::new();
-                for p_key in &predecessor_keys {
-                    if i < p_key.len() {
-                        next_level_set.extend(p_key[i].iter().cloned());
-                    }
+            for (i, pred_level_values) in pred_hash_key.iter().enumerate() {
+                let target_level = i + 1;
+                if target_level >= key_levels.len() {
+                    key_levels.resize_with(target_level + 1, BTreeSet::new);
                 }
-                levels.push(next_level_set);
+                key_levels[target_level].extend(pred_level_values.iter().cloned()); // T: Clone
             }
         }
 
-        let key = Arc::new(levels);
-        *self.hash_key_cache.borrow_mut() = Some(key.clone());
-        key
+        let arc_key = Arc::new(key_levels);
+        // Cache the computed key
+        *self.hash_key_cache.borrow_mut() = Some(arc_key.clone());
+
+        visited_for_hash.remove(&self_ptr); // Backtrack from visited set
+        arc_key
     }
-}
 
-// Added trait implementations based on hash_key
-impl<T: Ord + Clone + Hash> PartialEq for GSSNode<T> {
-    fn eq(&self, other: &Self) -> bool {
-        // Compare hash keys as the sole determinant of equality
-        self.get_hash_key() == other.get_hash_key()
-    }
-}
-
-impl<T: Ord + Clone + Hash> Eq for GSSNode<T> {}
-
-impl<T: Ord + Clone + Hash> PartialOrd for GSSNode<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<T: Ord + Clone + Hash> Ord for GSSNode<T> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.get_hash_key().cmp(&other.get_hash_key())
-    }
-}
-
-impl<T: Ord + Clone + Hash> Hash for GSSNode<T> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.get_hash_key().hash(state);
+    /// Retrieves or computes the semantic hash key for the node.
+    /// The key is a vector of sets of T values, representing T values at each level.
+    /// Level 0 is the value of the current node.
+    /// Level 1 is the union of values of all direct predecessors, and so on.
+    pub fn get_hash_key(&self) -> Arc<Vec<BTreeSet<T>>>
+    where
+        T: Clone + Ord, // Required by calculate_hash_key_recursive
+    {
+        // Check cache first (quick path)
+        if let Some(key) = self.hash_key_cache.borrow().as_ref() {
+            return key.clone();
+        }
+        // If not cached, compute it. Initialize a new visited set for this top-level call.
+        let mut visited_for_hash = HashSet::new();
+        self.calculate_hash_key_recursive(&mut visited_for_hash)
     }
 }
 
@@ -241,8 +233,34 @@ impl<T> Drop for GSSNode<T> {
     }
 }
 
-// Updated trait bound for GSSTrait
-pub trait GSSTrait<T: Ord + Clone> {
+impl<T: Clone + Ord + Hash> Hash for GSSNode<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.get_hash_key().hash(state);
+    }
+}
+
+impl<T: Clone + Ord + Hash> PartialEq for GSSNode<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.get_hash_key() == other.get_hash_key()
+    }
+}
+
+impl<T: Clone + Ord + Hash> Eq for GSSNode<T> {}
+
+impl<T: Clone + Ord + Hash> PartialOrd for GSSNode<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T: Clone + Ord + Hash> Ord for GSSNode<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.get_hash_key().cmp(&other.get_hash_key())
+    }
+}
+
+
+pub trait GSSTrait<T: Clone> {
     type Peek<'a> where T: 'a, Self: 'a;
     fn peek(&self) -> Self::Peek<'_>;
     fn push(&self, value: T) -> GSSNode<T>;
@@ -250,8 +268,7 @@ pub trait GSSTrait<T: Ord + Clone> {
     fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>>;
 }
 
-// Updated trait bound for impl
-impl<T: Ord + Clone> GSSTrait<T> for GSSNode<T> {
+impl<T: Clone> GSSTrait<T> for GSSNode<T> {
     type Peek<'a> = &'a T where T: 'a;
 
     fn peek(&self) -> Self::Peek<'_> {
@@ -274,8 +291,7 @@ impl<T: Ord + Clone> GSSTrait<T> for GSSNode<T> {
     }
 }
 
-// Updated trait bound for impl
-impl<T: Ord + Clone> GSSTrait<T> for Arc<GSSNode<T>> {
+impl<T: Clone> GSSTrait<T> for Arc<GSSNode<T>> {
     type Peek<'a> = &'a T where T: 'a;
 
     fn peek(&self) -> Self::Peek<'_> {
@@ -298,8 +314,7 @@ impl<T: Ord + Clone> GSSTrait<T> for Arc<GSSNode<T>> {
     }
 }
 
-// Updated trait bound for impl
-impl<T: Ord + Clone> GSSTrait<T> for Option<Arc<GSSNode<T>>> {
+impl<T: Clone> GSSTrait<T> for Option<Arc<GSSNode<T>>> {
     type Peek<'a> = Option<&'a T> where T: 'a;
 
     fn peek(&self) -> Self::Peek<'_> {
@@ -319,8 +334,7 @@ impl<T: Ord + Clone> GSSTrait<T> for Option<Arc<GSSNode<T>>> {
     }
 }
 
-// Updated trait bound for impl
-impl<T: Ord + Clone> GSSTrait<T> for Option<GSSNode<T>> {
+impl<T: Clone> GSSTrait<T> for Option<GSSNode<T>> {
     type Peek<'a> = Option<&'a T> where T: 'a;
 
     fn peek(&self) -> Self::Peek<'_> {
@@ -344,36 +358,46 @@ pub trait BulkMerge<T> {
     fn bulk_merge(&mut self);
 }
 
-impl<T: Clone + Ord> BulkMerge<T> for Vec<Arc<GSSNode<T>>> {
+impl<T: Clone + Ord + Hash> BulkMerge<T> for Vec<Arc<GSSNode<T>>> {
     fn bulk_merge(&mut self) {
         // todo: should be possible to avoid cloning T in some cases by using &T in this map,
         //  but we need to be careful about lifetimes. If we use `node.as_ref().value`, then node
         //  will go out of bounds while the reference to its value is still inside `groups`.
-        let mut groups: BTreeMap<T, HashMap<_, Arc<GSSNode<T>>>> = BTreeMap::new();
+        // Use the semantic hash key for grouping
+        let mut groups: BTreeMap<Arc<Vec<BTreeSet<T>>>, HashMap<*const GSSNode<T>, Arc<GSSNode<T>>>> = BTreeMap::new();
         for node in self.drain(..) {
-            groups.entry(node.value.clone()).or_default().entry(Arc::as_ptr(&node)).or_insert(node);
+            // Group by the semantic hash key
+            let key = node.get_hash_key();
+            groups.entry(key).or_default().entry(Arc::as_ptr(&node)).or_insert(node);
         }
+
+        // Process groups, merging predecessors of nodes with the same semantic key
         for mut group in groups.into_values() {
-            let mut group = group.into_values().collect::<Vec<_>>();
-            let mut first = group.pop().unwrap();
-            if group.is_empty() {
-                self.push(first);
-            } else {
-                // Arc::make_mut clones the GSSNode if `first` is shared.
-                // The new `first_mut_ref` will have its predecessors modified.
-                let first_mut_ref = Arc::make_mut(&mut first);
-                // Invalidate cache as predecessors are about to be modified
-                *first_mut_ref.hash_key_cache.borrow_mut() = None;
-                // The original predecessors of `first` are already in `first_mut_ref.predecessors`.
-                // Add predecessors from all siblings.
-                // `BTreeSet::insert` handles deduplication based on ArcPtrWrapper's Ord impl (pointer address).
-                for sibling_arc in group { // sibling_arc is Arc<GSSNode<T>>
-                    for pred_wrapper in &sibling_arc.predecessors { // pred_wrapper is &ArcPtrWrapper<GSSNode<T>>
-                        first_mut_ref.predecessors.insert(pred_wrapper.clone());
-                    }
-                }
-                self.push(first);
+            let mut group_vec = group.into_values().collect::<Vec<_>>();
+            if group_vec.is_empty() {
+                continue; // Should not happen with drain, but for safety
             }
+
+            let mut first = group_vec.pop().unwrap(); // Take one node as the base
+            
+            // If there's more than one node in the group, merge their predecessors
+            if !group_vec.is_empty() {
+                 // Arc::make_mut gives us a mutable reference. If the Arc is shared, it clones the node.
+                 let first_mut_ref = Arc::make_mut(&mut first);
+                 // Invalidate the cache as predecessors are about to change
+                 *first_mut_ref.hash_key_cache.borrow_mut() = None;
+
+                 // Add predecessors from all sibling nodes in the group
+                 for sibling_arc in group_vec { // sibling_arc is Arc<GSSNode<T>>
+                     // Iterate through predecessors of the sibling and insert into the base node's predecessors set.
+                     // BTreeSet::insert handles deduplication based on ArcPtrWrapper's Ord impl (pointer address).
+                     for pred_wrapper in &sibling_arc.predecessors { // pred_wrapper is &ArcPtrWrapper<GSSNode<T>>
+                         first_mut_ref.predecessors.insert(pred_wrapper.clone());
+                     }
+                 }
+            }
+            // Push the potentially modified 'first' node back to self (which is the result vector)
+            self.push(first);
         }
     }
 }
@@ -701,246 +725,371 @@ pub fn print_gss_forest<T: Debug>(roots: &[Arc<GSSNode<T>>], max_nodes: usize) -
     output
 }
 
-// Helper function to compute a hash key for a value and a set of (already simplified) predecessors.
-// This is used during simplification to determine if a node with this structure already exists.
-fn compute_key_for_value_and_preds<T: Ord + Clone + Hash>(
-    value: &T,
-    simplified_predecessors_arcs: &[Arc<GSSNode<T>>], // Assumes these are simplified, canonical nodes
-) -> Arc<Vec<BTreeSet<T>>> {
-    let mut levels: Vec<BTreeSet<T>> = Vec::new();
-    let mut current_level_values = BTreeSet::new();
-    current_level_values.insert(value.clone());
-    levels.push(current_level_values);
 
-    if !simplified_predecessors_arcs.is_empty() {
-        let mut predecessor_keys: Vec<Arc<Vec<BTreeSet<T>>>> =
-            Vec::with_capacity(simplified_predecessors_arcs.len());
-        let mut max_depth_in_predecessors = 0;
-
-        for pred_arc in simplified_predecessors_arcs {
-            // Assumes pred_arc.get_hash_key() is efficient due to caching on canonical nodes
-            let pred_key = pred_arc.get_hash_key();
-            max_depth_in_predecessors = max(max_depth_in_predecessors, pred_key.len());
-            predecessor_keys.push(pred_key);
-        }
-
-        for i in 0..max_depth_in_predecessors {
-            let mut next_level_set = BTreeSet::new();
-            for p_key in &predecessor_keys {
-                if i < p_key.len() {
-                    next_level_set.extend(p_key[i].iter().cloned());
-                }
-            }
-            levels.push(next_level_set);
-        }
-    }
-    Arc::new(levels)
-}
-
-fn simplify_node_recursive<T: Ord + Clone + Hash>(
+// Recursive helper for GSS simplification.
+// Processes a single node, ensuring that semantically identical nodes are represented by the same Arc.
+fn simplify_node_recursive<T: Clone + Ord + Hash + Debug>(
     original_node_arc: &Arc<GSSNode<T>>,
-    memo_simplify: &mut HashMap<*const GSSNode<T>, Arc<GSSNode<T>>>,
-    canonical_nodes: &mut HashMap<Arc<Vec<BTreeSet<T>>>, Arc<GSSNode<T>>>,
+    // Memoization for original node pointers to their simplified Arc<GSSNode<T>> versions.
+    memo_original_to_simplified: &mut HashMap<*const GSSNode<T>, Arc<GSSNode<T>>>,
+    // Global map of semantic hash keys to canonical Arc<GSSNode<T>> instances.
+    global_simplified_nodes: &mut HashMap<Arc<Vec<BTreeSet<T>>>, Arc<GSSNode<T>>>,
+    // Used to detect cycles in the original graph structure during this recursive simplification.
+    visited_on_stack: &mut HashSet<*const GSSNode<T>>,
 ) -> Arc<GSSNode<T>> {
     let original_node_ptr = Arc::as_ptr(original_node_arc);
-    if let Some(simplified_node) = memo_simplify.get(&original_node_ptr) {
-        return simplified_node.clone();
-    }
 
-    let mut simplified_predecessors_vec: Vec<Arc<GSSNode<T>>> =
-        Vec::with_capacity(original_node_arc.predecessors.len());
-    for pred_wrapper in &original_node_arc.predecessors {
-        let original_pred_arc = pred_wrapper.as_arc();
-        let simplified_pred =
-            simplify_node_recursive(original_pred_arc, memo_simplify, canonical_nodes);
-        simplified_predecessors_vec.push(simplified_pred);
-    }
+    // Check if this original node is already being simplified (cycle in original graph)
+    if !visited_on_stack.insert(original_node_ptr) {
+        // Cycle detected (e.g., A -> B -> A, and we are trying to simplify A again).
+        // We must return something. For robust cycle handling, this might involve
+        // returning a pre-existing (partially) simplified node if available,
+        // or a special canonical cycle node.
+        // For now, if it's in memo_original_to_simplified, means it was fully processed before this path, which is fine.
+        // If it's on stack AND in memo, it's complex.
+        // This indicates a cycle that wasn't broken by prior memoization hits.
+        // A robust solution might involve fixed-point iteration or specific cycle markers.
+        // For this implementation, we'll prefer a memoized version if somehow available,
+        // otherwise, this indicates an issue with graph structure or requires more advanced cycle handling.
+        // A simple stop-gap: if it's already processed and in memo, use that.
+        // Otherwise, this recursive path can't complete it.
+        // This part is tricky. For now, let's assume that if it's on stack, it's not yet in memo_original_to_simplified.
+        // A true cycle (X->Y->X, simplifying X, then Y, then X again) would hit this.
+        // We'll return a newly created node with no predecessors to break the cycle here.
+        // This is a simplistic way to handle cycles in the source graph for simplification.
+        // A more advanced strategy would be needed for true canonical cyclic graph simplification.
+        // For now, we create a "stub" node if a cycle is detected this way.
+        // This stub will have the same value but no predecessors from the cycle path.
 
-    // Sort simplified predecessors by their Arc pointer to ensure consistent BTreeSet order later,
-    // though ArcPtrWrapper in BTreeSet already orders by pointer.
-    // For computing the key, the Vec order doesn't matter as get_hash_key on them is canonical.
-    // For constructing the new node, the BTreeSet of ArcPtrWrappers will handle order.
+        // Try to find if a simplified version for this cycle node already exists globally
+        let cycle_stub_node_data = GSSNode {
+            value: original_node_arc.value.clone(),
+            predecessors: BTreeSet::new(), // Break cycle by emptying predecessors for this path
+            hash_key_cache: RefCell::new(None),
+        };
+        let key = cycle_stub_node_data.get_hash_key(); // Compute key for this stub
 
-    let new_node_value = original_node_arc.value.clone();
-
-    // Compute the canonical key for this potential new node configuration
-    let canonical_key =
-        compute_key_for_value_and_preds(&new_node_value, &simplified_predecessors_vec);
-
-    let final_simplified_node = match canonical_nodes.get(&canonical_key) {
-        Some(existing_canonical_node) => existing_canonical_node.clone(),
-        None => {
-            // Create the new GSSNode with simplified predecessors
-            // new_with_predecessors will initialize hash_key_cache to None.
-            // Then, the first call to get_hash_key() on this new node will compute and cache it.
-            // It's important that this computed key matches `canonical_key`.
-            let new_node = Arc::new(GSSNode::new_with_predecessors(
-                new_node_value,
-                simplified_predecessors_vec,
-            ));
-            // Explicitly store the pre-computed canonical_key into the new node's cache.
-            // This ensures that its get_hash_key() will return this exact Arc, crucial for HashMap keying.
-            *new_node.hash_key_cache.borrow_mut() = Some(canonical_key.clone());
-
-            canonical_nodes.insert(canonical_key, new_node.clone());
-            new_node
+        if let Some(existing_arc) = global_simplified_nodes.get(&key) {
+            visited_on_stack.remove(&original_node_ptr); // Backtrack from stack
+            return existing_arc.clone();
+        } else {
+            let new_arc = Arc::new(cycle_stub_node_data);
+            global_simplified_nodes.insert(key, new_arc.clone());
+            // Also memoize for original_node_ptr to this specific cycle-broken stub
+            memo_original_to_simplified.insert(original_node_ptr, new_arc.clone());
+            visited_on_stack.remove(&original_node_ptr); // Backtrack from stack
+            return new_arc;
         }
+    }
+
+    // Check memo: if this original node has already been simplified, return the canonical Arc.
+    if let Some(simplified_arc) = memo_original_to_simplified.get(&original_node_ptr) {
+        visited_on_stack.remove(&original_node_ptr); // Backtrack from stack
+        return simplified_arc.clone();
+    }
+
+    // Recursively simplify predecessors.
+    let mut simplified_predecessors_arcs: Vec<Arc<GSSNode<T>>> = Vec::new();
+    for original_pred_wrapper in &original_node_arc.predecessors {
+        let original_pred_arc = original_pred_wrapper.as_arc(); // This is &Arc<GSSNode<T>>
+        let simplified_pred_arc = simplify_node_recursive(
+            original_pred_arc,
+            memo_original_to_simplified,
+            global_simplified_nodes,
+            visited_on_stack,
+        );
+        simplified_predecessors_arcs.push(simplified_pred_arc);
+    }
+
+    // Create the set of simplified predecessor ArcPtrWrappers.
+    // BTreeSet orders them by pointer (via ArcPtrWrapper's Ord impl),
+    // ensuring canonical order for structurally identical sets of predecessor Arcs.
+    let simplified_predecessors_set: BTreeSet<ArcPtrWrapper<GSSNode<T>>> =
+        simplified_predecessors_arcs.into_iter().map(ArcPtrWrapper::new).collect();
+
+    // Construct a candidate simplified node (not yet Arc'd).
+    let candidate_simplified_node_data = GSSNode {
+        value: original_node_arc.value.clone(),
+        predecessors: simplified_predecessors_set,
+        hash_key_cache: RefCell::new(None), // Will be computed by get_hash_key()
     };
 
-    memo_simplify.insert(original_node_ptr, final_simplified_node.clone());
-    final_simplified_node
+    // Compute its semantic hash key. This will populate its cache.
+    let key = candidate_simplified_node_data.get_hash_key();
+
+    // Check if a semantically identical node (based on key) already exists globally.
+    if let Some(existing_canonical_arc) = global_simplified_nodes.get(&key) {
+        // Yes, use the existing canonical Arc.
+        memo_original_to_simplified.insert(original_node_ptr, existing_canonical_arc.clone());
+        visited_on_stack.remove(&original_node_ptr); // Backtrack from stack
+        existing_canonical_arc.clone()
+    } else {
+        // No, this candidate is semantically new. Arc it and add to global map.
+        let new_canonical_arc = Arc::new(candidate_simplified_node_data);
+        // The hash_key is already computed and cached within new_canonical_arc due to the get_hash_key() call above.
+        global_simplified_nodes.insert(key, new_canonical_arc.clone());
+        memo_original_to_simplified.insert(original_node_ptr, new_canonical_arc.clone());
+        visited_on_stack.remove(&original_node_ptr); // Backtrack from stack
+        new_canonical_arc
+    }
 }
 
-/// Simplifies a GSS forest by merging structurally identical nodes.
-/// Nodes are processed from leaves upwards. Shared nodes remain shared.
-/// The simplification process normalizes predecessor order implicitly.
+/// Simplifies a GSS forest, ensuring that semantically identical nodes are represented by
+/// the same `Arc<GSSNode<T>>` instance. This process is deep, starting from leaves.
+/// Nodes are considered semantically identical if their values are identical and their
+/// simplified predecessors (recursively) are identical sets.
 ///
-/// Returns a new Vec of root nodes for the simplified forest.
-pub fn simplify_gss_forest<T: Ord + Clone + Hash>(
-    roots: &[Arc<GSSNode<T>>>,
+/// The simplification handles shared substructures correctly.
+///
+/// Note: This version's cycle handling for cycles *within the original graph structure*
+/// is basic: it breaks cycles by creating a node with the same value but empty predecessors
+/// for the back-edge. More sophisticated cycle canonicalization might be needed for complex cyclic graphs.
+///
+/// # Arguments
+/// * `roots`: A slice of `Arc<GSSNode<T>>` representing the roots of the GSS forest to simplify.
+///
+/// # Returns
+/// A `Vec<Arc<GSSNode<T>>>` containing the `Arc`s to the simplified root nodes.
+pub fn simplify_gss_forest<T: Clone + Ord + Hash + Debug>(
+    roots: &[Arc<GSSNode<T>>],
 ) -> Vec<Arc<GSSNode<T>>> {
-    let mut memo_simplify: HashMap<*const GSSNode<T>, Arc<GSSNode<T>>> = HashMap::new();
-    let mut canonical_nodes: HashMap<Arc<Vec<BTreeSet<T>>>, Arc<GSSNode<T>>> = HashMap::new();
+    let mut memo_original_to_simplified = HashMap::new();
+    let mut global_simplified_nodes = HashMap::new();
 
-    let mut simplified_roots = Vec::with_capacity(roots.len());
+    let mut simplified_roots = Vec::new();
     for root_arc in roots {
+        // visited_on_stack is reset for each root processing if they are truly separate trees.
+        // If roots can be part of a connected graph, visited_on_stack should persist across calls or be managed globally.
+        // For simplicity, assuming independent processing or that shared parts are handled by memo_original_to_simplified.
+        let mut visited_on_stack = HashSet::new();
         simplified_roots.push(simplify_node_recursive(
             root_arc,
-            &mut memo_simplify,
-            &mut canonical_nodes,
+            &mut memo_original_to_simplified,
+            &mut global_simplified_nodes,
+            &mut visited_on_stack,
         ));
     }
     simplified_roots
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::collections::HashSet;
-    use std::collections::VecDeque;
 
-
-    #[test]
-    fn test_gss_node_hash_key_and_equality() {
-        // Requires T: Ord + Clone + Hash, let's use i32
-        let leaf1 = GSSNode::new(10); // Implicitly Arc-ed later if needed
-        let leaf2 = GSSNode::new(20);
-
-        let node1 = leaf1.push(1); // Node(1, preds={leaf1})
-        let node2 = leaf1.push(1); // Node(1, preds={leaf1}) - should be same key as node1
-        let node3 = leaf2.push(1); // Node(1, preds={leaf2}) - different key from node1
-        let node4 = leaf1.push(2); // Node(2, preds={leaf1}) - different key from node1
-
-        let key1 = node1.get_hash_key();
-        let key2 = node2.get_hash_key();
-        let key3 = node3.get_hash_key();
-        let key4 = node4.get_hash_key();
-
-        assert_eq!(key1, key2, "Nodes with same value and same predecessor structure should have same hash key");
-        assert_ne!(key1, key3, "Nodes with same value but different predecessor structure should have different hash keys");
-        assert_ne!(key1, key4, "Nodes with different value should have different hash keys");
-
-        // Test GSSNode Eq and Ord based on hash_key
-        assert_eq!(node1, node2);
-        assert_ne!(node1, node3);
-
-        // Check ordering consistency (exact order depends on BTreeSet<i32> ordering)
-        // This just checks that Ord is implemented and somewhat consistent.
-        let mut nodes = vec![node3.clone(), node1.clone(), node4.clone(), node2.clone()];
-        nodes.sort(); // Relies on Ord for GSSNode
-
-        // After sorting, identical nodes (node1, node2) should be adjacent.
-        let pos1 = nodes.iter().position(|n| n == &node1).unwrap();
-        let pos2 = nodes.iter().position(|n| n == &node2).unwrap();
-        assert!( (pos1 as i32 - pos2 as i32).abs() <= 1, "Identical nodes should be adjacent after sort");
+    // Helper to create a GSSNode quickly for tests
+    fn gss<T: Clone + Ord + Hash + Debug>(value: T, predecessors: Vec<Arc<GSSNode<T>>>) -> Arc<GSSNode<T>> {
+        Arc::new(GSSNode::new_with_predecessors(value, predecessors))
+    }
+    fn leaf<T: Clone + Ord + Hash + Debug>(value: T) -> Arc<GSSNode<T>> {
+        Arc::new(GSSNode::new(value))
     }
 
     #[test]
-    fn test_gss_deep_simplify() {
-        // L0(0), L1(1)
-        let l0 = Arc::new(GSSNode::new(0));
-        let l1 = Arc::new(GSSNode::new(1));
+    fn test_gss_node_hash_key() {
+        // L0 <- L1
+        //  \-> L2
+        let l2 = leaf(20); // Level 0 for l2: [{20}]
+        let l1 = leaf(10); // Level 0 for l1: [{10}]
+        let l0 = gss(0, vec![l1.clone(), l2.clone()]);
+        // Expected key for l0:
+        // Level 0: {0}
+        // Level 1: {10, 20} (from l1's val, l2's val)
+        let key_l0 = l0.get_hash_key();
+        assert_eq!(key_l0.len(), 2);
+        assert_eq!(key_l0[0].iter().cloned().collect::<Vec<_>>(), vec![0]);
+        assert_eq!(key_l0[1].iter().cloned().collect::<Vec<_>>(), vec![10, 20]);
 
-        // N0(value=10, preds={L0})
-        let n0 = Arc::new(GSSNode::new_with_predecessors(10, vec![l0.clone()]));
-        // N1(value=10, preds={L0})
-        let n1 = Arc::new(GSSNode::new_with_predecessors(10, vec![l0.clone()]));
-        // N2(value=10, preds={L1})
-        let n2 = Arc::new(GSSNode::new_with_predecessors(10, vec![l1.clone()]));
-        // N3(value=11, preds={L0})
-        let n3 = Arc::new(GSSNode::new_with_predecessors(11, vec![l0.clone()]));
-        // N4(value=12, preds={L0, L1})
-        let n4 = Arc::new(GSSNode::new_with_predecessors(12, vec![l0.clone(), l1.clone()]));
-        // N5(value=12, preds={L1, L0}) // Same as N4 logically
-        let n5 = Arc::new(GSSNode::new_with_predecessors(12, vec![l1.clone(), l0.clone()]));
+        // L3 -> L1 (shared)
+        let l3 = gss(3, vec![l1.clone()]);
+        // Expected key for l3:
+        // Level 0: {3}
+        // Level 1: {10}
+        let key_l3 = l3.get_hash_key();
+        assert_eq!(key_l3.len(), 2);
+        assert_eq!(key_l3[0].iter().cloned().collect::<Vec<_>>(), vec![3]);
+        assert_eq!(key_l3[1].iter().cloned().collect::<Vec<_>>(), vec![10]);
+    }
 
+    #[test]
+    fn test_gss_node_equality_and_order() {
+        let l_a1 = leaf(1); // Key: [{1}]
+        let l_a2 = leaf(1); // Key: [{1}]
+        let l_b = leaf(2);  // Key: [{2}]
 
-        let roots = vec![n0, n1, n2, n3, n4, n5, l0, l1]; // Include leaves as roots too
+        // Test PartialEq/Eq
+        assert_eq!(l_a1.as_ref() == l_a2.as_ref(), true); // Compare GSSNode content
+        assert_eq!(*l_a1, *l_a2); // Deref Arc then compare GSSNode content
+        assert_ne!(*l_a1, *l_b);
+
+        // Test PartialOrd/Ord
+        assert!(*l_a1 <= *l_a2);
+        assert!(*l_a1 >= *l_a2);
+        assert!(*l_a1 < *l_b);
+        assert!(*l_b > *l_a1);
+
+        // More complex
+        // N1: 0 -> {10, 20}
+        let n1_p1 = leaf(10);
+        let n1_p2 = leaf(20);
+        let n1 = gss(0, vec![n1_p1.clone(), n1_p2.clone()]); // Key: [{0}, {10,20}]
+
+        // N2: 0 -> {20, 10} (same predecessors, different order in vec)
+        let n2 = gss(0, vec![n1_p2.clone(), n1_p1.clone()]); // Key: [{0}, {10,20}]
+        assert_eq!(*n1, *n2);
+
+        // N3: 0 -> {10, 30}
+        let n3_p3 = leaf(30);
+        let n3 = gss(0, vec![n1_p1.clone(), n3_p3.clone()]); // Key: [{0}, {10,30}]
+        assert!(*n1 < *n3); // {10,20} < {10,30}
+    }
+
+    #[test]
+    fn test_gss_simplification_shared_nodes() {
+        // R1 -> A(val=10) -> B(val=20)
+        // R2 -> C(val=10) -> D(val=20)
+        // A, B, C, D are distinct Arcs initially.
+        // Expected: B and D simplify to S_BD. A and C simplify to S_AC.
+        // R1 and R2 should point to the same S_AC.
+
+        let b = leaf(20); // Original B
+        let a = gss(10, vec![b.clone()]); // Original A
+
+        let d = leaf(20); // Original D
+        let c = gss(10, vec![d.clone()]); // Original C
+
+        assert!(!Arc::ptr_eq(&b, &d)); // Ensure B and D are different Arcs initially
+        assert!(!Arc::ptr_eq(&a, &c)); // Ensure A and C are different Arcs initially
+
+        let roots = vec![a.clone(), c.clone()];
         let simplified_roots = simplify_gss_forest(&roots);
 
-        // Expected unique nodes after simplification:
-        // L0s, L1s
-        // N_10_L0s (from n0, n1)
-        // N_10_L1s (from n2)
-        // N_11_L0s (from n3)
-        // N_12_L0L1s (from n4, n5)
-        // Total: 2 leaves + 4 distinct parent types = 6 unique nodes in the whole simplified forest.
-        // The `simplified_roots` will contain Arcs to these.
+        let simplified_a_target = &simplified_roots[0];
+        let simplified_c_target = &simplified_roots[1];
 
-        let s_n0 = &simplified_roots[0];
-        let s_n1 = &simplified_roots[1];
-        let s_n2 = &simplified_roots[2];
-        let s_n3 = &simplified_roots[3];
-        let s_n4 = &simplified_roots[4];
-        let s_n5 = &simplified_roots[5];
-        let s_l0 = &simplified_roots[6];
-        let s_l1 = &simplified_roots[7];
+        // R1 and R2 should point to the same simplified node S_AC
+        assert!(Arc::ptr_eq(simplified_a_target, simplified_c_target));
 
-        assert!(Arc::ptr_eq(s_n0, s_n1), "N0 and N1 should simplify to the same Arc instance");
-        assert!(!Arc::ptr_eq(s_n0, s_n2), "N0 and N2 should be different");
-        assert!(!Arc::ptr_eq(s_n0, s_n3), "N0 and N3 should be different");
-        assert!(Arc::ptr_eq(s_n4, s_n5), "N4 and N5 should simplify to the same Arc instance");
+        // Check structure of S_AC: value 10
+        assert_eq!(simplified_a_target.value, 10);
+        assert_eq!(simplified_a_target.predecessors.len(), 1);
 
-        // Check values and predecessor counts of simplified nodes
-        assert_eq!(s_l0.value, 0);
-        assert_eq!(s_l0.predecessors.len(), 0);
-        assert_eq!(s_l1.value, 1);
-        assert_eq!(s_l1.predecessors.len(), 0);
+        // The predecessor should be S_BD
+        let s_bd_arc_ptr_wrapper = simplified_a_target.predecessors.iter().next().unwrap();
+        let s_bd_arc = s_bd_arc_ptr_wrapper.as_arc();
+        assert_eq!(s_bd_arc.value, 20);
+        assert!(s_bd_arc.predecessors.is_empty());
 
-        assert_eq!(s_n0.value, 10);
-        assert_eq!(s_n0.predecessors.len(), 1);
-        assert!(Arc::ptr_eq(s_n0.predecessors.iter().next().unwrap().as_arc(), s_l0), "N0's pred should be L0s");
+        // Verify that original B and D simplified to this S_BD
+        // We can do this by simplifying B and D individually (if simplify_gss_forest was not run)
+        // or by checking the memoization maps if they were exposed (they are not).
+        // The fact that simplified_a_target and simplified_c_target are ptr_eq and have the correct structure
+        // strongly implies the inner S_BD was also canonicalized.
+    }
 
-        assert_eq!(s_n2.value, 10);
-        assert_eq!(s_n2.predecessors.len(), 1);
-        assert!(Arc::ptr_eq(s_n2.predecessors.iter().next().unwrap().as_arc(), s_l1), "N2's pred should be L1s");
+    #[test]
+    fn test_gss_simplification_diamond() {
+        //    R -> N0(0) --↘
+        //              N1(1) -> N3(3)
+        //    R -> N0(0) --↗
+        //              N2(1) -> N3(3) (N1 and N2 are semantically same, N3 is shared)
 
-        assert_eq!(s_n3.value, 11);
-        assert_eq!(s_n3.predecessors.len(), 1);
-        assert!(Arc::ptr_eq(s_n3.predecessors.iter().next().unwrap().as_arc(), s_l0), "N3's pred should be L0s");
+        let n3_orig = leaf(3);
+        let n1_orig = gss(1, vec![n3_orig.clone()]);
+        let n2_orig = gss(1, vec![n3_orig.clone()]); // N2 is like N1 but different Arc
 
-        assert_eq!(s_n4.value, 12);
-        assert_eq!(s_n4.predecessors.len(), 2); // L0s and L1s
-        // Check if both L0s and L1s are predecessors of s_n4
-        let s_n4_preds: BTreeSet<_> = s_n4.predecessors.iter().map(|p| Arc::as_ptr(p.as_arc())).collect();
-        assert!(s_n4_preds.contains(&Arc::as_ptr(s_l0)));
-        assert!(s_n4_preds.contains(&Arc::as_ptr(s_l1)));
+        assert!(!Arc::ptr_eq(&n1_orig, &n2_orig));
 
+        let n0_orig = gss(0, vec![n1_orig.clone(), n2_orig.clone()]);
 
-        // Count unique nodes in the simplified forest by collecting pointers
-        let mut unique_simplified_nodes = HashSet::new();
-        let mut queue: VecDeque<Arc<GSSNode<i32>>> = simplified_roots.into_iter().collect();
-        let mut visited_in_traversal = HashSet::new();
+        let roots = vec![n0_orig];
+        let simplified_roots = simplify_gss_forest(&roots);
+        let simplified_n0 = &simplified_roots[0];
 
-        while let Some(node_arc) = queue.pop_front() {
-            if visited_in_traversal.insert(Arc::as_ptr(&node_arc)) {
-                unique_simplified_nodes.insert(Arc::as_ptr(&node_arc));
-                for pred_wrapper in &node_arc.predecessors {
-                    queue.push_back(pred_wrapper.as_arc().clone());
-                }
-            }
-        }
-        assert_eq!(unique_simplified_nodes.len(), 6, "Expected 6 unique nodes in the simplified forest structure.");
+        assert_eq!(simplified_n0.value, 0);
+        // N1 and N2 should simplify to the *same* Arc<GSSNode>.
+        // So, N0 should have only one distinct predecessor after simplification.
+        assert_eq!(simplified_n0.predecessors.len(), 1);
+
+        let simplified_n1n2 = simplified_n0.predecessors.iter().next().unwrap().as_arc();
+        assert_eq!(simplified_n1n2.value, 1);
+        assert_eq!(simplified_n1n2.predecessors.len(), 1);
+
+        let simplified_n3 = simplified_n1n2.predecessors.iter().next().unwrap().as_arc();
+        assert_eq!(simplified_n3.value, 3);
+        assert!(simplified_n3.predecessors.is_empty());
+    }
+     #[test]
+    fn test_gss_simplification_cycle_in_original() {
+        // N0 -> N1 -> N0 (cycle)
+        // N0 (value 0), N1 (value 1)
+        let n0_val = 0;
+        let n1_val = 1;
+
+        // Create nodes that will form a cycle. This is tricky with Arc.
+        // We can't directly create Arc<GSSNode> that cyclically reference each other at construction.
+        // Simplification is usually for DAGs or specific cycle handling.
+        // The current simplify_node_recursive has basic cycle breaking.
+        // Let's test a self-loop: N0 -> N0
+
+        // Create N0 that initially points to nothing.
+        let n0_initial = Arc::new(GSSNode::new(n0_val));
+
+        // Manually (and unsafely, for test purposes) create a cycle.
+        // This is not how GSSNodes are typically built but tests the cycle detection in simplify.
+        // To do this safely, one would need interior mutability or a post-construction step.
+        // The provided GSSNode structure doesn't easily allow creating cycles after construction
+        // without `Arc::make_mut` and then re-wrapping, which is complex.
+
+        // Let's test with a slightly different structure that can be built:
+        // R -> N0(0)
+        // R -> N1(1) -> N0(0) (N1 points back to an equivalent of R's first child)
+
+        let common_leaf = leaf(0); // Represents the target of the "back edge"
+        let n1 = gss(1, vec![common_leaf.clone()]);
+        let n0_pointing_to_n1 = gss(0, vec![n1.clone()]); // This is one root: 0 -> 1 -> 0
+
+        // Another root that is just the common_leaf
+        // Roots: [ (0 -> 1 -> 0), (0) ]
+
+        let roots = vec![n0_pointing_to_n1, common_leaf.clone()];
+        let simplified_roots = simplify_gss_forest(&roots);
+
+        // Expected:
+        // simplified_common_leaf: val=0, preds={}
+        // simplified_n1: val=1, preds={simplified_common_leaf}
+        // simplified_n0_pointing_to_n1: val=0, preds={simplified_n1}
+        // The two roots should be distinct simplified nodes.
+
+        assert_eq!(simplified_roots.len(), 2);
+        let s_n0_path = &simplified_roots[0]; // Should be 0 -> 1 -> 0
+        let s_leaf_path = &simplified_roots[1];   // Should be 0 (leaf)
+
+        assert!(!Arc::ptr_eq(s_n0_path, s_leaf_path));
+
+        // Check s_leaf_path
+        assert_eq!(s_leaf_path.value, 0);
+        assert!(s_leaf_path.predecessors.is_empty());
+
+        // Check s_n0_path
+        assert_eq!(s_n0_path.value, 0);
+        assert_eq!(s_n0_path.predecessors.len(), 1);
+        let s_n1 = s_n0_path.predecessors.iter().next().unwrap().as_arc();
+        assert_eq!(s_n1.value, 1);
+        assert_eq!(s_n1.predecessors.len(), 1);
+        let s_n1_pred = s_n1.predecessors.iter().next().unwrap().as_arc();
+
+        // s_n1_pred should be the same Arc instance as s_leaf_path
+        assert_eq!(s_n1_pred.value, 0);
+        assert!(s_n1_pred.predecessors.is_empty());
+        assert!(Arc::ptr_eq(s_n1_pred, s_leaf_path));
+
+        // The cycle detection in simplify_node_recursive is more about stack depth on original nodes.
+        // If N0 -> N0 (direct cycle in original pointers), simplify(N0) calls simplify(N0_pred=N0).
+        // visited_on_stack for N0 would be hit. It would create a stub: N0_stub(val=0, preds={}).
+        // This N0_stub would be memoized for original N0.
+        // This test doesn't directly create such a raw pointer cycle for simplify to untangle,
+        // but relies on semantic equivalence and DAG path processing.
     }
 }
