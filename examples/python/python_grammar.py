@@ -286,8 +286,12 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
             mask = mask[:scores.shape[-1]]
 
         mask_ids = np.where(mask)[0]
+        mask_tokens = [id_to_llm_token[id].decode() for id in mask_ids]
         mask_id_map = {id: self.llm_token_id_to_token.get(id) for id in mask_ids}
-#         debug_print(f"Mask IDs: {mask_id_map}")
+        print(f"Mask Token IDs: {textwrap.shorten(str(mask_ids), width=100)}")
+        print(f"Mask Tokens: {textwrap.shorten(str(mask_tokens), width=300)}")
+        print(f"Mask Tokens (first chars): {"".join(sorted(list({m[0] for m in mask_tokens})))!r}")
+
         print("")
 
         scores = np.where(mask, scores, -np.inf)
