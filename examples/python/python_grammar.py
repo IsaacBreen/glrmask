@@ -144,8 +144,8 @@ def define_tokens() -> list[tuple[str, Any]]:
     tokens["INDENT"] = eps()
     tokens["DEDENT"] = eps()
     tokens["STRING"] = choice([
-        seq([eat_u8(ord('"')), rep(choice(eat_u8_negation(ord('"')), eat('\"'))), eat_u8(ord('"'))]),
-        seq([eat_u8(ord("'")), rep(choice(eat_u8_negation(ord("'")), eat('\''))), eat_u8(ord("'"))]),
+        seq([eat_u8(ord('"')), rep(choice([eat_u8_negation(ord('"')), eat('\"')])), eat_u8(ord('"'))]),
+        seq([eat_u8(ord("'")), rep(choice([eat_u8_negation(ord("'")), eat('\'')])), eat_u8(ord("'"))]),
     ])
     tokens["FSTRING_START"] = choice([
         eat('"""'),
