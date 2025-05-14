@@ -349,6 +349,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
 
     pub fn step(&mut self, token_id: TerminalID) {
         /* ---------- logging & preparation ---------- */
+        crate::debug!(4, ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
         self.log_gss("Step-start", token_id);
 
         let mut todo = std::mem::take(&mut self.active_states).into_values().collect::<Vec<_>>();
@@ -415,6 +416,8 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
 
         self.log_gss("Step-end", token_id);
         self.action_not_found_states.clear();        // current design: we drop them
+
+        crate::debug!(4, "<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
     }
 
     /// Merging is now handled implicitly when states are added to `next` in the `step` method.
