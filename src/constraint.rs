@@ -823,6 +823,7 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     fn prepare_initial_nodes_and_values_for_special_map(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a, LLMTokenInfo>)> {
+
         let mut initial_nodes_and_values: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'_, LLMTokenInfo>)> = Vec::new();
         let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, GLRParserState<'_, LLMTokenInfo>> = BTreeMap::new();
 
@@ -834,11 +835,28 @@ impl<'a> GrammarConstraintState<'a> {
             tokenizer_state_id_to_parse_states.insert(*tokenizer_state_id, cloned_state);
         }
 
+        crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
+        // for (tokenizer_state_id, glr_state) in self.state.iter() {
+        //     glr_state.log_gss(format!("Existing initial nodes and values for tokenizer state {}", tokenizer_state_id.0).as_str(), GrammarTokenID(0));
+        // }
+        // for (tokenizer_state_id, glr_state) in tokenizer_state_id_to_parse_states.iter() {
+        //     glr_state.log_gss(format!("Prepared (stage 1) initial nodes and values for tokenizer state {}", tokenizer_state_id.0).as_str(), GrammarTokenID(0));
+        // }
+        for tokenizer_state_id in tokenizer_state_id_to_parse_states.keys() {
+            let glr_state_before = &self.state[&tokenizer_state_id];
+            let glr_state_after = &tokenizer_state_id_to_parse_states[&tokenizer_state_id];
+            glr_state_before.log_gss(format!("Existing initial nodes and values for tokenizer state {}", tokenizer_state_id.0).as_str(), GrammarTokenID(0));
+            glr_state_after.log_gss(format!("Prepared (stage 1) initial nodes and values for tokenizer state {}", tokenizer_state_id.0).as_str(), GrammarTokenID(0));
+        }
+        crate::debug!(4, "----------------------------------------------------------------");
+
         for (tokenizer_state_id, state) in tokenizer_state_id_to_parse_states {
             let token_trie_node = self.parent.precomputed[&tokenizer_state_id].clone();
             let token_trie_arc_mutex = Arc::new(Mutex::new(token_trie_node));
             initial_nodes_and_values.push((token_trie_arc_mutex, state));
         }
+
+
         initial_nodes_and_values
     }
 

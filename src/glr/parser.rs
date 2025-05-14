@@ -300,7 +300,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
     }
 
     /// Debug helper so the main `step` body stays short.
-    fn log_gss(&self, phase: &str, token: TerminalID) {
+    pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
         const MAX: usize = 30;
         let roots: Vec<_> = self.active_states.values().map(|s| s.stack.clone()).collect();
         let stats = gather_gss_stats(&roots);
