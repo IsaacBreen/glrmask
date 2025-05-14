@@ -13,18 +13,17 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, print_precompute_stats, PrecomputeStats};
 use crate::datastructures::charmap::TrieMap;
-use crate::datastructures::gss::{prune_and_transform_roots, GSSNode}; // Use prune_and_transform_roots
+use crate::datastructures::gss::prune_and_transform_recursive;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::datastructures::ArcPtrWrapper;
 use crate::finite_automata::Regex;
 use crate::glr::parser::{
-    MergeAndIntersect, GLRParser, GLRParserState, ParseState, // ParseStateNodeContent is removed
+    MergeAndIntersect, GLRParser, GLRParserState, ParseState, ParseStateNodeContent,
 };
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
-use crate::glr::table::StateID; // Import StateID
 
 pub type LLMTokenBV = HybridBitset;
 pub type GrammarTokenBV = BitVec;
@@ -130,7 +129,6 @@ impl PrecomputedNodeContents {
 }
 
 // Pre-computation graph node / alias types
-// PrecomputeNode is Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>
 pub type PrecomputeNode =
     Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 pub type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode>;
@@ -196,7 +194,7 @@ impl GrammarConstraint {
     ) -> Self {
         let original_to_internal_id_bimap = Self::setup_llm_token_mappings(&llm_token_map);
 
-        let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap_or(0); // handle empty map
+        let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap();
 
         // Reconstruct the internal_llm_token_map for precomputation (bytes -> internal LLMTokenID)
         let mut internal_llm_token_map_for_precompute = BiBTreeMap::new();
@@ -503,7 +501,7 @@ impl<'r> Precomputer<'r> {
         > = BTreeMap::new();
 
         let mut queue: BTreeMap<
-            usize, // offset in segment_bytes
+            usize,
             BTreeMap<TokenizerStateID, BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
         > = BTreeMap::new();
 
@@ -540,7 +538,6 @@ impl<'r> Precomputer<'r> {
                 for m in &exec_result.matches {
                     let grammar_tok = GrammarTokenID(m.id);
                     let match_end_offset = offset + m.width;
-                    // Edge tokens are all tokens reachable *from* this vocab node *without consuming further bytes*
                     let edge_tokens = child_vocab_of_segment.reachable_token_ids().clone();
 
 
@@ -751,8 +748,7 @@ impl<'a> GrammarConstraintState<'a> {
         let mut internal_mask = HybridBitset::new(); // This will be composed of internal IDs
         for (_tokenizer_state_id, glr_parser_state) in &self.state {
             for active_state in glr_parser_state.active_states.values() {
-                // Access current_t on the ParseState
-                internal_mask |= &active_state.current_t.active; // .active is already internal
+                internal_mask |= &active_state.stack.peek().t.active; // .active is already internal
             }
         }
         self.parent.internal_bv_to_original(&internal_mask) // Convert back to original IDs
@@ -789,84 +785,35 @@ impl<'a> GrammarConstraintState<'a> {
         let maybe_internal_llm_id_val = self.parent.original_id_to_internal(llm_token_id)
                                           .map(|id| id.0 as usize);
 
-        // Closure for prune_and_transform_roots
-        // Takes (node_content, edge_value_to_this_node)
-        // Returns Option<(new_node_content, new_edge_value_to_this_node, continue_recursion)>
-        let closure = |state_id: &StateID, llm_info_to_node: &LLMTokenInfo| -> Option<(StateID, LLMTokenInfo, bool)> {
-             if let Some(internal_llm_id_val) = maybe_internal_llm_id_val {
-                 // Check if the required LLM token is in the active set *on the edge leading to this node*
-                 if llm_info_to_node.active.contains(internal_llm_id_val) {
-                     // The new value for the edge is `all_true_token_info`
-                     let new_llm_info_for_edge = all_true_token_info.clone();
-
-                     // Decide whether to continue recursion based on intersection
-                     let continue_recursion = llm_info_to_node.intersection != all_true_intersection;
-
-                     Some((*state_id, new_llm_info_for_edge, continue_recursion))
-                 } else {
-                     // The required token is not active on the edge to this node, prune this path
-                     None
-                 }
-             } else {
-                 // Original token ID not found in mapping, cannot be active. Prune this path.
-                 None
-             }
+        let closure = |content: &ParseStateNodeContent<LLMTokenInfo>| -> Option<(ParseStateNodeContent<LLMTokenInfo>, bool)> {
+            if let Some(internal_llm_id_val) = maybe_internal_llm_id_val {
+                if content.t.active.contains(internal_llm_id_val) { // .active is internal, compare with internal ID
+                    if content.t.intersection == all_true_intersection {
+                         Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, false))
+                    } else {
+                         Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, true))
+                    }
+                } else { // Original token ID not found in mapping, so it cannot be active
+                    None
+                }
+            } else { // Original token ID not found in mapping, so it cannot be active
+                None
+            }
         };
 
-        // Collect root GSS nodes from the active states to pass to prune_and_transform_roots
-        // Need to pass roots as Vec<(Arc<GSSNode<N, E>>, E)> where E is the edge value to the root.
-        // For initial roots, there's no preceding edge within the GSS, so we can pass a default E or handle it.
-        // In the context of ParseState, each active ParseState represents a path ending at `parse_state.gss_node`,
-        // and `parse_state.current_t` is the semantic value *at* that node. This is not the edge value *to* the node.
-        // The `prune_and_transform_roots` as defined expects an edge value associated with each root.
-
-        // Let's rethink `commit`. The pruning should happen based on the *accumulated* semantic value *at* each GSS node.
-        // The `current_t` in `ParseState` already represents this accumulated value.
-        // The prune logic needs to check `parse_state.current_t.active`.
-        // If a ParseState is pruned, its associated GSS node and its predecessors via that path should be pruned unless
-        // other ParseStates still use those nodes/paths.
-
-        // The `prune_and_transform_recursive` function should operate on `Arc<GSSNode<N, E>>` and the accumulated value `T`.
-        // Let's redefine the closure signature and the prune functions.
-        // Closure: `Fn(&N, &E, &T_accumulated) -> Option<(N, E, T_accumulated, bool)>` ? No, this is getting complex.
-
-        // Let's stick to the GSS definition and `prune_and_transform_roots` as defined in gss.rs
-        // It expects `Vec<(Arc<GSSNode<N, E>>, E)>` as roots and `Fn(&N, &E) -> Option<(N, E, bool)>`.
-        // This means the pruning/transformation is based on the node's content (N) and the incoming edge value (E).
-
-        // The commit logic needs to filter/transform ParseStates based on their `current_t`.
-        // This suggests `prune_and_transform_roots` might not be the right tool directly on the GSS forest of ParseStates.
-        // Instead, we iterate through `active_states`, apply the commit logic based on `current_t`, and then rebuild/clean up the GSS.
-
+        let mut memo = HashMap::new();
         self.state.retain(|_tokenizer_state_id, glr_state| {
-             let mut new_active_states: BTreeMap<StateID, ParseState<T>> = BTreeMap::new();
-             for (_key, parse_state) in std::mem::take(&mut glr_state.active_states) {
-                 // Apply commit logic based on parse_state.current_t
-                 if let Some(internal_llm_id_val) = maybe_internal_llm_id_val {
-                     if parse_state.current_t.active.contains(internal_llm_id_val) {
-                         // This ParseState is kept, transform its current_t
-                         let mut transformed_parse_state = parse_state;
-                         transformed_parse_state.current_t = all_true_token_info.clone(); // Transform T
-
-                         // Insert into the new map, merging with existing if key (StateID) is same
-                         new_active_states.insert_with(transformed_parse_state.key(), transformed_parse_state, |existing, new_s| existing.merge(new_s));
-                     } else {
-                         // Prune this ParseState
-                         crate::debug!(4, "Pruning ParseState due to commit token not being active in current_t");
-                     }
-                 } else {
-                     // Original token ID not found, prune all states
-                     crate::debug!(4, "Pruning ParseState due to original token ID not found in map");
-                 }
-             }
-             glr_state.active_states = new_active_states;
-             !glr_state.active_states.is_empty()
-         });
-
-         // After pruning ParseStates, the underlying GSS nodes might have become unreachable.
-         // The `Arc` mechanism and the `Drop` implementation in `GSSNode` should handle cleanup.
-         // However, shared nodes might still be referenced by other tokenizer states.
-         // This seems correct.
+            glr_state.active_states.retain(|_key, parse_state| {
+                let maybe_new_node = prune_and_transform_recursive(&parse_state.stack, &closure, &mut memo);
+                if let Some(new_node) = maybe_new_node {
+                    parse_state.stack = new_node;
+                    true
+                } else {
+                    false
+                }
+            });
+            !glr_state.active_states.is_empty()
+        });
     }
 
     pub fn step_with_llm_token_sequence(&mut self, llm_token_ids: &[LLMTokenID]) {
@@ -881,16 +828,10 @@ impl<'a> GrammarConstraintState<'a> {
 
         for (tokenizer_state_id, state) in &self.state {
             let mut cloned_state = state.clone();
-            // Filter/intersect the current_t.active on the ParseStates
-            cloned_state.active_states.retain(|_key, parse_state| {
-                Arc::make_mut(&mut parse_state.current_t).active &= llm_tokens; // Modify current_t's active set
-                // Prune if active set becomes empty
-                !parse_state.current_t.active.is_empty()
-            });
-             // Keep the GLRParserState only if it still has active ParseStates
-            if !cloned_state.active_states.is_empty() {
-                 tokenizer_state_id_to_parse_states.insert(*tokenizer_state_id, cloned_state);
+            for parse_state in cloned_state.active_states.values_mut() {
+                Arc::make_mut(&mut parse_state.stack).value.t.active &= llm_tokens;
             }
+            tokenizer_state_id_to_parse_states.insert(*tokenizer_state_id, cloned_state);
         }
 
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
@@ -917,124 +858,93 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(2, "Stepping grammar constraint state with tokenizer states {:?}", self.state.keys().map(|k| k.0).collect::<Vec<_>>());
         let initial_nodes_and_values = self.prepare_initial_nodes_and_values_for_special_map(llm_tokens);
 
-        self.state = BTreeMap::new(); // Clear current state, will be rebuilt
+        self.state = BTreeMap::new();
 
         Trie::special_map(
             initial_nodes_and_values,
-            |mut glr_parse_state, grammar_token_id, edge_llm_tokens, child_node| { // mut glr_parse_state to allow modification
+            |glr_parse_state, grammar_token_id, edge_llm_tokens, child_node| {
                 let node_ptr = std::ptr::addr_of!(*child_node);
                 crate::debug!(3, "Processing grammar node {:p} token {:?} with {} active states", node_ptr, grammar_token_id.map(|gtid| gtid.0), glr_parse_state.active_states.len());
-
-                // Filter/intersect the active LLM tokens on the ParseStates using the edge_llm_tokens from the Trie edge
-                glr_parse_state.active_states.retain(|_key, parse_state| {
-                    // current_t is the semantic value *at* the source node (before this edge)
-                    // The active tokens on the edge should be intersected with the current_t.active
-                    // and the intersection of the edge tokens and current_t.intersection should be propagated.
-                    // Let's update current_t based on the edge_llm_tokens from the trie.
-
-                    let current_active_tokens_at_source = parse_state.current_t.active.clone();
-
-                    // The semantic value propagated *through* this trie edge
-                    let mut propagated_t = parse_state.current_t.clone();
-                    propagated_t.active &= edge_llm_tokens;
-                    propagated_t.intersection &= edge_llm_tokens; // Intersect with edge tokens
-
-                    // Update the ParseState's current_t to the propagated value *after* the edge traversal
-                    // This seems incorrect. The `current_t` is the value *at the GSS node*.
-                    // The semantic values `E` are on the GSS edges.
-                    // The `special_map` gives us `edge_llm_tokens` which is the set of LLM tokens compatible with this trie edge (GrammarTokenID).
-                    // We need to filter/transform the active ParseStates based on these `edge_llm_tokens`.
-
-                    // Let's try filtering the ParseStates based on if their `current_t.active` has any overlap with `edge_llm_tokens`.
-                    // Then, for the ones that remain, the `current_t.active` should be intersected with `edge_llm_tokens`.
-                    // And `current_t.intersection` should also be intersected.
-
-                    Arc::make_mut(&mut parse_state.current_t).active &= edge_llm_tokens;
-                    Arc::make_mut(&mut parse_state.current_t).intersection &= edge_llm_tokens; // Also intersect intersection
-
-                    // Prune the ParseState if its active set becomes empty after intersection
-                    !parse_state.current_t.active.is_empty()
+                let mut cloned_glr_parse_state = glr_parse_state.clone();
+                cloned_glr_parse_state.active_states.retain(|_key, parse_state| {
+                    let current_active_tokens = parse_state.stack.value.t.active.clone();
+                    Arc::make_mut(&mut parse_state.stack).value.t.intersection &= &current_active_tokens;
+                    Arc::make_mut(&mut parse_state.stack).value.t.active &= edge_llm_tokens;
+                    // // TODO: delete this
+                    // if parse_state.stack.value.t.active.is_empty() {
+                    //     crate::debug!(4, "Pruning parse state {:?} because it has no active tokens", parse_state.key());
+                    // }
+                    !parse_state.stack.value.t.active.is_empty()
                 });
-
-                if let Some(gtid) = grammar_token_id {
-                    // Step the GLR parser state with the grammar token
-                    glr_parse_state.step(gtid);
-                }
-
-                if glr_parse_state.active_states.is_empty() {
+                grammar_token_id.map(|gtid| cloned_glr_parse_state.step(gtid));
+                if cloned_glr_parse_state.active_states.is_empty() {
                     crate::debug!(3, "No active states after processing grammar token {:?}", grammar_token_id.map(|gtid| gtid.0));
-                    None
+                    return None;
                 } else {
-                    crate::debug!(3, "Processed grammar token {:?}, {} active states.", grammar_token_id.map(|gtid| gtid.0), glr_parse_state.active_states.len());
-                    Some(glr_parse_state)
+                    crate::debug!(3, "Processed grammar token {:?}, {} active states.", grammar_token_id.map(|gtid| gtid.0), cloned_glr_parse_state.active_states.len());
+                    Some(cloned_glr_parse_state)
                 }
             },
             |managed_parse_state1, managed_parse_state2| {
                 managed_parse_state1.merge_with(managed_parse_state2);
             },
-            |node, mut current_glr_parse_state| { // mut current_glr_parse_state to allow modification
+            |node, current_glr_parse_state| {
                 let mut active_llm_tokens = HybridBitset::new();
                 for parse_state in current_glr_parse_state.active_states.values() {
-                    active_llm_tokens |= &parse_state.current_t.active; // Access current_t
+                    active_llm_tokens |= &parse_state.stack.value.t.active;
                 }
                 let node_ptr = std::ptr::addr_of!(*node);
                 crate::debug!(3, "Processing node {:p} with {} active states, {} LLM tokens, {} finalizers", node_ptr, current_glr_parse_state.active_states.len(), active_llm_tokens.len(), node.value.finalizers().len()); // Use .finalizers()
-
-                // Handle clean end
-                if let Some(clean_end_llm_tokens) = &node.value.clean_end {
+                if let Some(clean_end) = &node.value.clean_end {
                     let mut final_glr_parse_state = current_glr_parse_state.clone();
                     final_glr_parse_state.active_states.retain(|_key, parse_state| {
-                        // Intersect with clean_end tokens
-                        Arc::make_mut(&mut parse_state.current_t).active &= clean_end_llm_tokens;
-                        Arc::make_mut(&mut parse_state.current_t).intersection &= clean_end_llm_tokens; // Also intersect intersection
-                        !parse_state.current_t.active.is_empty()
+                        let current_active_tokens = parse_state.stack.value.t.active.clone();
+                        Arc::make_mut(&mut parse_state.stack).value.t.intersection &= &current_active_tokens;
+                        Arc::make_mut(&mut parse_state.stack).value.t.active &= clean_end;
+                        !parse_state.stack.value.t.active.is_empty()
                     });
                     crate::debug!(3, "At clean end state");
                     if final_glr_parse_state.is_ok() {
                         crate::debug!(3, "GLR parse state at clean end is OK");
-                        // Merge the final_glr_parse_state into the overall constraint state for TokenizerStateID(0)
                         if let Some(existing) = self.state.get_mut(&TokenizerStateID(0)) {
-                            existing.merge_with(final_glr_parse_state); // Pass the modified state
+                            existing.merge_with(final_glr_parse_state.clone());
                         } else {
-                            self.state.insert(TokenizerStateID(0), final_glr_parse_state);
+                            self.state.insert(TokenizerStateID(0), final_glr_parse_state.clone());
                         }
                     }
                 }
 
-                // Handle finalizers
                 for (possible_final_grammar_token, precomputed_finalizer) in node.value.finalizers().iter() { // Use .finalizers()
-                    let mut glr_parse_state_after_finalizer_step = current_glr_parse_state.clone();
-                    crate::debug!(3, "Stepping semi-final GLR parse state with grammar token {:?}", possible_final_grammar_token.0);
-                    glr_parse_state_after_finalizer_step.step(*possible_final_grammar_token); // Step with the finalizer grammar token
-
-                    if glr_parse_state_after_finalizer_step.is_ok() {
-                        crate::debug!(3, "Semi-final GLR parse state after grammar step is OK");
+                    let mut possible_next_glr_parse_state = current_glr_parse_state.clone();
+                    crate::debug!(3, "Stepping semi-final GLR parse state");
+                    possible_next_glr_parse_state.step(*possible_final_grammar_token);
+                    if possible_next_glr_parse_state.is_ok() {
+                        crate::debug!(3, "Semi-final GLR parse state is OK");
                         for (tokenizer_state_id, llm_tokens_from_finalizer) in &precomputed_finalizer.content {
-                            // For each finalizer entry, filter the states *after* the grammar step
-                            let mut glr_parse_state_filtered = glr_parse_state_after_finalizer_step.clone(); // Start from state *after* grammar step
-                             glr_parse_state_filtered.active_states.retain(|_key, parse_state| {
-                                 // Intersect with finalizer's LLM tokens
-                                 Arc::make_mut(&mut parse_state.current_t).active &= llm_tokens_from_finalizer;
-                                 Arc::make_mut(&mut parse_state.current_t).intersection &= llm_tokens_from_finalizer; // Also intersect intersection
-                                 !parse_state.current_t.active.is_empty()
-                             });
+                            let mut glr_parse_state_filtered = current_glr_parse_state.clone(); // Start from current_glr_parse_state for filtering
+                            glr_parse_state_filtered.active_states.retain(|_key, parse_state| {
+                                let current_active_tokens = parse_state.stack.value.t.active.clone();
+                                Arc::make_mut(&mut parse_state.stack).value.t.intersection &= &current_active_tokens;
+                                Arc::make_mut(&mut parse_state.stack).value.t.active &= llm_tokens_from_finalizer;
+                                !parse_state.stack.value.t.active.is_empty()
+                            });
 
                             crate::debug!(3, "Processing finalizer for token_state_id {:?}", tokenizer_state_id);
-                            if glr_parse_state_filtered.is_ok() {
-                                crate::debug!(3, "Finalizer is compatible after filtering");
+                            if glr_parse_state_filtered.is_ok() { // This is current_glr_parse_state filtered by finalizer's llm_tokens
+                                crate::debug!(3, "Finalizer is compatible with current GLR state (pre-step by final_grammar_token)");
                                 if let Some(existing) = self.state.get_mut(tokenizer_state_id) {
-                                    existing.merge_with(glr_parse_state_filtered); // Merge the filtered state
+                                    existing.merge_with(glr_parse_state_filtered.clone());
                                 } else {
-                                    self.state.insert(*tokenizer_state_id, glr_parse_state_filtered);
+                                    self.state.insert(*tokenizer_state_id, glr_parse_state_filtered.clone());
                                 }
                             }
                         }
                     }
                 }
-                // The node is kept in the trie special_map if there are ANY active states associated with it at the end of processing this node.
-                !current_glr_parse_state.active_states.is_empty() // This might be incorrect logic now. The trie node should be kept if it leads to *any* valid state in *any* tokenizer state after processing. The special_map returns the filtered/transformed GLRParserState for THIS branch.
-                                                                   // The check `!current_glr_parse_state.active_states.is_empty()` here determines if this branch of the Trie traversal should continue. This seems correct.
+                !current_glr_parse_state.active_states.is_empty()
             },
         );
     }
 }
+
+
