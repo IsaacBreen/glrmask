@@ -519,7 +519,7 @@ fn test_hideous_ambiguity() {
 
     // 8. Step with LLM Token "a" repeatedly
     let a_id = llm_token_map.get_by_left(&b"a"[..]).unwrap().0;
-    for i in 0..10 {
+    for i in 0..10000 {
         println!("{}. Stepping with LLM token ID {}", i, a_id);
         constraint_state.step_with_all_llm_tokens();
     }
