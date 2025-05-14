@@ -6,10 +6,11 @@ use std::ops::Deref;
 
 use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)] // Modified derives
 pub struct GSSNode<T> {
     pub value: T,
     predecessors: BTreeSet<ArcPtrWrapper<GSSNode<T>>>,
+    cached_deep_hash: Option<Arc<Vec<Vec<T>>>>, // New field
 }
 
 impl<T> GSSNode<T> {
@@ -17,12 +18,14 @@ impl<T> GSSNode<T> {
         Self {
             value,
             predecessors: BTreeSet::new(),
+            cached_deep_hash: None, // Add this line
         }
     }
     pub fn new_with_predecessors(value: T, predecessors: Vec<Arc<GSSNode<T>>>) -> Self {
         Self {
             value,
             predecessors: predecessors.into_iter().map(ArcPtrWrapper::new).collect(),
+            cached_deep_hash: None, // Add this line
         }
     }
 
@@ -133,6 +136,7 @@ impl<T> GSSNode<T> {
                 // wrapper.as_ref() is &GSSNode<T>, then map is applied to the GSSNode
                 .map(|wrapper| ArcPtrWrapper::new(Arc::new(wrapper.as_ref().map(f))))
                 .collect(),
+            cached_deep_hash: None, // Add this line
         }
     }
 }
@@ -344,7 +348,7 @@ pub fn prune_and_transform_recursive<T: Clone>(
                 }
 
                 // Only create a node if it has predecessors OR it's an original root (how to check?).
-                // If new_predecessors is empty AND the original node had predecessors, it means all paths were pruned.
+                // If new_predecessors.is_empty() AND the original node had predecessors, it means all paths were pruned.
                 if new_predecessors.is_empty() && !node_arc.predecessors.is_empty() {
                      memo.insert(node_ptr, None); // Mark as pruned
                      return None; // Return None, pruning this node
@@ -457,7 +461,7 @@ pub struct GSSStats {
     /// Maximum depth encountered (distance from a root node).
     pub max_depth: usize,
     /// Average depth of nodes (distance from a root node).
-    pub average_depth: f64,
+    pub average_depth: f664,
     /// Number of nodes with more than one predecessor (merge points).
     pub merge_points: usize,
     /// Maximum number of predecessors for any single node.
@@ -513,6 +517,157 @@ pub fn gather_gss_stats<T: Clone>(roots: &[Arc<GSSNode<T>>]) -> GSSStats {
     }
 
     stats
+}
+
+
+// Helper for GSS simplification.
+#[derive(Clone)]
+enum SimplificationState<T: Clone + Ord + Hash + Eq + Debug> {
+    Processing,
+    Done(Arc<GSSNode<T>>),
+}
+
+/// Recursive helper for GSS simplification.
+fn simplify_recursive<T: Clone + Ord + Hash + Eq + Debug>(
+    original_node_arc: &Arc<GSSNode<T>>,
+    processed_nodes_memo: &mut HashMap<*const GSSNode<T>, SimplificationState<T>>,
+    structural_memo: &mut HashMap<(T, Arc<Vec<Vec<T>>>), Arc<GSSNode<T>>>,
+) -> Arc<GSSNode<T>> {
+    let original_node_ptr = Arc::as_ptr(original_node_arc);
+
+    // 1. Check memo for already processed or currently processing node
+    if let Some(state) = processed_nodes_memo.get(&original_node_ptr) {
+        match state {
+            SimplificationState::Processing => {
+                // Cycle detected (a node is an ancestor of itself in the recursion path).
+                // This simplification approach relies on "leaves-up" (post-order traversal)
+                // and is designed for DAGs. Deep hashing of cyclic structures is non-trivial.
+                panic!("Cycle detected during GSS simplification. This method assumes a DAG.");
+            }
+            SimplificationState::Done(simplified_node_arc) => {
+                return simplified_node_arc.clone();
+            }
+        }
+    }
+
+    // Mark current node as "Processing" to detect cycles.
+    processed_nodes_memo.insert(original_node_ptr, SimplificationState::Processing);
+
+    // 2. Recursively simplify predecessors
+    let mut simplified_predecessors_set = BTreeSet::new();
+    for pred_wrapper in original_node_arc.predecessors.iter() {
+        let original_pred_arc = pred_wrapper.as_arc();
+        let simplified_pred_arc =
+            simplify_recursive(original_pred_arc, processed_nodes_memo, structural_memo);
+        simplified_predecessors_set.insert(ArcPtrWrapper::new(simplified_pred_arc));
+    }
+
+    // 3. Compute the deep hash for the current node based on its value and its simplified predecessors' hashes.
+    let current_value = original_node_arc.value.clone();
+
+    // `levels_of_sets` will temporarily store BTreeSets for each level to easily merge values.
+    let mut levels_of_sets: Vec<BTreeSet<T>> = Vec::new();
+
+    // Level 0: current node's value
+    let mut level0_set = BTreeSet::new();
+    level0_set.insert(current_value.clone());
+    levels_of_sets.push(level0_set);
+
+    // Aggregate hashes from simplified predecessors
+    for simpl_pred_wrapper in &simplified_predecessors_set {
+        let simpl_pred_arc = simpl_pred_wrapper.as_arc();
+
+        // Simplified predecessors must have their cached_deep_hash populated by previous recursive calls.
+        let pred_cached_hash_arc = simpl_pred_arc.cached_deep_hash.as_ref()
+            .expect("Internal error: Simplified predecessor must have its cached_deep_hash populated.");
+
+        let pred_hash_levels_vec_vec_t: &Vec<Vec<T>> = pred_cached_hash_arc.as_ref();
+
+        for (i, pred_level_values_vec) in pred_hash_levels_vec_vec_t.iter().enumerate() {
+            // Ensure levels_of_sets has BTreeSet for level i+1 (from predecessor's level i)
+            while levels_of_sets.len() <= i + 1 {
+                levels_of_sets.push(BTreeSet::new());
+            }
+            // Add all values from the predecessor's i-th level to current node's (i+1)-th level set.
+            levels_of_sets[i + 1].extend(pred_level_values_vec.iter().cloned());
+        }
+    }
+
+    // Convert Vec<BTreeSet<T>> to Vec<Vec<T>> (where inner Vec<T> are sorted and unique)
+    // This is the canonical, hashable representation of the deep hash.
+    let current_node_deep_hash_vec_vec_t: Vec<Vec<T>> = levels_of_sets
+        .into_iter()
+        .map(|set| {
+            // BTreeSet iteration is already sorted, so just collect.
+            set.into_iter().collect::<Vec<T>>()
+        })
+        .collect();
+    let current_node_deep_hash_arc = Arc::new(current_node_deep_hash_vec_vec_t);
+
+    // 4. Check structural_memo for an existing, structurally identical simplified node.
+    // The key combines the node's own value and its computed deep hash.
+    let structural_key = (current_value.clone(), current_node_deep_hash_arc.clone());
+
+    let final_simplified_node_arc =
+        if let Some(existing_structurally_identical_node) = structural_memo.get(&structural_key) {
+            // Found an existing node that is structurally identical. Reuse it.
+            existing_structurally_identical_node.clone()
+        } else {
+            // 5. Create a new simplified GSSNode instance.
+            // No structurally identical node found, so create, cache, and return a new one.
+            let new_simplified_node = GSSNode {
+                value: current_value, // Already cloned for structural_key
+                predecessors: simplified_predecessors_set,
+                cached_deep_hash: Some(current_node_deep_hash_arc.clone()), // Store the computed hash
+            };
+            let new_arc = Arc::new(new_simplified_node);
+
+            // Store this new node in structural_memo for potential reuse by other branches.
+            structural_memo.insert(structural_key, new_arc.clone());
+            new_arc
+        };
+
+    // 6. Update processed_nodes_memo to mark this original node as "Done" and store its simplified version.
+    processed_nodes_memo.insert(original_node_ptr, SimplificationState::Done(final_simplified_node_arc.clone()));
+
+    // 7. Return the (potentially shared) simplified node.
+    final_simplified_node_arc
+}
+
+
+/// Simplifies a GSS forest deeply, starting from leaves and going up.
+/// Nodes with identical values and identical deep structural hashes (based on values at each level below)
+/// will be deduplicated to share the same `Arc<GSSNode<T>>` instance.
+/// The deep hash (a vector of sets of T values by level) is cached in the simplified nodes.
+/// Predecessor order is normalized by using `BTreeSet` internally for simplified predecessors.
+///
+/// This function assumes the GSS structure is a Directed Acyclic Graph (DAG).
+/// If cycles are present, it will panic.
+///
+/// # Arguments
+/// * `roots` - A slice of `Arc<GSSNode<T>>` representing the roots of the forest to simplify.
+///
+/// # Returns
+/// A `Vec<Arc<GSSNode<T>>>` containing the simplified root nodes.
+///
+/// # Type Constraints
+/// * `T` must implement `Clone + Ord + Hash + Eq + Debug`.
+pub fn simplify_gss_forest_deep<T: Clone + Ord + Hash + Eq + Debug>(
+    roots: &[Arc<GSSNode<T>>],
+) -> Vec<Arc<GSSNode<T>>> {
+    // Memoization table for nodes already processed/simplified (maps original node ptr to its simplified Arc).
+    let mut processed_nodes_memo: HashMap<*const GSSNode<T>, SimplificationState<T>> = HashMap::new();
+
+    // Memoization table for structural deduplication (maps (value, deep_hash) to a shared simplified Arc).
+    // The deep_hash is an Arc<Vec<Vec<T>>>, where each inner Vec<T> is sorted and represents a set of values at a level.
+    let mut structural_memo: HashMap<(T, Arc<Vec<Vec<T>>>), Arc<GSSNode<T>>> = HashMap::new();
+
+    roots
+        .iter()
+        .map(|root_arc| {
+            simplify_recursive(root_arc, &mut processed_nodes_memo, &mut structural_memo)
+        })
+        .collect()
 }
 
 /// Recursive helper to build the string representation of the GSS structure.
