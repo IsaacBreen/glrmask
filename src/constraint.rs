@@ -13,7 +13,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, print_precompute_stats, PrecomputeStats};
 use crate::datastructures::charmap::TrieMap;
-use crate::datastructures::gss::prune_and_transform_recursive;
+use crate::datastructures::gss::{prune_and_transform_recursive, simplify_gss_forest};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -944,6 +944,23 @@ impl<'a> GrammarConstraintState<'a> {
                 !current_glr_parse_state.active_states.is_empty()
             },
         );
+
+        // Simplify the GSS forest
+        let mut roots = Vec::new();
+        for (tokenizer_state_id, glr_state) in self.state.iter() {
+            for active_state in glr_state.active_states.values() {
+                let root = active_state.stack.clone();
+                roots.push(root);
+            }
+        }
+        let mut i = 0;
+        let simplified_roots = simplify_gss_forest(&roots);
+        for (tokenizer_state_id, glr_state) in self.state.iter_mut() {
+            for active_state in glr_state.active_states.values_mut() {
+                active_state.stack = simplified_roots[i].clone();
+                i += 1;
+            }
+        }
     }
 }
 
