@@ -836,12 +836,7 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
-        // for (tokenizer_state_id, glr_state) in self.state.iter() {
-        //     glr_state.log_gss(format!("Existing initial nodes and values for tokenizer state {}", tokenizer_state_id.0).as_str(), GrammarTokenID(0));
-        // }
-        // for (tokenizer_state_id, glr_state) in tokenizer_state_id_to_parse_states.iter() {
-        //     glr_state.log_gss(format!("Prepared (stage 1) initial nodes and values for tokenizer state {}", tokenizer_state_id.0).as_str(), GrammarTokenID(0));
-        // }
+        crate::debug!(4, "Printing initial nodes and values for tokenizer states");
         for tokenizer_state_id in tokenizer_state_id_to_parse_states.keys() {
             let glr_state_before = &self.state[&tokenizer_state_id];
             let glr_state_after = &tokenizer_state_id_to_parse_states[&tokenizer_state_id];
