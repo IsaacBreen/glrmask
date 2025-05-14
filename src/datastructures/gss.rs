@@ -6,7 +6,7 @@ use std::ops::Deref;
 
 use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
 
-#[derive(Debug, Clone, PartialEq, Eq)] // Modified derives
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GSSNode<T> {
     pub value: T,
     predecessors: BTreeSet<ArcPtrWrapper<GSSNode<T>>>,
@@ -461,7 +461,7 @@ pub struct GSSStats {
     /// Maximum depth encountered (distance from a root node).
     pub max_depth: usize,
     /// Average depth of nodes (distance from a root node).
-    pub average_depth: f664,
+    pub average_depth: f64,
     /// Number of nodes with more than one predecessor (merge points).
     pub merge_points: usize,
     /// Maximum number of predecessors for any single node.
