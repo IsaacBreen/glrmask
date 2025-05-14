@@ -4,526 +4,605 @@ use std::fmt::{Debug, Write};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 
-use crate::datastructures::ArcPtrWrapper;
-use crate::glr::parser::MergeAndIntersect; // For V constraint
-use crate::glr::table::StateID; // For GSSNode content
+use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
 
-// Represents an edge in the GSS, pointing to a predecessor node.
-// It carries a value `V` of a type that implements MergeAndIntersect.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct GSSEdge<V: MergeAndIntersect> {
-    pub value: V, // Value associated with this edge
-    pub predecessor_node: Arc<GSSNode<V>>, // Points to the predecessor GSSNode
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GSSNode<T> {
+    pub value: T,
+    predecessors: BTreeSet<ArcPtrWrapper<GSSNode<T>>>,
 }
 
-impl<V: MergeAndIntersect + Debug> Debug for GSSEdge<V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GSSEdge")
-         .field("value", &self.value)
-         .field("predecessor_node (state_id)", &self.predecessor_node.state_id) // Avoid full recursion
-         .field("predecessor_node (ptr)", &Arc::as_ptr(&self.predecessor_node))
-         .finish()
-    }
-}
-
-
-// GSSNode is generic over V (the edge value type).
-// The GSSNode itself stores a StateID.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct GSSNode<V: MergeAndIntersect> {
-    pub state_id: StateID, // Content of the node itself
-    // predecessors is a set of edges; each edge has a value and points to a predecessor node.
-    predecessors: BTreeSet<ArcPtrWrapper<GSSEdge<V>>>,
-}
-
-impl<V: MergeAndIntersect + Debug> Debug for GSSNode<V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Custom Debug to avoid deep recursion if predecessors are printed directly.
-        // It's better to use print_gss_forest for full GSS visualization.
-        f.debug_struct("GSSNode")
-         .field("state_id", &self.state_id)
-         .field("num_predecessors", &self.predecessors.len())
-         // Optionally, list predecessor edge values or target StateIDs if short
-         .finish()
-    }
-}
-
-
-impl<V: MergeAndIntersect> GSSNode<V> {
-    /// Creates a new GSS root node with a given StateID and no predecessors.
-    pub fn new(state_id: StateID) -> Self {
+impl<T> GSSNode<T> {
+    pub fn new(value: T) -> Self {
         Self {
-            state_id,
+            value,
             predecessors: BTreeSet::new(),
         }
     }
-
-    /// Creates a new GSS node with `new_node_state_id`.
-    /// An edge with `edge_value` is created from the new node to `self` (the previous top).
-    /// `self_arc` should be an Arc pointing to the node that becomes the predecessor.
-    pub fn push(self_arc: &Arc<Self>, new_node_state_id: StateID, edge_value: V) -> Self {
-        let edge = Arc::new(GSSEdge {
-            value: edge_value,
-            predecessor_node: self_arc.clone(),
-        });
-        let mut predecessors = BTreeSet::new();
-        predecessors.insert(ArcPtrWrapper::new(edge));
+    pub fn new_with_predecessors(value: T, predecessors: Vec<Arc<GSSNode<T>>>) -> Self {
         Self {
-            state_id: new_node_state_id,
-            predecessors,
+            value,
+            predecessors: predecessors.into_iter().map(ArcPtrWrapper::new).collect(),
         }
     }
 
-    /// Returns a list of Arcs to the GSSEdges representing direct predecessors.
-    pub fn pop_edges(&self) -> Vec<Arc<GSSEdge<V>>> {
+    pub fn from_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+    {
+        let mut iter = iter.into_iter();
+        let mut root = Self::new(iter.next().unwrap());
+        for value in iter {
+            root = root.push(value);
+        }
+        root
+    }
+
+    pub fn push(self, value: T) -> Self {
+        let mut new_node = Self::new(value);
+        new_node.predecessors.insert(ArcPtrWrapper::new(Arc::new(self)));
+        new_node
+    }
+
+    pub fn pop(&self) -> Vec<Arc<Self>> {
         self.predecessors.iter().map(|wrapper| wrapper.as_arc().clone()).collect()
     }
-    
-    /// Pops `n` levels from the GSS stack, returning a list of GSS nodes found at that depth,
-    /// along with the T value of the edge that *led to* that node.
-    /// This needs to return `Vec<(Arc<GSSNode<V>>, V)>` where V is path T value.
-    /// For now, returning `Vec<crate::glr::parser::ParseState<V>>` as a placeholder for what parser needs.
-    /// This method needs careful design to correctly track T values along paths.
-    pub fn popn_to_parse_states(&self, n: usize) -> Vec<crate::glr::parser::ParseState<V>> {
+
+    pub fn popn(&self, n: usize) -> Vec<Arc<Self>>
+    where
+        T: Clone,
+    {
         if n == 0 {
-            // If n is 0, we are "popping" to the current node.
-            // This requires knowing the T value for the path ending at `self`.
-            // This information is not stored in GSSNode itself.
-            // This function signature is problematic if GSSNode doesn't know its path's T value.
-            // The caller (parser) must manage the T value for the current node.
-            // For now, this will be an empty vec or panic, as it's ill-defined for n=0 here.
-            // Let's assume n > 0 for meaningful pops.
-            // If n=0, it means "stay at current node". The parser's ParseState already has this.
-            // So, popn should always be for n >= 1.
-            if n == 0 {
-                 panic!("popn_to_parse_states called with n=0. This should be handled by the caller using its current ParseState.");
-            }
+            return vec![Arc::new(self.clone())];
         }
 
-        let mut result_parse_states = Vec::new();
-        // (Arc<GSSNode<V>>, V_path_value_to_this_node, remaining_pops)
-        let mut queue: VecDeque<(Arc<GSSNode<V>>, V, usize)> = VecDeque::new();
-        
-        // To start the queue, we need the T value of the path ending at `self`.
-        // This is a conceptual problem: GSSNode itself doesn't store this.
-        // The caller of popn_to_parse_states *must* provide the T value for the path ending at `self`.
-        // Let's modify the signature or assume a default/clone for the root T if not available.
-        // This is a HACK. The parser's `pop_and_goto` should manage this initial T.
-        // For now, let's assume this function is called on a node that is part of a ParseState,
-        // and that ParseState's t_value is the one for the path ending at `self`.
-        // This function cannot be standalone without that context.
+        let mut result = Vec::new();
+        let mut seen: HashSet<*const GSSNode<T>> = HashSet::new();
 
-        // This function is deeply problematic with the current GSS structure.
-        // GSSNode.popn should return Vec<Arc<GSSEdge<V>>> for one level,
-        // and the parser should build paths and T values.
-
-        // Let's redefine popn to return what GSS can provide:
-        // For n=1, it returns direct predecessor edges.
-        // For n>1, it recursively finds "grandparent" edges etc.
-        // The return type should be Vec<Arc<GSSEdge<V>>> where these are the edges
-        // at the n-th level of popping.
-        
-        // Simpler popn: returns nodes at depth n, and the edge value that *led to them*.
-        // Vec<(Arc<GSSNode<V>>, V_edge_value)>
-        
-        let mut current_level_nodes: Vec<(Arc<GSSNode<V>>, Option<V>)> = vec![(Arc::new(self.clone()), None)]; // (Node, EdgeVal that led to it)
-        let mut next_level_nodes_map: HashMap<ArcPtrWrapper<GSSNode<V>>, V> = HashMap::new();
-
-
-        for i in 0..n {
-            next_level_nodes_map.clear();
-            if current_level_nodes.is_empty() { break; }
-
-            for (node_arc, _edge_val_to_node) in current_level_nodes {
-                for edge_wrapper in &node_arc.predecessors {
-                    let edge = edge_wrapper.as_arc();
-                    // The key is the predecessor_node. The value is the edge's value.
-                    // If multiple paths lead to the same predecessor_node via different edges at this pop level,
-                    // we need to merge their edge_values.
-                    let pred_node_wrapped = ArcPtrWrapper::new(edge.predecessor_node.clone());
-                    next_level_nodes_map.entry(pred_node_wrapped)
-                        .and_modify(|existing_v| *existing_v = existing_v.merge(&edge.value))
-                        .or_insert_with(|| edge.value.clone());
+        // recurse on predecessors and collect, skipping duplicates
+        for predecessor_wrapper in &self.predecessors {
+            // predecessor_wrapper is &ArcPtrWrapper<GSSNode<T>>
+            // predecessor_wrapper.as_arc() is &Arc<GSSNode<T>>
+            for node in predecessor_wrapper.as_arc().popn(n - 1) {
+                let ptr = Arc::as_ptr(&node);
+                if seen.insert(ptr) {
+                    result.push(node);
                 }
             }
-            current_level_nodes = next_level_nodes_map.iter()
-                .map(|(node_wrapper, merged_edge_val)| (node_wrapper.as_arc().clone(), Some(merged_edge_val.clone())))
-                .collect();
         }
 
-        // current_level_nodes now contains (node, edge_value_that_led_to_node) after n pops.
-        // This edge_value_that_led_to_node is the T value for the path ending at that node.
-        for (node_arc, opt_edge_val) in current_level_nodes {
-            if let Some(edge_val) = opt_edge_val { // Should always be Some if n > 0
-                 result_parse_states.push(crate::glr::parser::ParseState {
-                    gss_node: node_arc,
-                    t_value: edge_val,
-                });
-            } else if n == 0 { 
-                // This case should be handled by the caller with its current ParseState.
-                // If we must return something, it implies self.state_id and an unknown T.
-                // This path should ideally not be hit if n > 0.
+        result
+    }
+
+    pub fn peek(&self) -> &T {
+        &self.value
+    }
+
+    pub fn value_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
+
+    pub fn flatten(&self) -> Vec<Vec<T>>
+    where
+        T: Clone,
+    {
+        let mut result = Vec::new();
+        let mut stack = Vec::new();
+        stack.push((self, Vec::new()));
+        while let Some((node, mut path)) = stack.pop() {
+            path.push(node.value.clone());
+            if node.predecessors.is_empty() {
+                result.push(path);
+            } else {
+                for predecessor_wrapper in &node.predecessors { // predecessor_wrapper is &ArcPtrWrapper<GSSNode<T>>
+                    // predecessor_wrapper.as_ref() is &GSSNode<T> (due to Deref)
+                    stack.push((predecessor_wrapper.as_ref(), path.clone()));
+                }
             }
         }
-        
-        // TODO: Apply bulk_merge logic if ParseStates with same GSSNode but different t_values exist,
-        // or ensure the map merge handles this. The current map merges edge_values for same target node.
-        // BulkMerge on ParseState would merge t_values and GSSNodes.
-        // For now, this simplified popn returns distinct ParseStates.
-        // The parser's BTreeMap will handle merging ParseStates with the same key (StateID).
-        result_parse_states
+        result
     }
 
-
-    /// Peeks at the StateID of this GSS node.
-    pub fn peek_state_id(&self) -> &StateID {
-        &self.state_id
+    pub fn flatten_bulk(nodes: &[Self]) -> Vec<Vec<T>>
+    where
+        T: Clone,
+    {
+        nodes.iter().flat_map(|node| node.flatten()).collect()
     }
 
-    /// Merges predecessors from `other_node` into `self`.
-    /// `self` must be a mutable reference (e.g., from `Arc::make_mut`).
-    /// `other_node` is an Arc, its predecessors are cloned.
-    pub fn absorb_predecessors_from(&mut self, other_node: &Arc<Self>) {
-        if Arc::ptr_eq(&Arc::new(self.clone()), other_node) { // Crude check if self and other_node are same underlying
-            return;
+    pub fn merge(&mut self, mut other: Self)
+    where
+        T: PartialEq,
+    {
+        assert!(self.value == other.value);
+        self.predecessors.extend(std::mem::take(&mut other.predecessors));
+    }
+
+    pub fn merge_unchecked(&mut self, mut other: Self)
+    {
+        self.predecessors.extend(std::mem::take(&mut other.predecessors));
+    }
+
+    pub fn map<F, U>(&self, f: F) -> GSSNode<U>
+    where
+        F: Copy + Fn(&T) -> U,
+    {
+        GSSNode {
+            value: f(&self.value),
+            predecessors: self.predecessors.iter()
+                // wrapper.as_ref() is &GSSNode<T>, then map is applied to the GSSNode
+                .map(|wrapper| ArcPtrWrapper::new(Arc::new(wrapper.as_ref().map(f))))
+                .collect(),
         }
-        assert_eq!(self.state_id, other_node.state_id, "Cannot merge GSS nodes with different StateIDs");
-        for edge_wrapper in &other_node.predecessors {
-            self.predecessors.insert(edge_wrapper.clone()); // ArcPtrWrapper handles Arc cloning
-        }
     }
-
-
-    // flatten, map, etc. need to be adapted.
-    // For flatten: what does it mean to flatten? A path of StateIDs, or StateIDs and Edge Values?
-    // For map: map StateID to U, map EdgeValue V to W? GSSNode<U, W>.
-
-    // This method is problematic as GSSNode<V> doesn't store T directly.
-    // It was GSSNode<T> where T was ParseStateNodeContent.
-    // pub fn flatten(&self) -> Vec<Vec<T>> where T: Clone { ... }
-    // pub fn flatten_bulk(nodes: &[Self]) -> Vec<Vec<T>> where T: Clone { ... }
-
-    // merge_unchecked was for GSSNode<T_node_content>
-    // Now merge is absorb_predecessors_from.
 }
 
-impl<V: MergeAndIntersect> Drop for GSSNode<V> {
+impl<T> Drop for GSSNode<T> {
+    // Custom drop to iteratively drop predecessors and break potential cycles.
     fn drop(&mut self) {
-        let predecessors_to_process = std::mem::take(&mut self.predecessors);
-        let mut worklist: Vec<Arc<GSSEdge<V>>> = predecessors_to_process.into_iter().map(|w| w.into_arc()).collect();
+        // Take the predecessors to drop them outside of holding the mutex
+        let predecessors_to_process_further = std::mem::take(&mut self.predecessors);
+        let mut worklist: Vec<Arc<GSSNode<T>>> = predecessors_to_process_further.into_iter().map(|wrapper| wrapper.into_arc()).collect(); // Use into_arc
 
-        while let Some(edge_arc) = worklist.pop() {
-            if let Ok(edge_inner) = Arc::try_unwrap(edge_arc) {
-                // Edge is uniquely owned. Now consider its predecessor_node.
-                if let Ok(mut node_inner) = Arc::try_unwrap(edge_inner.predecessor_node) {
-                    // Node is also uniquely owned. Add its predecessor edges to worklist.
-                    worklist.extend(std::mem::take(&mut node_inner.predecessors).into_iter().map(|w| w.into_arc()));
-                }
-                // else: predecessor_node is still shared, will be dropped when its last Arc ref (possibly via ArcPtrWrapper) goes.
+        while let Some(node_arc) = worklist.pop() {
+            if let Ok(mut inner_node) = Arc::try_unwrap(node_arc) {
+                // Successfully got unique ownership, take predecessors and add to worklist
+                worklist.extend(std::mem::take(&mut inner_node.predecessors).into_iter().map(|wrapper| wrapper.into_arc())); // Use into_arc
             }
-            // else: edge_arc is still shared.
+            // Else: Arc is still shared, it will be dropped when the last ArcPtrWrapper wrapper is dropped.
         }
     }
 }
 
-
-// GSSTrait might need to be re-evaluated or removed if its usage becomes too complex.
-// It was defined for GSSNode<T_node_content>.
-// Now GSSNode<V_edge_content>.
-pub trait GSSTrait<V: MergeAndIntersect + Clone>: Sized { // V is edge value
-    type PeekNodeID<'a> where Self: 'a; // To peek StateID
-    // How to peek edge value? An edge is not 'self'.
-
-    fn peek_node_id(&self) -> Self::PeekNodeID<'_>;
-    fn push_new_node(self: Arc<Self>, new_node_state_id: StateID, edge_value: V) -> GSSNode<V>;
-    // pop and popn should return collections of GSSEdge<V> or (GSSNode<V>, V_edge_to_it)
+pub trait GSSTrait<T: Clone> {
+    type Peek<'a> where T: 'a, Self: 'a;
+    fn peek(&self) -> Self::Peek<'_>;
+    fn push(&self, value: T) -> GSSNode<T>;
+    fn pop(&self) -> Vec<Arc<GSSNode<T>>>;
+    fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>>;
 }
 
-// Implementation of GSSTrait for Arc<GSSNode<V>>
-impl<V: MergeAndIntersect + Clone> GSSTrait<V> for Arc<GSSNode<V>> {
-    type PeekNodeID<'a> = &'a StateID where Self: 'a;
+impl<T: Clone> GSSTrait<T> for GSSNode<T> {
+    type Peek<'a> = &'a T where T: 'a;
 
-    fn peek_node_id(&self) -> Self::PeekNodeID<'_> {
-        &self.state_id
+    fn peek(&self) -> Self::Peek<'_> {
+        &self.value
     }
 
-    fn push_new_node(self: Arc<Self>, new_node_state_id: StateID, edge_value: V) -> GSSNode<V> {
-        GSSNode::push(&self, new_node_state_id, edge_value)
+    fn push(&self, value: T) -> GSSNode<T> {
+        let mut new_node = GSSNode::new(value);
+        new_node.predecessors.insert(ArcPtrWrapper::new(Arc::new(self.clone())));
+        new_node
+    }
+
+    fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
+        self.predecessors.iter().map(|wrapper| wrapper.as_arc().clone()).collect()
+    }
+
+    fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
+        // Delegate to the inherent, de-duplicating implementation above
+        GSSNode::popn(self, n)
     }
 }
 
+impl<T: Clone> GSSTrait<T> for Arc<GSSNode<T>> {
+    type Peek<'a> = &'a T where T: 'a;
 
-// BulkMerge was for Vec<Arc<GSSNode<T_node_content>>>
-// Now it should be for Vec<crate::glr::parser::ParseState<V>> or similar.
-// The goal is to merge paths that have reached the same GSSNode, combining their T values.
-pub trait BulkMerge<T: MergeAndIntersect> {
+    fn peek(&self) -> Self::Peek<'_> {
+        &self.value
+    }
+
+    fn push(&self, value: T) -> GSSNode<T> {
+        let mut new_node = GSSNode::new(value);
+        new_node.predecessors.insert(ArcPtrWrapper::new(self.clone()));
+        new_node
+    }
+
+    fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
+        self.predecessors.iter().map(|wrapper| wrapper.as_arc().clone()).collect()
+    }
+
+    fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
+        // Re-use the implementation on the underlying node, which already de-duplicates.
+        self.as_ref().popn(n)
+    }
+}
+
+impl<T: Clone> GSSTrait<T> for Option<Arc<GSSNode<T>>> {
+    type Peek<'a> = Option<&'a T> where T: 'a;
+
+    fn peek(&self) -> Self::Peek<'_> {
+        self.as_ref().map(|node| node.peek())
+    }
+
+    fn push(&self, value: T) -> GSSNode<T> {
+        self.clone().map(|node| node.push(value.clone())).unwrap_or_else(|| GSSNode::new(value))
+    }
+
+    fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
+        self.as_ref().map(|node| node.pop()).unwrap_or_default()
+    }
+
+    fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
+        self.as_ref().map(|node| node.popn(n)).unwrap_or_default()
+    }
+}
+
+impl<T: Clone> GSSTrait<T> for Option<GSSNode<T>> {
+    type Peek<'a> = Option<&'a T> where T: 'a;
+
+    fn peek(&self) -> Self::Peek<'_> {
+        self.as_ref().map(|node| node.peek())
+    }
+
+    fn push(&self, value: T) -> GSSNode<T> {
+        self.clone().map(|node| node.push(value.clone())).unwrap_or_else(|| GSSNode::new(value))
+    }
+
+    fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
+        self.as_ref().map(|node| node.pop()).unwrap_or_default()
+    }
+
+    fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T>>> {
+        self.as_ref().map(|node| node.popn(n)).unwrap_or_default()
+    }
+}
+
+pub trait BulkMerge<T> {
     fn bulk_merge(&mut self);
 }
 
-// Implementing for Vec<crate::glr::parser::ParseState<V>>
-impl<V: MergeAndIntersect> BulkMerge<V> for Vec<crate::glr::parser::ParseState<V>> {
+impl<T: Clone + Ord> BulkMerge<T> for Vec<Arc<GSSNode<T>>> {
     fn bulk_merge(&mut self) {
-        if self.is_empty() { return; }
-
-        let mut groups: BTreeMap<ArcPtrWrapper<GSSNode<V>>, Vec<V>> = BTreeMap::new();
-        for parse_state in self.drain(..) {
-            groups.entry(ArcPtrWrapper::new(parse_state.gss_node))
-                  .or_default()
-                  .push(parse_state.t_value);
+        // todo: should be possible to avoid cloning T in some cases by using &T in this map,
+        //  but we need to be careful about lifetimes. If we use `node.as_ref().value`, then node
+        //  will go out of bounds while the reference to its value is still inside `groups`.
+        let mut groups: BTreeMap<T, HashMap<_, Arc<GSSNode<T>>>> = BTreeMap::new();
+        for node in self.drain(..) {
+            groups.entry(node.value.clone()).or_default().entry(Arc::as_ptr(&node)).or_insert(node);
         }
-
-        for (node_wrapper, t_values) in groups {
-            let final_gss_node = node_wrapper.into_arc(); // Convert wrapper back to Arc
-            if t_values.is_empty() { continue; } // Should not happen
-
-            let mut merged_t = t_values[0].clone();
-            for i in 1..t_values.len() {
-                merged_t = merged_t.merge(&t_values[i]);
+        for mut group in groups.into_values() {
+            let mut group = group.into_values().collect::<Vec<_>>();
+            let mut first = group.pop().unwrap();
+            if group.is_empty() {
+                self.push(first);
+            } else {
+                // Arc::make_mut clones the GSSNode if `first` is shared.
+                // The new `first_mut_ref` will have its predecessors modified.
+                let first_mut_ref = Arc::make_mut(&mut first);
+                // The original predecessors of `first` are already in `first_mut_ref.predecessors`.
+                // Add predecessors from all siblings.
+                // `BTreeSet::insert` handles deduplication based on ArcPtrWrapper's Ord impl (pointer address).
+                for sibling_arc in group { // sibling_arc is Arc<GSSNode<T>>
+                    for pred_wrapper in &sibling_arc.predecessors { // pred_wrapper is &ArcPtrWrapper<GSSNode<T>>
+                        first_mut_ref.predecessors.insert(pred_wrapper.clone());
+                    }
+                }
+                self.push(first);
             }
-            self.push(crate::glr::parser::ParseState {
-                gss_node: final_gss_node,
-                t_value: merged_t,
-            });
         }
     }
 }
 
 
-// prune_and_transform_recursive and related functions:
-// These are highly dependent on what `T` was.
-// Original: GSSNode<T_node_content>, closure Fn(&T_node_content).
-// New: GSSNode<V_edge_content>. Node has StateID. Edges have V.
-// The closure in constraint.rs used `content.t.active` etc.
-// `content.t` was `LLMTokenInfo` (a V type). `content.state_id` was StateID.
-// So the closure needs (StateID, V_edge_val).
-// But a node can have multiple incoming edges. Pruning happens per path (edge).
-// This means prune_and_transform should operate on edges or (node, specific_incoming_edge).
+// Helper function for prune_and_transform_roots
+pub fn prune_and_transform_recursive<T: Clone>(
+    node_arc: &Arc<GSSNode<T>>,
+    closure: &impl Fn(&T) -> Option<(T, bool)>, // Returns Option<(NewValue, ContinueRecursion)>
+    memo: &mut HashMap<*const GSSNode<T>, Option<Arc<GSSNode<T>>>>,
+) -> Option<Arc<GSSNode<T>>> {
+    // TODO: clean up
+    let node_ptr = Arc::as_ptr(node_arc);
+    if let Some(cached_result) = memo.get(&node_ptr) {
+        return cached_result.clone();
+    }
 
-// For now, these are commented out as they need a redesign based on new GSS structure
-// and how they are used in constraint.rs.
-/*
-pub fn prune_and_transform_recursive<N: Clone, V: MergeAndIntersect + Clone>(
-    node_arc: &Arc<GSSNode<N, V>>, // Assuming GSSNode<N,V> where N is node content, V is edge
-    closure: &impl Fn(&N, &V) -> Option<(N, V, bool)>, // (new_node_content, new_edge_value, continue_recursion)
-    memo: &mut HashMap<*const GSSNode<N, V>, Option<Arc<GSSNode<N, V>>>>,
-) -> Option<Arc<GSSNode<N, V>>> {
-    // ... major rewrite needed ...
-    None
+    match closure(&node_arc.value) {
+        None => {
+            // Prune this node
+            memo.insert(node_ptr, None);
+            None
+        }
+        Some((new_value, continue_recursion)) => {
+            let new_node_arc = if !continue_recursion {
+                // Stop recursion, create new node with original predecessors but new value
+                let mut transformed_predecessors = Vec::new();
+                for pred_wrapper in &node_arc.predecessors { // pred_wrapper is &ArcPtrWrapper<GSSNode<T>>
+                     // pred_arc is &Arc<GSSNode<T>>
+                     let pred_arc = pred_wrapper.as_arc();
+                     // Check memo for already transformed predecessor
+                    if let Some(existing_transformed) = memo.get(&Arc::as_ptr(pred_arc)) {
+                        if let Some(transformed_pred) = existing_transformed {
+                            transformed_predecessors.push(transformed_pred.clone());
+                        }
+                        // If existing_transformed is None, the predecessor was pruned, so skip.
+                        crate::debug!(4, "Skipping pruned predecessor");
+                    } else {
+                        // This case *shouldn't* happen if traversal order is correct (parents processed after children),
+                        // but as a fallback, keep the original if not found in memo. Or perhaps panic?
+                        // Let's assume the caller manages the order or this closure handles cycles/shared nodes correctly.
+                        // For simplicity now, let's stick to the logic: if we stop, we keep original pointers below.
+                         transformed_predecessors = node_arc.predecessors.clone().into_iter()
+                             .map(|wrapper| wrapper.as_arc().clone()) // wrapper is ArcPtrWrapper, wrapper.as_arc().clone() is Arc<GSSNode<T>>
+                             .collect();
+                         crate::debug!(3, "Keeping {} original predecessors", transformed_predecessors.len());
+                         // TODO: Revisit required: This might lead to incorrect sharing if predecessors weren't processed.
+                         // A better approach for early stop might be needed, maybe marking nodes instead.
+                         break; // Exit loop once we decide to keep originals
+                    }
+                }
+
+                Arc::new(GSSNode::new_with_predecessors(new_value, transformed_predecessors))
+            } else {
+                // Continue recursion for predecessors
+                let mut new_predecessors = Vec::new();
+                for pred_wrapper in &node_arc.predecessors { // pred_wrapper is &ArcPtrWrapper<GSSNode<T>>
+                    let pred_arc = pred_wrapper.as_arc(); // pred_arc is &Arc<GSSNode<T>>
+                    if let Some(new_pred) = prune_and_transform_recursive(pred_arc, closure, memo) {
+                        new_predecessors.push(new_pred);
+                    }
+                }
+
+                // Only create a node if it has predecessors OR it's an original root (how to check?).
+                // If new_predecessors is empty AND the original node had predecessors, it means all paths were pruned.
+                if new_predecessors.is_empty() && !node_arc.predecessors.is_empty() {
+                     memo.insert(node_ptr, None); // Mark as pruned
+                     return None; // Return None, pruning this node
+                } else {
+                     Arc::new(GSSNode::new_with_predecessors(new_value, new_predecessors))
+                }
+            };
+            memo.insert(node_ptr, Some(new_node_arc.clone()));
+            Some(new_node_arc)
+        }
+    }
 }
 
-pub fn prune_and_transform_roots<N: Clone, V: MergeAndIntersect + Clone>(
-    roots: &[Arc<GSSNode<N, V>>],
-    closure: &impl Fn(&N, &V) -> Option<(N, V, bool)>,
-) -> Vec<Option<Arc<GSSNode<N, V>>>> {
+/// Traverses the GSS forest defined by `roots`, applying `closure` to each node's value.
+/// Handles shared nodes using memoization. Prunes branches where `closure` returns `None`.
+/// Stops recursion down a path if `closure` returns `(_, false)`.
+/// Returns a Vec of `Option<Arc<GSSNode<T>>>` corresponding to the input `roots`.
+pub fn prune_and_transform_roots<T: Clone>(
+    roots: &[Arc<GSSNode<T>>],
+    closure: &impl Fn(&T) -> Option<(T, bool)>, // Returns Option<(NewValue, ContinueRecursion)>
+) -> Vec<Option<Arc<GSSNode<T>>>> {
+    // We need a processing order that ensures children are processed before parents
+    // if we want the early-stop optimization (`continue_recursion = false`) to work reliably
+    // with shared nodes. A simple recursive approach might process shared children multiple times
+    // or incorrectly reuse non-transformed predecessors.
+    // For now, let's proceed with the simple recursive approach + memoization, acknowledging the
+    // potential issue with the early-stop logic accuracy for shared nodes below the stop point.
+    // A full topological sort or iterative approach might be needed for perfect early-stop.
+
     let mut memo = HashMap::new();
     roots
         .iter()
         .map(|root| prune_and_transform_recursive(root, closure, &mut memo))
         .collect()
 }
-*/
 
 // --- Longest Path ---
-// find_longest_path_recursive needs to be aware of GSSNode<V>
-fn find_longest_path_recursive<V: MergeAndIntersect>(
-    node_arc: &Arc<GSSNode<V>>,
-    memo: &mut HashMap<*const GSSNode<V>, Vec<Arc<GSSNode<V>>>>,
-    visited_recursion: &mut HashSet<*const GSSNode<V>>,
-) -> Vec<Arc<GSSNode<V>>> {
-    let node_ptr = Arc::as_ptr(node_arc);
-    if let Some(cached_path) = memo.get(&node_ptr) { return cached_path.clone(); }
-    if !visited_recursion.insert(node_ptr) { return Vec::new(); }
 
-    let mut longest_pred_path: Vec<Arc<GSSNode<V>>> = Vec::new();
+// Recursive helper for find_longest_path.
+// Returns the longest path *ending* at node_arc, discovered so far.
+fn find_longest_path_recursive<T>(
+    node_arc: &Arc<GSSNode<T>>,
+    memo: &mut HashMap<*const GSSNode<T>, Vec<Arc<GSSNode<T>>>>, // Stores longest path ending at the key node
+    visited_recursion: &mut HashSet<*const GSSNode<T>>, // Detects cycles during the current DFS traversal
+) -> Vec<Arc<GSSNode<T>>> {
+    let node_ptr = Arc::as_ptr(node_arc);
+
+    // Check memo first
+    if let Some(cached_path) = memo.get(&node_ptr) {
+        return cached_path.clone();
+    }
+
+    // Cycle detection for the current traversal path
+    if !visited_recursion.insert(node_ptr) {
+        // Cycle detected, return an empty path to avoid infinite recursion
+        // and signal that this path shouldn't be considered the longest.
+        return Vec::new();
+    }
+
+    let mut longest_pred_path: Vec<Arc<GSSNode<T>>> = Vec::new();
+
+    // Explore predecessors recursively
     if !node_arc.predecessors.is_empty() {
-        for edge_wrapper in &node_arc.predecessors {
-            let edge = edge_wrapper.as_arc();
-            let pred_path = find_longest_path_recursive(&edge.predecessor_node, memo, visited_recursion);
+        for pred_wrapper in &node_arc.predecessors { // pred_wrapper is &ArcPtrWrapper<GSSNode<T>>
+            let pred_arc = pred_wrapper.as_arc(); // pred_arc is &Arc<GSSNode<T>>
+            let pred_path = find_longest_path_recursive(pred_arc, memo, visited_recursion);
+            // Only update if the predecessor path is valid (non-empty, meaning no cycle encountered below)
             if !pred_path.is_empty() && pred_path.len() > longest_pred_path.len() {
                 longest_pred_path = pred_path;
             }
         }
     }
+    // else: This node has no predecessors, it's a starting point for paths ending here.
 
-    let mut current_path = longest_pred_path;
-    current_path.push(node_arc.clone());
+    // Construct the path ending at the current node
+    let mut current_path = longest_pred_path; // Starts with the longest path ending at a predecessor
+    current_path.push(node_arc.clone()); // Appends the current node
+
+    // Store in memo and backtrack from recursion stack
     memo.insert(node_ptr, current_path.clone());
     visited_recursion.remove(&node_ptr);
+
     current_path
 }
 
-pub fn find_longest_path<V: MergeAndIntersect>(roots: &[Arc<GSSNode<V>>]) -> Option<Vec<Arc<GSSNode<V>>>> {
-    if roots.is_empty() { return None; }
-    let mut memo: HashMap<*const GSSNode<V>, Vec<Arc<GSSNode<V>>>> = HashMap::new();
+/// Finds one of the longest paths in the GSS forest defined by the given roots.
+/// Handles cycles by ignoring paths that contain them.
+/// Returns the path as a Vec of nodes from a root to a leaf (or the longest path found).
+/// Returns `None` if there are no roots or no valid paths (e.g., only cycles).
+pub fn find_longest_path<T>(roots: &[Arc<GSSNode<T>>]) -> Option<Vec<Arc<GSSNode<T>>>> {
+    let mut memo: HashMap<*const GSSNode<T>, Vec<Arc<GSSNode<T>>>> = HashMap::new();
+
+    // Populate the memo by traversing from all roots
     for root_arc in roots {
-        let mut visited_recursion = HashSet::new();
+        let mut visited_recursion = HashSet::new(); // Reset cycle detection for each root
         find_longest_path_recursive(root_arc, &mut memo, &mut visited_recursion);
     }
-    memo.into_values().filter(|p| !p.is_empty()).max_by_key(|path| path.len())
+
+    // Find the longest path among all paths stored in the memo values
+    memo.into_values().max_by_key(|path| path.len())
 }
 
-
+/// Statistics about the structure of a GSS forest.
 #[derive(Debug, Clone, Default)]
 pub struct GSSStats {
+    /// Number of root nodes provided.
     pub num_roots: usize,
+    /// Total number of unique nodes reachable from the roots.
     pub unique_nodes: usize,
-    pub unique_edges: usize, // Added
+    /// Maximum depth encountered (distance from a root node).
     pub max_depth: usize,
+    /// Average depth of nodes (distance from a root node).
     pub average_depth: f64,
-    pub merge_points: usize, // Nodes with >1 incoming edge
-    pub max_predecessors: usize, // Max fan-in for a node
+    /// Number of nodes with more than one predecessor (merge points).
+    pub merge_points: usize,
+    /// Maximum number of predecessors for any single node.
+    pub max_predecessors: usize,
+    /// Average number of predecessors per node.
     pub average_predecessors: f64,
 }
 
-pub fn gather_gss_stats<V: MergeAndIntersect + Clone>(roots: &[Arc<GSSNode<V>>]) -> GSSStats {
+/// Gathers statistics about the GSS forest defined by the given roots.
+/// Traverses the graph using BFS to calculate depths from roots.
+pub fn gather_gss_stats<T: Clone>(roots: &[Arc<GSSNode<T>>]) -> GSSStats {
     let mut stats = GSSStats::default();
     stats.num_roots = roots.len();
 
-    let mut visited_nodes: HashSet<*const GSSNode<V>> = HashSet::new();
-    let mut visited_edges: HashSet<*const GSSEdge<V>> = HashSet::new();
-    let mut queue: VecDeque<(Arc<GSSNode<V>>, usize)> = VecDeque::new(); // (node, depth from a root)
+    let mut visited: HashSet<*const GSSNode<T>> = HashSet::new();
+    let mut queue: VecDeque<(Arc<GSSNode<T>>, usize)> = VecDeque::new(); // (node, depth)
+
+    let mut total_depth_sum: u64 = 0;
+    let mut total_predecessors_sum: u64 = 0;
 
     for root_arc in roots {
         let root_ptr = Arc::as_ptr(root_arc);
-        if visited_nodes.insert(root_ptr) { // Only add to queue if not visited as a node
+        if visited.insert(root_ptr) {
             queue.push_back((root_arc.clone(), 0));
         }
     }
 
     while let Some((current_node_arc, current_depth)) = queue.pop_front() {
-        // Node stats are counted when node is first processed from queue
-        // (already inserted into visited_nodes before adding to queue)
-        stats.unique_nodes = visited_nodes.len(); // Update unique_nodes based on set size
+        let current_node = current_node_arc.as_ref(); // Borrow the content
+        stats.unique_nodes += 1;
         stats.max_depth = stats.max_depth.max(current_depth);
-        // total_depth_sum needs to be accumulated carefully if nodes can be reached at different depths.
-        // BFS ensures shortest path depth.
+        total_depth_sum += current_depth as u64;
 
-        let num_predecessors = current_node_arc.predecessors.len();
+        let num_predecessors = current_node.predecessors.len();
         stats.max_predecessors = stats.max_predecessors.max(num_predecessors);
-        // total_predecessors_sum += num_predecessors as u64; // Sum over unique nodes
+        total_predecessors_sum += num_predecessors as u64;
         if num_predecessors > 1 {
-            // This counts a node as a merge point if it has >1 direct predecessor edges.
-            // This needs to be tracked per unique node.
-            // Let's count merge points when a node is first confirmed as visited.
+            stats.merge_points += 1;
         }
 
-        for pred_edge_wrapper in &current_node_arc.predecessors {
-            let pred_edge_arc = pred_edge_wrapper.as_arc();
-            let pred_edge_ptr = Arc::as_ptr(&pred_edge_arc);
-            visited_edges.insert(pred_edge_ptr);
-
-            let predecessor_gss_node = &pred_edge_arc.predecessor_node;
-            let pred_gss_node_ptr = Arc::as_ptr(predecessor_gss_node);
-
-            if visited_nodes.insert(pred_gss_node_ptr) { // If newly visited node
-                queue.push_back((predecessor_gss_node.clone(), current_depth + 1));
+        for pred_wrapper in &current_node.predecessors { // pred_wrapper is &ArcPtrWrapper<GSSNode<T>>
+            let pred_arc = pred_wrapper.as_arc(); // pred_arc is &Arc<GSSNode<T>>
+            let pred_raw_ptr = Arc::as_ptr(pred_arc);
+            if visited.insert(pred_raw_ptr) {
+                queue.push_back((pred_arc.clone(), current_depth + 1)); // Queue the Arc
             }
         }
     }
-    
-    // Recalculate stats based on unique visited nodes
-    stats.unique_nodes = visited_nodes.len();
-    stats.unique_edges = visited_edges.len();
-    
-    // For average depth and predecessors, we need to iterate over visited_nodes once
-    let mut total_depth_sum: u64 = 0;
-    let mut total_predecessors_sum: u64 = 0;
-    let mut actual_merge_points = 0;
 
-    // Re-traverse for accurate depth sum and predecessor counts for unique nodes
-    // This requires a BFS-like traversal again to get depths correctly.
-    // For simplicity, current GSSStats might be slightly off for avg_depth if graph is not a tree.
-    // A full BFS from roots storing depths in a map would be more accurate for avg_depth.
-    // For now, let's use a simplified calculation.
     if stats.unique_nodes > 0 {
-        // These averages are approximations without a full depth map.
-        // stats.average_depth = total_depth_sum as f64 / stats.unique_nodes as f64;
-        // stats.average_predecessors = total_predecessors_sum as f64 / stats.unique_nodes as f64;
+        stats.average_depth = total_depth_sum as f64 / stats.unique_nodes as f64;
+        stats.average_predecessors = total_predecessors_sum as f64 / stats.unique_nodes as f64;
     }
-    // stats.merge_points = actual_merge_points;
 
-
-    stats // Return partially filled stats, avg might be off.
+    stats
 }
 
-
-fn print_gss_node_recursive<V: MergeAndIntersect + Debug>(
-    node_arc: &Arc<GSSNode<V>>,
-    visited_nodes: &mut HashSet<*const GSSNode<V>>,
-    visited_edges: &mut HashSet<*const GSSEdge<V>>,
+/// Recursive helper to build the string representation of the GSS structure.
+fn print_gss_node_recursive<T: Debug>(
+    node_arc: &Arc<GSSNode<T>>,
+    visited: &mut HashSet<*const GSSNode<T>>,
     indent: usize,
-    node_print_count: &mut usize,
-    max_nodes_to_print: usize,
+    node_count: &mut usize,
+    max_nodes: usize,
     output: &mut String,
 ) -> Result<(), std::fmt::Error> {
-    if *node_print_count >= max_nodes_to_print {
-        return Ok(());
+    if *node_count >= max_nodes {
+        return Ok(()); // Stop recursion if max_nodes limit is reached
     }
 
     let node_ptr = Arc::as_ptr(node_arc);
     let prefix = format!("{:indent$}", "", indent = indent * 2);
 
-    if visited_nodes.contains(&node_ptr) {
-        writeln!(output, "{}- Node {:p} (StateID: {}) (Visited)", prefix, node_ptr, node_arc.state_id.0)?;
+    if visited.contains(&node_ptr) {
+        writeln!(output, "{}- Node {:p} (Visited)", prefix, node_ptr)?;
         return Ok(());
     }
 
-    visited_nodes.insert(node_ptr);
-    *node_print_count += 1;
+    visited.insert(node_ptr);
+    *node_count += 1;
 
-    writeln!(output, "{}- Node {:p} (StateID: {})", prefix, node_ptr, node_arc.state_id.0)?;
+    // Print current node info
+    writeln!(output, "{}- Node {:p}: {:?}", prefix, node_ptr, node_arc.value)?;
 
+    // Print predecessors
     if !node_arc.predecessors.is_empty() {
-        writeln!(output, "{}  Predecessor Edges:", prefix)?;
-        for edge_wrapper in &node_arc.predecessors {
-            let edge_arc = edge_wrapper.as_arc();
-            let edge_ptr = Arc::as_ptr(&edge_arc);
-            let edge_prefix = format!("{:indent$}", "", indent = (indent + 1) * 2);
-
-            if visited_edges.contains(&edge_ptr) {
-                writeln!(output, "{}- Edge {:p} (To Node {:p}, StateID: {}) (Value: {:?}) (Visited Edge)",
-                    edge_prefix, edge_ptr, Arc::as_ptr(&edge_arc.predecessor_node), edge_arc.predecessor_node.state_id.0, edge_arc.value)?;
-            } else {
-                visited_edges.insert(edge_ptr);
-                writeln!(output, "{}- Edge {:p} (To Node {:p}, StateID: {}) (Value: {:?})",
-                    edge_prefix, edge_ptr, Arc::as_ptr(&edge_arc.predecessor_node), edge_arc.predecessor_node.state_id.0, edge_arc.value)?;
-                print_gss_node_recursive(&edge_arc.predecessor_node, visited_nodes, visited_edges, indent + 2, node_print_count, max_nodes_to_print, output)?;
-                if *node_print_count >= max_nodes_to_print {
-                    return Ok(());
-                }
+        writeln!(output, "{}  Predecessors:", prefix)?;
+        for pred_wrapper in &node_arc.predecessors { // pred_wrapper is &ArcPtrWrapper<GSSNode<T>>
+            let pred_arc = pred_wrapper.as_arc(); // pred_arc is &Arc<GSSNode<T>>
+            // Recursively print predecessors
+            print_gss_node_recursive(pred_arc, visited, indent + 2, node_count, max_nodes, output)?; // Corrected indent
+            if *node_count >= max_nodes {
+                 // Check again after recursive call in case it hit the limit
+                return Ok(());
             }
         }
     }
+
     Ok(())
 }
 
-pub fn print_gss_forest<V: MergeAndIntersect + Debug>(roots: &[Arc<GSSNode<V>>], max_nodes_to_print: usize) -> String {
-    let mut visited_nodes = HashSet::new();
-    let mut visited_edges = HashSet::new();
-    let mut node_print_count = 0;
+/// Generates a string representation of the GSS forest structure starting from the given roots.
+///
+/// Traverses the graph, handling cycles and shared nodes. Stops printing if the number
+/// of unique nodes encountered exceeds `max_nodes`.
+///
+/// # Arguments
+/// * `roots` - A slice of `Arc<GSSNode<T>>` representing the roots of the forest.
+/// * `max_nodes` - The maximum number of unique nodes to include in the output string.
+///
+/// # Returns
+/// A `String` containing the formatted GSS structure, potentially truncated.
+pub fn print_gss_forest<T: Debug>(roots: &[Arc<GSSNode<T>>], max_nodes: usize) -> String {
+    let mut visited = HashSet::new();
+    let mut node_count = 0;
     let mut output = String::new();
 
     if roots.is_empty() {
         return "GSS Forest: (No roots)".to_string();
     }
 
-    writeln!(&mut output, "GSS Forest Roots (Max Nodes To Print: {}):", max_nodes_to_print).unwrap();
+    writeln!(&mut output, "GSS Forest Roots (Max Nodes: {}):", max_nodes).unwrap();
 
     for (i, root_arc) in roots.iter().enumerate() {
         writeln!(&mut output, "Root {}:", i).unwrap();
-        match print_gss_node_recursive(root_arc, &mut visited_nodes, &mut visited_edges, 1, &mut node_print_count, max_nodes_to_print, &mut output) {
+        match print_gss_node_recursive(root_arc, &mut visited, 1, &mut node_count, max_nodes, &mut output) {
             Ok(_) => {
-                if node_print_count >= max_nodes_to_print {
-                    writeln!(&mut output, "... (Truncated: Reached max nodes to print {})", max_nodes_to_print).unwrap();
-                    break;
+                if node_count >= max_nodes {
+                    writeln!(&mut output, "... (Truncated: Reached max nodes {})", max_nodes).unwrap();
+                    break; // Stop processing more roots if limit reached
                 }
             }
             Err(e) => {
+                // Should not happen with String::write_fmt
                 eprintln!("Error writing GSS structure to string: {}", e);
                 return format!("Error generating GSS string: {}", e);
             }
         }
     }
+
+    if node_count < max_nodes && node_count > visited.len() {
+         // This condition indicates some nodes were visited but not printed due to the limit being hit mid-recursion
+         writeln!(&mut output, "... (Truncated: Reached max nodes {})", max_nodes).unwrap();
+    }
+
+
     output
 }
-
