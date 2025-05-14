@@ -4,7 +4,7 @@ use crate::glr::items::Item;
 use crate::glr::table::{
     NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID,
 };
-use crate::datastructures::gss::{GSSTrait, GSSStats}; // GSSTrait likely needs removing or redesign, keep for now but expect issues
+use crate::datastructures::gss::{GSSStats}; // GSSTrait likely needs removing or redesign, keep for now but expect issues
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};
@@ -41,7 +41,7 @@ pub enum StopReason {
 }
 
 // Define a dummy state ID for the head node of the GSS forest representing active states
-const DUMMY_HEAD_STATE_ID: StateID = StateID(usize::MAX);
+pub(crate) const DUMMY_HEAD_STATE_ID: StateID = StateID(usize::MAX);
 
 // TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
 #[derive(Clone)]
@@ -497,7 +497,7 @@ impl<'a, T: MergeAndIntersect + Debug + Ord + Clone + Hash> GLRParserState<'a, T
 
         // Take links from self's head (if it's uniquely owned, it drains, otherwise it clones)
         let self_links_iter: Box<dyn Iterator<Item = PredecessorLink<T>>> = if let Ok(mut_head) = Arc::try_unwrap(self.head.clone()) {
-             Box::new(mut_head.into_inner().expect("Mutex poisoned").predecessors.into_iter())
+             Box::new(mut_head.predecessors.into_iter())
         } else {
              Box::new(self.head.predecessors.iter().cloned()) // Clone if shared
         };

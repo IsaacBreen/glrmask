@@ -17,7 +17,7 @@ pub struct PredecessorLink<T: Ord + Clone + Debug + Hash> {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GSSNode<T: Ord + Clone + Debug + Hash> { // T is the edge data type
     pub state_id: StateID, // The "value" of the node itself (parser state ID)
-    predecessors: BTreeSet<PredecessorLink<T>>,
+    pub(crate) predecessors: BTreeSet<PredecessorLink<T>>,
 }
 
 impl<T: Ord + Clone + Debug + Hash> GSSNode<T> {
@@ -631,4 +631,13 @@ pub fn print_gss_forest<T: Debug + Ord + Clone + Hash>(roots: &[Arc<GSSNode<T>>]
 
 
     output
+}
+
+pub fn make_successor_node<T: Ord + Clone + Debug + Hash>(
+    node_arc: Arc<GSSNode<T>>,
+    successor_state_id: StateID,
+    edge_val: T,
+) -> GSSNode<T> {
+    let new_gss_node_obj = GSSNode::make_successor_node(node_arc, successor_state_id, edge_val);
+    new_gss_node_obj
 }
