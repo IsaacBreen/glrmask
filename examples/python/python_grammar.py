@@ -20,6 +20,7 @@ def regex(expr, name=None):
     if not isinstance(expr, ge):
         expr = ge.regex(expr)
     if name == "IGNORE":
+        print(f"Ignoring ignore for IGNORE rule: {expr}")
         return name, expr
     if name is None:
         return ge.sequence([ge.ref("IGNORE"), expr])

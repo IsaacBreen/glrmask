@@ -302,12 +302,13 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
     /// Debug helper so the main `step` body stays short.
     pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
         const MAX: usize = 30;
+        const PANIC_THRESHOLD: usize = 100;
         let roots: Vec<_> = self.active_states.values().map(|s| s.stack.clone()).collect();
         let stats = gather_gss_stats(&roots);
         crate::debug!(3, "{} - token {} ({:?}) - – active: {}, nodes: {:?}",
                       phase, token.0, self.parser.terminal_map.get_by_right(&token).unwrap().0, self.active_states.len(), stats);
 
-        debug!(4, "{}", {
+        let make_msg = || {
             if stats.unique_nodes <= MAX {
                 format!("GSS ({} nodes):\n{}", stats.unique_nodes,
                         print_gss_forest(&roots, MAX))
@@ -324,7 +325,14 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                     None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
                 }
             }
-        });
+        };
+
+        if stats.unique_nodes > PANIC_THRESHOLD {
+            let msg = make_msg();
+            panic!("GSS too big ({} nodes). {}", stats.unique_nodes, msg);
+        }
+        
+        debug!(4, "{}", make_msg());
     }
 
     pub fn parse(&mut self, input: &[TerminalID]) {
