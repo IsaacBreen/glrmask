@@ -207,6 +207,19 @@ impl PyGrammar {
 
 #[pyclass]
 #[derive(Clone)]
+pub struct PyGLRParser {
+    inner: GLRParser,
+}
+
+#[pymethods]
+impl PyGLRParser {
+    fn print(&self) {
+        println!("{}", self.inner)
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
 pub struct PyGrammarConstraint {
     inner: Arc<GrammarConstraint>,
 }

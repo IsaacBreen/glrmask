@@ -30,10 +30,11 @@ def regex(expr, name=None):
 #     return name, expr
 
 def eat(s: bytes) -> Regex:
-    if len(s) == 1:
-        return Regex.eat_u8(ord(s[0]))
-    else:
-        return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
+    return Regex.literal(s)
+#     if len(s) == 1:
+#         return Regex.eat_u8(ord(s[0]))
+#     else:
+#         return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
 
 def rule_name_is_valid(name: str) -> bool:
     return not name.startswith("invalid_")

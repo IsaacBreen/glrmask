@@ -192,7 +192,7 @@ impl Grammar {
             match expr {
                 // Add this new arm
                 GrammarExpr::Literal(bytes) => {
-                    let regex_expr = Expr::Seq(bytes.iter().map(|&b| Expr::Byte(b)).collect());
+                    let regex_expr = Expr::U8Seq(bytes.clone());
                     if let Some(group_id) = terminal_expr_to_group_id.get_by_left(&regex_expr) {
                         // Existing terminal, find its name
                         let terminal_name = terminal_name_to_group_id.get_by_right(group_id)
