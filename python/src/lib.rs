@@ -6,7 +6,7 @@ use pyo3::types::{PyDict};
 use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use sep1::glr::parser::{GLRParser, GLRParserState};
 use sep1::glr::table::{generate_glr_parser, StateID, TerminalID};
-use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, literal as grammar_literal, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence}; // Added literal as grammar_literal
+use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, literal as grammar_literal, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence, eat_any_fast}; // Added literal as grammar_literal
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
 use std::collections::{BTreeMap, BTreeSet};
 use bimap::BiBTreeMap;
@@ -90,6 +90,11 @@ impl PyRegexExpr {
     #[staticmethod]
     fn eat_u8_negation(c: u8) -> Self {
         Self { inner: eat_u8_negation(c) }
+    }
+
+    #[staticmethod]
+    pub fn eat_any() -> Self {
+        Self { inner: eat_any_fast() }
     }
 
     #[staticmethod]
