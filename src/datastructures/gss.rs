@@ -369,7 +369,8 @@ pub fn prune_and_transform_recursive<T: Clone + Hash>(
         Some((new_value, continue_recursion)) => {
             let new_node_arc = if !continue_recursion {
                 // Stop recursion, create new node with original predecessors but new value
-                Arc::new(GSSNode { value: new_value, predecessors: node_arc.predecessors.clone(), hash_key_cache: 0 })
+                let hash_key_cache = GSSNode::<T>::compute_hash_key_cache(&new_value, &node_arc.predecessors);
+                Arc::new(GSSNode { value: new_value, predecessors: node_arc.predecessors.clone(), hash_key_cache })
             } else {
                 // Continue recursion for predecessors
                 let mut new_predecessors = BTreeSet::new();
@@ -669,15 +670,7 @@ fn simplify_node_recursive<T: Clone + Ord + Hash + Debug>(
     }
 
     // Compute the hash for the new simplified node
-    let mut hasher = DefaultHasher::new();
-    original_node_arc.value.hash(&mut hasher); // Hash the node's own value
-
-    // Hash the `hash_key_cache` of each simplified predecessor.
-    // The order is stable because `simplified_predecessors_arcs` is a BTreeSet.
-    for pred_arc in &simplified_predecessors_arcs {
-        pred_arc.hash_key_cache.hash(&mut hasher);
-    }
-    let computed_hash = hasher.finish();
+    let hash_key_cache = GSSNode::compute_hash_key_cache(&original_node_arc.value, &simplified_predecessors_arcs.iter().map(|p| ArcPtrWrapper::new(p.clone())).collect());
 
     // Convert BTreeSet<Arc<GSSNode<T>>> to BTreeSet<ArcPtrWrapper<GSSNode<T>>> for the new node's `predecessors` field.
     // ArcPtrWrapper uses pointer-based comparison, ensuring structural sharing of Arcs.
@@ -691,7 +684,7 @@ fn simplify_node_recursive<T: Clone + Ord + Hash + Debug>(
     let simplified_node = GSSNode {
         value: original_node_arc.value.clone(),
         predecessors: new_node_predecessors,
-        hash_key_cache: computed_hash,
+        hash_key_cache,
     };
     let simplified_node_arc = Arc::new(simplified_node);
 
