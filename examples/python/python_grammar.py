@@ -30,11 +30,10 @@ def regex(expr, name=None):
 #     return name, expr
 
 def eat(s: bytes) -> Regex:
-    return Regex.literal(s)
-#     if len(s) == 1:
-#         return Regex.eat_u8(ord(s[0]))
-#     else:
-#         return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
+    if len(s) == 1:
+        return Regex.eat_u8(ord(s[0]))
+    else:
+        return Regex.seq([Regex.eat_u8(ord(c)) for c in s])
 
 def rule_name_is_valid(name: str) -> bool:
     return not name.startswith("invalid_")
@@ -50,7 +49,7 @@ def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Regex:
             value = value[1:-1]
         else:
             raise ValueError(f"Invalid string literal: {value}")
-        return regex(eat(value))
+        return ge.literal(value.encode())
     elif isinstance(item, pegen.grammar.Opt):
         return ge.optional(pegen_to_sep1_regex(item.node, memo))
     elif isinstance(item, pegen.grammar.Gather):
