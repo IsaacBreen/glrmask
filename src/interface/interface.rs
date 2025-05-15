@@ -194,8 +194,9 @@ impl Grammar {
                 GrammarExpr::Literal(bytes) => {
                     let regex_expr = Expr::U8Seq(bytes.clone());
                     if let Some(group_id) = terminal_expr_to_group_id.get_by_left(&regex_expr) {
-                        // TODO: UTF8 conversion is lossy. Make sure there aren't collisions.
-                        let terminal_name = String::from_utf8(bytes.clone()).expect("Internal error: bytes should be valid UTF-8");
+                        // Existing terminal, find its name
+                        let terminal_name = terminal_name_to_group_id.get_by_right(group_id)
+                            .expect("Internal error: group_id has no name for literal's regex_expr").clone();
                         vec![Symbol::Terminal(Terminal(terminal_name))]
                     } else {
                         // New terminal for this literal
