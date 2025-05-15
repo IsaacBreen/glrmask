@@ -781,19 +781,14 @@ impl<'a> GrammarConstraintState<'a> {
         };
 
         // Convert original LLMTokenID to internal LLMTokenID for the closure
-        let maybe_internal_llm_id_val = self.parent.original_id_to_internal(llm_token_id)
-                                          .map(|id| id.0 as usize);
+        let internal_llm_id_val = self.parent.original_id_to_internal(llm_token_id).unwrap().0;
 
         let closure = |content: &ParseStateNodeContent<LLMTokenInfo>| -> Option<(ParseStateNodeContent<LLMTokenInfo>, bool)> {
-            if let Some(internal_llm_id_val) = maybe_internal_llm_id_val {
-                if content.t.active.contains(internal_llm_id_val) { // .active is internal, compare with internal ID
-                    if content.t.intersection == all_true_set {
-                         Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, false))
-                    } else {
-                         Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, true))
-                    }
-                } else { // Original token ID not found in mapping, so it cannot be active
-                    None
+            if content.t.active.contains(internal_llm_id_val) { // .active is internal, compare with internal ID
+                if content.t.intersection == all_true_set {
+                    Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, false))
+                } else {
+                    Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, true))
                 }
             } else { // Original token ID not found in mapping, so it cannot be active
                 None
