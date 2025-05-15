@@ -308,8 +308,8 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         crate::debug!(3, "{} - token {} ({:?}) - – active: {}, nodes: {:?}",
                       phase, token.0, self.parser.terminal_map.get_by_right(&token).unwrap().0, self.active_states.len(), stats);
 
-        let make_msg = || {
-            if stats.unique_nodes <= MAX {
+        let make_msg = |print_full_forest| {
+            if print_full_forest {
                 format!("GSS ({} nodes):\n{}", stats.unique_nodes,
                         print_gss_forest(&roots, MAX))
             } else {
@@ -328,11 +328,11 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         };
 
         if stats.unique_nodes > PANIC_THRESHOLD {
-            let msg = make_msg();
+            let msg = make_msg(stats.unique_nodes <= MAX);
             panic!("GSS too big ({} nodes). {}", stats.unique_nodes, msg);
         }
 
-        debug!(4, "{}", make_msg());
+        debug!(4, "{}", make_msg(true));
     }
 
     pub fn parse(&mut self, input: &[TerminalID]) {
