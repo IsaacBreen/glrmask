@@ -181,35 +181,30 @@ impl<T: Hash> Hash for GSSNode<T> {
     }
 }
 
-impl<T: Hash> PartialEq for GSSNode<T> {
+impl<T: Hash + PartialEq> PartialEq for GSSNode<T> {
     fn eq(&self, other: &Self) -> bool {
-        // For consistency with Ord based on hash_key_cache,
-        // Eq also primarily relies on hash_key_cache.
-        // This means nodes are considered "equal" by BTreeSet if their hashes match.
-        self.hash_key_cache == other.hash_key_cache
-        // If true structural equality is needed beyond what BTreeSet requires,
-        // one might also compare self.value and self.predecessors,
-        // but that would require T: PartialEq and careful consideration of predecessor comparison.
-        // For the simplification logic relying on BTreeSet<Arc<GSSNode<T>>>,
-        // matching hash_key_cache is sufficient for equivalence.
+        // First compare hash, then value, then predecessors
+        self.hash_key_cache == other.hash_key_cache && self.value == other.value && self.predecessors == other.predecessors
     }
 }
 
-impl<T: Hash> Eq for GSSNode<T> {}
+impl<T: Hash + PartialEq> Eq for GSSNode<T> {}
 
-impl<T: Hash> PartialOrd for GSSNode<T> {
+impl<T: Hash + PartialOrd> PartialOrd for GSSNode<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+        // Just compare hash. If hash is equal, return None.
+        if self.hash_key_cache == other.hash_key_cache {
+            None
+        } else {
+            Some(self.hash_key_cache.cmp(&other.hash_key_cache))
+        }
     }
 }
 
-impl<T: Hash> Ord for GSSNode<T> {
+impl<T: Hash + PartialOrd + Ord> Ord for GSSNode<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.hash_key_cache.cmp(&other.hash_key_cache)
-        // If a more specific ordering is needed for nodes with identical hashes,
-        // additional comparisons (e.g., self.value.cmp(&other.value) if T: Ord)
-        // could be added here using .then_with(...).
-        // For BTreeSet to group nodes with the same hash, this is sufficient.
+        // Compare hash, then value, then predecessors
+        self.hash_key_cache.cmp(&other.hash_key_cache).then_with(|| self.value.cmp(&other.value)).then_with(|| self.predecessors.cmp(&other.predecessors))
     }
 }
 
