@@ -200,15 +200,46 @@ impl Grammar {
                         vec![Symbol::Terminal(Terminal(terminal_name))]
                     } else {
                         // New terminal for this literal
-                        let base_name = format!("b\"{}\"", String::from_utf8_lossy(bytes).escape_debug().to_string());
-                        let terminal_name = Grammar::generate_unique_indexed_name(
-                            &base_name, // Base name for the terminal based on literal content
-                            per_base_counters,
-                            all_names,
-                        );
+                        let terminal_name: String;
+
+                        // Attempt to use the literal string directly as the name if it's "simple"
+                        // and not already taken.
+                        // "Simple" means valid UTF-8, not empty, and does not contain '[' or ']'.
+                        match String::from_utf8(bytes.clone()) {
+                            Ok(s) if !s.is_empty() && !s.contains('[') && !s.contains(']') => {
+                                // The string is simple (e.g., "/", "foo").
+                                if !all_names.contains(&s) {
+                                    // And the simple name is not already in use. Use it directly.
+                                    terminal_name = s;
+                                    all_names.insert(terminal_name.clone());
+                                } else {
+                                    // The simple name is already taken (e.g., by a NonTerminal or another generated name).
+                                    // Use the simple name as a base for an indexed name.
+                                    // For example, if "foo" (a NonTerminal) exists, a literal "foo" will be named "foo[0]".
+                                    terminal_name = Grammar::generate_unique_indexed_name(
+                                        &s, // base_name is the simple string itself
+                                        per_base_counters,
+                                        all_names, // all_names will be updated by generate_unique_indexed_name
+                                    );
+                                }
+                            }
+                            _ => {
+                                // The literal was not "simple" (e.g., non-UTF8, empty, or contains '[' or ']')
+                                // or String::from_utf8 failed.
+                                // Fall back to the b"..."[idx] naming scheme.
+                                // The base name will be like b"\xff\xfe" or b"complex[val]".
+                                let base_name = format!("b\"{}\"", String::from_utf8_lossy(bytes).escape_debug().to_string());
+                                terminal_name = Grammar::generate_unique_indexed_name(
+                                    &base_name,
+                                    per_base_counters,
+                                    all_names, // all_names will be updated by generate_unique_indexed_name
+                                );
+                            }
+                        }
+
                         let group_id = *next_terminal_group_id;
                         terminal_name_to_group_id.insert(terminal_name.clone(), group_id);
-                        terminal_expr_to_group_id.insert(regex_expr.clone(), group_id);
+                        terminal_expr_to_group_id.insert(regex_expr.clone(), group_id); // regex_expr is defined outside this else block
                         terminal_string_to_expr.insert(terminal_name.clone(), regex_expr.clone());
                         *next_terminal_group_id += 1;
                         vec![Symbol::Terminal(Terminal(terminal_name))]
