@@ -363,10 +363,7 @@ pub fn prune_and_transform_recursive<T: Clone + Hash>(
         }
         Some((new_value, continue_recursion)) => {
             let mut new_predecessors;
-            if !continue_recursion {
-                // Stop recursion, create new node with original predecessors but new value
-                new_predecessors = node_arc.predecessors.clone();
-            } else {
+            if continue_recursion {
                 // Continue recursion for predecessors
                 new_predecessors = BTreeSet::new();
                 for pred_wrapper in &node_arc.predecessors { // pred_wrapper is &ArcPtrWrapper<GSSNode<T>>
@@ -375,6 +372,9 @@ pub fn prune_and_transform_recursive<T: Clone + Hash>(
                         new_predecessors.insert(ArcPtrWrapper::new(new_pred));
                     }
                 }
+            } else {
+                // Stop recursion, create new node with original predecessors but new value
+                new_predecessors = node_arc.predecessors.clone();
             };
             let hash_key_cache = GSSNode::<T>::compute_hash_key_cache(&new_value, &new_predecessors);
             let new_node_arc = Arc::new(GSSNode { value: new_value, predecessors: new_predecessors, hash_key_cache });
