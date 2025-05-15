@@ -156,10 +156,12 @@ def define_tokens() -> list[tuple[str, Any]]:
         eat('"""'),
         eat("'''"),
     ])
-    tokens["FSTRING_MIDDLE"] = rep(choice([
-        eat_u8_negation(ord("{")),
-        eat("{{"),
-    ]))
+#     tokens["FSTRING_MIDDLE"] = rep(choice([
+#         eat_u8_negation(ord("{")),
+#         eat("{{"),
+#     ]))
+    # TODO: delete this
+    tokens["FSTRING_MIDDLE"] = eps()
     tokens["TYPE_COMMENT"] = eps()
     tokens["ENDMARKER"] = eps()
     return [regex(expr, name) for name, expr in tokens.items()]
