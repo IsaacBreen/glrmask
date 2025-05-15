@@ -357,6 +357,11 @@ impl<'r> Precomputer<'r> {
         }
     }
 
+    fn definitely_matches(&self, vocab_node: &VocabPrefixTreeNode, tokenizer_state_id: TokenizerStateID) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
+        // Tells us which LLM tokens could match (starting from the vocab node) the specified grammar token.
+        todo!()
+    }
+
     // -------------------------------------------------------------------------
     // Public driver
     // -------------------------------------------------------------------------
