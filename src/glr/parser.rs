@@ -302,7 +302,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
     /// Debug helper so the main `step` body stays short.
     pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
         const MAX: usize = 30;
-        const PANIC_THRESHOLD: usize = 100;
+        const PANIC_THRESHOLD: usize = 20;
         let roots: Vec<_> = self.active_states.values().map(|s| s.stack.clone()).collect();
         let stats = gather_gss_stats(&roots);
         crate::debug!(3, "{} - token {} ({:?}) - – active: {}, nodes: {:?}",
@@ -331,7 +331,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
             let msg = make_msg();
             panic!("GSS too big ({} nodes). {}", stats.unique_nodes, msg);
         }
-        
+
         debug!(4, "{}", make_msg());
     }
 
