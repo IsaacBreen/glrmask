@@ -133,6 +133,9 @@ pub struct PrecomputeStats {
 
     // Final structure stats (net counts, after all processing and sharing)
     pub final_unique_nodes_count: usize,
+    pub final_root_nodes_count: usize,
+    pub final_non_root_internal_nodes_count: usize, // Renamed from final_internal_nodes_count
+    pub final_leaf_nodes_count: usize,             // New field
     pub final_edges_count: usize,
     pub final_edges_with_none_key: usize,
     pub final_edges_with_some_key: usize,
@@ -188,35 +191,53 @@ pub fn calculate_final_stats(
         }
     }
     stats.final_unique_nodes_count = all_reachable_nodes_for_final_stats.len();
+    stats.final_root_nodes_count = precomputed_roots.len(); // Calculate root count
 
+    // Create a set of root node wrappers for efficient lookup
+    let root_node_wrappers: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = precomputed_roots
+        .values()
+        .map(|arc_mutex_node| ArcPtrWrapper::new(arc_mutex_node.clone()))
+        .collect();
+
+    // Initialize stats fields
     stats.final_total_occupancy_sum_for_some_keys = 0;
     stats.final_num_occupied_some_edge_keys = 0;
     stats.final_total_occupancy_sum_for_none_keys = 0;
     stats.final_num_occupied_none_edge_keys = 0;
-    stats.final_edges_count = 0; // Initialize explicitly
-    stats.final_edges_with_none_key = 0; // Initialize explicitly
-    stats.final_edges_with_some_key = 0; // Initialize explicitly
-    stats.final_nodes_with_clean_end = 0; // Initialize explicitly
-    stats.final_total_finalizer_entries_in_graph = 0; // Initialize explicitly
+    stats.final_edges_count = 0;
+    stats.final_edges_with_none_key = 0;
+    stats.final_edges_with_some_key = 0;
+    stats.final_nodes_with_clean_end = 0;
+    stats.final_total_finalizer_entries_in_graph = 0;
     stats.final_grammar_token_edge_key_counts.clear();
     stats.final_grammar_token_edge_fanouts_dist.clear();
     stats.final_grammar_token_edge_token_set_sizes_dist.clear();
+    // stats.final_root_nodes_count = 0; // Already set above
+    stats.final_non_root_internal_nodes_count = 0;
+    stats.final_leaf_nodes_count = 0;
 
 
     for comp_arc_node in &all_reachable_nodes_for_final_stats {
         let node_arc = comp_arc_node.as_arc();
         let node_guard = node_arc.lock().expect("Mutex poisoned during final stats calculation");
 
+        // New logic for non-root internal and leaf nodes
+        if !root_node_wrappers.contains(comp_arc_node) {
+            if node_guard.children().is_empty() {
+                stats.final_leaf_nodes_count += 1;
+            } else {
+                stats.final_non_root_internal_nodes_count += 1;
+            }
+        }
+
+        // Existing logic for edges
         for (edge_key_opt, dest_map) in node_guard.children() {
             let num_edges_for_this_key_to_distinct_children = dest_map.len();
             stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
 
             if let Some(gtid) = edge_key_opt {
                 stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
-                *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += 1; // Note: original was +=1, this might be per node using the key. Let's assume it's counting how many nodes use this gtid as an edge key.
-                                                                                            // If it's sum of fanouts, it should be `+= num_edges_for_this_key_to_distinct_children`.
-                                                                                            // The original code `*stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += 1;` means "number of source nodes that have an outgoing edge with this gtid".
-                                                                                            // Let's stick to the original logic.
+                *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += 1;
 
                 stats.final_grammar_token_edge_fanouts_dist
                     .entry(*gtid)
@@ -241,9 +262,11 @@ pub fn calculate_final_stats(
             }
         }
 
+        // Existing logic for clean_end
         if node_guard.value.clean_end.is_some() {
             stats.final_nodes_with_clean_end += 1;
         }
+        // Existing logic for finalizers
         for finalizer_for_gtid in node_guard.value.finalizers().values() { // Use .finalizers() method
             stats.final_total_finalizer_entries_in_graph += finalizer_for_gtid.content.len();
         }
@@ -265,6 +288,16 @@ pub fn print_precompute_stats(
 
     println!("--- Precomputation Statistics ---");
     println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
+
+    println!("\nNode Counts Breakdown:");
+    println!("  There are:");
+    println!("  - {} unique nodes, of which", stats.final_unique_nodes_count);
+    println!("    - {} are roots", stats.final_root_nodes_count);
+    let non_root_count = stats.final_unique_nodes_count - stats.final_root_nodes_count;
+    println!("    - {} are non-roots, of which", non_root_count);
+    println!("        - {} are internal (non-root, non-leaf)", stats.final_non_root_internal_nodes_count);
+    println!("        - {} are leaves (non-root)", stats.final_leaf_nodes_count);
+
     println!("\nFinal Graph Structure (after sharing and deduplication):");
     println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
     println!("  Total Edges: {}", stats.final_edges_count);
