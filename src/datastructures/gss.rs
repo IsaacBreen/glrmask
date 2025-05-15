@@ -367,29 +367,22 @@ pub fn prune_and_transform_recursive<T: Clone + Hash>(
             None
         }
         Some((new_value, continue_recursion)) => {
-            let new_node_arc = if !continue_recursion {
+            let mut new_predecessors;
+            if !continue_recursion {
                 // Stop recursion, create new node with original predecessors but new value
-                let hash_key_cache = GSSNode::<T>::compute_hash_key_cache(&new_value, &node_arc.predecessors);
-                Arc::new(GSSNode { value: new_value, predecessors: node_arc.predecessors.clone(), hash_key_cache })
+                new_predecessors = node_arc.predecessors.clone();
             } else {
                 // Continue recursion for predecessors
-                let mut new_predecessors = BTreeSet::new();
+                new_predecessors = BTreeSet::new();
                 for pred_wrapper in &node_arc.predecessors { // pred_wrapper is &ArcPtrWrapper<GSSNode<T>>
                     let pred_arc = pred_wrapper.as_arc(); // pred_arc is &Arc<GSSNode<T>>
                     if let Some(new_pred) = prune_and_transform_recursive(pred_arc, closure, memo) {
-                        new_predecessors.insert(new_pred);
+                        new_predecessors.insert(ArcPtrWrapper::new(new_pred));
                     }
                 }
-
-                // Only create a node if it has predecessors OR it's an original root (how to check?).
-                // If new_predecessors is empty AND the original node had predecessors, it means all paths were pruned.
-                if new_predecessors.is_empty() && !node_arc.predecessors.is_empty() {
-                     memo.insert(node_ptr, None); // Mark as pruned
-                     return None; // Return None, pruning this node
-                } else {
-                     Arc::new(GSSNode::new_with_predecessors(new_value, new_predecessors))
-                }
             };
+            let hash_key_cache = GSSNode::<T>::compute_hash_key_cache(&new_value, &new_predecessors);
+            let new_node_arc = Arc::new(GSSNode { value: new_value, predecessors: new_predecessors, hash_key_cache });
             memo.insert(node_ptr, Some(new_node_arc.clone()));
             Some(new_node_arc)
         }
