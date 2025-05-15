@@ -798,7 +798,9 @@ impl<'a> GrammarConstraintState<'a> {
         let mut memo = HashMap::new();
         self.state.retain(|_tokenizer_state_id, glr_state| {
             glr_state.active_states.retain(|_key, parse_state| {
+                crate::debug!(4, "Pruning parse state {:?}", parse_state.key());
                 let maybe_new_node = prune_and_transform_recursive(&parse_state.stack, &closure, &mut memo);
+                crate::debug!(4, "Pruned parse state {:?}. Got new node {:?}.", parse_state.key(), maybe_new_node);
                 if let Some(new_node) = maybe_new_node {
                     parse_state.stack = new_node;
                     true
