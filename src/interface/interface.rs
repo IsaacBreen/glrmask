@@ -19,7 +19,7 @@ type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
 pub struct Grammar {
     pub productions: Vec<Production>,
     pub start_production_id: usize,
-    pub literal_map: BTreeMap<String, String>,
+    // pub literal_map: BTreeMap<String, String>, // Remove this line
     pub terminal_name_to_group_id: BiBTreeMap<String, usize>,
     pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,
     pub tokenizer: Regex,
@@ -46,10 +46,12 @@ impl Debug for Grammar {
             writeln!(f)?;
         }
 
-        writeln!(f, "  Literal Map:")?;
-        for (literal, mangled_name) in &self.literal_map {
-            writeln!(f, "    {:?}: {}", literal, mangled_name)?;
-        }
+        // writeln!(f, "  Literal Map:")?;
+        // for (literal, mangled_name) in &self.literal_map {
+        //     writeln!(f, "    {:?}: {}", literal, mangled_name)?;
+        // }
+        // Remove these three lines (approximately lines 40-43 in the original code)
+
 
         writeln!(f, "  Terminals:")?;
         let mut terminals = self.terminal_name_to_group_id.iter().collect::<Vec<_>>();
@@ -66,15 +68,16 @@ impl Debug for Grammar {
 }
 
 impl Grammar {
-    fn mangle_literal(literal: &str, tokens: &BTreeMap<String, Expr>) -> String {
-        let mut mangled_name = literal.to_string();
-        let mut i = 0;
-        while tokens.contains_key(&mangled_name) {
-            mangled_name = format!("{}__literal_{}", literal, i);
-            i += 1;
-        }
-        mangled_name
-    }
+    // fn mangle_literal(literal: &str, tokens: &BTreeMap<String, Expr>) -> String {
+    //     let mut mangled_name = literal.to_string();
+    //     let mut i = 0;
+    //     while tokens.contains_key(&mangled_name) {
+    //         mangled_name = format!("{}__literal_{}", literal, i);
+    //         i += 1;
+    //     }
+    //     mangled_name
+    // }
+    // Remove this entire function (approximately lines 56-64 in the original code)
 
     // Helper function to generate unique names like Base[0], Base[1], etc.
     // Or, if base itself is Base[0], then Base[0][0], Base[0][1], etc.
@@ -105,6 +108,7 @@ pub enum GrammarExpr {
     Choice(Vec<GrammarExpr>),
     Optional(Box<GrammarExpr>),
     Repeat(Box<GrammarExpr>), // Zero or more repetition
+    Literal(Vec<u8>), // Add this line
 }
 
 pub fn regex(expr: Expr) -> GrammarExpr {
@@ -131,6 +135,12 @@ pub fn repeat(expr: GrammarExpr) -> GrammarExpr {
     GrammarExpr::Repeat(Box::new(expr))
 }
 
+// Add this new function
+pub fn literal(bytes: Vec<u8>) -> GrammarExpr {
+    GrammarExpr::Literal(bytes)
+}
+
+
 impl Grammar {
     pub fn glr_parser(&self) -> GLRParser {
         // Return a clone or reference if stored
@@ -145,7 +155,7 @@ impl Grammar {
     /// The first non-terminal in the list is treated as the start symbol.
     pub fn from_exprs(exprs: Vec<(String, GrammarExpr)>) -> Self {
         let mut productions = Vec::new();
-        let mut literal_map = BTreeMap::new(); // This doesn't seem to be used in convert_expr anymore?
+        // let mut literal_map = BTreeMap::new(); // Remove this line
         let mut terminal_name_to_group_id = BiBTreeMap::new();
         let mut terminal_expr_to_group_id = BiBTreeMap::new();
         let mut next_terminal_group_id = 0; // Renamed for clarity
@@ -171,7 +181,7 @@ impl Grammar {
             expr: &GrammarExpr,
             current_rule_name_or_path: &str, // e.g., "S", or "S[0]" if inside an internal rule
             productions: &mut Vec<Production>,
-            // literal_map: &mut BTreeMap<String, String>, // Remove if unused
+            // literal_map: &mut BTreeMap<String, String>, // Remove if unused // This line should be removed
             terminal_string_to_expr: &mut BTreeMap<String, Expr>,
             terminal_name_to_group_id: &mut BiBTreeMap<String, usize>,
             terminal_expr_to_group_id: &mut BiBTreeMap<Expr, usize>,
@@ -180,6 +190,30 @@ impl Grammar {
             all_names: &mut HashSet<String>, // Contains all NT and T names
         ) -> Vec<Symbol> {
             match expr {
+                // Add this new arm
+                GrammarExpr::Literal(bytes) => {
+                    let regex_expr = Expr::Seq(bytes.iter().map(|&b| Expr::Byte(b)).collect());
+                    if let Some(group_id) = terminal_expr_to_group_id.get_by_left(&regex_expr) {
+                        // Existing terminal, find its name
+                        let terminal_name = terminal_name_to_group_id.get_by_right(group_id)
+                            .expect("Internal error: group_id has no name for literal's regex_expr").clone();
+                        vec![Symbol::Terminal(Terminal(terminal_name))]
+                    } else {
+                        // New terminal for this literal
+                        let base_name = format!("b\"{}\"", String::from_utf8_lossy(bytes).escape_debug().to_string());
+                        let terminal_name = Grammar::generate_unique_indexed_name(
+                            &base_name, // Base name for the terminal based on literal content
+                            per_base_counters,
+                            all_names,
+                        );
+                        let group_id = *next_terminal_group_id;
+                        terminal_name_to_group_id.insert(terminal_name.clone(), group_id);
+                        terminal_expr_to_group_id.insert(regex_expr.clone(), group_id);
+                        terminal_string_to_expr.insert(terminal_name.clone(), regex_expr.clone());
+                        *next_terminal_group_id += 1;
+                        vec![Symbol::Terminal(Terminal(terminal_name))]
+                    }
+                }
                 GrammarExpr::RegexExpr(regex_expr) => {
                     if let Some(group_id) = terminal_expr_to_group_id.get_by_left(regex_expr) {
                         // Existing terminal, find its name
@@ -213,7 +247,7 @@ impl Grammar {
                             e,
                             current_rule_name_or_path, // Pass current path
                             productions,
-                            // literal_map, // if used
+                            // literal_map, // if used // Remove this line
                             terminal_string_to_expr,
                             terminal_name_to_group_id,
                             terminal_expr_to_group_id,
@@ -237,7 +271,7 @@ impl Grammar {
                             expr,
                             &choice_nt_name, // Pass the new NT name as the base for its children
                             productions,
-                            // literal_map, // if used
+                            // literal_map, // if used // Remove this line
                             terminal_string_to_expr,
                             terminal_name_to_group_id,
                             terminal_expr_to_group_id,
@@ -259,7 +293,7 @@ impl Grammar {
                         &GrammarExpr::Choice(vec![*expr_box.clone(), GrammarExpr::Sequence(vec![])]),
                         current_rule_name_or_path, // Pass current path for the Choice NT to be based on
                         productions,
-                        // literal_map, // if used
+                        // literal_map, // if used // Remove this line
                         terminal_string_to_expr,
                         terminal_name_to_group_id,
                         terminal_expr_to_group_id,
@@ -285,7 +319,7 @@ impl Grammar {
                         inner_expr,
                         &repeat_nt_name, // Children are named relative to this new RepeatNT
                         productions,
-                        // literal_map, // if used
+                        // literal_map, // if used // Remove this line
                         terminal_string_to_expr,
                         terminal_name_to_group_id,
                         terminal_expr_to_group_id,
@@ -341,7 +375,7 @@ impl Grammar {
                         choice_expr,
                         lhs_name_str, // Pass current rule's name as base
                         &mut productions,
-                        // &mut literal_map, // if used
+                        // &mut literal_map, // if used // Remove this line
                         &mut terminal_string_to_expr,
                         &mut terminal_name_to_group_id,
                         &mut terminal_expr_to_group_id,
@@ -357,7 +391,7 @@ impl Grammar {
                     expr,
                     lhs_name_str, // Pass current rule's name as base
                     &mut productions,
-                    // &mut literal_map, // if used
+                    // &mut literal_map, // if used // Remove this line
                     &mut terminal_string_to_expr,
                     &mut terminal_name_to_group_id,
                     &mut terminal_expr_to_group_id,
@@ -394,7 +428,7 @@ impl Grammar {
         Self {
             productions,
             start_production_id: 0, // Assuming the first production is the start production
-            literal_map, // Still here, but maybe unused?
+            // literal_map, // Still here, but maybe unused? // Remove this line
             terminal_name_to_group_id,
             terminal_expr_to_group_id,
             tokenizer,
@@ -735,7 +769,7 @@ mod tests {
     #[test]
     fn test_precompute_for_python_name_token_with_names() {
         // ignore = rep(choice([
-        //     eat_u8(ord(" ")),
+        //     eat_u8(ord(" "))),
         //     seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]),
         // ]))
         // digit = choice([eat_u8(c) for c in range(ord("0"), ord("9") + 1)])

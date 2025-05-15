@@ -6,7 +6,7 @@ use pyo3::types::{PyDict};
 use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use sep1::glr::parser::{GLRParser, GLRParserState};
 use sep1::glr::table::{generate_glr_parser, StateID, TerminalID};
-use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence};
+use sep1::interface::{Grammar, GrammarExpr, choice as grammar_choice, literal as grammar_literal, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence}; // Added literal as grammar_literal
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
 use std::collections::{BTreeMap, BTreeSet};
 use bimap::BiBTreeMap;
@@ -62,6 +62,14 @@ impl PyGrammarExpr {
     fn regex(regex: PyRegexExpr) -> Self {
         Self {
             inner: grammar_regex(regex.inner)
+        }
+    }
+
+    // Add this new static method
+    #[staticmethod]
+    fn literal(bytes: Vec<u8>) -> Self {
+        Self {
+            inner: grammar_literal(bytes),
         }
     }
 }
@@ -194,19 +202,6 @@ impl PyGrammar {
 
     fn print(&self) {
         println!("{:?}", self.inner)
-    }
-}
-
-#[pyclass]
-#[derive(Clone)]
-pub struct PyGLRParser {
-    inner: GLRParser,
-}
-
-#[pymethods]
-impl PyGLRParser {
-    fn print(&self) {
-        println!("{}", self.inner)
     }
 }
 
