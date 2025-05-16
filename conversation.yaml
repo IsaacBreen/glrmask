@@ -4,7 +4,7 @@ local_system:
   conversation_file:
   compile_command:
   initial_file_contents:
-    src/constraint.rs: |+
+    src/constraint.rs: |
       // src/constraint.rs
       #![allow(clippy::too_many_arguments)]
 
@@ -201,7 +201,7 @@ local_system:
           ) -> Self {
               let original_to_internal_id_bimap = Self::setup_llm_token_mappings(&llm_token_map);
 
-              let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap();
+              let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap_or(0);
 
               // Reconstruct the internal_llm_token_map for precomputation (bytes -> internal LLMTokenID)
               let mut internal_llm_token_map_for_precompute = BiBTreeMap::new();
@@ -388,8 +388,7 @@ local_system:
               }
 
               crate::debug!(2, "Starting precompute DFS");
-              let mut yellow = HashSet::new();
-              self.dfs(&self.vocab.root, assoc, &mut yellow);
+              self.dfs(&self.vocab.root, assoc);
               crate::debug!(2, "Finished precompute DFS");
               self.pb.finish_with_message("Precomputation complete");
           }
@@ -450,18 +449,8 @@ local_system:
                   TokenizerStateID,
                   BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
               >,
-              yellow: &mut HashSet<*const VocabPrefixTreeNode>,
           ) {
               self.pb.inc(1);
-
-              let vocab_node_ptr = vocab_node as *const VocabPrefixTreeNode;
-              if yellow.contains(&vocab_node_ptr) {
-                  // This vocab_node is already in the current DFS processing path, skip.
-                  crate::debug!(4, "Skipping vocab node {:p} because it's already in the current DFS processing path", vocab_node_ptr);
-                  return;
-              }
-              crate::debug!(4, "Processing vocab node {:p}", vocab_node_ptr); //
-              yellow.insert(vocab_node_ptr);
 
               // Merge policy per tokenizer state
               let mut effective: BTreeMap<
@@ -488,10 +477,8 @@ local_system:
                       String::from_utf8_lossy(child_vocab_ref.prefix())
                   );
 
-                  self.process_segment(segment_bytes, child_vocab_ref, &effective, yellow);
+                  self.process_segment(segment_bytes, child_vocab_ref, &effective);
               }
-
-              yellow.remove(&vocab_node_ptr);
           }
 
           // -------------------------------------------------------------------------
@@ -505,7 +492,6 @@ local_system:
                   TokenizerStateID,
                   BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
               >,
-              yellow: &mut HashSet<*const VocabPrefixTreeNode>,
           ) {
               // Maps used while consuming the segment byte-by-byte.
               let mut next_level: BTreeMap<
@@ -599,7 +585,7 @@ local_system:
               }
 
               // Recurse into the child vocab node.
-              self.dfs(child_vocab_of_segment, next_level, yellow);
+              self.dfs(child_vocab_of_segment, next_level);
           }
 
           // Insert or merge an edge out of `source_arc`.
@@ -972,10 +958,8 @@ local_system:
               }
           }
       }
-
-
   prev_file_contents:
-    src/constraint.rs: |+
+    src/constraint.rs: |
       // src/constraint.rs
       #![allow(clippy::too_many_arguments)]
 
@@ -1172,7 +1156,7 @@ local_system:
           ) -> Self {
               let original_to_internal_id_bimap = Self::setup_llm_token_mappings(&llm_token_map);
 
-              let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap();
+              let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap_or(0);
 
               // Reconstruct the internal_llm_token_map for precomputation (bytes -> internal LLMTokenID)
               let mut internal_llm_token_map_for_precompute = BiBTreeMap::new();
@@ -1359,8 +1343,7 @@ local_system:
               }
 
               crate::debug!(2, "Starting precompute DFS");
-              let mut yellow = HashSet::new();
-              self.dfs(&self.vocab.root, assoc, &mut yellow);
+              self.dfs(&self.vocab.root, assoc);
               crate::debug!(2, "Finished precompute DFS");
               self.pb.finish_with_message("Precomputation complete");
           }
@@ -1421,18 +1404,8 @@ local_system:
                   TokenizerStateID,
                   BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
               >,
-              yellow: &mut HashSet<*const VocabPrefixTreeNode>,
           ) {
               self.pb.inc(1);
-
-              let vocab_node_ptr = vocab_node as *const VocabPrefixTreeNode;
-              if yellow.contains(&vocab_node_ptr) {
-                  // This vocab_node is already in the current DFS processing path, skip.
-                  crate::debug!(4, "Skipping vocab node {:p} because it's already in the current DFS processing path", vocab_node_ptr);
-                  return;
-              }
-              crate::debug!(4, "Processing vocab node {:p}", vocab_node_ptr); //
-              yellow.insert(vocab_node_ptr);
 
               // Merge policy per tokenizer state
               let mut effective: BTreeMap<
@@ -1459,10 +1432,8 @@ local_system:
                       String::from_utf8_lossy(child_vocab_ref.prefix())
                   );
 
-                  self.process_segment(segment_bytes, child_vocab_ref, &effective, yellow);
+                  self.process_segment(segment_bytes, child_vocab_ref, &effective);
               }
-
-              yellow.remove(&vocab_node_ptr);
           }
 
           // -------------------------------------------------------------------------
@@ -1476,7 +1447,6 @@ local_system:
                   TokenizerStateID,
                   BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
               >,
-              yellow: &mut HashSet<*const VocabPrefixTreeNode>,
           ) {
               // Maps used while consuming the segment byte-by-byte.
               let mut next_level: BTreeMap<
@@ -1570,7 +1540,7 @@ local_system:
               }
 
               // Recurse into the child vocab node.
-              self.dfs(child_vocab_of_segment, next_level, yellow);
+              self.dfs(child_vocab_of_segment, next_level);
           }
 
           // Insert or merge an edge out of `source_arc`.
@@ -1943,8 +1913,6 @@ local_system:
               }
           }
       }
-
-
   diffs_applied_this_send: true
 system:
   message: |2
@@ -2168,7 +2136,7 @@ messages:
           ) -> Self {
               let original_to_internal_id_bimap = Self::setup_llm_token_mappings(&llm_token_map);
 
-              let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap();
+              let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap_or(0);
 
               // Reconstruct the internal_llm_token_map for precomputation (bytes -> internal LLMTokenID)
               let mut internal_llm_token_map_for_precompute = BiBTreeMap::new();
@@ -2355,8 +2323,7 @@ messages:
               }
 
               crate::debug!(2, "Starting precompute DFS");
-              let mut yellow = HashSet::new();
-              self.dfs(&self.vocab.root, assoc, &mut yellow);
+              self.dfs(&self.vocab.root, assoc);
               crate::debug!(2, "Finished precompute DFS");
               self.pb.finish_with_message("Precomputation complete");
           }
@@ -2417,18 +2384,8 @@ messages:
                   TokenizerStateID,
                   BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
               >,
-              yellow: &mut HashSet<*const VocabPrefixTreeNode>,
           ) {
               self.pb.inc(1);
-
-              let vocab_node_ptr = vocab_node as *const VocabPrefixTreeNode;
-              if yellow.contains(&vocab_node_ptr) {
-                  // This vocab_node is already in the current DFS processing path, skip.
-                  crate::debug!(4, "Skipping vocab node {:p} because it's already in the current DFS processing path", vocab_node_ptr);
-                  return;
-              }
-              crate::debug!(4, "Processing vocab node {:p}", vocab_node_ptr); //
-              yellow.insert(vocab_node_ptr);
 
               // Merge policy per tokenizer state
               let mut effective: BTreeMap<
@@ -2455,10 +2412,8 @@ messages:
                       String::from_utf8_lossy(child_vocab_ref.prefix())
                   );
 
-                  self.process_segment(segment_bytes, child_vocab_ref, &effective, yellow);
+                  self.process_segment(segment_bytes, child_vocab_ref, &effective);
               }
-
-              yellow.remove(&vocab_node_ptr);
           }
 
           // -------------------------------------------------------------------------
@@ -2472,7 +2427,6 @@ messages:
                   TokenizerStateID,
                   BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
               >,
-              yellow: &mut HashSet<*const VocabPrefixTreeNode>,
           ) {
               // Maps used while consuming the segment byte-by-byte.
               let mut next_level: BTreeMap<
@@ -2566,7 +2520,7 @@ messages:
               }
 
               // Recurse into the child vocab node.
-              self.dfs(child_vocab_of_segment, next_level, yellow);
+              self.dfs(child_vocab_of_segment, next_level);
           }
 
           // Insert or merge an edge out of `source_arc`.
@@ -2940,123 +2894,293 @@ messages:
           }
       }
 
-
-
       ```
     metadata:
       filename: src/constraint.rs
-  - user: Remove the 'yellow' set. It's not necessary anymore.
+  - user: "Add an `active: LLMTokenBV` field to `PrecomputedNodeContents`. It represents
+      the LLM tokens that are 'active' at a given precompute node. It should be equivalent
+      to the union of LLM token sets on all incoming edges (but obviously isn't actually
+      computed that way)."
     metadata:
   - assistant: |-
-      Okay, I'll guide you through removing the `yellow` set from your `Precomputer`'s DFS logic.
+      Okay, I'll provide step-by-step instructions to add the `active: LLMTokenBV` field to `PrecomputedNodeContents` and ensure it's correctly populated.
 
-      Here are the step-by-step instructions:
+      **Step 1: Modify the `PrecomputedNodeContents` struct definition**
 
-      1.  **In `src/constraint.rs`, inside the `Precomputer` struct implementation:**
+      In `src/constraint.rs`, locate the `PrecomputedNodeContents` struct definition:
 
-          *   **Modify the `run_dfs` method:**
-              *   Locate the line:
-                  ```rust
-                  let mut yellow = HashSet::new();
-                  ```
-                  Delete this line.
-              *   Locate the call to `self.dfs`:
-                  ```rust
-                  self.dfs(&self.vocab.root, assoc, &mut yellow);
-                  ```
-                  Change it to:
-                  ```rust
-                  self.dfs(&self.vocab.root, assoc);
-                  ```
+      ```rust
+      #[derive(Default, Debug, Clone)]
+      pub struct PrecomputedNodeContents {
+          finalizers: BTreeMap<GrammarTokenID, PrecomputedFinalizer>,
+          pub clean_end: Option<LLMTokenBV>,
+      }
+      ```
 
-          *   **Modify the `dfs` method signature:**
-              *   Locate the signature:
-                  ```rust
-                  fn dfs(
-                      &self,
-                      vocab_node: &VocabPrefixTreeNode,
-                      assoc_by_state: BTreeMap<
-                          TokenizerStateID,
-                          BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
-                      >,
-                      yellow: &mut HashSet<*const VocabPrefixTreeNode>,
-                  ) {
-                  ```
-              *   Change it to:
-                  ```rust
-                  fn dfs(
-                      &self,
-                      vocab_node: &VocabPrefixTreeNode,
-                      assoc_by_state: BTreeMap<
-                          TokenizerStateID,
-                          BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
-                      >,
-                  ) {
-                  ```
+      Add the new `active` field to this struct. It should look like this:
 
-          *   **Inside the `dfs` method body:**
-              *   Locate and delete the following lines:
-                  ```rust
-                  let vocab_node_ptr = vocab_node as *const VocabPrefixTreeNode;
-                  if yellow.contains(&vocab_node_ptr) {
-                      // This vocab_node is already in the current DFS processing path, skip.
-                      crate::debug!(4, "Skipping vocab node {:p} because it's already in the current DFS processing path", vocab_node_ptr);
-                      return;
+      ```rust
+      #[derive(Default, Debug, Clone)]
+      pub struct PrecomputedNodeContents {
+          finalizers: BTreeMap<GrammarTokenID, PrecomputedFinalizer>,
+          pub clean_end: Option<LLMTokenBV>,
+          pub active: LLMTokenBV, // Add this line
+      }
+      ```
+
+      **Step 2: Update the `Default` implementation for `PrecomputedNodeContents`**
+
+      The `PrecomputedNodeContents` struct derives `Default`. When a new field is added without a `#[default = ...]` attribute, its own `Default::default()` value is used. For `LLMTokenBV` (which is `HybridBitset`), `Default::default()` creates an empty bitset. This is the desired initial state for the `active` field.
+
+      However, to be explicit or if `HybridBitset`'s default was different, you would modify the `impl Default for PrecomputedNodeContents` if it were manually defined. Since it's derived and the default behavior for `HybridBitset` is suitable (empty set), no explicit change is needed here *if `LLMTokenBV::default()` is indeed an empty set*. Assuming `HybridBitset::new()` is `HybridBitset::default()`, this step is implicitly handled by the derive.
+
+      If you had a manual `impl Default`:
+      ```rust
+      // This is illustrative, as your code uses #[derive(Default)]
+      // If you had this:
+      // impl Default for PrecomputedNodeContents {
+      //     fn default() -> Self {
+      //         Self {
+      //             finalizers: BTreeMap::new(),
+      //             clean_end: None,
+      //         }
+      //     }
+      // }
+
+      // You would change it to:
+      // impl Default for PrecomputedNodeContents {
+      //     fn default() -> Self {
+      //         Self {
+      //             finalizers: BTreeMap::new(),
+      //             clean_end: None,
+      //             active: LLMTokenBV::default(), // Or HybridBitset::new()
+      //         }
+      //     }
+      // }
+      ```
+      Since you are using `#[derive(Default)]`, and `LLMTokenBV` (alias for `HybridBitset`) has a suitable `Default` implementation (an empty bitset), no changes are strictly necessary for this step beyond adding the field in Step 1. The derived `default()` will correctly initialize `active` to an empty `LLMTokenBV`.
+
+      **Step 3: Update `Precomputer::insert_edge()` method**
+
+      In `src/constraint.rs`, locate the `Precomputer::insert_edge` method.
+      You need to update the `active` field of the `target` node. The `edge_tokens` (which are the LLM tokens for the edge being inserted) should be unioned into the `target` node's `active` set.
+
+      The relevant part of the method is after `target` is determined:
+      ```rust
+              let target = inserter
+                  .else_create_destination_with_value(PrecomputedNodeContents::default())
+                  .unwrap();
+
+              let handle = ArcPtrWrapper::new(target.clone());
+      ```
+
+      Insert the modification immediately after `let target = ... .unwrap();`:
+
+      Specifically, change this:
+      ```rust
+              let target = inserter
+                  .else_create_destination_with_value(PrecomputedNodeContents::default())
+                  .unwrap();
+
+              let handle = ArcPtrWrapper::new(target.clone());
+      ```
+      to this:
+      ```rust
+              let target = inserter
+                  .else_create_destination_with_value(PrecomputedNodeContents::default())
+                  .unwrap();
+
+              // Add this block to update the target node's active set
+              {
+                  let mut guard = target.lock().unwrap();
+                  guard.value.active |= &edge_tokens;
+              }
+
+              let handle = ArcPtrWrapper::new(target.clone());
+      ```
+      Make sure you use `edge_tokens.clone()` when creating the `EdgeInserter` if `edge_tokens` is consumed by the inserter or if its lifetime is an issue, or ensure `edge_tokens` is still valid and accessible for the `|= &edge_tokens` operation. In the current code, `edge_tokens` is passed by value and cloned for `EdgeInserter::new`, so the original `edge_tokens` variable is still available and valid.
+
+      **Step 4: Update `Precomputer::merge_handles()` method**
+
+      In `src/constraint.rs`, locate the `Precomputer::merge_handles` method.
+      When edges are created from `child` nodes to the `merged` node, the `merged` node's `active` field needs to be updated with the `edge_tokens` of these new incoming edges. In this case, the `edge_tokens` are `self.all_llm_tokens`.
+
+      Locate this part of the code within the loop:
+      ```rust
+                  let mut ins = EdgeInserter::new(
+                      child.as_arc().clone(),
+                      None::<GrammarTokenID>,
+                      self.all_llm_tokens.clone(), // These are the edge_tokens for this operation
+                      |ev: &mut HybridBitset, new| *ev |= new,
+                  )
+                  .try_children();
+
+                  if ins.clone_into_option().is_none() {
+                      let _ = ins.try_destination(merged.clone());
                   }
-                  crate::debug!(4, "Processing vocab node {:p}", vocab_node_ptr); //
-                  yellow.insert(vocab_node_ptr);
-                  ```
-              *   At the end of the `dfs` method, locate and delete the line:
-                  ```rust
-                  yellow.remove(&vocab_node_ptr);
-                  ```
-              *   Inside the loop `for (segment_bytes, child_vocab_arc) in vocab_node.iter_children()`, locate the call to `self.process_segment`:
-                  ```rust
-                  self.process_segment(segment_bytes, child_vocab_ref, &effective, yellow);
-                  ```
-                  Change it to:
-                  ```rust
-                  self.process_segment(segment_bytes, child_vocab_ref, &effective);
-                  ```
+      ```
 
-          *   **Modify the `process_segment` method signature:**
-              *   Locate the signature:
-                  ```rust
-                  fn process_segment(
-                      &self,
-                      segment_bytes: &[u8],
-                      child_vocab_of_segment: &VocabPrefixTreeNode,
-                      sources_per_state: &BTreeMap<
-                          TokenizerStateID,
-                          BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
-                      >,
-                      yellow: &mut HashSet<*const VocabPrefixTreeNode>,
-                  ) {
-                  ```
-              *   Change it to:
-                  ```rust
-                  fn process_segment(
-                      &self,
-                      segment_bytes: &[u8],
-                      child_vocab_of_segment: &VocabPrefixTreeNode,
-                      sources_per_state: &BTreeMap<
-                          TokenizerStateID,
-                          BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
-                      >,
-                  ) {
-                  ```
+      You need to modify the logic around `ins.try_destination(merged.clone())`.
+      The original code is:
+      ```rust
+              // ...
+              let merged = Arc::new(Mutex::new(PrecomputeNode::new(
+                  PrecomputedNodeContents::default(),
+              )));
 
-          *   **Inside the `process_segment` method body:**
-              *   At the end of the method, locate the recursive call to `self.dfs`:
-                  ```rust
-                  self.dfs(child_vocab_of_segment, next_level, yellow);
-                  ```
-                  Change it to:
-                  ```rust
-                  self.dfs(child_vocab_of_segment, next_level);
-                  ```
+              for child in set {
+                  let mut ins = EdgeInserter::new(
+                      child.as_arc().clone(),
+                      None::<GrammarTokenID>,
+                      self.all_llm_tokens.clone(),
+                      |ev: &mut HybridBitset, new| *ev |= new, // Pass new by reference
+                  )
+                  .try_children(); // This was in the provided code, let's assume it's correct.
 
-      These changes will remove all uses of the `yellow` set.
+                  if ins.clone_into_option().is_none() { // This checks if try_children found anything.
+                      // If not, try_destination is called.
+                      let _ = ins.try_destination(merged.clone());
+                  }
+              }
+              // ...
+      ```
+
+      The logic for `EdgeInserter` in `merge_handles` seems to be slightly different from my thought process. Let's adjust to the provided code's structure. The key is that `try_destination` is called on `ins`.
+      The `edge_tokens_for_merge` will be `self.all_llm_tokens.clone()`.
+
+      Change this section:
+      ```rust
+              for child in set {
+                  let mut ins = EdgeInserter::new(
+                      child.as_arc().clone(),
+                      None::<GrammarTokenID>,
+                      self.all_llm_tokens.clone(),
+                      |ev: &mut HybridBitset, new| *ev |= new, // Pass new by reference
+                  )
+                  .try_children();
+
+                  if ins.clone_into_option().is_none() {
+                      let _ = ins.try_destination(merged.clone());
+                  }
+              }
+      ```
+      to this:
+      ```rust
+              for child in set {
+                  // Define the edge tokens for this specific merge operation
+                  let edge_tokens_for_merge = self.all_llm_tokens.clone();
+
+                  let mut ins = EdgeInserter::new(
+                      child.as_arc().clone(),
+                      None::<GrammarTokenID>,
+                      edge_tokens_for_merge.clone(), // Use the defined variable
+                      |ev: &mut HybridBitset, new| *ev |= new,
+                  )
+                  .try_children(); // This attempts to find/reuse children of `child` first.
+
+                  // The goal is to make `merged` a child of `child` if no suitable existing child is found.
+                  // `ins.try_destination(merged.clone())` will attempt to use `merged` as the destination.
+                  // If `ins.clone_into_option()` is `None` after `try_children()`, it means no existing child of `child`
+                  // matched the criteria (key `None` and compatible edge data).
+                  // So, we want to make `merged` the destination for this edge from `child`.
+                  if ins.clone_into_option().is_none() {
+                      if let Some(actual_dest_node) = ins.try_destination(merged.clone()) {
+                          // `actual_dest_node` is the node that became the destination.
+                          // This should be the `merged` node.
+                          // Update its `active` set with the tokens from the edge we just established.
+                          let mut guard = actual_dest_node.lock().unwrap();
+                          guard.value.active |= &edge_tokens_for_merge;
+                      }
+                  }
+                  // If `try_children()` *did* find an existing child, and `ins.clone_into_option()` is Some(existing_child_arc),
+                  // then `existing_child_arc` is the destination. Its `active` field should be updated.
+                  // The `EdgeInserter` updates the edge data on the edge itself.
+                  // The current logic of `EdgeInserter` does not automatically update a field on the destination node.
+                  // This means if `try_children()` reuses an existing child, that child's `active` field also needs this update.
+
+                  // A more robust way to handle this is to get the final destination from the inserter
+                  // and update it, regardless of how it was obtained (found existing or used `merged`).
+
+                  // Let's refine the logic for merge_handles:
+                  // The EdgeInserter `ins` is configured to add an edge FROM `child.as_arc()`.
+                  // The destination of this edge will either be an existing child of `child.as_arc()` (if `try_children` succeeds)
+                  // or the `merged` node (if `try_destination(merged.clone())` is called and succeeds).
+                  // We need to update the `active` field of whatever node becomes the destination.
+
+                  // Revised change for the loop in `merge_handles`:
+              }
+      ```
+
+      Let's re-evaluate the `merge_handles` modification. The `EdgeInserter` is complex.
+      The original code is:
+      ```rust
+                  let mut ins = EdgeInserter::new(
+                      child.as_arc().clone(),
+                      None::<GrammarTokenID>,
+                      self.all_llm_tokens.clone(),
+                      |ev: &mut HybridBitset, new| *ev |= new, // Pass new by reference
+                  )
+                  .try_children();
+
+                  if ins.clone_into_option().is_none() {
+                      let _ = ins.try_destination(merged.clone());
+                  }
+      ```
+      This structure means `ins` is first potentially resolved by `try_children`. If `ins.target_option` (what `clone_into_option` returns) is set by `try_children`, then `try_destination` is *not* called. If `try_children` does *not* set a target, then `try_destination(merged.clone())` is called, which *will* set `ins.target_option` to `merged` (or an equivalent existing node if `merged` itself was a duplicate, though `merged` is freshly created).
+
+      The `active` field of the *destination node* of the edge from `child` needs to be updated.
+      Let `edge_data_for_this_merge_edge = self.all_llm_tokens.clone()`.
+      The `EdgeInserter` is created with this `edge_data_for_this_merge_edge`.
+      After `ins` is fully resolved (either by `try_children` or `try_destination`), `ins.clone_into_option()` will give `Some(destination_node_arc)`.
+
+      Revised change for the loop in `merge_handles`:
+      Replace the loop:
+      ```rust
+              for child in set {
+                  let mut ins = EdgeInserter::new(
+                      child.as_arc().clone(),
+                      None::<GrammarTokenID>,
+                      self.all_llm_tokens.clone(),
+                      |ev: &mut HybridBitset, new| *ev |= new, // Pass new by reference
+                  )
+                  .try_children();
+
+                  if ins.clone_into_option().is_none() {
+                      let _ = ins.try_destination(merged.clone());
+                  }
+              }
+      ```
+      with this:
+      ```rust
+              for child in set {
+                  let edge_tokens_for_merge = self.all_llm_tokens.clone();
+                  let mut inserter = EdgeInserter::new(
+                      child.as_arc().clone(), // Source of the edge
+                      None::<GrammarTokenID>,   // Key for the edge (epsilon)
+                      edge_tokens_for_merge.clone(), // Data for the edge
+                      |existing_edge_data: &mut HybridBitset, new_edge_data| *existing_edge_data |= new_edge_data,
+                  );
+
+                  // Try to reuse an existing child of `child.as_arc()`
+                  inserter = inserter.try_children();
+
+                  // If no suitable existing child was found, make the new `merged` node the destination
+                  if inserter.clone_into_option().is_none() {
+                      inserter = inserter.try_destination(merged.clone());
+                  }
+
+                  // Now, `inserter.clone_into_option()` should contain Some(destination_node).
+                  // Update the `active` field of this destination_node.
+                  if let Some(destination_node_arc) = inserter.clone_into_option() {
+                      let mut guard = destination_node_arc.lock().unwrap();
+                      guard.value.active |= &edge_tokens_for_merge;
+                  }
+              }
+      ```
+
+      This ensures that whichever node becomes the target of the edge from `child` (be it an existing child node found by `try_children`, or the `merged` node itself via `try_destination`), its `active` set is correctly updated with `edge_tokens_for_merge`.
+
+      These four steps should correctly implement the desired feature.
     metadata:
   - user: |
       Using model 'gemini/gemini-2.5-flash-preview-04-17' for code completion.

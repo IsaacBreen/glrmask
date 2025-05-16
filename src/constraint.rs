@@ -100,6 +100,7 @@ impl PrecomputedFinalizer {
 pub struct PrecomputedNodeContents {
     finalizers: BTreeMap<GrammarTokenID, PrecomputedFinalizer>,
     pub clean_end: Option<LLMTokenBV>,
+    pub active: LLMTokenBV, // Add this line
 }
 
 impl PrecomputedNodeContents {
@@ -603,7 +604,7 @@ impl<'r> Precomputer<'r> {
         let mut inserter = EdgeInserter::new(
             source_arc.clone(),
             Some(grammar_tok),
-            edge_tokens,
+            edge_tokens.clone(), // Clone for inserter
             |existing: &mut HybridBitset, new_bv_ref: HybridBitset| *existing |= new_bv_ref,
         );
 
@@ -655,6 +656,13 @@ impl<'r> Precomputer<'r> {
             .else_create_destination_with_value(PrecomputedNodeContents::default())
             .unwrap();
 
+        // Add this block to update the target node's active set
+        {
+            let mut guard = target.lock().unwrap();
+            guard.value.active |= &edge_tokens;
+        }
+
+
         let handle = ArcPtrWrapper::new(target.clone());
 
         if match_end_offset_in_segment == segment_len {
@@ -696,16 +704,27 @@ impl<'r> Precomputer<'r> {
         )));
 
         for child in set {
-            let mut ins = EdgeInserter::new(
-                child.as_arc().clone(),
-                None::<GrammarTokenID>,
-                self.all_llm_tokens.clone(),
-                |ev: &mut HybridBitset, new| *ev |= new, // Pass new by reference
-            )
-            .try_children();
+            let edge_tokens_for_merge = self.all_llm_tokens.clone();
+            let mut inserter = EdgeInserter::new(
+                child.as_arc().clone(), // Source of the edge
+                None::<GrammarTokenID>,   // Key for the edge (epsilon)
+                edge_tokens_for_merge.clone(), // Data for the edge
+                |existing_edge_data: &mut HybridBitset, new_edge_data| *existing_edge_data |= new_edge_data,
+            );
 
-            if ins.clone_into_option().is_none() {
-                let _ = ins.try_destination(merged.clone());
+            // Try to reuse an existing child of `child.as_arc()`
+            inserter = inserter.try_children();
+
+            // If no suitable existing child was found, make the new `merged` node the destination
+            if inserter.clone_into_option().is_none() {
+                inserter = inserter.try_destination(merged.clone());
+            }
+
+            // Now, `inserter.clone_into_option()` should contain Some(destination_node).
+            // Update the `active` field of this destination_node.
+            if let Some(destination_node_arc) = inserter.clone_into_option() {
+                let mut guard = destination_node_arc.lock().unwrap();
+                guard.value.active |= &edge_tokens_for_merge;
             }
         }
 
