@@ -793,7 +793,8 @@ mod tests {
         let mask = grammar_constraint_state.get_mask();
         // After consuming "a", the only possible next token is EOF.
         let mut expected_mask = HybridBitset::new();
-        expected_mask.insert(llm_tokens.len()); // Add EOF token ID
+        // Do NOT add EOF - it's not implicit anymore.
+        // expected_mask.insert(llm_tokens.len()); // Add EOF token ID
         assert_eq!(mask, expected_mask);
     }
 
