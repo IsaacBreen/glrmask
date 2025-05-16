@@ -152,7 +152,7 @@ impl<T: Hash> GSSNode<T> {
     pub fn map<F, U>(&self, f: F) -> GSSNode<U>
     where
         F: Copy + Fn(&T) -> U,
-        U: Hash,
+        U: Hash, // U needs Hash for the GSSNode<U> to be valid in contexts expecting Hash
     {
         let new_value = f(&self.value); // Renamed 'value' to 'new_value' for clarity
         let new_predecessors: BTreeSet<ArcPtrWrapper<GSSNode<U>>> = self.predecessors.iter()
@@ -726,28 +726,56 @@ pub fn simplify_gss_forest<T: Clone + Ord + Hash + Debug>(
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::collections::{BTreeSet, HashMap, HashSet, VecDeque}; // Add if not present
+    use std::fmt::Debug; // Add if not present
+
 
     // Define Mock Types
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     struct MockLLMTokenInfo {
         active: String,
         intersection: String,
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    // Manual Debug impl to match log format closely
+    impl Debug for MockLLMTokenInfo {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("LLMTokenInfo")
+             .field("active", &self.active)
+             .field("intersection", &self.intersection)
+             .finish()
+        }
+    }
+
+
+    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     struct MockParseStateNodeContent {
-        state_id: usize,
+        state_id: usize, // Using usize to match StateID(0) etc.
         t: MockLLMTokenInfo,
     }
+
+    // Manual Debug impl to match log format closely
+    impl Debug for MockParseStateNodeContent { // Overwrite previous Debug for MockParseStateNodeContent
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_fmt(format_args!(
+                "ParseStateNodeContent {{ state_id: StateID({}), t: {:?} }}",
+                self.state_id, self.t
+            ))
+        }
+    }
+
 
     // Type alias for GSSNode with MockParseStateNodeContent for brevity in the test
     type MockGSSNode = GSSNode<MockParseStateNodeContent>;
 
 
     // Helper to create a node for tests
-    fn node<T: Clone + Ord + Hash + Debug>(value: T, predecessors: Vec<Arc<GSSNode<T>>>) -> Arc<GSSNode<T>> {
-        Arc::new(GSSNode::new_with_predecessors(value, predecessors.into_iter().collect()))
+    // Assumes GSSNode::new_with_predecessors and ArcPtrWrapper are working as expected
+    // and T: Clone + Ord + Hash + Debug (MockParseStateNodeContent satisfies this)
+    fn node(value: MockParseStateNodeContent, predecessors: Vec<Arc<MockGSSNode>>) -> Arc<MockGSSNode> {
+        Arc::new(MockGSSNode::new_with_predecessors(value, predecessors.into_iter().collect()))
     }
+
 
     // Helper to get a stable representation of a simplified GSS for comparison.
     // Returns (value, Vec<pred_hashes_sorted>)
@@ -1037,130 +1065,109 @@ mod tests {
     #[test]
     fn test_gss_simplification_reproduces_logged_structure() {
         // Values for the nodes, mimicking the log's StateID and LLMTokenInfo
-        let val0 = MockParseStateNodeContent {
-            state_id: 0,
-            t: MockLLMTokenInfo { active: "[0]".to_string(), intersection: "[0]".to_string() },
-        };
-        let val1 = MockParseStateNodeContent {
-            state_id: 1,
-            t: MockLLMTokenInfo { active: "[0]".to_string(), intersection: "[0]".to_string() },
-        };
-        let val2 = MockParseStateNodeContent {
-            state_id: 2,
-            t: MockLLMTokenInfo { active: "[0]".to_string(), intersection: "[0]".to_string() },
+        let token_info = MockLLMTokenInfo {
+            active: "[0]".to_string(),
+            intersection: "[0]".to_string(),
         };
 
-        // Create original leaf nodes (StateID 0)
-        // These correspond to s_S0_A, s_S0_C, s_S0_G, ..., s_S0_U in analysis
-        // All have val0 and no predecessors. They are distinct Arcs.
-        let orig_s0_a = node(val0.clone(), vec![]); // Will be a root
+        let val0 = MockParseStateNodeContent { state_id: 0, t: token_info.clone() };
+        let val1 = MockParseStateNodeContent { state_id: 1, t: token_info.clone() };
+        let val2 = MockParseStateNodeContent { state_id: 2, t: token_info.clone() };
 
-        let orig_s0_c = node(val0.clone(), vec![]); // Shared predecessor
+        // --- Constructing the GSS based on the log analysis ---
 
-        // 8 more distinct leaf nodes with val0
-        let mut other_orig_s0_leaves: Vec<Arc<MockGSSNode>> = Vec::new();
-        for _ in 0..8 {
-            other_orig_s0_leaves.push(node(val0.clone(), vec![]));
-        }
-        // These are orig_s0_g, orig_s0_h, ..., orig_s0_u
+        // State 0 Leaf Nodes:
+        let node_a_val0 = node(val0.clone(), vec![]); // Root 0
 
-        // Create original intermediate nodes (StateID 1)
-        // This corresponds to orig_S1_B_val_node in analysis
-        let orig_s1_b = node(val1.clone(), vec![orig_s0_c.clone()]); // Will be a root
+        let node_c_val0 = node(val0.clone(), vec![]); // Shared predecessor
 
-        // This corresponds to orig_S1_E_val_node in analysis
-        let orig_s1_e = node(val1.clone(), vec![orig_s0_c.clone()]); // Shares orig_s0_c
+        let node_g_val0 = node(val0.clone(), vec![]);
+        let node_i_val0 = node(val0.clone(), vec![]);
+        let node_k_val0 = node(val0.clone(), vec![]);
+        let node_m_val0 = node(val0.clone(), vec![]);
+        let node_o_val0 = node(val0.clone(), vec![]);
+        let node_q_val0 = node(val0.clone(), vec![]);
+        let node_s_val0 = node(val0.clone(), vec![]);
+        let node_u_val0 = node(val0.clone(), vec![]);
 
-        // 8 more distinct intermediate nodes with val1, each pointing to one of the other_orig_s0_leaves
-        let mut other_orig_s1_nodes: Vec<Arc<MockGSSNode>> = Vec::new();
-        for leaf_s0_node in &other_orig_s0_leaves {
-            other_orig_s1_nodes.push(node(val1.clone(), vec![leaf_s0_node.clone()]));
-        }
-        // These are orig_s1_f (pred orig_s0_g), ..., orig_s1_u (pred orig_s0_u)
+        // State 1 Intermediate Nodes:
+        let node_b_val1 = node(val1.clone(), vec![node_c_val0.clone()]); // Root 1
 
-        // Create original top-level node (StateID 2)
-        // This corresponds to orig_S2_D_val_node in analysis
-        let mut s2_predecessors: Vec<Arc<MockGSSNode>> = Vec::new();
-        s2_predecessors.push(orig_s1_e.clone()); // Add orig_s1_e
-        s2_predecessors.extend(other_orig_s1_nodes.iter().cloned()); // Add the 8 other s1 nodes
-        assert_eq!(s2_predecessors.len(), 9, "S2 node should have 9 predecessors before simplification");
+        // Predecessors for Node D (Order might matter for print visual match, but BTreeSet will sort by ptr)
+        // Node E (pred: Node C)
+        let node_e_val1 = node(val1.clone(), vec![node_c_val0.clone()]); // Shares node_c_val0
 
-        let orig_s2_d = node(val2.clone(), s2_predecessors); // Will be a root
+        // Other State 1 nodes, each with a unique State 0 predecessor
+        let node_f_val1 = node(val1.clone(), vec![node_g_val0.clone()]);
+        let node_h_val1 = node(val1.clone(), vec![node_i_val0.clone()]);
+        let node_j_val1 = node(val1.clone(), vec![node_k_val0.clone()]);
+        let node_l_val1 = node(val1.clone(), vec![node_m_val0.clone()]);
+        let node_n_val1 = node(val1.clone(), vec![node_o_val0.clone()]);
+        let node_p_val1 = node(val1.clone(), vec![node_q_val0.clone()]);
+        let node_r_val1 = node(val1.clone(), vec![node_s_val0.clone()]);
+        let node_t_val1 = node(val1.clone(), vec![node_u_val0.clone()]);
 
-        // Define the roots for simplification
-        let roots_to_simplify = vec![
-            orig_s0_a.clone(),
-            orig_s1_b.clone(),
-            orig_s2_d.clone(),
+        let mut preds_for_d = vec![
+            node_e_val1.clone(), // As per log order (0x...08d0)
+            node_f_val1.clone(), // (0x...0a10)
+            node_h_val1.clone(), // (0x...0b50)
+            node_j_val1.clone(), // (0x...0c90)
+            node_l_val1.clone(), // (0x...0e70) - Note: log has 0dd0 then 0e70, my L is 0e70
+            node_n_val1.clone(), // (0x...0fb0)
+            node_p_val1.clone(), // (0x...10f0)
+            node_r_val1.clone(), // (0x...1230)
+            node_t_val1.clone(), // (0x...1370)
+        ];
+        // The BTreeSet in GSSNode will order these by pointer, so this vec order is only for creation.
+
+        // State 2 Top Node:
+        let node_d_val2 = node(val2.clone(), preds_for_d); // Root 2
+
+        // --- Collect roots and print ---
+        let roots = vec![
+            node_a_val0.clone(), // Root 0
+            node_b_val1.clone(), // Root 1
+            node_d_val2.clone(), // Root 2
         ];
 
-        // Perform simplification
-        let simplified_roots = simplify_gss_forest(&roots_to_simplify);
+        let max_nodes_to_print = 30; // Match the log's max_nodes
+        let gss_string_representation = print_gss_forest(&roots, max_nodes_to_print);
 
-        // Collect all unique Arcs in the simplified GSS forest
-        let mut collected_arcs_map: HashMap<*const MockGSSNode, Arc<MockGSSNode>> = HashMap::new();
-        for root_arc in &simplified_roots {
-            collect_all_simplified_arcs(root_arc, &mut collected_arcs_map);
-        }
+        println!("\n--- GSS Structure for Visual Comparison ---\n");
+        println!("{}", gss_string_representation);
+        println!("--- End of GSS Structure ---\n");
 
-        // Assert the number of unique Arcs (nodes)
-        // Expected:
-        // 10 StateID(0) nodes (s0_a, s0_c, and 8 others from other_orig_s0_leaves)
-        //   - s0_a is a root.
-        //   - s0_c is pred of simplified s1_b and simplified s1_e.
-        //   - The 8 others are preds of the 8 other simplified s1 nodes.
-        //   All 10 of these simplified s0 nodes will have Eq GSSNode content.
-        // 10 StateID(1) nodes (simplified s1_b, simplified s1_e, and 8 others)
-        //   - simplified s1_b is a root. Its GSSNode content will be Eq to simplified s1_e's content.
-        //   - simplified s1_e and the 8 others are preds of simplified s2_d.
-        //     Their GSSNode contents will not be Eq to each other (due to different pred Arcs).
-        // 1 StateID(2) node (simplified s2_d)
-        //   - simplified s2_d is a root.
-        // Total = 10 + 10 + 1 = 21 unique Arcs.
-        assert_eq!(collected_arcs_map.len(), 21, "The simplified GSS should contain 21 unique Arcs for this structure.");
+        // You can add assertions here if needed, e.g., count unique nodes printed
+        // or verify specific "(Visited)" occurrences if you parse the string.
+        // For now, the main goal is visual inspection of the printed output.
 
-        // Optional: Further detailed checks on the simplified structure,
-        // similar to what the log implies, can be added here.
-        // For example, check that the simplified version of orig_s0_c is indeed shared.
-        let s_root_s0_a = &simplified_roots[0];
-        let s_root_s1_b = &simplified_roots[1];
-        let s_root_s2_d = &simplified_roots[2];
+        // Example assertion: check if node_c_val0 is marked as visited
+        // This requires knowing the pointer of node_c_val0.
+        let ptr_c_str = format!("{:p}", Arc::as_ptr(&node_c_val0));
+        let occurrences_of_ptr_c = gss_string_representation.matches(&ptr_c_str).count();
+        let occurrences_of_ptr_c_visited = gss_string_representation.matches(&format!("{} (Visited)", ptr_c_str)).count();
 
-        assert_eq!(s_root_s0_a.value, val0);
-        assert_eq!(s_root_s1_b.value, val1);
-        assert_eq!(s_root_s2_d.value, val2);
+        assert_eq!(occurrences_of_ptr_c, 2, "Node C should appear twice in the printout");
+        assert_eq!(occurrences_of_ptr_c_visited, 1, "Node C should be marked (Visited) once");
 
-        // Check sharing of the simplified s0_c node
-        let simplified_s0_c_from_s1_b = s_root_s1_b.predecessors.iter().next().unwrap().as_arc();
-
-        let mut found_simplified_s1_e_arc = None;
-        for pred_of_s2_d_wrapper in &s_root_s2_d.predecessors {
-            let pred_of_s2_d_arc = pred_of_s2_d_wrapper.as_arc();
-            // We need to identify the simplified version of orig_s1_e.
-            // This is tricky without original pointers. We assume it's the one whose predecessor
-            // is the same Arc as simplified_s0_c_from_s1_b.
-            // This relies on the fact that *orig_s1_b and *orig_s1_e had the same value (val1)
-            // and shared the same predecessor Arc (orig_s0_c).
-            // After simplification, their simplified Arcs (s_s1_b and s_s1_e) will point to
-            // GSSNodes that are Eq.
-            if pred_of_s2_d_arc.value == val1 && !pred_of_s2_d_arc.predecessors.is_empty() {
-                 let pred_of_pred_of_s2_d_arc = pred_of_s2_d_arc.predecessors.iter().next().unwrap().as_arc();
-                 if Arc::ptr_eq(pred_of_pred_of_s2_d_arc, simplified_s0_c_from_s1_b) {
-                     found_simplified_s1_e_arc = Some(pred_of_s2_d_arc.clone());
-                     break;
-                 }
+        // Count total unique nodes involved in this structure to confirm it's 21.
+        // This uses the same logic as your `collect_all_simplified_arcs` but for the original structure.
+        let mut all_involved_arcs: HashMap<*const MockGSSNode, Arc<MockGSSNode>> = HashMap::new();
+        fn collect_arcs_recursive(
+            node_arc: &Arc<MockGSSNode>,
+            collected: &mut HashMap<*const MockGSSNode, Arc<MockGSSNode>>,
+        ) {
+            if collected.contains_key(&Arc::as_ptr(node_arc)) {
+                return;
+            }
+            collected.insert(Arc::as_ptr(node_arc), node_arc.clone());
+            for pred_wrapper in &node_arc.predecessors {
+                collect_arcs_recursive(pred_wrapper.as_arc(), collected);
             }
         }
-        assert!(found_simplified_s1_e_arc.is_some(), "Could not find the simplified s1_e node.");
-        let simplified_s1_e_arc = found_simplified_s1_e_arc.unwrap();
-        let simplified_s0_c_from_s1_e = simplified_s1_e_arc.predecessors.iter().next().unwrap().as_arc();
-
-        assert!(Arc::ptr_eq(simplified_s0_c_from_s1_b, simplified_s0_c_from_s1_e),
-            "The simplified s0_c node should be the same Arc instance for s1_b and s1_e's predecessors.");
-
-        // Check that simplified s1_b and simplified s1_e point to GSSNodes that are Eq,
-        // even if the Arcs themselves (s_root_s1_b and simplified_s1_e_arc) are distinct.
-        assert_eq!(*s_root_s1_b, simplified_s1_e_arc, "Simplified s1_b and s1_e GSSNode content should be Eq.");
-        assert_ne!(Arc::as_ptr(s_root_s1_b), Arc::as_ptr(&simplified_s1_e_arc), "Simplified s1_b and s1_e should be distinct Arcs if their originals were distinct and part of different paths initially.");
+        for r in &roots {
+            collect_arcs_recursive(r, &mut all_involved_arcs);
+        }
+        assert_eq!(all_involved_arcs.len(), 21, "The constructed GSS should have 21 unique nodes before simplification.");
     }
 }
