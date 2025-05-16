@@ -353,11 +353,8 @@ impl Into<BitVec<usize, Lsb0>> for HybridBitset {
 }
 
 impl From<BitVec<usize, Lsb0>> for HybridBitset {
-    fn from(_bitvec: BitVec<usize, Lsb0>) -> Self {
-        // This could be implemented as:
-        // HybridBitset { inner: RangeSetBlaze::from_iter(bitvec.iter_ones()) }
-        // But keeping as todo! to match original structure.
-        todo!("Conversion from BitVec to HybridBitset (RangeSetBlaze based) is not directly implemented yet.")
+    fn from(bitvec: BitVec<usize, Lsb0>) -> Self {
+        HybridBitset { inner: RangeSetBlaze::from_iter(bitvec.iter_ones()) }
     }
 }
 
