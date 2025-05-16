@@ -303,17 +303,17 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
     pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
         const MAX: usize = 30;
         // const PANIC_THRESHOLD: usize = 30;
-        const PANIC_THRESHOLD: usize = 1000;
+        const PANIC_THRESHOLD: usize = 10000;
         // const PANIC_THRESHOLD: usize = usize::MAX;
         let roots: Vec<_> = self.active_states.values().map(|s| s.stack.clone()).collect();
         let stats = gather_gss_stats(&roots);
         crate::debug!(3, "{} - token {} ({:?}) - – active: {}, nodes: {:?}",
                       phase, token.0, self.parser.terminal_map.get_by_right(&token).unwrap().0, self.active_states.len(), stats);
 
-        let make_msg = |print_full_forest| {
+        let make_msg = |print_full_forest, max_nodes_to_print| {
             if print_full_forest {
                 format!("GSS ({} nodes):\n{}", stats.unique_nodes,
-                        print_gss_forest(&roots, MAX))
+                        print_gss_forest(&roots, max_nodes_to_print))
             } else {
                 // fall back to longest path printing
                 match find_longest_path(&roots) {
@@ -330,11 +330,11 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         };
 
         if stats.unique_nodes > PANIC_THRESHOLD {
-            let msg = make_msg(true);
+            let msg = make_msg(true, usize::MAX);
             panic!("GSS too big ({} nodes). {}", stats.unique_nodes, msg);
         }
 
-        debug!(4, "{}", make_msg(stats.unique_nodes <= MAX));
+        debug!(4, "{}", make_msg(stats.unique_nodes <= MAX, MAX));
     }
 
     pub fn parse(&mut self, input: &[TerminalID]) {
