@@ -17,7 +17,7 @@ pub struct GSSNode<T> {
 
 impl<T: Hash> GSSNode<T> {
     pub fn new(value: T) -> Self {
-        let hash_key_cache = Self::compute_hash_key_cache(&value, &BTreeSet::new());
+        let hash_key_cache = Self::compute_hash_key_cache(&BTreeSet::new()); // Removed '&value, '
         Self {
             value,
             predecessors: BTreeSet::new(),
@@ -25,18 +25,18 @@ impl<T: Hash> GSSNode<T> {
         }
     }
     pub fn new_with_predecessors(value: T, predecessors: BTreeSet<Arc<GSSNode<T>>>) -> Self {
-        let predecessors = predecessors.into_iter().map(ArcPtrWrapper::new).collect();
-        let hash_key_cache = Self::compute_hash_key_cache(&value, &predecessors);
+        let predecessors_arc_ptr_wrapper = predecessors.into_iter().map(ArcPtrWrapper::new).collect(); // This is now BTreeSet<ArcPtrWrapper<GSSNode<T>>>
+        let hash_key_cache = Self::compute_hash_key_cache(&predecessors_arc_ptr_wrapper); // Removed '&value, '
         Self {
             value,
-            predecessors,
+            predecessors: predecessors_arc_ptr_wrapper,
             hash_key_cache,
         }
     }
 
-    pub fn compute_hash_key_cache(value: &T, predecessors: &BTreeSet<ArcPtrWrapper<GSSNode<T>>>) -> u64 {
+    pub fn compute_hash_key_cache(predecessors: &BTreeSet<ArcPtrWrapper<GSSNode<T>>>) -> u64 { // Removed 'value: &T'
         let mut hasher = DefaultHasher::new();
-        value.hash(&mut hasher);
+        // value.hash(&mut hasher); // Remove this line
         for pred in predecessors {
             pred.hash(&mut hasher);
         }
@@ -145,14 +145,14 @@ impl<T: Hash> GSSNode<T> {
         F: Copy + Fn(&T) -> U,
         U: Hash,
     {
-        let value = f(&self.value);
-        let predecessors: BTreeSet<ArcPtrWrapper<GSSNode<U>>> = self.predecessors.iter()
+        let new_value = f(&self.value); // Renamed 'value' to 'new_value' for clarity
+        let new_predecessors: BTreeSet<ArcPtrWrapper<GSSNode<U>>> = self.predecessors.iter()
             .map(|wrapper| ArcPtrWrapper::new(Arc::new(wrapper.as_ref().map(f))))
             .collect();
-        let hash_key_cache = GSSNode::<U>::compute_hash_key_cache(&value, &predecessors);
+        let hash_key_cache = GSSNode::<U>::compute_hash_key_cache(&new_predecessors); // Removed '&new_value, '
         GSSNode {
-            value,
-            predecessors,
+            value: new_value,
+            predecessors: new_predecessors,
             hash_key_cache,
         }
     }
@@ -178,6 +178,7 @@ impl<T> Drop for GSSNode<T> {
 impl<T: Hash> Hash for GSSNode<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.hash_key_cache.hash(state);
+        self.value.hash(state); // Add this line
     }
 }
 
@@ -192,11 +193,15 @@ impl<T: Hash + PartialEq> Eq for GSSNode<T> {}
 
 impl<T: Hash + PartialOrd> PartialOrd for GSSNode<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        // Just compare hash. If hash is equal, return None.
-        if self.hash_key_cache == other.hash_key_cache {
-            None
-        } else {
-            Some(self.hash_key_cache.cmp(&other.hash_key_cache))
+        match self.hash_key_cache.cmp(&other.hash_key_cache) {
+            Ordering::Equal => {
+                // Hashes are equal, compare values
+                match self.value.partial_cmp(&other.value) {
+                    Some(Ordering::Equal) => None, // Values are also equal (or reported as equal by partial_cmp), return None
+                    other_ordering => other_ordering, // Values are different or one is greater/less
+                }
+            }
+            other_ordering => Some(other_ordering), // Hashes are different
         }
     }
 }
@@ -376,7 +381,7 @@ pub fn prune_and_transform_recursive<T: Clone + Hash>(
                 // Stop recursion, create new node with original predecessors but new value
                 new_predecessors = node_arc.predecessors.clone();
             };
-            let hash_key_cache = GSSNode::<T>::compute_hash_key_cache(&new_value, &new_predecessors);
+            let hash_key_cache = GSSNode::<T>::compute_hash_key_cache(&new_predecessors); // Removed '&new_value, '
             let new_node_arc = Arc::new(GSSNode { value: new_value, predecessors: new_predecessors, hash_key_cache });
             memo.insert(node_ptr, Some(new_node_arc.clone()));
             Some(new_node_arc)
@@ -657,21 +662,21 @@ fn simplify_node_recursive<T: Clone + Ord + Hash + Debug>(
         simplified_predecessors_arcs.insert(simplified_pred_arc);
     }
 
-    // Compute the hash for the new simplified node
-    let hash_key_cache = GSSNode::compute_hash_key_cache(&original_node_arc.value, &simplified_predecessors_arcs.iter().map(|p| ArcPtrWrapper::new(p.clone())).collect());
-
-    // Convert BTreeSet<Arc<GSSNode<T>>> to BTreeSet<ArcPtrWrapper<GSSNode<T>>> for the new node's `predecessors` field.
-    // ArcPtrWrapper uses pointer-based comparison, ensuring structural sharing of Arcs.
-    let new_node_predecessors: BTreeSet<ArcPtrWrapper<GSSNode<T>>> =
-        simplified_predecessors_arcs
-            .iter() // Iterate without consuming, if needed elsewhere, else .into_iter()
+    // Convert BTreeSet<Arc<GSSNode<T>>> to BTreeSet<ArcPtrWrapper<GSSNode<T>>>
+    // This will be used for both the new node's `predecessors` field and for computing its hash_key_cache.
+    let new_node_predecessors_arc_ptr_wrappers: BTreeSet<ArcPtrWrapper<GSSNode<T>>> =
+        simplified_predecessors_arcs // This is BTreeSet<Arc<GSSNode<T>>>
+            .iter()
             .map(|arc| ArcPtrWrapper::new(arc.clone()))
             .collect();
+
+    // Compute the hash for the new simplified node based *only* on its (simplified) predecessors.
+    let hash_key_cache = GSSNode::compute_hash_key_cache(&new_node_predecessors_arc_ptr_wrappers);
 
     // Create the new simplified GSSNode
     let simplified_node = GSSNode {
         value: original_node_arc.value.clone(),
-        predecessors: new_node_predecessors,
+        predecessors: new_node_predecessors_arc_ptr_wrappers, // Use the already collected ArcPtrWrappers
         hash_key_cache,
     };
     let simplified_node_arc = Arc::new(simplified_node);
@@ -729,7 +734,7 @@ mod tests {
         pred_hashes.sort_unstable(); // Ensure order for comparison
         (node_arc.value.clone(), pred_hashes)
     }
-    
+
     // Helper to recursively collect all unique node representations in a simplified forest
     fn collect_all_simplified_nodes<T: Clone + Hash>(
         node_arc: &Arc<GSSNode<T>>,
@@ -759,20 +764,20 @@ mod tests {
         let d1_orig = node(40, vec![]);
         let c1_orig = node(30, vec![d1_orig.clone()]);
         let b1_orig = node(20, vec![c1_orig.clone()]);
-        
+
         let d2_orig = node(40, vec![]); // Same content as d1_orig, but different instance initially
 
         let a1_orig = node(10, vec![b1_orig.clone(), d2_orig.clone()]);
-        
+
         let roots = vec![a1_orig.clone()];
         let simplified_roots = simplify_gss_forest(&roots);
         let simplified_a1 = simplified_roots[0].clone();
 
         // Verify structure and hash caching after simplification
-        // Simplified D nodes (d1_s from d1_orig, d2_s from d2_orig)
+        // Simplified D nodes (s_d1 from d1_orig, s_d2 from d2_orig)
         // Since d1_orig and d2_orig are identical (value 40, no preds),
         // their simplified versions should have the same hash.
-        // simplify_node_recursive will create distinct Arc<GSSNode> for d1_s and d2_s
+        // simplify_node_recursive will create distinct Arc<GSSNode> for s_d1 and s_d2
         // because they are from different original pointers, but their GSSNode content (and hash) will be identical.
 
         let mut visited_check = HashSet::new();
@@ -792,7 +797,7 @@ mod tests {
             s_nodes_by_val.entry(s_node_arc.value).or_insert_with(Vec::new).push(s_node_arc.clone());
              // Do not forget Arc here, collect_all_simplified_nodes keys are raw pointers, ownership is not transferred
         }
-        
+
         let s_d_nodes = s_nodes_by_val.get(&40).unwrap();
         assert!(s_d_nodes.len() >= 1); // Could be 1 if d1_orig and d2_orig simplified to the same Arc, or 2 if not.
                                        // With current memo (original_ptr -> simplified_arc), they will be distinct Arcs if d1_orig and d2_orig are distinct.
@@ -830,7 +835,7 @@ mod tests {
 
         let a1_pred_hashes: Vec<u64> = s_a1.predecessors.iter().map(|p| p.as_arc().hash_key_cache).collect();
         let expected_a1_pred_hashes = vec![s_b1.hash_key_cache, s_d_hash]; // Order might vary, so compare as sets or sort
-        
+
         let mut sorted_a1_pred_hashes = a1_pred_hashes;
         sorted_a1_pred_hashes.sort_unstable();
         let mut sorted_expected_a1_pred_hashes = expected_a1_pred_hashes;
@@ -869,11 +874,11 @@ mod tests {
         let simplified_norm = simplify_gss_forest(&[h1_orig, h2_orig]);
         let s_h1 = &simplified_norm[0];
         let s_h2 = &simplified_norm[1];
-        
+
         assert_ne!(Arc::as_ptr(s_h1), Arc::as_ptr(s_h2), "s_h1 and s_h2 should be different Arcs due to different original roots");
         assert_eq!(s_h1.hash_key_cache, s_h2.hash_key_cache, "s_h1 and s_h2 should have the same hash after normalization");
         assert_eq!(s_h1.value, s_h2.value);
-        
+
         // Check that their predecessor sets, after simplification and normalization, are identical
         // This means they contain ArcPtrWrappers pointing to the same set of simplified predecessor Arcs,
         // and those ArcPtrWrappers will be ordered by pointer in the BTreeSet.
