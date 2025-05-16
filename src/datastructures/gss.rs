@@ -751,6 +751,22 @@ mod tests {
         }
     }
 
+    // Helper to recursively collect all unique Arcs in a simplified GSS forest
+    fn collect_all_simplified_arcs<T: Clone + Hash>(
+        node_arc: &Arc<GSSNode<T>>,
+        // Output map: raw pointer to GSSNode -> Arc pointing to that GSSNode
+        collected_arcs: &mut HashMap<*const GSSNode<T>, Arc<GSSNode<T>>>,
+    ) {
+        let ptr = Arc::as_ptr(node_arc);
+        if collected_arcs.contains_key(&ptr) {
+            return; // Already visited and collected this Arc
+        }
+        collected_arcs.insert(ptr, node_arc.clone());
+        for pred_wrapper in &node_arc.predecessors {
+            collect_all_simplified_arcs(pred_wrapper.as_arc(), collected_arcs);
+        }
+    }
+
 
     #[test]
     fn test_gss_simplification_basic() {
@@ -895,5 +911,100 @@ mod tests {
 
         assert!(Arc::ptr_eq(s_i_arc_h1, s_i_arc_h2), "Simplified I-node should be the same Arc instance for H1 and H2");
         assert!(Arc::ptr_eq(s_j_arc_h1, s_j_arc_h2), "Simplified J-node should be the same Arc instance for H1 and H2");
+    }
+
+    #[test]
+    fn test_simplification_does_not_canonicalize_structurally_identical_nodes_from_distinct_arcs() {
+        // This test demonstrates the current behavior where structurally identical nodes
+        // that originate from different initial Arcs are not unified into a single Arc
+        // by `simplify_gss_forest`. This can lead to a larger GSS node count than
+        // if full canonicalization (merging all structurally identical nodes to one Arc)
+        // were performed.
+
+        // L1, L2, L3 are structurally identical (value 0, no preds) but are distinct Arcs.
+        let l1 = node(0, vec![]); // node() helper requires T: Clone + Ord + Hash + Debug
+        let l2 = node(0, vec![]);
+        let l3 = node(0, vec![]);
+
+        // Ensure they are distinct Arcs initially
+        assert_ne!(Arc::as_ptr(&l1), Arc::as_ptr(&l2));
+        assert_ne!(Arc::as_ptr(&l1), Arc::as_ptr(&l3));
+        assert_ne!(Arc::as_ptr(&l2), Arc::as_ptr(&l3));
+
+        // M1, M2, M3 have the same value (1).
+        // Their predecessors (L1, L2, L3 respectively) are structurally identical GSSNodes.
+        // However, since L1, L2, L3 simplify to distinct Arcs (sl1, sl2, sl3),
+        // M1, M2, M3 will also simplify to distinct Arcs whose GSSNode contents
+        // will NOT be Eq due to ArcPtrWrapper comparisons in GSSNode::Eq.
+        let m1 = node(1, vec![l1.clone()]);
+        let m2 = node(1, vec![l2.clone()]);
+        let m3 = node(1, vec![l3.clone()]);
+
+        assert_ne!(Arc::as_ptr(&m1), Arc::as_ptr(&m2));
+        assert_ne!(Arc::as_ptr(&m1), Arc::as_ptr(&m3));
+        assert_ne!(Arc::as_ptr(&m2), Arc::as_ptr(&m3));
+
+        // R1 has M1, M2, M3 as predecessors.
+        let r1_orig = node(2, vec![m1.clone(), m2.clone(), m3.clone()]);
+
+        let simplified_roots = simplify_gss_forest(&[r1_orig]);
+        let simplified_r1_arc = simplified_roots[0].clone();
+
+        let mut collected_arcs_map = HashMap::new();
+        collect_all_simplified_arcs(&simplified_r1_arc, &mut collected_arcs_map);
+
+        // Expected unique Arcs with current simplification:
+        // sl1 (from l1), sl2 (from l2), sl3 (from l3) -> 3 distinct Arcs.
+        //   The GSSNode content *sl1, *sl2, *sl3 will be Eq.
+        // sm1 (from m1, pred sl1), sm2 (from m2, pred sl2), sm3 (from m3, pred sl3) -> 3 distinct Arcs.
+        //   The GSSNode content *sm1, *sm2, *sm3 will NOT be Eq because their
+        //   predecessor ArcPtrWrappers point to different Arcs (sl1, sl2, sl3).
+        //   Thus, their hash_key_cache values will differ.
+        // sr1 (from r1_orig, preds sm1, sm2, sm3) -> 1 Arc.
+        // Total = 3 (L-level) + 3 (M-level) + 1 (R-level) = 7 unique Arcs.
+        assert_eq!(collected_arcs_map.len(), 7, "Expected 7 unique Arcs in the simplified GSS for this structure");
+
+        // Detailed verification of the structure:
+        let s_r1_node = simplified_r1_arc.as_ref();
+        assert_eq!(s_r1_node.value, 2);
+        assert_eq!(s_r1_node.predecessors.len(), 3, "Simplified R1 should have 3 predecessor Arcs");
+
+        // Collect simplified M-level nodes
+        let s_m_level_arcs: Vec<Arc<GSSNode<i32>>> = s_r1_node.predecessors.iter()
+            .map(|p_wrapper| p_wrapper.as_arc().clone())
+            .collect();
+
+        let s_m_level_ptrs: HashSet<*const GSSNode<i32>> = s_m_level_arcs.iter().map(|arc| Arc::as_ptr(arc)).collect();
+        assert_eq!(s_m_level_ptrs.len(), 3, "Should be 3 distinct Arcs for M-level nodes");
+
+        // Verify M-level nodes are not Eq and have different hash_key_caches
+        assert_ne!(*s_m_level_arcs[0], *s_m_level_arcs[1], "Simplified M-nodes should not be Eq");
+        assert_ne!(s_m_level_arcs[0].hash_key_cache, s_m_level_arcs[1].hash_key_cache, "Simplified M-nodes should have different hash_key_caches");
+        // (Could check all pairs, but one pair is indicative)
+
+
+        // Collect simplified L-level nodes
+        let mut s_l_level_arcs_collected = Vec::new();
+        for s_m_arc in &s_m_level_arcs {
+            assert_eq!(s_m_arc.value, 1);
+            assert_eq!(s_m_arc.predecessors.len(), 1, "Each M-node should have 1 predecessor Arc");
+            let l_node_arc = s_m_arc.predecessors.iter().next().unwrap().as_arc().clone();
+            s_l_level_arcs_collected.push(l_node_arc);
+        }
+        assert_eq!(s_l_level_arcs_collected.len(), 3, "Should have collected 3 L-node Arcs (one from each M-node)");
+
+        let s_l_level_ptrs: HashSet<*const GSSNode<i32>> = s_l_level_arcs_collected.iter().map(|arc| Arc::as_ptr(arc)).collect();
+        assert_eq!(s_l_level_ptrs.len(), 3, "Should be 3 distinct Arcs for L-level nodes");
+
+        // Verify L-level GSSNode contents are Eq, even if Arcs are distinct
+        assert_eq!(*s_l_level_arcs_collected[0], *s_l_level_arcs_collected[1], "Simplified L-nodes content should be Eq");
+        assert_eq!(*s_l_level_arcs_collected[1], *s_l_level_arcs_collected[2], "Simplified L-nodes content should be Eq");
+        assert_eq!(s_l_level_arcs_collected[0].hash_key_cache, s_l_level_arcs_collected[1].hash_key_cache, "Simplified L-nodes should have same hash_key_cache");
+
+
+        for s_l_arc in &s_l_level_arcs_collected {
+            assert_eq!(s_l_arc.value, 0);
+            assert_eq!(s_l_arc.predecessors.len(), 0, "L-nodes should have no predecessors");
+        }
     }
 }
