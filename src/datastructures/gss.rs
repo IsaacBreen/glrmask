@@ -1176,5 +1176,14 @@ mod tests {
             collect_arcs_recursive(r, &mut all_involved_arcs);
         }
         assert_eq!(all_involved_arcs.len(), 21, "The constructed GSS should have 21 unique nodes before simplification.");
+
+        // Perform simplification
+        let simplified_roots = simplify_gss_forest(&roots);
+
+        // Print simplified GSS
+        let simplified_gss_string_representation = print_gss_forest(&simplified_roots, max_nodes_to_print);
+        println!("\n--- Simplified GSS Structure for Visual Comparison ---\n");
+        println!("{}", simplified_gss_string_representation);
+        println!("--- End of Simplified GSS Structure ---\n");
     }
 }
