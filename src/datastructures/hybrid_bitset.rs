@@ -357,24 +357,6 @@ impl From<BitVec<usize, Lsb0>> for HybridBitset {
     }
 }
 
-impl Index<usize> for HybridBitset {
-    type Output = bool;
-
-    fn index(&self, _index: usize) -> &Self::Output {
-        // RangeSetBlaze::contains returns bool, not &bool.
-        // This trait is hard to implement correctly without returning a temporary,
-        // or changing Output to bool (which is not how Index works).
-        todo!("Index trait for direct bool output is problematic with RangeSetBlaze.")
-    }
-}
-
-impl IndexMut<usize> for HybridBitset {
-    fn index_mut(&mut self, _index: usize) -> &mut Self::Output {
-        // RangeSetBlaze does not offer mutable references to individual "bits".
-        todo!("IndexMut trait is not supported by RangeSetBlaze backend.")
-    }
-}
-
 // --- Tests ---
 #[cfg(test)]
 mod tests {

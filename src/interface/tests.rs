@@ -111,7 +111,7 @@ mod tests {
         println!("Committing tokens...");
         for token_id in input_token_ids {
             println!("Ensuring token ID {} is in mask...", token_id.0);
-            assert!(state.get_mask()[token_id.0], "Token ID {} not in mask", token_id.0);
+            assert!(state.get_mask().contains(token_id.0), "Token ID {} not in mask", token_id.0);
             println!("Committing token ID: {}", token_id.0);
             state.commit(token_id);
             state.step_with_all_llm_tokens(); // Step after commit
@@ -122,11 +122,11 @@ mod tests {
 
         // After "123+456+", the grammar expects NUM (digits '0'-'9')
         for i in 0..=9 {
-            assert!(final_mask[i], "Expected digit '{}' (ID {}) to be allowed", (b'0' + i as u8) as char, i);
+            assert!(final_mask.contains(i), "Expected digit '{}' (ID {}) to be allowed", (b'0' + i as u8) as char, i);
         }
-        assert!(!final_mask[plus_token_id], "Expected '+' (ID {}) to be disallowed", plus_token_id);
+        assert!(!final_mask.contains(plus_token_id), "Expected '+' (ID {}) to be disallowed", plus_token_id);
         if final_mask.len() > eof_llm_token_id {
-             assert!(!final_mask[eof_llm_token_id], "Expected EOF (ID {}) to be disallowed", eof_llm_token_id);
+             assert!(!final_mask.contains(eof_llm_token_id), "Expected EOF (ID {}) to be disallowed", eof_llm_token_id);
         }
         println!("Final mask check passed.");
     }
