@@ -252,7 +252,7 @@ impl GrammarConstraint {
     // Runtime interface -------------------------------------------------------------------
     // -------------------------------------------------------------------------
     pub fn init(&self) -> GrammarConstraintState<'_> {
-        let base_set_for_info = HybridBitset::ones(self.internal_max_llm_token);
+        let base_set_for_info = HybridBitset::ones(self.internal_max_llm_token + 1);
         let info = LLMTokenInfo {
             active:       base_set_for_info.clone(),
             intersection: base_set_for_info,
@@ -351,7 +351,7 @@ impl<'r> Precomputer<'r> {
             tokenizer,
             vocab,
             roots,
-            all_llm_tokens: HybridBitset::ones(internal_max_llm_token),
+            all_llm_tokens: HybridBitset::ones(internal_max_llm_token + 1),
             merge_threshold,
             pb,
             stats: PrecomputeStats::default(),
@@ -767,7 +767,7 @@ impl<'a> GrammarConstraintState<'a> {
 
     pub fn step_with_all_llm_tokens(&mut self) {
         // This creates a bitset of all *internal* LLM tokens
-        let all_internal_llm_tokens = HybridBitset::ones(self.parent.internal_max_llm_token);
+        let all_internal_llm_tokens = HybridBitset::ones(self.parent.internal_max_llm_token + 1);
         self.step(&all_internal_llm_tokens);
     }
 
@@ -785,7 +785,7 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
-        let all_true_set = HybridBitset::ones(self.parent.internal_max_llm_token);
+        let all_true_set = HybridBitset::ones(self.parent.internal_max_llm_token + 1);
         let all_true_token_info = LLMTokenInfo {
             active: all_true_set.clone(),
             intersection: all_true_set.clone(),

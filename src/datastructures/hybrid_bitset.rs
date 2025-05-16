@@ -25,9 +25,13 @@ impl HybridBitset {
     }
 
     /// Creates a new HybridBitset with all indices from 0 up to `max_value` (inclusive) set to true.
-    pub fn ones(max_value: usize) -> Self {
-        HybridBitset {
-            inner: RangeSetBlaze::from_iter([0..=max_value]),
+    pub fn ones(len: usize) -> Self {
+        if len == 0 {
+            HybridBitset::new()
+        } else {
+            HybridBitset {
+                inner: RangeSetBlaze::from_iter([0..=len - 1]),
+            }
         }
     }
 
@@ -684,7 +688,7 @@ mod tests {
 
     #[test]
     fn test_ones() {
-        let set_ones_small = HybridBitset::ones(3); // 0, 1, 2, 3
+        let set_ones_small = HybridBitset::ones(4); // 0, 1, 2, 3
         assert_eq!(set_ones_small.len(), 4);
         assert!(set_ones_small.contains(0));
         assert!(set_ones_small.contains(1));
@@ -692,7 +696,8 @@ mod tests {
         assert!(set_ones_small.contains(3));
         assert!(!set_ones_small.contains(4));
 
-        let set_ones_large = HybridBitset::ones(SPARSE_TO_DENSE_THRESHOLD + 5);
+        let len = SPARSE_TO_DENSE_THRESHOLD + 5;
+        let set_ones_large = HybridBitset::ones(len + 1);
         assert_eq!(set_ones_large.len(), SPARSE_TO_DENSE_THRESHOLD + 6);
         for i in 0..=(SPARSE_TO_DENSE_THRESHOLD + 5) {
             assert!(set_ones_large.contains(i));
@@ -701,10 +706,10 @@ mod tests {
 
         // Test edge case for usize::MAX
         let set_ones_max = HybridBitset::ones(usize::MAX);
-        assert!(set_ones_max.is_empty(), "ones(usize::MAX) should be empty to match original logic");
-        assert_eq!(set_ones_max.len(), 0);
+        assert!(!set_ones_max.is_empty());
+        assert_eq!(set_ones_max.len(), usize::MAX);
 
-        let set_ones_zero = HybridBitset::ones(0); // Should contain only 0
+        let set_ones_zero = HybridBitset::ones(1); // Should contain only 0
         assert_eq!(set_ones_zero.len(), 1);
         assert!(set_ones_zero.contains(0));
         assert!(!set_ones_zero.contains(1));
