@@ -194,7 +194,7 @@ impl GrammarConstraint {
     ) -> Self {
         let original_to_internal_id_bimap = Self::setup_llm_token_mappings(&llm_token_map);
 
-        let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap();
+        let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap_or(0);
 
         // Reconstruct the internal_llm_token_map for precomputation (bytes -> internal LLMTokenID)
         let mut internal_llm_token_map_for_precompute = BiBTreeMap::new();
@@ -381,8 +381,7 @@ impl<'r> Precomputer<'r> {
         }
 
         crate::debug!(2, "Starting precompute DFS");
-        let mut yellow = HashSet::new();
-        self.dfs(&self.vocab.root, assoc, &mut yellow);
+        self.dfs(&self.vocab.root, assoc);
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish_with_message("Precomputation complete");
     }
@@ -443,18 +442,8 @@ impl<'r> Precomputer<'r> {
             TokenizerStateID,
             BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
-        yellow: &mut HashSet<*const VocabPrefixTreeNode>,
     ) {
         self.pb.inc(1);
-
-        let vocab_node_ptr = vocab_node as *const VocabPrefixTreeNode;
-        if yellow.contains(&vocab_node_ptr) {
-            // This vocab_node is already in the current DFS processing path, skip.
-            crate::debug!(4, "Skipping vocab node {:p} because it's already in the current DFS processing path", vocab_node_ptr);
-            return;
-        }
-        crate::debug!(4, "Processing vocab node {:p}", vocab_node_ptr); //
-        yellow.insert(vocab_node_ptr);
 
         // Merge policy per tokenizer state
         let mut effective: BTreeMap<
@@ -481,10 +470,8 @@ impl<'r> Precomputer<'r> {
                 String::from_utf8_lossy(child_vocab_ref.prefix())
             );
 
-            self.process_segment(segment_bytes, child_vocab_ref, &effective, yellow);
+            self.process_segment(segment_bytes, child_vocab_ref, &effective);
         }
-
-        yellow.remove(&vocab_node_ptr);
     }
 
     // -------------------------------------------------------------------------
@@ -498,7 +485,6 @@ impl<'r> Precomputer<'r> {
             TokenizerStateID,
             BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
-        yellow: &mut HashSet<*const VocabPrefixTreeNode>,
     ) {
         // Maps used while consuming the segment byte-by-byte.
         let mut next_level: BTreeMap<
@@ -592,7 +578,7 @@ impl<'r> Precomputer<'r> {
         }
 
         // Recurse into the child vocab node.
-        self.dfs(child_vocab_of_segment, next_level, yellow);
+        self.dfs(child_vocab_of_segment, next_level);
     }
 
     // Insert or merge an edge out of `source_arc`.
@@ -965,5 +951,3 @@ impl<'a> GrammarConstraintState<'a> {
         }
     }
 }
-
-
