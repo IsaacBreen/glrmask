@@ -136,13 +136,16 @@ impl<T: Clone + Ord + Hash + Debug> GSSNode<T> {
         let mut stack: Vec<(Arc<Self>, Vec<T>)> = Vec::new();
         stack.push((self_arc, Vec::new()));
 
-        let mut visited_paths: HashSet<(Arc<Self>, Vec<T>)> = HashSet::new(); // Optional: helps with cycles if paths repeat
+        // Optional: visited paths helps with cycles if paths repeat, but Arc handles node cycles.
+        // If you push a path with a cycle back onto the stack, it might loop infinitely
+        // unless you track (node, path) combinations or path hashes.
+        // For now, basic DFS assumes non-cyclic *paths*, relying on Arc cycle handling for node dropping.
+        // let mut visited_paths: HashSet<(Arc<Self>, Vec<T>)> = HashSet::new();
 
         while let Some((node_arc, mut path)) = stack.pop() {
-             // Optional: Cycle detection on paths if needed, but Arc handles node cycles.
-             // If you push a path with a cycle back onto the stack, it might loop infinitely
-             // unless you track (node, path) combinations or path hashes.
-             // For now, basic DFS assumes non-cyclic *paths*, relying on Arc cycle handling for node dropping.
+             // Optional: Cycle detection on paths if needed
+             // if !visited_paths.insert((node_arc.clone(), path.clone())) { continue; }
+
 
             path.push(node_arc.value.clone());
 
@@ -406,9 +409,12 @@ impl<T: Clone + Ord + Hash + Debug> BulkMerge<T> for Vec<Arc<GSSNode<T>>> {
         for (value, group_arcs) in groups_by_value {
             if group_arcs.is_empty() { continue; }
 
-            // Merge the predecessors from all Arcs in this value group.
-            // The resulting set of predecessors for the merged node will be the union
-            // of the predecessor sets of all original nodes in this group.
+            // If only one node for this value, and it's already canonical (heuristic or trust),
+            // or simply, if only one node, it's already "merged" for its value group.
+            // However, its predecessors might not be canonical if this function is misused.
+            // For now, assume predecessors of inputs are canonical.
+            // The main goal is to merge multiple nodes that share the same `value`.
+
             let mut merged_predecessors: BTreeSet<Arc<GSSNode<T>>> = BTreeSet::new();
             for node_arc_in_group in group_arcs {
                 for pred_arc in &node_arc_in_group.predecessors {
@@ -720,8 +726,86 @@ pub fn print_gss_forest<T: Debug>(roots: &[Arc<GSSNode<T>>], max_nodes: usize) -
     output
 }
 
-// Removed simplify_node_recursive
-// Removed simplify_gss_forest
+// Helper function for GSS simplification.
+// Recursively simplifies a node and its predecessors.
+// Uses two memoization tables:
+// 1. original_ptr_memo: Maps original node pointers to their canonical simplified Arcs
+//                       to avoid reprocessing the same original node instance.
+// 2. canonicalization_cache: The cache used by GSSNode::get_canonical to ensure that
+//                            structurally identical nodes map to the same Arc. This cache
+//                            is populated during the simplification process.
+fn simplify_node_recursive<T: Clone + Ord + Hash + Debug>(
+    original_node_arc: &Arc<GSSNode<T>>,
+    original_ptr_memo: &mut HashMap<*const GSSNode<T>, Arc<GSSNode<T>>>,
+    // This cache is passed to GSSNode::get_canonical
+    canonicalization_cache: &mut NodeCache<T>,
+) -> Arc<GSSNode<T>> {
+    let original_node_ptr = Arc::as_ptr(original_node_arc);
+
+    // Check original_ptr_memo: if this original Arc has already been processed during this
+    // simplification run, return its known canonical form.
+    if let Some(canonical_arc) = original_ptr_memo.get(&original_node_ptr) {
+        return canonical_arc.clone();
+    }
+
+    // Recursively simplify predecessors to get their canonical Arcs.
+    // The predecessors in original_node_arc are Arcs themselves.
+    let mut canonical_predecessor_arcs: BTreeSet<Arc<GSSNode<T>>> = BTreeSet::new();
+    for original_pred_arc in &original_node_arc.predecessors {
+        let simplified_pred_arc = simplify_node_recursive(
+            original_pred_arc, // This is &Arc<GSSNode<T>>
+            original_ptr_memo,
+            canonicalization_cache,
+        );
+        canonical_predecessor_arcs.insert(simplified_pred_arc);
+    }
+
+    // Get the canonical Arc for the current node's structure.
+    // This uses the value from the original node and the set of now-canonicalized predecessors.
+    // GSSNode::get_canonical will use (and populate) the canonicalization_cache.
+    let canonical_arc_for_current_node = GSSNode::get_canonical(
+        original_node_arc.value.clone(),
+        canonical_predecessor_arcs,
+        canonicalization_cache,
+    );
+
+    // Store this resulting canonical Arc in original_ptr_memo for this specific original_node_ptr.
+    // This ensures that if we encounter original_node_arc again (e.g., through another path
+    // in the original non-canonical graph), we reuse its already computed canonical form.
+    original_ptr_memo.insert(original_node_ptr, canonical_arc_for_current_node.clone());
+
+    canonical_arc_for_current_node
+}
+
+/// Simplifies a GSS forest, ensuring that structurally identical nodes
+/// (after simplification) are represented by shared `Arc<GSSNode<T>>` instances
+/// (global canonicalization or hash-consing).
+///
+/// This function processes an existing GSS (represented by `roots`) and produces
+/// a new set of roots pointing to a canonicalized GSS.
+/// A fresh canonicalization cache is used for each call to this function.
+pub fn simplify_gss_forest<T: Clone + Ord + Hash + Debug>(
+    roots: &[Arc<GSSNode<T>>],
+) -> Vec<Arc<GSSNode<T>>> {
+    // Memo for mapping original node pointers to their canonical simplified Arcs for this run.
+    let mut original_ptr_memo: HashMap<*const GSSNode<T>, Arc<GSSNode<T>>> = HashMap::new();
+
+    // The cache that GSSNode::get_canonical will use to ensure global canonicalization.
+    // This cache is populated by GSSNode::get_canonical as it encounters unique structures.
+    let mut canonicalization_cache_for_this_run: NodeCache<T> = NodeCache::new();
+
+    let mut simplified_roots = Vec::with_capacity(roots.len());
+
+    for root_arc in roots {
+        simplified_roots.push(simplify_node_recursive(
+            root_arc,
+            &mut original_ptr_memo,
+            &mut canonicalization_cache_for_this_run,
+        ));
+    }
+
+    simplified_roots
+}
 
 
 #[cfg(test)]
@@ -784,6 +868,28 @@ mod tests {
     ) -> Arc<MockGSSNode> {
         let pred_set: BTreeSet<Arc<MockGSSNode>> = predecessors.into_iter().collect();
         GSSNode::get_canonical(value, pred_set, cache)
+    }
+
+    // Helper to create a *non-canonical* node for original structure in tests that then call simplify_gss_forest
+    // This bypasses the cache during creation but uses the canonical GSSNode struct definition.
+    // Note: the predecessors here are *not* guaranteed to be canonical themselves.
+    fn node_non_canonical_test_only(
+        value: MockParseStateNodeContent,
+        predecessors: Vec<Arc<MockGSSNode>>,
+    ) -> Arc<MockGSSNode>
+    where
+        MockParseStateNodeContent: Clone + Ord + Hash + Debug, // Bounds needed for GSSNode ops used internally
+    {
+        let pred_set: BTreeSet<Arc<MockGSSNode>> = predecessors.into_iter().collect();
+         // Note: This hash_key_cache might be incorrect if predecessors are not canonical,
+         // but simplify_gss_forest will recompute hashes based on canonical predecessors.
+         // This helper is just for building the *input* to simplify_gss_forest tests.
+        let hash_key_cache = compute_node_hash(&value, &pred_set);
+        Arc::new(GSSNode {
+            value,
+            predecessors: pred_set,
+            hash_key_cache,
+        })
     }
 
 
@@ -1267,5 +1373,294 @@ mod tests {
         assert!(Arc::ptr_eq(&roots[0], s_node_0), "Root 0 should be the canonical StateID 0 node");
         assert!(Arc::ptr_eq(&roots[1], s_node_1), "Root 1 should be the canonical StateID 1 node");
         assert!(Arc::ptr_eq(&roots[2], s_node_2), "Root 2 should be the canonical StateID 2 node");
+    }
+
+    #[test]
+    fn test_simplify_gss_forest_basic() {
+        // Helper for i32 nodes
+        fn node_non_canonical_i32(
+            value: i32,
+            predecessors: Vec<Arc<GSSNode<i32>>>,
+        ) -> Arc<GSSNode<i32>>
+        where
+             i32: Clone + Ord + Hash + Debug, // Bounds needed for GSSNode ops used internally
+        {
+            let pred_set: BTreeSet<Arc<GSSNode<i32>>> = predecessors.into_iter().collect();
+            let hash_key_cache = compute_node_hash(&value, &pred_set);
+            Arc::new(GSSNode {
+                value,
+                predecessors: pred_set,
+                hash_key_cache,
+            })
+        }
+
+
+        // Construct a NON-canonical graph structure
+        // D1_orig (40, [])
+        let d1_orig = node_non_canonical_i32(40, vec![]);
+        // C1_orig (30, [D1_orig])
+        let c1_orig = node_non_canonical_i32(30, vec![d1_orig.clone()]);
+        // B1_orig (20, [C1_orig])
+        let b1_orig = node_non_canonical_i32(20, vec![c1_orig.clone()]);
+
+        // D2_orig (40, []) - Structurally identical to D1_orig but a different Arc instance
+        let d2_orig = node_non_canonical_i32(40, vec![]);
+        assert!(!Arc::ptr_eq(&d1_orig, &d2_orig), "Original D nodes should be distinct Arcs before simplification");
+
+        // A1_orig (10, [B1_orig, D2_orig])
+        let a1_orig = node_non_canonical_i32(10, vec![b1_orig.clone(), d2_orig.clone()]);
+
+        // The original roots
+        let original_roots = vec![a1_orig.clone()];
+
+        // Simplify the forest
+        let simplified_roots = simplify_gss_forest(&original_roots);
+        assert_eq!(simplified_roots.len(), 1, "Simplification should return the same number of roots");
+        let simplified_a1 = simplified_roots[0].clone();
+
+        // Collect all unique Arcs in the simplified forest
+        let mut collected_arcs_map: HashMap<*const GSSNode<i32>, Arc<GSSNode<i32>>> = HashMap::new();
+        for root_arc in &simplified_roots {
+            collect_arcs_recursive(root_arc, &mut collected_arcs_map);
+        }
+
+        // We expect 4 unique node *structures* (and thus 4 unique Arcs) in the simplified graph:
+        // Value 40 (D nodes)
+        // Value 30 (C1 node)
+        // Value 20 (B1 node)
+        // Value 10 (A1 node)
+        assert_eq!(collected_arcs_map.len(), 4, "Expected 4 unique node structures (Arc instances) after simplification and canonicalization");
+
+        // Find the canonical nodes by value from the collected map
+        let mut canonical_nodes_by_val = HashMap::new();
+        for s_node_arc in collected_arcs_map.values() {
+             canonical_nodes_by_val.entry(s_node_arc.value).or_insert_with(Vec::new).push(s_node_arc.clone());
+        }
+
+        let s_d_nodes = canonical_nodes_by_val.get(&40).unwrap();
+        assert_eq!(s_d_nodes.len(), 1, "Canonicalization should result in 1 Arc for value 40");
+        let s_d_arc = &s_d_nodes[0];
+        assert_ne!(s_d_arc.hash_key_cache, 0, "Canonical D node hash should be computed");
+        assert_eq!(s_d_arc.predecessors.len(), 0, "Canonical D node should have no predecessors");
+
+
+        let s_c1_nodes = canonical_nodes_by_val.get(&30).unwrap();
+        assert_eq!(s_c1_nodes.len(), 1);
+        let s_c1_arc = &s_c1_nodes[0];
+        assert_ne!(s_c1_arc.hash_key_cache, 0, "Canonical C1 node hash should be computed");
+        assert_eq!(s_c1_arc.predecessors.len(), 1, "Canonical C1 should have 1 predecessor");
+        assert_eq!(s_c1_arc.predecessors.iter().next().unwrap().value, 40, "Canonical C1 predecessor should be a D node");
+        assert_eq!(s_c1_arc.predecessors.iter().next().unwrap().hash_key_cache, s_d_arc.hash_key_cache, "Canonical C1 predecessor hash should match D's hash");
+         // Check that the predecessor is the canonical D node Arc
+         assert!(Arc::ptr_eq(s_c1_arc.predecessors.iter().next().unwrap(), s_d_arc), "Canonical C1's predecessor should be the canonical D node Arc");
+
+
+        let s_b1_nodes = canonical_nodes_by_val.get(&20).unwrap();
+        assert_eq!(s_b1_nodes.len(), 1);
+        let s_b1_arc = &s_b1_nodes[0];
+        assert_ne!(s_b1_arc.hash_key_cache, 0, "Canonical B1 node hash should be computed");
+        assert_eq!(s_b1_arc.predecessors.len(), 1, "Canonical B1 should have 1 predecessor");
+        assert_eq!(s_b1_arc.predecessors.iter().next().unwrap().value, 30, "Canonical B1 predecessor should be C1 node");
+        assert_eq!(s_b1_arc.predecessors.iter().next().unwrap().hash_key_cache, s_c1_arc.hash_key_cache, "Canonical B1 predecessor hash should match C1's hash");
+         // Check that the predecessor is the canonical C1 node Arc
+         assert!(Arc::ptr_eq(s_b1_arc.predecessors.iter().next().unwrap(), s_c1_arc), "Canonical B1's predecessor should be the canonical C1 node Arc");
+
+
+        let s_a1_nodes = canonical_nodes_by_val.get(&10).unwrap();
+        assert_eq!(s_a1_nodes.len(), 1);
+        let s_a1_arc = &s_a1_nodes[0];
+        assert_ne!(s_a1_arc.hash_key_cache, 0, "Canonical A1 node hash should be computed");
+        assert_eq!(s_a1_arc.predecessors.len(), 2, "Canonical A1 should have 2 predecessors");
+
+        let a1_pred_hashes: Vec<u64> = s_a1_arc.predecessors.iter().map(|p_arc| p_arc.hash_key_cache).collect();
+        let expected_a1_pred_hashes = vec![s_b1_arc.hash_key_cache, s_d_arc.hash_key_cache];
+
+        let mut sorted_a1_pred_hashes = a1_pred_hashes;
+        sorted_a1_pred_hashes.sort_unstable();
+        let mut sorted_expected_a1_pred_hashes = expected_a1_pred_hashes;
+        sorted_expected_a1_pred_hashes.sort_unstable();
+
+        assert_eq!(sorted_a1_pred_hashes, sorted_expected_a1_pred_hashes, "A1's canonical predecessors' hashes do not match expected");
+
+         // Check that A1's predecessors are the canonical B1 and D nodes
+         let a1_preds_ptrs: HashSet<*const GSSNode<i32>> = s_a1_arc.predecessors.iter().map(|p_arc| Arc::as_ptr(p_arc)).collect();
+         let expected_a1_preds_ptrs: HashSet<*const GSSNode<i32>> = vec![Arc::as_ptr(s_b1_arc), Arc::as_ptr(s_d_arc)].into_iter().collect();
+         assert_eq!(a1_preds_ptrs, expected_a1_preds_ptrs, "A1's predecessors should be the canonical B1 and D nodes");
+
+        // Test shared original node simplification
+        // E_orig -> F_orig
+        // E_orig -> G_orig
+        // E_orig should simplify to a single canonical Arc for both F and G's predecessors.
+        let e_orig = node_non_canonical_i32(500, vec![]);
+        let f_orig = node_non_canonical_i32(600, vec![e_orig.clone()]);
+        let g_orig = node_non_canonical_i32(700, vec![e_orig.clone()]); // e_orig is shared in the original graph
+
+        let original_shared_roots = vec![f_orig.clone(), g_orig.clone()];
+        let simplified_shared_roots = simplify_gss_forest(&original_shared_roots);
+        assert_eq!(simplified_shared_roots.len(), 2); // Still 2 roots
+
+        let s_f = &simplified_shared_roots[0];
+        let s_g = &simplified_shared_roots[1];
+
+        assert_ne!(Arc::as_ptr(s_f), Arc::as_ptr(s_g), "Simplified F and G should be different Arcs as they are different roots with different values");
+
+        assert_eq!(s_f.predecessors.len(), 1);
+        assert_eq!(s_g.predecessors.len(), 1);
+
+        let s_f_pred = s_f.predecessors.iter().next().unwrap();
+        let s_g_pred = s_g.predecessors.iter().next().unwrap();
+
+        assert_eq!(s_f_pred.value, 500);
+        assert_eq!(s_g_pred.value, 500);
+
+        // The simplified E node should be the same Arc instance for F and G's predecessors due to canonicalization during simplification.
+        assert!(Arc::ptr_eq(s_f_pred, s_g_pred), "Shared original node E should simplify to the same Arc instance for F and G's predecessors");
+
+
+        // Test predecessor order normalization and global canonicalization via simplify_gss_forest
+        // H1_orig -> (I_orig, J_orig)
+        // H2_orig -> (J_orig, I_orig)
+        // I_orig, J_orig are distinct leaf Arcs initially. H1_orig and H2_orig are distinct Arcs initially.
+        // I_orig and J_orig should simplify to canonical I and J.
+        // H1_orig and H2_orig should simplify to identical GSSNode structures (value 100, same set of canonical preds).
+        // simplify_gss_forest should ensure they resolve to the *same* canonical Arc.
+
+        let i_orig = node_non_canonical_i32(80, vec![]);
+        let j_orig = node_non_canonical_i32(90, vec![]);
+        assert!(!Arc::ptr_eq(&i_orig, &j_orig));
+
+        let h1_orig = node_non_canonical_i32(100, vec![i_orig.clone(), j_orig.clone()]);
+        let h2_orig = node_non_canonical_i32(100, vec![j_orig.clone(), i_orig.clone()]); // Different pred order initially
+        assert!(!Arc::ptr_eq(&h1_orig, &h2_orig));
+
+        let original_norm_roots = vec![h1_orig.clone(), h2_orig.clone()];
+        let simplified_norm_roots = simplify_gss_forest(&original_norm_roots);
+        assert_eq!(simplified_norm_roots.len(), 2, "Expected 2 roots in simplified forest");
+
+        let s_h1 = &simplified_norm_roots[0];
+        let s_h2 = &simplified_norm_roots[1];
+
+        // With global canonicalization, s_h1 and s_h2 should point to the same GSSNode content
+        // AND be the same Arc instance because their original roots simplified to the same structure.
+        assert_eq!(*s_h1, *s_h2, "s_h1 and s_h2 should have identical GSSNode content after simplification");
+        assert_eq!(s_h1.hash_key_cache, s_h2.hash_key_cache, "s_h1 and s_h2 should have the same hash after simplification");
+        assert_eq!(s_h1.value, s_h2.value);
+
+        // This is the key check for global canonicalization of structurally identical nodes
+        assert!(Arc::ptr_eq(s_h1, s_h2), "Structurally identical nodes originating from different roots should be canonicalized to the same Arc instance by simplify_gss_forest");
+
+        // Check that their predecessor sets, after simplification, are identical
+        let s_h1_pred_hashes: BTreeSet<u64> = s_h1.predecessors.iter().map(|p_arc| p_arc.hash_key_cache).collect();
+        let s_h2_pred_hashes: BTreeSet<u64> = s_h2.predecessors.iter().map(|p_arc| p_arc.hash_key_cache).collect();
+        assert_eq!(s_h1_pred_hashes, s_h2_pred_hashes, "Predecessor hashes of s_h1 and s_h2 should be identical after simplification");
+
+        // Check that the actual predecessor Arcs are the same (due to I_orig and J_orig simplifying consistently)
+        let s_i_arc_h1 = s_h1.predecessors.iter().find(|p_arc| p_arc.value == 80).unwrap();
+        let s_j_arc_h1 = s_h1.predecessors.iter().find(|p_arc| p_arc.value == 90).unwrap();
+        let s_i_arc_h2 = s_h2.predecessors.iter().find(|p_arc| p_arc.value == 80).unwrap();
+        let s_j_arc_h2 = s_h2.predecessors.iter().find(|p_arc| p_arc.value == 90).unwrap();
+
+        assert!(Arc::ptr_eq(s_i_arc_h1, s_i_arc_h2), "Simplified I-node should be the same Arc instance for H1 and H2");
+        assert!(Arc::ptr_eq(s_j_arc_h1, s_j_arc_h2), "Simplified J-node should be the same Arc instance for H1 and H2");
+    }
+
+    #[test]
+    fn test_simplify_gss_forest_distinct_arcs_same_structure() {
+        // Helper for i32 nodes
+        fn node_non_canonical_i32(
+            value: i32,
+            predecessors: Vec<Arc<GSSNode<i32>>>,
+        ) -> Arc<GSSNode<i32>>
+        where
+             i32: Clone + Ord + Hash + Debug, // Bounds needed for GSSNode ops used internally
+        {
+            let pred_set: BTreeSet<Arc<GSSNode<i32>>> = predecessors.into_iter().collect();
+            let hash_key_cache = compute_node_hash(&value, &pred_set);
+            Arc::new(GSSNode {
+                value,
+                predecessors: pred_set,
+                hash_key_cache,
+            })
+        }
+
+
+        // L1_orig, L2_orig, L3_orig are structurally identical (value 0, no preds) but are distinct Arcs.
+        let l1_orig = node_non_canonical_i32(0, vec![]);
+        let l2_orig = node_non_canonical_i32(0, vec![]);
+        let l3_orig = node_non_canonical_i32(0, vec![]);
+
+        // Ensure they are distinct Arcs initially
+        assert!(!Arc::ptr_eq(&l1_orig, &l2_orig));
+        assert!(!Arc::ptr_eq(&l1_orig, &l3_orig));
+        assert!(!Arc::ptr_eq(&l2_orig, &l3_orig));
+
+        // M1_orig, M2_orig, M3_orig have the same value (1).
+        // Their predecessors (L1_orig, L2_orig, L3_orig respectively) are structurally identical GSSNodes.
+        // After simplification, L1_orig, L2_orig, L3_orig will simplify to the *same* canonical Arc (canonical_L).
+        // M1_orig, M2_orig, M3_orig will then have the same value (1) and the same canonical predecessor Arc (canonical_L).
+        // simplify_gss_forest should ensure M1_orig, M2_orig, M3_orig simplify to the *same* canonical Arc (canonical_M).
+        let m1_orig = node_non_canonical_i32(1, vec![l1_orig.clone()]);
+        let m2_orig = node_non_canonical_i32(1, vec![l2_orig.clone()]);
+        let m3_orig = node_non_canonical_i32(1, vec![l3_orig.clone()]);
+
+        assert!(!Arc::ptr_eq(&m1_orig, &m2_orig));
+        assert!(!Arc::ptr_eq(&m1_orig, &m3_orig));
+        assert!(!Arc::ptr_eq(&m2_orig, &m3_orig));
+
+        // R1_orig has M1_orig, M2_orig, M3_orig as predecessors.
+        // Since M1_orig, M2_orig, M3_orig simplify to a single canonical Arc (canonical_M),
+        // the simplified R1 will have value 2 and predecessor set containing only canonical_M.
+        // simplify_gss_forest should ensure R1 simplifies to a single canonical Arc (canonical_R).
+        let r1_orig = node_non_canonical_i32(2, vec![m1_orig.clone(), m2_orig.clone(), m3_orig.clone()]);
+
+        // The original forest roots (only one in this case)
+        let original_roots = vec![r1_orig.clone()];
+
+        // Simplify the forest
+        let simplified_roots = simplify_gss_forest(&original_roots);
+        assert_eq!(simplified_roots.len(), 1, "Simplification should return the same number of roots");
+        let simplified_r1_arc = simplified_roots[0].clone();
+
+        let mut collected_arcs_map = HashMap::new();
+        collect_arcs_recursive(&simplified_r1_arc, &mut collected_arcs_map); // Use recursive collector on the simplified root
+
+        // Expected unique Arcs in the simplified GSS after global canonicalization by simplify_gss_forest:
+        // One canonical L-level node -> 1 Arc.
+        // One canonical M-level node -> 1 Arc.
+        // One canonical R-level node -> 1 Arc.
+        // Total = 1 + 1 + 1 = 3 unique Arcs.
+        assert_eq!(collected_arcs_map.len(), 3, "Expected 3 unique Arcs in the simplified GSS after global canonicalization");
+
+        // Detailed verification of the structure:
+        let s_r1_node = simplified_r1_arc.as_ref();
+        assert_eq!(s_r1_node.value, 2);
+        // simplify_gss_forest should have merged the simplified M1, M2, M3 (which are the same canonical_M Arc)
+        // into a single predecessor entry for simplified R1.
+        assert_eq!(s_r1_node.predecessors.len(), 1, "Simplified R1 should have 1 predecessor Arc (the canonical M node)");
+
+        // Get the single canonical M-level node
+        let s_m_level_arc = s_r1_node.predecessors.iter().next().unwrap().clone();
+        assert_eq!(s_m_level_arc.value, 1);
+        // The canonical M-level node's predecessors should be the single canonical L-level node.
+        assert_eq!(s_m_level_arc.predecessors.len(), 1, "The canonical M node should have 1 predecessor Arc (the canonical L node)");
+
+        // Get the single canonical L-level node
+        let s_l_level_arc = s_m_level_arc.predecessors.iter().next().unwrap().clone();
+        assert_eq!(s_l_level_arc.value, 0);
+        assert_eq!(s_l_level_arc.predecessors.len(), 0, "The canonical L node should have no predecessors");
+
+        // Verify the Arcs are canonical (pointers are equal for structurally identical nodes)
+        let canonical_r_arc = simplified_r1_arc.clone();
+        let canonical_m_arc = s_m_level_arc;
+        let canonical_l_arc = s_l_level_arc;
+
+        // Find the arcs in the collected map by value to confirm they are the same instances
+        let found_r_arc = collected_arcs_map.values().find(|a| a.value == 2).unwrap();
+        let found_m_arc = collected_arcs_map.values().find(|a| a.value == 1).unwrap();
+        let found_l_arc = collected_arcs_map.values().find(|a| a.value == 0).unwrap();
+
+        assert!(Arc::ptr_eq(&canonical_r_arc, found_r_arc), "Simplified root R1 should be the canonical R node");
+        assert!(Arc::ptr_eq(&canonical_m_arc, found_m_arc), "The single predecessor of canonical R should be the canonical M node");
+        assert!(Arc::ptr_eq(&canonical_l_arc, found_l_arc), "The single predecessor of canonical M should be the canonical L node");
     }
 }
