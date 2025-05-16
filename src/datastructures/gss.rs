@@ -824,6 +824,10 @@ mod tests {
 
     #[test]
     fn test_gss_simplification_basic() {
+        fn node(value: i32, predecessors: Vec<Arc<GSSNode<i32>>>) -> Arc<GSSNode<i32>> {
+            Arc::new(GSSNode::new_with_predecessors(value, predecessors.into_iter().collect()))
+        }
+
         // D1
         // |
         // C1
@@ -969,6 +973,9 @@ mod tests {
 
     #[test]
     fn test_simplification_does_not_canonicalize_structurally_identical_nodes_from_distinct_arcs() {
+        fn node(value: i32, predecessors: Vec<Arc<GSSNode<i32>>>) -> Arc<GSSNode<i32>> {
+            Arc::new(GSSNode::new_with_predecessors(value, predecessors.into_iter().collect()))
+        }
         // This test demonstrates the current behavior where structurally identical nodes
         // that originate from different initial Arcs are not unified into a single Arc
         // by `simplify_gss_forest`. This can lead to a larger GSS node count than
