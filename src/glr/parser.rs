@@ -303,7 +303,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
     pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
         const MAX: usize = 30;
         // const PANIC_THRESHOLD: usize = 30;
-        const PANIC_THRESHOLD: usize = 100;
+        const PANIC_THRESHOLD: usize = 1000;
         // const PANIC_THRESHOLD: usize = usize::MAX;
         let roots: Vec<_> = self.active_states.values().map(|s| s.stack.clone()).collect();
         let stats = gather_gss_stats(&roots);
