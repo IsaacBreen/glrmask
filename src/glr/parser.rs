@@ -329,7 +329,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
 
         if stats.unique_nodes > PANIC_THRESHOLD {
             let msg = make_msg(true);
-            // panic!("GSS too big ({} nodes). {}", stats.unique_nodes, msg);
+            panic!("GSS too big ({} nodes). {}", stats.unique_nodes, msg);
         }
 
         debug!(4, "{}", make_msg(stats.unique_nodes <= MAX));

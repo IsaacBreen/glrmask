@@ -968,5 +968,10 @@ impl<'a> GrammarConstraintState<'a> {
                 i += 1;
             }
         }
+
+        // Print each GSS
+        for (tokenizer_state_id, glr_state) in self.state.iter() {
+            glr_state.log_gss(format!("After simplifying GSS for state {}", tokenizer_state_id.0).as_str(), GrammarTokenID(0));
+        }
     }
 }
