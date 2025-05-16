@@ -119,7 +119,7 @@ impl GLRParser {
             t,
         };
         ParseState {
-            stack: Arc::new(GSSNode::new(initial_content)),
+            stack: Arc::new(GSSNode::new_empty(initial_content)),
         }
     }
 
