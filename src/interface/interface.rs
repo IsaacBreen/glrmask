@@ -781,13 +781,14 @@ mod tests {
         }
 
         // Get the mask.
+        grammar_constraint_state.step_with_all_llm_tokens();
         let mask = grammar_constraint_state.get_mask();
         let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"a"));
         assert_eq!(mask, expected_mask);
 
         // Commit "a"
-        let terminals: Vec<_> = llm_token_vec!(b"a").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
-        grammar_constraint_state.step_with_llm_token_sequence(&terminals);
+        grammar_constraint_state.commit(LLMTokenID(0));
+        grammar_constraint_state.step_with_all_llm_tokens();
 
         // Get the mask.
         let mask = grammar_constraint_state.get_mask();
