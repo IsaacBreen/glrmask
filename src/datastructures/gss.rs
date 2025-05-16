@@ -12,25 +12,33 @@ use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
 pub struct GSSNode<T> {
     pub value: T,
     predecessors: BTreeSet<ArcPtrWrapper<GSSNode<T>>>,
-    hash_key_cache: u64, // Add this line
+    // hash_key_cache: u64, // Add this line
 }
 
 impl<T: Hash> GSSNode<T> {
+    // Add this new method:
+    pub fn get_hash_key_cache(&self) -> u64 {
+        Self::compute_hash_key_cache(&self.predecessors)
+    }
+}
+
+
+impl<T: Hash> GSSNode<T> {
     pub fn new(value: T) -> Self {
-        let hash_key_cache = Self::compute_hash_key_cache(&BTreeSet::new()); // Removed '&value, '
+        // let hash_key_cache = Self::compute_hash_key_cache(&BTreeSet::new()); // Removed '&value, '
         Self {
             value,
             predecessors: BTreeSet::new(),
-            hash_key_cache,
+            // hash_key_cache, // Add this line
         }
     }
     pub fn new_with_predecessors(value: T, predecessors: BTreeSet<Arc<GSSNode<T>>>) -> Self {
         let predecessors_arc_ptr_wrapper = predecessors.into_iter().map(ArcPtrWrapper::new).collect(); // This is now BTreeSet<ArcPtrWrapper<GSSNode<T>>>
-        let hash_key_cache = Self::compute_hash_key_cache(&predecessors_arc_ptr_wrapper); // Removed '&value, '
+        // let hash_key_cache = Self::compute_hash_key_cache(&predecessors_arc_ptr_wrapper); // Removed '&value, '
         Self {
             value,
             predecessors: predecessors_arc_ptr_wrapper,
-            hash_key_cache,
+            // hash_key_cache, // Add this line
         }
     }
 
@@ -99,6 +107,7 @@ impl<T: Hash> GSSNode<T> {
         &mut self.value
     }
 
+
     pub fn flatten(&self) -> Vec<Vec<T>>
     where
         T: Clone,
@@ -149,11 +158,11 @@ impl<T: Hash> GSSNode<T> {
         let new_predecessors: BTreeSet<ArcPtrWrapper<GSSNode<U>>> = self.predecessors.iter()
             .map(|wrapper| ArcPtrWrapper::new(Arc::new(wrapper.as_ref().map(f))))
             .collect();
-        let hash_key_cache = GSSNode::<U>::compute_hash_key_cache(&new_predecessors); // Removed '&new_value, '
+        // let hash_key_cache = GSSNode::<U>::compute_hash_key_cache(&new_predecessors); // Removed '&new_value, '
         GSSNode {
             value: new_value,
             predecessors: new_predecessors,
-            hash_key_cache,
+            // hash_key_cache, // Add this line
         }
     }
 }
@@ -177,7 +186,7 @@ impl<T> Drop for GSSNode<T> {
 
 impl<T: Hash> Hash for GSSNode<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.hash_key_cache.hash(state);
+        self.get_hash_key_cache().hash(state); // Add this line
         self.value.hash(state); // Add this line
     }
 }
@@ -185,7 +194,7 @@ impl<T: Hash> Hash for GSSNode<T> {
 impl<T: Hash + PartialEq> PartialEq for GSSNode<T> {
     fn eq(&self, other: &Self) -> bool {
         // First compare hash, then value, then predecessors
-        self.hash_key_cache == other.hash_key_cache && self.value == other.value && self.predecessors == other.predecessors
+        self.get_hash_key_cache() == other.get_hash_key_cache() && self.value == other.value && self.predecessors == other.predecessors
     }
 }
 
@@ -193,11 +202,11 @@ impl<T: Hash + PartialEq> Eq for GSSNode<T> {}
 
 impl<T: Hash + PartialOrd> PartialOrd for GSSNode<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match self.hash_key_cache.partial_cmp(&other.hash_key_cache) {
+        match self.get_hash_key_cache().partial_cmp(&other.get_hash_key_cache()) {
             Some(Ordering::Equal) => {
                 // Hashes are equal, compare values
                 match self.value.partial_cmp(&other.value) {
-                    Some(Ordering::Equal) => self.predecessors.partial_cmp(&other.predecessors), // Values are also equal, compare predecessors
+                    Some(Ordering::Equal) => self.predecessors.partial_cmp(&other.predecessors), // Values are also equal (or reported as equal by partial_cmp), compare predecessors
                     other_ordering => other_ordering, // Values are different or one is greater/less
                 }
             }
@@ -209,7 +218,7 @@ impl<T: Hash + PartialOrd> PartialOrd for GSSNode<T> {
 impl<T: Hash + PartialOrd + Ord> Ord for GSSNode<T> {
     fn cmp(&self, other: &Self) -> Ordering {
         // Compare hash, then value, then predecessors
-        self.hash_key_cache.cmp(&other.hash_key_cache).then_with(|| self.value.cmp(&other.value)).then_with(|| self.predecessors.cmp(&other.predecessors))
+        self.get_hash_key_cache().cmp(&other.get_hash_key_cache()).then_with(|| self.value.cmp(&other.value)).then_with(|| self.predecessors.cmp(&other.predecessors))
     }
 }
 
@@ -381,8 +390,8 @@ pub fn prune_and_transform_recursive<T: Clone + Hash>(
                 // Stop recursion, create new node with original predecessors but new value
                 new_predecessors = node_arc.predecessors.clone();
             };
-            let hash_key_cache = GSSNode::<T>::compute_hash_key_cache(&new_predecessors); // Removed '&new_value, '
-            let new_node_arc = Arc::new(GSSNode { value: new_value, predecessors: new_predecessors, hash_key_cache });
+            // let hash_key_cache = GSSNode::<T>::compute_hash_key_cache(&new_predecessors); // Removed '&new_value, '
+            let new_node_arc = Arc::new(GSSNode { value: new_value, predecessors: new_predecessors }); // Add this line
             memo.insert(node_ptr, Some(new_node_arc.clone()));
             Some(new_node_arc)
         }
@@ -671,13 +680,13 @@ fn simplify_node_recursive<T: Clone + Ord + Hash + Debug>(
             .collect();
 
     // Compute the hash for the new simplified node based *only* on its (simplified) predecessors.
-    let hash_key_cache = GSSNode::compute_hash_key_cache(&new_node_predecessors_arc_ptr_wrappers);
+    // let hash_key_cache = GSSNode::compute_hash_key_cache(&new_node_predecessors_arc_ptr_wrappers); // Add this line
 
     // Create the new simplified GSSNode
     let simplified_node = GSSNode {
         value: original_node_arc.value.clone(),
         predecessors: new_node_predecessors_arc_ptr_wrappers, // Use the already collected ArcPtrWrappers
-        hash_key_cache,
+        // hash_key_cache, // Add this line
     };
     let simplified_node_arc = Arc::new(simplified_node);
 
@@ -744,11 +753,11 @@ mod tests {
     // Returns (value, Vec<pred_hashes_sorted>)
     type SimplifiedNodeRepr<T> = (T, Vec<u64>);
 
-    fn get_simplified_repr<T: Clone>(node_arc: &Arc<GSSNode<T>>) -> SimplifiedNodeRepr<T> {
+    fn get_simplified_repr<T: Clone + Hash>(node_arc: &Arc<GSSNode<T>>) -> SimplifiedNodeRepr<T> { // Added Hash bound for get_hash_key_cache
         let mut pred_hashes: Vec<u64> = node_arc.predecessors.iter()
-            .map(|p| p.as_arc().hash_key_cache)
+            .map(|p| p.as_arc().get_hash_key_cache()) // Use getter
             .collect();
-        pred_hashes.sort_unstable(); // Ensure order for comparison
+        pred_hashes.sort_unstable();
         (node_arc.value.clone(), pred_hashes)
     }
 
@@ -835,10 +844,10 @@ mod tests {
         assert!(s_d_nodes.len() >= 1); // Could be 1 if d1_orig and d2_orig simplified to the same Arc, or 2 if not.
                                        // With current memo (original_ptr -> simplified_arc), they will be distinct Arcs if d1_orig and d2_orig are distinct.
                                        // But their GSSNode content (value, preds, hash_key_cache) will be identical.
-        let s_d_hash = s_d_nodes[0].hash_key_cache;
+        let s_d_hash = s_d_nodes[0].get_hash_key_cache();
         assert_ne!(s_d_hash, 0, "D node hash should be computed");
         for s_d_node in s_d_nodes {
-            assert_eq!(s_d_node.hash_key_cache, s_d_hash, "All simplified D nodes must have same hash");
+            assert_eq!(s_d_node.get_hash_key_cache(), s_d_hash, "All simplified D nodes must have same hash");
             assert_eq!(s_d_node.predecessors.len(), 0, "Simplified D node should have no predecessors");
         }
 
@@ -846,28 +855,28 @@ mod tests {
         let s_c1_nodes = s_nodes_by_val.get(&30).unwrap();
         assert_eq!(s_c1_nodes.len(), 1);
         let s_c1 = &s_c1_nodes[0];
-        assert_ne!(s_c1.hash_key_cache, 0, "C1 node hash should be computed");
+        assert_ne!(s_c1.get_hash_key_cache(), 0, "C1 node hash should be computed");
         assert_eq!(s_c1.predecessors.len(), 1, "Simplified C1 should have 1 predecessor");
         assert_eq!(s_c1.predecessors.iter().next().unwrap().as_arc().value, 40, "C1 predecessor should be a D node");
-        assert_eq!(s_c1.predecessors.iter().next().unwrap().as_arc().hash_key_cache, s_d_hash, "C1 predecessor hash should match D's hash");
+        assert_eq!(s_c1.predecessors.iter().next().unwrap().as_arc().get_hash_key_cache(), s_d_hash, "C1 predecessor hash should match D's hash");
 
         let s_b1_nodes = s_nodes_by_val.get(&20).unwrap();
         assert_eq!(s_b1_nodes.len(), 1);
         let s_b1 = &s_b1_nodes[0];
-        assert_ne!(s_b1.hash_key_cache, 0, "B1 node hash should be computed");
+        assert_ne!(s_b1.get_hash_key_cache(), 0, "B1 node hash should be computed");
         assert_eq!(s_b1.predecessors.len(), 1, "Simplified B1 should have 1 predecessor");
         assert_eq!(s_b1.predecessors.iter().next().unwrap().as_arc().value, 30, "B1 predecessor should be C1 node");
-        assert_eq!(s_b1.predecessors.iter().next().unwrap().as_arc().hash_key_cache, s_c1.hash_key_cache, "B1 predecessor hash should match C1's hash");
+        assert_eq!(s_b1.predecessors.iter().next().unwrap().as_arc().get_hash_key_cache(), s_c1.get_hash_key_cache(), "B1 predecessor hash should match C1's hash");
 
 
         let s_a1_nodes = s_nodes_by_val.get(&10).unwrap();
         assert_eq!(s_a1_nodes.len(), 1);
         let s_a1 = &s_a1_nodes[0];
-        assert_ne!(s_a1.hash_key_cache, 0, "A1 node hash should be computed");
+        assert_ne!(s_a1.get_hash_key_cache(), 0, "A1 node hash should be computed");
         assert_eq!(s_a1.predecessors.len(), 2, "Simplified A1 should have 2 predecessors");
 
-        let a1_pred_hashes: Vec<u64> = s_a1.predecessors.iter().map(|p| p.as_arc().hash_key_cache).collect();
-        let expected_a1_pred_hashes = vec![s_b1.hash_key_cache, s_d_hash]; // Order might vary, so compare as sets or sort
+        let a1_pred_hashes: Vec<u64> = s_a1.predecessors.iter().map(|p| p.as_arc().get_hash_key_cache()).collect();
+        let expected_a1_pred_hashes = vec![s_b1.get_hash_key_cache(), s_d_hash]; // Order might vary, so compare as sets or sort
 
         let mut sorted_a1_pred_hashes = a1_pred_hashes;
         sorted_a1_pred_hashes.sort_unstable();
@@ -909,15 +918,15 @@ mod tests {
         let s_h2 = &simplified_norm[1];
 
         assert_ne!(Arc::as_ptr(s_h1), Arc::as_ptr(s_h2), "s_h1 and s_h2 should be different Arcs due to different original roots");
-        assert_eq!(s_h1.hash_key_cache, s_h2.hash_key_cache, "s_h1 and s_h2 should have the same hash after normalization");
+        assert_eq!(s_h1.get_hash_key_cache(), s_h2.get_hash_key_cache(), "s_h1 and s_h2 should have the same hash after normalization");
         assert_eq!(s_h1.value, s_h2.value);
 
         // Check that their predecessor sets, after simplification and normalization, are identical
         // This means they contain ArcPtrWrappers pointing to the same set of simplified predecessor Arcs,
         // and those ArcPtrWrappers will be ordered by pointer in the BTreeSet.
         // The crucial part is that the set of (Arc pointing to simplified I) and (Arc pointing to simplified J) is the same.
-        let s_h1_pred_hashes: BTreeSet<u64> = s_h1.predecessors.iter().map(|p| p.as_arc().hash_key_cache).collect();
-        let s_h2_pred_hashes: BTreeSet<u64> = s_h2.predecessors.iter().map(|p| p.as_arc().hash_key_cache).collect();
+        let s_h1_pred_hashes: BTreeSet<u64> = s_h1.predecessors.iter().map(|p| p.as_arc().get_hash_key_cache()).collect();
+        let s_h2_pred_hashes: BTreeSet<u64> = s_h2.predecessors.iter().map(|p| p.as_arc().get_hash_key_cache()).collect();
         assert_eq!(s_h1_pred_hashes, s_h2_pred_hashes, "Predecessor hashes of s_h1 and s_h2 should be identical after normalization");
 
         // Check that the actual predecessor Arcs are the same (due to I and J simplifying consistently)
@@ -996,7 +1005,7 @@ mod tests {
 
         // Verify M-level nodes are not Eq and have different hash_key_caches
         assert_ne!(*s_m_level_arcs[0], *s_m_level_arcs[1], "Simplified M-nodes should not be Eq");
-        assert_ne!(s_m_level_arcs[0].hash_key_cache, s_m_level_arcs[1].hash_key_cache, "Simplified M-nodes should have different hash_key_caches");
+        assert_ne!(s_m_level_arcs[0].get_hash_key_cache(), s_m_level_arcs[1].get_hash_key_cache(), "Simplified M-nodes should have different hash_key_caches");
         // (Could check all pairs, but one pair is indicative)
 
 
@@ -1016,7 +1025,7 @@ mod tests {
         // Verify L-level GSSNode contents are Eq, even if Arcs are distinct
         assert_eq!(*s_l_level_arcs_collected[0], *s_l_level_arcs_collected[1], "Simplified L-nodes content should be Eq");
         assert_eq!(*s_l_level_arcs_collected[1], *s_l_level_arcs_collected[2], "Simplified L-nodes content should be Eq");
-        assert_eq!(s_l_level_arcs_collected[0].hash_key_cache, s_l_level_arcs_collected[1].hash_key_cache, "Simplified L-nodes should have same hash_key_cache");
+        assert_eq!(s_l_level_arcs_collected[0].get_hash_key_cache(), s_l_level_arcs_collected[1].get_hash_key_cache(), "Simplified L-nodes should have same hash_key_cache");
 
 
         for s_l_arc in &s_l_level_arcs_collected {

@@ -3284,4 +3284,533 @@ messages:
       --- Applying Changes ---
       Successfully replaced file: src/datastructures/gss.rs
     metadata:
+  - user: |-
+      Diff of src/datastructures/gss.rs since previous turn:
+      ```diff
+      --- original version of src/datastructures/gss.rs+++ current version of src/datastructures/gss.rs@@ -193,15 +193,15 @@ 
+       impl<T: Hash + PartialOrd> PartialOrd for GSSNode<T> {
+           fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+      -        match self.hash_key_cache.cmp(&other.hash_key_cache) {
+      -            Ordering::Equal => {
+      +        match self.hash_key_cache.partial_cmp(&other.hash_key_cache) {
+      +            Some(Ordering::Equal) => {
+                       // Hashes are equal, compare values
+                       match self.value.partial_cmp(&other.value) {
+      -                    Some(Ordering::Equal) => None, // Values are also equal (or reported as equal by partial_cmp), return None
+      +                    Some(Ordering::Equal) => self.predecessors.partial_cmp(&other.predecessors), // Values are also equal, compare predecessors
+                           other_ordering => other_ordering, // Values are different or one is greater/less
+                       }
+                   }
+      -            other_ordering => Some(other_ordering), // Hashes are different
+      +            other_ordering => other_ordering, // Hashes are different or incomparable
+               }
+           }
+       }
+      @@ -718,6 +718,23 @@     use super::*;
+           use std::sync::Arc;
+       
+      +    // Define Mock Types
+      +    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      +    struct MockLLMTokenInfo {
+      +        active: String,
+      +        intersection: String,
+      +    }
+      +
+      +    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      +    struct MockParseStateNodeContent {
+      +        state_id: usize,
+      +        t: MockLLMTokenInfo,
+      +    }
+      +
+      +    // Type alias for GSSNode with MockParseStateNodeContent for brevity in the test
+      +    type MockGSSNode = GSSNode<MockParseStateNodeContent>;
+      +
+      +
+           // Helper to create a node for tests
+           fn node<T: Clone + Ord + Hash + Debug>(value: T, predecessors: Vec<Arc<GSSNode<T>>>) -> Arc<GSSNode<T>> {
+               Arc::new(GSSNode::new_with_predecessors(value, predecessors.into_iter().collect()))
+      @@ -748,6 +765,22 @@         collected_nodes.insert(ptr, get_simplified_repr(node_arc));
+               for pred_wrapper in &node_arc.predecessors {
+                   collect_all_simplified_nodes(pred_wrapper.as_arc(), visited, collected_nodes);
+      +        }
+      +    }
+      +
+      +    // Helper to recursively collect all unique Arcs in a simplified GSS forest
+      +    fn collect_all_simplified_arcs<T: Clone + Hash>(
+      +        node_arc: &Arc<GSSNode<T>>,
+      +        // Output map: raw pointer to GSSNode -> Arc pointing to that GSSNode
+      +        collected_arcs: &mut HashMap<*const GSSNode<T>, Arc<GSSNode<T>>>,
+      +    ) {
+      +        let ptr = Arc::as_ptr(node_arc);
+      +        if collected_arcs.contains_key(&ptr) {
+      +            return; // Already visited and collected this Arc
+      +        }
+      +        collected_arcs.insert(ptr, node_arc.clone());
+      +        for pred_wrapper in &node_arc.predecessors {
+      +            collect_all_simplified_arcs(pred_wrapper.as_arc(), collected_arcs);
+               }
+           }
+       
+      @@ -896,4 +929,229 @@         assert!(Arc::ptr_eq(s_i_arc_h1, s_i_arc_h2), "Simplified I-node should be the same Arc instance for H1 and H2");
+               assert!(Arc::ptr_eq(s_j_arc_h1, s_j_arc_h2), "Simplified J-node should be the same Arc instance for H1 and H2");
+           }
+      -}
+      +
+      +    #[test]
+      +    fn test_simplification_does_not_canonicalize_structurally_identical_nodes_from_distinct_arcs() {
+      +        // This test demonstrates the current behavior where structurally identical nodes
+      +        // that originate from different initial Arcs are not unified into a single Arc
+      +        // by `simplify_gss_forest`. This can lead to a larger GSS node count than
+      +        // if full canonicalization (merging all structurally identical nodes to one Arc)
+      +        // were performed.
+      +
+      +        // L1, L2, L3 are structurally identical (value 0, no preds) but are distinct Arcs.
+      +        let l1 = node(0, vec![]); // node() helper requires T: Clone + Ord + Hash + Debug
+      +        let l2 = node(0, vec![]);
+      +        let l3 = node(0, vec![]);
+      +
+      +        // Ensure they are distinct Arcs initially
+      +        assert_ne!(Arc::as_ptr(&l1), Arc::as_ptr(&l2));
+      +        assert_ne!(Arc::as_ptr(&l1), Arc::as_ptr(&l3));
+      +        assert_ne!(Arc::as_ptr(&l2), Arc::as_ptr(&l3));
+      +
+      +        // M1, M2, M3 have the same value (1).
+      +        // Their predecessors (L1, L2, L3 respectively) are structurally identical GSSNodes.
+      +        // However, since L1, L2, L3 simplify to distinct Arcs (sl1, sl2, sl3),
+      +        // M1, M2, M3 will also simplify to distinct Arcs whose GSSNode contents
+      +        // will NOT be Eq due to ArcPtrWrapper comparisons in GSSNode::Eq.
+      +        let m1 = node(1, vec![l1.clone()]);
+      +        let m2 = node(1, vec![l2.clone()]);
+      +        let m3 = node(1, vec![l3.clone()]);
+      +
+      +        assert_ne!(Arc::as_ptr(&m1), Arc::as_ptr(&m2));
+      +        assert_ne!(Arc::as_ptr(&m1), Arc::as_ptr(&m3));
+      +        assert_ne!(Arc::as_ptr(&m2), Arc::as_ptr(&m3));
+      +
+      +        // R1 has M1, M2, M3 as predecessors.
+      +        let r1_orig = node(2, vec![m1.clone(), m2.clone(), m3.clone()]);
+      +
+      +        let simplified_roots = simplify_gss_forest(&[r1_orig]);
+      +        let simplified_r1_arc = simplified_roots[0].clone();
+      +
+      +        let mut collected_arcs_map = HashMap::new();
+      +        collect_all_simplified_arcs(&simplified_r1_arc, &mut collected_arcs_map);
+      +
+      +        // Expected unique Arcs with current simplification:
+      +        // sl1 (from l1), sl2 (from l2), sl3 (from l3) -> 3 distinct Arcs.
+      +        //   The GSSNode content *sl1, *sl2, *sl3 will be Eq.
+      +        // sm1 (from m1, pred sl1), sm2 (from m2, pred sl2), sm3 (from m3, pred sl3) -> 3 distinct Arcs.
+      +        //   The GSSNode content *sm1, *sm2, *sm3 will NOT be Eq because their
+      +        //   predecessor ArcPtrWrappers point to different Arcs (sl1, sl2, sl3).
+      +        //   Thus, their hash_key_cache values will differ.
+      +        // sr1 (from r1_orig, preds sm1, sm2, sm3) -> 1 Arc.
+      +        // Total = 3 (L-level) + 3 (M-level) + 1 (R-level) = 7 unique Arcs.
+      +        assert_eq!(collected_arcs_map.len(), 7, "Expected 7 unique Arcs in the simplified GSS for this structure");
+      +
+      +        // Detailed verification of the structure:
+      +        let s_r1_node = simplified_r1_arc.as_ref();
+      +        assert_eq!(s_r1_node.value, 2);
+      +        assert_eq!(s_r1_node.predecessors.len(), 3, "Simplified R1 should have 3 predecessor Arcs");
+      +
+      +        // Collect simplified M-level nodes
+      +        let s_m_level_arcs: Vec<Arc<GSSNode<i32>>> = s_r1_node.predecessors.iter()
+      +            .map(|p_wrapper| p_wrapper.as_arc().clone())
+      +            .collect();
+      +
+      +        let s_m_level_ptrs: HashSet<*const GSSNode<i32>> = s_m_level_arcs.iter().map(|arc| Arc::as_ptr(arc)).collect();
+      +        assert_eq!(s_m_level_ptrs.len(), 3, "Should be 3 distinct Arcs for M-level nodes");
+      +
+      +        // Verify M-level nodes are not Eq and have different hash_key_caches
+      +        assert_ne!(*s_m_level_arcs[0], *s_m_level_arcs[1], "Simplified M-nodes should not be Eq");
+      +        assert_ne!(s_m_level_arcs[0].hash_key_cache, s_m_level_arcs[1].hash_key_cache, "Simplified M-nodes should have different hash_key_caches");
+      +        // (Could check all pairs, but one pair is indicative)
+      +
+      +
+      +        // Collect simplified L-level nodes
+      +        let mut s_l_level_arcs_collected = Vec::new();
+      +        for s_m_arc in &s_m_level_arcs {
+      +            assert_eq!(s_m_arc.value, 1);
+      +            assert_eq!(s_m_arc.predecessors.len(), 1, "Each M-node should have 1 predecessor Arc");
+      +            let l_node_arc = s_m_arc.predecessors.iter().next().unwrap().as_arc().clone();
+      +            s_l_level_arcs_collected.push(l_node_arc);
+      +        }
+      +        assert_eq!(s_l_level_arcs_collected.len(), 3, "Should have collected 3 L-node Arcs (one from each M-node)");
+      +
+      +        let s_l_level_ptrs: HashSet<*const GSSNode<i32>> = s_l_level_arcs_collected.iter().map(|arc| Arc::as_ptr(arc)).collect();
+      +        assert_eq!(s_l_level_ptrs.len(), 3, "Should be 3 distinct Arcs for L-level nodes");
+      +
+      +        // Verify L-level GSSNode contents are Eq, even if Arcs are distinct
+      +        assert_eq!(*s_l_level_arcs_collected[0], *s_l_level_arcs_collected[1], "Simplified L-nodes content should be Eq");
+      +        assert_eq!(*s_l_level_arcs_collected[1], *s_l_level_arcs_collected[2], "Simplified L-nodes content should be Eq");
+      +        assert_eq!(s_l_level_arcs_collected[0].hash_key_cache, s_l_level_arcs_collected[1].hash_key_cache, "Simplified L-nodes should have same hash_key_cache");
+      +
+      +
+      +        for s_l_arc in &s_l_level_arcs_collected {
+      +            assert_eq!(s_l_arc.value, 0);
+      +            assert_eq!(s_l_arc.predecessors.len(), 0, "L-nodes should have no predecessors");
+      +        }
+      +    }
+      +
+      +    #[test]
+      +    fn test_gss_simplification_reproduces_logged_structure() {
+      +        // Values for the nodes, mimicking the log's StateID and LLMTokenInfo
+      +        let val0 = MockParseStateNodeContent {
+      +            state_id: 0,
+      +            t: MockLLMTokenInfo { active: "[0]".to_string(), intersection: "[0]".to_string() },
+      +        };
+      +        let val1 = MockParseStateNodeContent {
+      +            state_id: 1,
+      +            t: MockLLMTokenInfo { active: "[0]".to_string(), intersection: "[0]".to_string() },
+      +        };
+      +        let val2 = MockParseStateNodeContent {
+      +            state_id: 2,
+      +            t: MockLLMTokenInfo { active: "[0]".to_string(), intersection: "[0]".to_string() },
+      +        };
+      +
+      +        // Create original leaf nodes (StateID 0)
+      +        // These correspond to s_S0_A, s_S0_C, s_S0_G, ..., s_S0_U in analysis
+      +        // All have val0 and no predecessors. They are distinct Arcs.
+      +        let orig_s0_a = node(val0.clone(), vec![]); // Will be a root
+      +
+      +        let orig_s0_c = node(val0.clone(), vec![]); // Shared predecessor
+      +
+      +        // 8 more distinct leaf nodes with val0
+      +        let mut other_orig_s0_leaves: Vec<Arc<MockGSSNode>> = Vec::new();
+      +        for _ in 0..8 {
+      +            other_orig_s0_leaves.push(node(val0.clone(), vec![]));
+      +        }
+      +        // These are orig_s0_g, orig_s0_h, ..., orig_s0_u
+      +
+      +        // Create original intermediate nodes (StateID 1)
+      +        // This corresponds to orig_S1_B_val_node in analysis
+      +        let orig_s1_b = node(val1.clone(), vec![orig_s0_c.clone()]); // Will be a root
+      +
+      +        // This corresponds to orig_S1_E_val_node in analysis
+      +        let orig_s1_e = node(val1.clone(), vec![orig_s0_c.clone()]); // Shares orig_s0_c
+      +
+      +        // 8 more distinct intermediate nodes with val1, each pointing to one of the other_orig_s0_leaves
+      +        let mut other_orig_s1_nodes: Vec<Arc<MockGSSNode>> = Vec::new();
+      +        for leaf_s0_node in &other_orig_s0_leaves {
+      +            other_orig_s1_nodes.push(node(val1.clone(), vec![leaf_s0_node.clone()]));
+      +        }
+      +        // These are orig_s1_f (pred orig_s0_g), ..., orig_s1_u (pred orig_s0_u)
+      +
+      +        // Create original top-level node (StateID 2)
+      +        // This corresponds to orig_S2_D_val_node in analysis
+      +        let mut s2_predecessors: Vec<Arc<MockGSSNode>> = Vec::new();
+      +        s2_predecessors.push(orig_s1_e.clone()); // Add orig_s1_e
+      +        s2_predecessors.extend(other_orig_s1_nodes.iter().cloned()); // Add the 8 other s1 nodes
+      +        assert_eq!(s2_predecessors.len(), 9, "S2 node should have 9 predecessors before simplification");
+      +
+      +        let orig_s2_d = node(val2.clone(), s2_predecessors); // Will be a root
+      +
+      +        // Define the roots for simplification
+      +        let roots_to_simplify = vec![
+      +            orig_s0_a.clone(),
+      +            orig_s1_b.clone(),
+      +            orig_s2_d.clone(),
+      +        ];
+      +
+      +        // Perform simplification
+      +        let simplified_roots = simplify_gss_forest(&roots_to_simplify);
+      +
+      +        // Collect all unique Arcs in the simplified GSS forest
+      +        let mut collected_arcs_map: HashMap<*const MockGSSNode, Arc<MockGSSNode>> = HashMap::new();
+      +        for root_arc in &simplified_roots {
+      +            collect_all_simplified_arcs(root_arc, &mut collected_arcs_map);
+      +        }
+      +
+      +        // Assert the number of unique Arcs (nodes)
+      +        // Expected:
+      +        // 10 StateID(0) nodes (s0_a, s0_c, and 8 others from other_orig_s0_leaves)
+      +        //   - s0_a is a root.
+      +        //   - s0_c is pred of simplified s1_b and simplified s1_e.
+      +        //   - The 8 others are preds of the 8 other simplified s1 nodes.
+      +        //   All 10 of these simplified s0 nodes will have Eq GSSNode content.
+      +        // 10 StateID(1) nodes (simplified s1_b, simplified s1_e, and 8 others)
+      +        //   - simplified s1_b is a root. Its GSSNode content will be Eq to simplified s1_e's content.
+      +        //   - simplified s1_e and the 8 others are preds of simplified s2_d.
+      +        //     Their GSSNode contents will not be Eq to each other (due to different pred Arcs).
+      +        // 1 StateID(2) node (simplified s2_d)
+      +        //   - simplified s2_d is a root.
+      +        // Total = 10 + 10 + 1 = 21 unique Arcs.
+      +        assert_eq!(collected_arcs_map.len(), 21, "The simplified GSS should contain 21 unique Arcs for this structure.");
+      +
+      +        // Optional: Further detailed checks on the simplified structure,
+      +        // similar to what the log implies, can be added here.
+      +        // For example, check that the simplified version of orig_s0_c is indeed shared.
+      +        let s_root_s0_a = &simplified_roots[0];
+      +        let s_root_s1_b = &simplified_roots[1];
+      +        let s_root_s2_d = &simplified_roots[2];
+      +
+      +        assert_eq!(s_root_s0_a.value, val0);
+      +        assert_eq!(s_root_s1_b.value, val1);
+      +        assert_eq!(s_root_s2_d.value, val2);
+      +
+      +        // Check sharing of the simplified s0_c node
+      +        let simplified_s0_c_from_s1_b = s_root_s1_b.predecessors.iter().next().unwrap().as_arc();
+      +
+      +        let mut found_simplified_s1_e_arc = None;
+      +        for pred_of_s2_d_wrapper in &s_root_s2_d.predecessors {
+      +            let pred_of_s2_d_arc = pred_of_s2_d_wrapper.as_arc();
+      +            // We need to identify the simplified version of orig_s1_e.
+      +            // This is tricky without original pointers. We assume it's the one whose predecessor
+      +            // is the same Arc as simplified_s0_c_from_s1_b.
+      +            // This relies on the fact that *orig_s1_b and *orig_s1_e had the same value (val1)
+      +            // and shared the same predecessor Arc (orig_s0_c).
+      +            // After simplification, their simplified Arcs (s_s1_b and s_s1_e) will point to
+      +            // GSSNodes that are Eq.
+      +            if pred_of_s2_d_arc.value == val1 && !pred_of_s2_d_arc.predecessors.is_empty() {
+      +                 let pred_of_pred_of_s2_d_arc = pred_of_s2_d_arc.predecessors.iter().next().unwrap().as_arc();
+      +                 if Arc::ptr_eq(pred_of_pred_of_s2_d_arc, simplified_s0_c_from_s1_b) {
+      +                     found_simplified_s1_e_arc = Some(pred_of_s2_d_arc.clone());
+      +                     break;
+      +                 }
+      +            }
+      +        }
+      +        assert!(found_simplified_s1_e_arc.is_some(), "Could not find the simplified s1_e node.");
+      +        let simplified_s1_e_arc = found_simplified_s1_e_arc.unwrap();
+      +        let simplified_s0_c_from_s1_e = simplified_s1_e_arc.predecessors.iter().next().unwrap().as_arc();
+      +
+      +        assert!(Arc::ptr_eq(simplified_s0_c_from_s1_b, simplified_s0_c_from_s1_e),
+      +            "The simplified s0_c node should be the same Arc instance for s1_b and s1_e's predecessors.");
+      +
+      +        // Check that simplified s1_b and simplified s1_e point to GSSNodes that are Eq,
+      +        // even if the Arcs themselves (s_root_s1_b and simplified_s1_e_arc) are distinct.
+      +        assert_eq!(*s_root_s1_b, simplified_s1_e_arc, "Simplified s1_b and s1_e GSSNode content should be Eq.");
+      +        assert_ne!(Arc::as_ptr(s_root_s1_b), Arc::as_ptr(&simplified_s1_e_arc), "Simplified s1_b and s1_e should be distinct Arcs if their originals were distinct and part of different paths initially.");
+      +    }
+      +}
+
+      ```
+    metadata:
+  - user: |-
+      Still passing. Strange.
+      Perhaps the node is changing but `hash_key_cache` isn't being updated? But I can't see how that'd be possible.
+      Let's make it so `hash_key_cache` is only ever accessed through a getter. And for now let's replace the body of that getter (temporarily) with a direct computation of the `hash_key_cache` and comment out the actual field. That way we know for sure it's not that the value or predecessors are changing and `hash_key_cache` is just not getting updated.
+    metadata:
+  - assistant: |-
+      Okay, this is a good debugging step. If the `hash_key_cache` is not being updated correctly when predecessors change, then always recomputing it on access will ensure correctness and might change the behavior of `simplify_gss_forest` or your tests.
+
+      Here are the detailed, step-by-step instructions to modify your code:
+
+      **File: `src/datastructures/gss.rs`**
+
+      1.  **Modify the `GSSNode<T>` struct definition:**
+          Comment out the `hash_key_cache` field.
+          ```rust
+          #[derive(Debug, Clone)] // Removed PartialEq, Eq, PartialOrd, Ord, Hash
+          pub struct GSSNode<T> {
+              pub value: T,
+              predecessors: BTreeSet<ArcPtrWrapper<GSSNode<T>>>,
+              // hash_key_cache: u64, // Add this line // MODIFIED: Comment out this line
+          }
+          ```
+
+      2.  **Add a new getter method `get_hash_key_cache` to `impl<T> GSSNode<T>`:**
+          This method will compute the hash on demand. Since `compute_hash_key_cache` does not depend on `T` itself being `Hash` (only on predecessors), this getter can be in the general `impl<T> GSSNode<T>` block.
+          Place this method, for example, after `value_mut()`.
+
+          ```rust
+          // Inside impl<T> GSSNode<T> { ... }
+          // (Or, if you prefer, you can place it in impl<T: Hash> GSSNode<T> if all its uses are gated by T: Hash)
+
+          // Add this new method:
+          pub fn get_hash_key_cache(&self) -> u64 {
+              Self::compute_hash_key_cache(&self.predecessors)
+          }
+          ```
+
+      3.  **Modify `GSSNode::new`:**
+          Remove the computation and storage of `hash_key_cache`.
+          ```rust
+          // In impl<T: Hash> GSSNode<T>
+
+          pub fn new(value: T) -> Self {
+              // let hash_key_cache = Self::compute_hash_key_cache(&BTreeSet::new()); // MODIFIED: Remove this line
+              Self {
+                  value,
+                  predecessors: BTreeSet::new(),
+                  // hash_key_cache, // MODIFIED: Remove this line
+              }
+          }
+          ```
+
+      4.  **Modify `GSSNode::new_with_predecessors`:**
+          Remove the computation and storage of `hash_key_cache`.
+          ```rust
+          // In impl<T: Hash> GSSNode<T>
+
+          pub fn new_with_predecessors(value: T, predecessors: BTreeSet<Arc<GSSNode<T>>>) -> Self {
+              let predecessors_arc_ptr_wrapper = predecessors.into_iter().map(ArcPtrWrapper::new).collect();
+              // let hash_key_cache = Self::compute_hash_key_cache(&predecessors_arc_ptr_wrapper); // MODIFIED: Remove this line
+              Self {
+                  value,
+                  predecessors: predecessors_arc_ptr_wrapper,
+                  // hash_key_cache, // MODIFIED: Remove this line
+              }
+          }
+          ```
+          *(The `compute_hash_key_cache` method itself remains unchanged.)*
+
+      5.  **Modify `GSSNode::map`:**
+          Remove the computation and storage of `hash_key_cache` for the new node.
+          ```rust
+          // In impl<T: Hash> GSSNode<T> (actually, the map method has U: Hash)
+
+          pub fn map<F, U>(&self, f: F) -> GSSNode<U>
+          where
+              F: Copy + Fn(&T) -> U,
+              U: Hash, // U needs Hash for the GSSNode<U> to be valid in contexts expecting Hash
+          {
+              let new_value = f(&self.value);
+              let new_predecessors: BTreeSet<ArcPtrWrapper<GSSNode<U>>> = self.predecessors.iter()
+                  .map(|wrapper| ArcPtrWrapper::new(Arc::new(wrapper.as_ref().map(f))))
+                  .collect();
+              // let hash_key_cache = GSSNode::<U>::compute_hash_key_cache(&new_predecessors); // MODIFIED: Remove this line
+              GSSNode {
+                  value: new_value,
+                  predecessors: new_predecessors,
+                  // hash_key_cache, // MODIFIED: Remove this line
+              }
+          }
+          ```
+
+      6.  **Modify the `Hash` implementation for `GSSNode<T>`:**
+          Replace `self.hash_key_cache` with `self.get_hash_key_cache()`.
+          ```rust
+          impl<T: Hash> Hash for GSSNode<T> {
+              fn hash<H: Hasher>(&self, state: &mut H) {
+                  self.get_hash_key_cache().hash(state); // MODIFIED: Use getter
+                  self.value.hash(state);
+              }
+          }
+          ```
+
+      7.  **Modify the `PartialEq` implementation for `GSSNode<T>`:**
+          Replace `self.hash_key_cache` and `other.hash_key_cache` with calls to `get_hash_key_cache()`.
+          ```rust
+          impl<T: Hash + PartialEq> PartialEq for GSSNode<T> {
+              fn eq(&self, other: &Self) -> bool {
+                  self.get_hash_key_cache() == other.get_hash_key_cache() && self.value == other.value && self.predecessors == other.predecessors // MODIFIED: Use getter
+              }
+          }
+          ```
+
+      8.  **Modify the `PartialOrd` implementation for `GSSNode<T>`:**
+          Replace `self.hash_key_cache` and `other.hash_key_cache` with calls to `get_hash_key_cache()`.
+          ```rust
+          impl<T: Hash + PartialOrd> PartialOrd for GSSNode<T> {
+              fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                  match self.get_hash_key_cache().cmp(&other.get_hash_key_cache()) { // MODIFIED: Use getter
+                      Ordering::Equal => {
+                          match self.value.partial_cmp(&other.value) {
+                              Some(Ordering::Equal) => None,
+                              other_ordering => other_ordering,
+                          }
+                      }
+                      other_ordering => Some(other_ordering),
+                  }
+              }
+          }
+          ```
+
+      9.  **Modify the `Ord` implementation for `GSSNode<T>`:**
+          Replace `self.hash_key_cache` and `other.hash_key_cache` with calls to `get_hash_key_cache()`.
+          ```rust
+          impl<T: Hash + PartialOrd + Ord> Ord for GSSNode<T> {
+              fn cmp(&self, other: &Self) -> Ordering {
+                  self.get_hash_key_cache().cmp(&other.get_hash_key_cache()) // MODIFIED: Use getter
+                      .then_with(|| self.value.cmp(&other.value))
+                      .then_with(|| self.predecessors.cmp(&other.predecessors))
+              }
+          }
+          ```
+
+      10. **Modify `prune_and_transform_recursive` function:**
+          Remove the computation and storage of `hash_key_cache` when creating `new_node_arc`.
+          ```rust
+          // In fn prune_and_transform_recursive<T: Clone + Hash>(...)
+          // ...
+              Some((new_value, continue_recursion)) => {
+                  // ... (new_predecessors logic remains the same) ...
+                  // let hash_key_cache = GSSNode::<T>::compute_hash_key_cache(&new_predecessors); // MODIFIED: Remove this line
+                  let new_node_arc = Arc::new(GSSNode {
+                      value: new_value,
+                      predecessors: new_predecessors,
+                      // hash_key_cache, // MODIFIED: Remove this line
+                  });
+                  memo.insert(node_ptr, Some(new_node_arc.clone()));
+                  Some(new_node_arc)
+              }
+          // ...
+          ```
+
+      11. **Modify `simplify_node_recursive` function:**
+          Remove the computation and storage of `hash_key_cache` when creating `simplified_node`.
+          ```rust
+          // In fn simplify_node_recursive<T: Clone + Ord + Hash + Debug>(...)
+          // ...
+          // Compute the hash for the new simplified node based *only* on its (simplified) predecessors.
+          // let hash_key_cache = GSSNode::compute_hash_key_cache(&new_node_predecessors_arc_ptr_wrappers); // MODIFIED: Remove this line
+
+          // Create the new simplified GSSNode
+          let simplified_node = GSSNode {
+              value: original_node_arc.value.clone(),
+              predecessors: new_node_predecessors_arc_ptr_wrappers,
+              // hash_key_cache, // MODIFIED: Remove this line
+          };
+          let simplified_node_arc = Arc::new(simplified_node);
+          // ...
+          ```
+
+      12. **Update test code - `get_simplified_repr` helper:**
+          ```rust
+          // In mod tests
+          fn get_simplified_repr<T: Clone + Hash>(node_arc: &Arc<GSSNode<T>>) -> SimplifiedNodeRepr<T> { // Added Hash bound for get_hash_key_cache
+              let mut pred_hashes: Vec<u64> = node_arc.predecessors.iter()
+                  .map(|p| p.as_arc().get_hash_key_cache()) // MODIFIED: Use getter
+                  .collect();
+              pred_hashes.sort_unstable();
+              (node_arc.value.clone(), pred_hashes)
+          }
+          ```
+          *Note: You might need to add `T: Hash` bound to `get_simplified_repr` if `GSSNode::get_hash_key_cache` is placed in `impl<T: Hash> GSSNode<T>`. If you placed it in `impl<T> GSSNode<T>`, this specific change to the bounds of `get_simplified_repr` is not needed, but the call to `get_hash_key_cache()` is.*
+          Given our decision to put `get_hash_key_cache` in `impl<T> GSSNode<T>`, the `T: Hash` bound is not strictly needed on `get_simplified_repr` *just for this call*, but `SimplifiedNodeRepr` is used in contexts where `T` is `Hash` anyway. Let's assume `T: Hash` is already appropriate for this helper.
+
+      13. **Update test code - `test_gss_simplification_basic`:**
+          Replace all direct accesses to `.hash_key_cache` with `.get_hash_key_cache()`.
+          Example changes:
+          *   `s_d_nodes[0].hash_key_cache` becomes `s_d_nodes[0].get_hash_key_cache()`
+          *   `s_c1.hash_key_cache` becomes `s_c1.get_hash_key_cache()`
+          *   `s_c1.predecessors.iter().next().unwrap().as_arc().hash_key_cache` becomes `s_c1.predecessors.iter().next().unwrap().as_arc().get_hash_key_cache()`
+          *   And so on for `s_b1`, `s_a1`, `s_h1`, `s_h2`, and their predecessor hash collections.
+
+      14. **Update test code - `test_simplification_does_not_canonicalize_structurally_identical_nodes_from_distinct_arcs`:**
+          Replace direct accesses to `.hash_key_cache` with `.get_hash_key_cache()`.
+          *   `s_m_level_arcs[0].hash_key_cache` becomes `s_m_level_arcs[0].get_hash_key_cache()`
+          *   `s_l_level_arcs_collected[0].hash_key_cache` becomes `s_l_level_arcs_collected[0].get_hash_key_cache()`
+
+      15. **Update test code - `test_gss_simplification_reproduces_logged_structure` (if you added it):**
+          Similarly, update any `.hash_key_cache` accesses to `.get_hash_key_cache()`.
+
+      After these changes, the `hash_key_cache` will always be computed fresh whenever it's needed for hashing, equality, or ordering. This will tell us if a stale cache was the problem. Be aware that this will likely make operations that rely on these traits (like insertions into `BTreeSet` or `HashMap` where `GSSNode` is a key, or sorting) slower, as the hash is recomputed repeatedly. This change is primarily for debugging.
+    metadata:
+  - user: |
+      Using model 'gemini/gemini-2.5-flash-preview-04-17' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/datastructures/gss.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/datastructures/gss.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/datastructures/gss.rs
+    metadata:
 ...
