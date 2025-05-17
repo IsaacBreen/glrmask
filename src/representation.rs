@@ -110,14 +110,15 @@ impl<L: AllowedRepresentation, R: AllowedRepresentation> AllowedRepresentation f
 // Generic BiBTreeMap conversion where L and R are IntoAllowedRepresentation
 impl<L, R> IntoAllowedRepresentation for BiBTreeMap<L, R>
 where
-    L: IntoAllowedRepresentation,
-    R: IntoAllowedRepresentation,
-    L: Ord + Clone,
-    R: Ord + Clone,
+    L: IntoAllowedRepresentation + Ord,
+    R: IntoAllowedRepresentation + Ord,
 {
     type Allowed = AllowedBiBTreeMap<L::Allowed, R::Allowed>;
     fn into_allowed(self) -> Self::Allowed {
-        todo!()
+        let mut pairs: Vec<(L, R)> = self.into_iter().collect();
+        pairs.sort_unstable_by(|(l1, r1), (l2, r2)| l1.cmp(l2).then_with(|| r1.cmp(r2)));
+        let allowed_pairs: Vec<(L::Allowed, R::Allowed)> = pairs.into_iter().map(|(l, r)| (l.into_allowed(), r.into_allowed())).collect();
+        AllowedBiBTreeMap(allowed_pairs)
     }
 }
 
