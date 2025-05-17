@@ -15,6 +15,11 @@ use ouroboros::self_referencing;
 use numpy::{IntoPyArray, PyArray1, ToPyArray};
 use sep1::interface::IncrementalParser; // Added import
 
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Write};
+use serde_json;
+
+
 #[pyclass]
 #[derive(Clone)]
 struct PyGrammarExpr {
@@ -240,12 +245,9 @@ impl PyGrammarConstraint {
             llm_token_map.insert(token.to_vec(), LLMTokenID(id));
         }
 
-        // Assuming Grammar has methods to get tokenizer and parser
-        // You might need to adjust this based on your actual Grammar implementation
-        let tokenizer = grammar.inner.tokenizer.clone(); // Placeholder
-        let parser = grammar.inner.glr_parser(); // Placeholder
+        let tokenizer = grammar.inner.tokenizer.clone();
+        let parser = grammar.inner.glr_parser();
 
-        // terminal_name_to_group_id is already BiBTreeMap<String, usize>
         let terminal_name_map = grammar.inner.terminal_name_to_group_id.clone();
         let constraint = GrammarConstraint::new(
             tokenizer,
@@ -265,7 +267,27 @@ impl PyGrammarConstraint {
         println!("Printing precomputed data is not implemented in this binding yet.");
     }
 
+    /// Saves the GrammarConstraint to a JSON file.
+    fn save(&self, path: &str) -> PyResult<()> {
+        let file = File::create(path)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Failed to create file: {}", e)))?;
+        let writer = BufWriter::new(file);
+        // Serialize the GrammarConstraint itself (which is behind an Arc)
+        serde_json::to_writer_pretty(writer, &*self.inner)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Serialization error: {}", e)))?;
+        Ok(())
+    }
 
+    /// Loads a GrammarConstraint from a JSON file.
+    #[staticmethod]
+    fn load(path: &str) -> PyResult<Self> {
+        let file = File::open(path)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Failed to open file: {}", e)))?;
+        let reader = BufReader::new(file);
+        let constraint: GrammarConstraint = serde_json::from_reader(reader)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Deserialization error: {}", e)))?;
+        Ok(Self { inner: Arc::new(constraint) })
+    }
 }
 
 
@@ -289,18 +311,17 @@ impl PyGrammarConstraintState {
     #[new]
     fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
         // Use the builder provided by ouroboros, and immediately step
-        Ok(PyGrammarConstraintState {
-            inner: PyGrammarConstraintStateWrapperTryBuilder {
-                constraint,
-                inner_builder: |constraint: &PyGrammarConstraint| {
-                    // init state and step with all LLM tokens
-                    let mut state = constraint.inner.init();
-                    state.step_with_all_llm_tokens();
-                    Ok::<_, PyErr>(state)
-                },
-            }
-            .try_build()?
-        })
+        Ok(PyGrammarConstraintStateWrapperTryBuilder {
+            constraint,
+            inner_builder: |constraint: &PyGrammarConstraint| {
+                // init state and step with all LLM tokens
+                let mut state = constraint.inner.init();
+                state.step_with_all_llm_tokens();
+                Ok::<_, PyErr>(state)
+            },
+        }
+        .try_build()?
+        )
     }
 
     fn get_mask<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
@@ -339,12 +360,11 @@ pub struct PyIncrementalParser {
 impl PyIncrementalParser {
     #[new]
     fn new(grammar: PyGrammar) -> PyResult<Self> {
-        Ok(PyIncrementalParser {
-            inner: PyIncrementalParserWrapperTryBuilder {
-                grammar,
-                parser_builder: |g: &PyGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
-            }.try_build()?
-        })
+        Ok(PyIncrementalParserWrapperTryBuilder {
+            grammar,
+            parser_builder: |g: &PyGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
+        }.try_build()?
+        )
     }
 
     fn feed(&mut self, bytes: &[u8]) {
@@ -355,6 +375,7 @@ impl PyIncrementalParser {
         self.inner.with_parser(|p| p.is_valid())
     }
 }
+
 
 #[pymodule]
 fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
