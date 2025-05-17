@@ -330,20 +330,6 @@ impl SubAssign<&HybridBitset> for HybridBitset {
     }
 }
 
-// --- Equality and Hashing ---
-impl PartialEq for HybridBitset {
-    fn eq(&self, other: &Self) -> bool {
-        self.inner == other.inner
-    }
-}
-// Eq is derived.
-
-impl Hash for HybridBitset {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.inner.hash(state);
-    }
-}
-
 // --- Conversions and Indexing (Kept as todo! as per original) ---
 use bitvec::prelude::*; // Keep for BitVec type in signatures
 

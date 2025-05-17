@@ -1561,7 +1561,7 @@ mod tests {
         let mut expected_processed: HashSet<i32> = HashSet::new();
         expected_processed.insert(0);
         expected_processed.insert(1);
-        assert_eq!(final_processed, expected_processed);
+        assert_eq!(final_processed.clone(), expected_processed);
 
         // Check computed values
         assert_eq!(final_values.get(&0), Some(&100));
