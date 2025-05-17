@@ -229,7 +229,7 @@ impl GrammarConstraint {
     // -------------------------------------------------------------------------
     pub fn precompute(
         tokenizer:        &Regex,
-        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, // Renamed and now contains internal IDs
+        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, // Renamed
         token_name_map:   &BiBTreeMap<String, usize>,
         internal_max_llm_token: usize,                       // Number of internal tokens
     ) -> Precomputed {
@@ -865,6 +865,9 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(2, "Stepping grammar constraint state with tokenizer states {:?}", self.state.keys().map(|k| k.0).collect::<Vec<_>>());
         let initial_nodes_and_values = self.prepare_initial_nodes_and_values_for_special_map(llm_tokens);
 
+        // Initialize the counter
+        let mut step_counts: BTreeMap<GrammarTokenID, usize> = BTreeMap::new();
+
         self.state = BTreeMap::new();
 
         Trie::special_map(
@@ -883,6 +886,9 @@ impl<'a> GrammarConstraintState<'a> {
                     // }
                     !parse_state.stack.value.t.active.is_empty()
                 });
+                if let Some(gtid) = grammar_token_id {
+                    *step_counts.entry(gtid).or_insert(0) += 1;
+                }
                 grammar_token_id.map(|gtid| cloned_glr_parse_state.step(gtid));
                 if cloned_glr_parse_state.active_states.is_empty() {
                     crate::debug!(3, "No active states after processing grammar token {:?}", grammar_token_id.map(|gtid| gtid.0));
@@ -924,6 +930,7 @@ impl<'a> GrammarConstraintState<'a> {
                 for (possible_final_grammar_token, precomputed_finalizer) in node.value.finalizers().iter() { // Use .finalizers()
                     let mut possible_next_glr_parse_state = current_glr_parse_state.clone();
                     crate::debug!(3, "Stepping semi-final GLR parse state");
+                    *step_counts.entry(*possible_final_grammar_token).or_insert(0) += 1;
                     possible_next_glr_parse_state.step(*possible_final_grammar_token);
                     if possible_next_glr_parse_state.is_ok() {
                         crate::debug!(3, "Semi-final GLR parse state is OK");
@@ -972,6 +979,26 @@ impl<'a> GrammarConstraintState<'a> {
         // Print each GSS
         for (tokenizer_state_id, glr_state) in self.state.iter() {
             glr_state.log_gss(format!("After simplifying GSS for state {}", tokenizer_state_id.0).as_str(), GrammarTokenID(0));
+        }
+
+        // Print GLRParserState::step call counts
+        if !step_counts.is_empty() {
+            println!("--- GLRParserState::step call counts (this GrammarConstraintState::step) ---");
+            let mut sorted_counts: Vec<(GrammarTokenID, usize)> = step_counts.into_iter().collect();
+            sorted_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0))); // Sort by count desc, then by ID asc
+
+            for (gtid, count) in sorted_counts {
+                let token_name = self
+                    .parent
+                    .token_name_map
+                    .get_by_right(&gtid.0)
+                    .map(|s| s.as_str())
+                    .unwrap_or("<Unknown Name>");
+                println!("  Token \"{}\" (ID: {}): {} calls", token_name, gtid.0, count);
+            }
+            println!("--------------------------------------------------------------------------");
+        } else {
+            println!("--- GLRParserState::step was not called in this GrammarConstraintState::step ---");
         }
     }
 }
