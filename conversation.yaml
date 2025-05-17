@@ -10,7 +10,7 @@ local_system:
     - src/glr/mod.rs
     - src/glr/parser.rs
     - src/glr/table.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/constraint_extra.rs: |
@@ -14894,7 +14894,7 @@ local_system:
               &mut self.children
           }
       }
-  diffs_applied_this_send: true
+  diffs_applied_this_send: false
 system:
   message: |2
 
@@ -22487,5 +22487,1982 @@ messages:
 
       --- Applying Changes ---
       Successfully created file: src/constraint_serializer.rs
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_extra.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_serializer.rs since previous turn:
+      ```diff
+      --- original version of src/constraint_serializer.rs+++ current version of src/constraint_serializer.rs@@ -17,7 +17,7 @@ use crate::datastructures::ArcPtrWrapper; // For reconstructing children map
+       
+       use serde::{Serialize, Deserialize, Serializer, Deserializer};
+      -use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+      +use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+       use std::sync::{Arc, Mutex};
+       use std::iter::FromIterator;
+       use bimap::BiBTreeMap;
+      @@ -446,12 +446,3 @@     let serializable_gc: SerializableGrammarConstraint = serde_json::from_str(json_str).map_err(|e| e.to_string())?;
+           GrammarConstraint::try_from(serializable_gc)
+       }
+      -
+      -
+      -// Helper method for PrecomputeNode to access children mutably (if not already present)
+      -// This is needed because the original Trie methods might not be suitable for direct deserialization logic.
+      -impl<EK: Ord, EV, T> PrecomputeNode<EK, EV, T> {
+      -    fn children_mut(&mut self) -> &mut BTreeMap<EK, BTreeMap<ArcPtrWrapper<Mutex<Self>>, EV>> {
+      -        &mut self.children
+      -    }
+      -}
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/datastructures/trie.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/finite_automata.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      RUSTFLAGS=-Awarnings /Users/isaacbreen/.cargo/bin/cargo build
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      error[E0599]: the method `serialize` exists for struct `BTreeMap<&TokenizerStateID, BVHelper<'_>>`, but its trait bounds were not satisfied
+         --> src/constraint_serializer.rs:70:17
+          |
+      70  |           new_map.serialize(serializer)
+          |                   ^^^^^^^^^ method cannot be called on `BTreeMap<&TokenizerStateID, BVHelper<'_>>` due to unsatisfied trait bounds
+          |
+         ::: /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:173:1
+          |
+      173 | / pub struct BTreeMap<
+      174 | |     K,
+      175 | |     V,
+      176 | |     #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator + Clone = Global,
+      177 | | > {
+          | |_- doesn't satisfy `_: Serialize`
+          |
+          = note: the following trait bounds were not satisfied:
+                  `&tokenizer::TokenizerStateID: tests_apr25::_::_serde::Serialize`
+                  which is required by `std::collections::BTreeMap<&tokenizer::TokenizerStateID, btreemap_tokenizerstate_llmtokenbv_serde::serialize::BVHelper<'_>>: tests_apr25::_::_serde::Serialize`
+
+      error[E0277]: the trait bound `tokenizer::TokenizerStateID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+        --> src/constraint_serializer.rs:77:65
+         |
+      77 |         let map_helpers: BTreeMap<TokenizerStateID, BVHelper> = BTreeMap::deserialize(deserializer)?;
+         |                                                                 ^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `tokenizer::TokenizerStateID`
+         |
+         = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `tokenizer::TokenizerStateID` type
+         = note: for types from other crates check whether the crate offers a `serde` feature flag
+         = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                   &'a Path
+                   &'a [u8]
+                   &'a str
+                   ()
+                   (T,)
+                   (T0, T1)
+                   (T0, T1, T2)
+                   (T0, T1, T2, T3)
+                 and 167 others
+         = note: required for `BTreeMap<TokenizerStateID, BVHelper>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+         = note: the full name for the type has been written to '/Users/isaacbreen/Projects2/grammars2024/target/debug/deps/sep1-c038647f7787e254.long-type-1977684064598891901.txt'
+         = note: consider using `--verbose` to print the full type name to the console
+
+      error[E0599]: no function or associated item named `from_iter` found for struct `u8set::U8Set` in the current scope
+        --> src/constraint_serializer.rs:93:19
+         |
+      93 |         Ok(U8Set::from_iter(v))
+         |                   ^^^^^^^^^ function or associated item not found in `U8Set`
+         |
+        ::: src/datastructures/u8set.rs:4:1
+         |
+      4  | pub struct U8Set {
+         | ---------------- function or associated item `from_iter` not found for this struct
+         |
+      note: if you're trying to build a new `u8set::U8Set` consider using one of the following associated functions:
+            u8set::U8Set::all
+            u8set::U8Set::none
+            u8set::U8Set::new
+            u8set::U8Set::from_u8
+            and 13 others
+        --> src/datastructures/u8set.rs:66:5
+         |
+      66 |     pub fn all() -> Self {
+         |     ^^^^^^^^^^^^^^^^^^^^
+      ...
+      71 |     pub fn none() -> Self {
+         |     ^^^^^^^^^^^^^^^^^^^^^
+      ...
+      76 |     pub fn new() -> Self {
+         |     ^^^^^^^^^^^^^^^^^^^^
+      ...
+      81 |     pub fn from_u8(p0: u8) -> U8Set {
+         |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+         = help: items from traits can only be used if the trait is implemented and in scope
+         = note: the following trait defines an item `from_iter`, perhaps you need to implement it:
+                 candidate #1: `std::iter::FromIterator`
+      help: there is an associated function `from_str` with a similar name
+         |
+      93 -         Ok(U8Set::from_iter(v))
+      93 +         Ok(U8Set::from_str(v))
+         |
+
+      error[E0277]: the trait bound `TerminalID: tests_apr25::_::_serde::Serialize` is not satisfied
+          --> src/constraint_serializer.rs:168:10
+           |
+      168  | #[derive(Serialize, Deserialize, Debug, Clone, Default)]
+           |          ^^^^^^^^^ the trait `tests_apr25::_::_serde::Serialize` is not implemented for `TerminalID`
+      169  | pub struct SerializablePrecomputedNodeContents {
+      170  |     finalizers: BTreeMap<GrammarTokenID, SerializablePrecomputedFinalizer>,
+           |     ---------- required by a bound introduced by this call
+           |
+           = note: for local types consider adding `#[derive(serde::Serialize)]` to your `TerminalID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Serialize`:
+                     &'a T
+                     &'a mut T
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                     (T0, T1, T2, T3, T4)
+                   and 145 others
+           = note: required for `std::collections::BTreeMap<TerminalID, SerializablePrecomputedFinalizer>` to implement `tests_apr25::_::_serde::Serialize`
+      note: required by a bound in `tests_apr25::_::_serde::ser::SerializeStruct::serialize_field`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/ser/mod.rs:1866:21
+           |
+      1864 |     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+           |        --------------- required by a bound in this associated function
+      1865 |     where
+      1866 |         T: ?Sized + Serialize;
+           |                     ^^^^^^^^^ required by this bound in `SerializeStruct::serialize_field`
+           = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `TerminalID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:170:17
+           |
+      170  |     finalizers: BTreeMap<GrammarTokenID, SerializablePrecomputedFinalizer>,
+           |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `TerminalID`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `TerminalID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `std::collections::BTreeMap<TerminalID, SerializablePrecomputedFinalizer>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_element`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1732:12
+           |
+      1730 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+           |        ------------ required by a bound in this associated function
+      1731 |     where
+      1732 |         T: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+
+      error[E0277]: the trait bound `TerminalID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:170:17
+           |
+      170  |     finalizers: BTreeMap<GrammarTokenID, SerializablePrecomputedFinalizer>,
+           |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `TerminalID`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `TerminalID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `std::collections::BTreeMap<TerminalID, SerializablePrecomputedFinalizer>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_value`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1871:12
+           |
+      1869 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
+           |        ---------- required by a bound in this associated function
+      1870 |     where
+      1871 |         V: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
+
+      error[E0277]: the trait bound `TerminalID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+         --> src/constraint_serializer.rs:168:21
+          |
+      168 | #[derive(Serialize, Deserialize, Debug, Clone, Default)]
+          |                     ^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `TerminalID`
+          |
+          = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `TerminalID` type
+          = note: for types from other crates check whether the crate offers a `serde` feature flag
+          = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                    &'a Path
+                    &'a [u8]
+                    &'a str
+                    ()
+                    (T,)
+                    (T0, T1)
+                    (T0, T1, T2)
+                    (T0, T1, T2, T3)
+                  and 165 others
+          = note: required for `std::collections::BTreeMap<TerminalID, SerializablePrecomputedFinalizer>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `tests_apr25::_::_serde::__private::de::missing_field`
+         --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/private/de.rs:25:8
+          |
+      23  | pub fn missing_field<'de, V, E>(field: &'static str) -> Result<V, E>
+          |        ------------- required by a bound in this function
+      24  | where
+      25  |     V: Deserialize<'de>,
+          |        ^^^^^^^^^^^^^^^^ required by this bound in `missing_field`
+          = note: this error originates in the derive macro `Deserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `tokenizer::TokenizerStateID: tests_apr25::_::_serde::Serialize` is not satisfied
+          --> src/constraint_serializer.rs:199:10
+           |
+      199  | #[derive(Serialize, Deserialize, Debug)]
+           |          ^^^^^^^^^ the trait `tests_apr25::_::_serde::Serialize` is not implemented for `tokenizer::TokenizerStateID`
+      ...
+      202  |     roots: BTreeMap<TokenizerStateID, usize /*NodeID*/>,
+           |     ----- required by a bound introduced by this call
+           |
+           = note: for local types consider adding `#[derive(serde::Serialize)]` to your `tokenizer::TokenizerStateID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Serialize`:
+                     &'a T
+                     &'a mut T
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                     (T0, T1, T2, T3, T4)
+                   and 145 others
+           = note: required for `std::collections::BTreeMap<tokenizer::TokenizerStateID, usize>` to implement `tests_apr25::_::_serde::Serialize`
+      note: required by a bound in `tests_apr25::_::_serde::ser::SerializeStruct::serialize_field`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/ser/mod.rs:1866:21
+           |
+      1864 |     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+           |        --------------- required by a bound in this associated function
+      1865 |     where
+      1866 |         T: ?Sized + Serialize;
+           |                     ^^^^^^^^^ required by this bound in `SerializeStruct::serialize_field`
+           = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `tokenizer::TokenizerStateID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:202:12
+           |
+      202  |     roots: BTreeMap<TokenizerStateID, usize /*NodeID*/>,
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `tokenizer::TokenizerStateID`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `tokenizer::TokenizerStateID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `std::collections::BTreeMap<tokenizer::TokenizerStateID, usize>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_element`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1732:12
+           |
+      1730 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+           |        ------------ required by a bound in this associated function
+      1731 |     where
+      1732 |         T: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+
+      error[E0277]: the trait bound `tokenizer::TokenizerStateID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:202:12
+           |
+      202  |     roots: BTreeMap<TokenizerStateID, usize /*NodeID*/>,
+           |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `tokenizer::TokenizerStateID`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `tokenizer::TokenizerStateID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `std::collections::BTreeMap<tokenizer::TokenizerStateID, usize>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_value`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1871:12
+           |
+      1869 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
+           |        ---------- required by a bound in this associated function
+      1870 |     where
+      1871 |         V: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
+
+      error[E0277]: the trait bound `tokenizer::TokenizerStateID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+         --> src/constraint_serializer.rs:199:21
+          |
+      199 | #[derive(Serialize, Deserialize, Debug)]
+          |                     ^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `tokenizer::TokenizerStateID`
+          |
+          = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `tokenizer::TokenizerStateID` type
+          = note: for types from other crates check whether the crate offers a `serde` feature flag
+          = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                    &'a Path
+                    &'a [u8]
+                    &'a str
+                    ()
+                    (T,)
+                    (T0, T1)
+                    (T0, T1, T2)
+                    (T0, T1, T2, T3)
+                  and 165 others
+          = note: required for `std::collections::BTreeMap<tokenizer::TokenizerStateID, usize>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `tests_apr25::_::_serde::__private::de::missing_field`
+         --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/private/de.rs:25:8
+          |
+      23  | pub fn missing_field<'de, V, E>(field: &'static str) -> Result<V, E>
+          |        ------------- required by a bound in this function
+      24  | where
+      25  |     V: Deserialize<'de>,
+          |        ^^^^^^^^^^^^^^^^ required by this bound in `missing_field`
+          = note: this error originates in the derive macro `Deserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `StateID: tests_apr25::_::_serde::Serialize` is not satisfied
+          --> src/constraint_serializer.rs:207:10
+           |
+      207  | #[derive(Serialize, Deserialize, Debug)]
+           |          ^^^^^^^^^ the trait `tests_apr25::_::_serde::Serialize` is not implemented for `StateID`
+      208  | struct SerializableGLRParser {
+      209  |     stage_7_table: Stage7Table,
+           |     ------------- required by a bound introduced by this call
+           |
+           = note: for local types consider adding `#[derive(serde::Serialize)]` to your `StateID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Serialize`:
+                     &'a T
+                     &'a mut T
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                     (T0, T1, T2, T3, T4)
+                   and 145 others
+           = note: required for `std::collections::BTreeMap<StateID, Stage7Row>` to implement `tests_apr25::_::_serde::Serialize`
+      note: required by a bound in `tests_apr25::_::_serde::ser::SerializeStruct::serialize_field`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/ser/mod.rs:1866:21
+           |
+      1864 |     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+           |        --------------- required by a bound in this associated function
+      1865 |     where
+      1866 |         T: ?Sized + Serialize;
+           |                     ^^^^^^^^^ required by this bound in `SerializeStruct::serialize_field`
+           = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `Stage7Row: tests_apr25::_::_serde::Serialize` is not satisfied
+          --> src/constraint_serializer.rs:207:10
+           |
+      207  | #[derive(Serialize, Deserialize, Debug)]
+           |          ^^^^^^^^^ the trait `tests_apr25::_::_serde::Serialize` is not implemented for `Stage7Row`
+      208  | struct SerializableGLRParser {
+      209  |     stage_7_table: Stage7Table,
+           |     ------------- required by a bound introduced by this call
+           |
+           = note: for local types consider adding `#[derive(serde::Serialize)]` to your `Stage7Row` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Serialize`:
+                     &'a T
+                     &'a mut T
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                     (T0, T1, T2, T3, T4)
+                   and 145 others
+           = note: required for `std::collections::BTreeMap<StateID, Stage7Row>` to implement `tests_apr25::_::_serde::Serialize`
+      note: required by a bound in `tests_apr25::_::_serde::ser::SerializeStruct::serialize_field`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/ser/mod.rs:1866:21
+           |
+      1864 |     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+           |        --------------- required by a bound in this associated function
+      1865 |     where
+      1866 |         T: ?Sized + Serialize;
+           |                     ^^^^^^^^^ required by this bound in `SerializeStruct::serialize_field`
+           = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `Production: tests_apr25::_::_serde::Serialize` is not satisfied
+          --> src/constraint_serializer.rs:207:10
+           |
+      207  | #[derive(Serialize, Deserialize, Debug)]
+           |          ^^^^^^^^^ the trait `tests_apr25::_::_serde::Serialize` is not implemented for `Production`
+      ...
+      210  |     productions: Vec<Production>,
+           |     ----------- required by a bound introduced by this call
+           |
+           = note: for local types consider adding `#[derive(serde::Serialize)]` to your `Production` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Serialize`:
+                     &'a T
+                     &'a mut T
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                     (T0, T1, T2, T3, T4)
+                   and 145 others
+           = note: required for `Vec<Production>` to implement `tests_apr25::_::_serde::Serialize`
+      note: required by a bound in `tests_apr25::_::_serde::ser::SerializeStruct::serialize_field`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/ser/mod.rs:1866:21
+           |
+      1864 |     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+           |        --------------- required by a bound in this associated function
+      1865 |     where
+      1866 |         T: ?Sized + Serialize;
+           |                     ^^^^^^^^^ required by this bound in `SerializeStruct::serialize_field`
+           = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `Terminal: tests_apr25::_::_serde::Serialize` is not satisfied
+          --> src/constraint_serializer.rs:207:10
+           |
+      207  | #[derive(Serialize, Deserialize, Debug)]
+           |          ^^^^^^^^^ the trait `tests_apr25::_::_serde::Serialize` is not implemented for `Terminal`
+      ...
+      211  |     terminal_map: BiBTreeMap<Terminal, GLRTerminalID>,
+           |     ------------ required by a bound introduced by this call
+           |
+           = note: for local types consider adding `#[derive(serde::Serialize)]` to your `Terminal` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Serialize`:
+                     &'a T
+                     &'a mut T
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                     (T0, T1, T2, T3, T4)
+                   and 145 others
+           = note: required for `BiBTreeMap<Terminal, TerminalID>` to implement `tests_apr25::_::_serde::Serialize`
+      note: required by a bound in `tests_apr25::_::_serde::ser::SerializeStruct::serialize_field`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/ser/mod.rs:1866:21
+           |
+      1864 |     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+           |        --------------- required by a bound in this associated function
+      1865 |     where
+      1866 |         T: ?Sized + Serialize;
+           |                     ^^^^^^^^^ required by this bound in `SerializeStruct::serialize_field`
+           = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `TerminalID: tests_apr25::_::_serde::Serialize` is not satisfied
+          --> src/constraint_serializer.rs:207:10
+           |
+      207  | #[derive(Serialize, Deserialize, Debug)]
+           |          ^^^^^^^^^ the trait `tests_apr25::_::_serde::Serialize` is not implemented for `TerminalID`
+      ...
+      211  |     terminal_map: BiBTreeMap<Terminal, GLRTerminalID>,
+           |     ------------ required by a bound introduced by this call
+           |
+           = note: for local types consider adding `#[derive(serde::Serialize)]` to your `TerminalID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Serialize`:
+                     &'a T
+                     &'a mut T
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                     (T0, T1, T2, T3, T4)
+                   and 145 others
+           = note: required for `BiBTreeMap<Terminal, TerminalID>` to implement `tests_apr25::_::_serde::Serialize`
+      note: required by a bound in `tests_apr25::_::_serde::ser::SerializeStruct::serialize_field`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/ser/mod.rs:1866:21
+           |
+      1864 |     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+           |        --------------- required by a bound in this associated function
+      1865 |     where
+      1866 |         T: ?Sized + Serialize;
+           |                     ^^^^^^^^^ required by this bound in `SerializeStruct::serialize_field`
+           = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `NonTerminal: tests_apr25::_::_serde::Serialize` is not satisfied
+          --> src/constraint_serializer.rs:207:10
+           |
+      207  | #[derive(Serialize, Deserialize, Debug)]
+           |          ^^^^^^^^^ the trait `tests_apr25::_::_serde::Serialize` is not implemented for `NonTerminal`
+      ...
+      212  |     non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+           |     ---------------- required by a bound introduced by this call
+           |
+           = note: for local types consider adding `#[derive(serde::Serialize)]` to your `NonTerminal` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Serialize`:
+                     &'a T
+                     &'a mut T
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                     (T0, T1, T2, T3, T4)
+                   and 145 others
+           = note: required for `BiBTreeMap<NonTerminal, NonTerminalID>` to implement `tests_apr25::_::_serde::Serialize`
+      note: required by a bound in `tests_apr25::_::_serde::ser::SerializeStruct::serialize_field`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/ser/mod.rs:1866:21
+           |
+      1864 |     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+           |        --------------- required by a bound in this associated function
+      1865 |     where
+      1866 |         T: ?Sized + Serialize;
+           |                     ^^^^^^^^^ required by this bound in `SerializeStruct::serialize_field`
+           = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `NonTerminalID: tests_apr25::_::_serde::Serialize` is not satisfied
+          --> src/constraint_serializer.rs:207:10
+           |
+      207  | #[derive(Serialize, Deserialize, Debug)]
+           |          ^^^^^^^^^ the trait `tests_apr25::_::_serde::Serialize` is not implemented for `NonTerminalID`
+      ...
+      212  |     non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+           |     ---------------- required by a bound introduced by this call
+           |
+           = note: for local types consider adding `#[derive(serde::Serialize)]` to your `NonTerminalID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Serialize`:
+                     &'a T
+                     &'a mut T
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                     (T0, T1, T2, T3, T4)
+                   and 145 others
+           = note: required for `BiBTreeMap<NonTerminal, NonTerminalID>` to implement `tests_apr25::_::_serde::Serialize`
+      note: required by a bound in `tests_apr25::_::_serde::ser::SerializeStruct::serialize_field`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/ser/mod.rs:1866:21
+           |
+      1864 |     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+           |        --------------- required by a bound in this associated function
+      1865 |     where
+      1866 |         T: ?Sized + Serialize;
+           |                     ^^^^^^^^^ required by this bound in `SerializeStruct::serialize_field`
+           = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `items::Item: tests_apr25::_::_serde::Serialize` is not satisfied
+          --> src/constraint_serializer.rs:207:10
+           |
+      207  | #[derive(Serialize, Deserialize, Debug)]
+           |          ^^^^^^^^^ the trait `tests_apr25::_::_serde::Serialize` is not implemented for `items::Item`
+      ...
+      213  |     item_set_map: Vec<(BTreeSet<Item>, StateID)>, // Serialized as Vec of pairs
+           |     ------------ required by a bound introduced by this call
+           |
+           = note: for local types consider adding `#[derive(serde::Serialize)]` to your `items::Item` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Serialize`:
+                     &'a T
+                     &'a mut T
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                     (T0, T1, T2, T3, T4)
+                   and 145 others
+           = note: required for `BTreeSet<items::Item>` to implement `tests_apr25::_::_serde::Serialize`
+           = note: 2 redundant requirements hidden
+           = note: required for `Vec<(BTreeSet<items::Item>, StateID)>` to implement `tests_apr25::_::_serde::Serialize`
+      note: required by a bound in `tests_apr25::_::_serde::ser::SerializeStruct::serialize_field`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/ser/mod.rs:1866:21
+           |
+      1864 |     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+           |        --------------- required by a bound in this associated function
+      1865 |     where
+      1866 |         T: ?Sized + Serialize;
+           |                     ^^^^^^^^^ required by this bound in `SerializeStruct::serialize_field`
+           = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `StateID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:209:20
+           |
+      209  |     stage_7_table: Stage7Table,
+           |                    ^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `StateID`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `StateID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `std::collections::BTreeMap<StateID, Stage7Row>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_element`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1732:12
+           |
+      1730 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+           |        ------------ required by a bound in this associated function
+      1731 |     where
+      1732 |         T: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+
+      error[E0277]: the trait bound `Stage7Row: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:209:20
+           |
+      209  |     stage_7_table: Stage7Table,
+           |                    ^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `Stage7Row`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `Stage7Row` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `std::collections::BTreeMap<StateID, Stage7Row>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_element`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1732:12
+           |
+      1730 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+           |        ------------ required by a bound in this associated function
+      1731 |     where
+      1732 |         T: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+
+      error[E0277]: the trait bound `Production: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:210:18
+           |
+      210  |     productions: Vec<Production>,
+           |                  ^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `Production`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `Production` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `Vec<Production>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_element`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1732:12
+           |
+      1730 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+           |        ------------ required by a bound in this associated function
+      1731 |     where
+      1732 |         T: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+
+      error[E0277]: the trait bound `Terminal: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:211:19
+           |
+      211  |     terminal_map: BiBTreeMap<Terminal, GLRTerminalID>,
+           |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `Terminal`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `Terminal` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `BiBTreeMap<Terminal, TerminalID>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_element`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1732:12
+           |
+      1730 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+           |        ------------ required by a bound in this associated function
+      1731 |     where
+      1732 |         T: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+
+      error[E0277]: the trait bound `TerminalID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:211:19
+           |
+      211  |     terminal_map: BiBTreeMap<Terminal, GLRTerminalID>,
+           |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `TerminalID`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `TerminalID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `BiBTreeMap<Terminal, TerminalID>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_element`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1732:12
+           |
+      1730 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+           |        ------------ required by a bound in this associated function
+      1731 |     where
+      1732 |         T: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+
+      error[E0277]: the trait bound `NonTerminal: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:212:23
+           |
+      212  |     non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+           |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `NonTerminal`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `NonTerminal` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `BiBTreeMap<NonTerminal, NonTerminalID>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_element`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1732:12
+           |
+      1730 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+           |        ------------ required by a bound in this associated function
+      1731 |     where
+      1732 |         T: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+
+      error[E0277]: the trait bound `NonTerminalID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:212:23
+           |
+      212  |     non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+           |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `NonTerminalID`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `NonTerminalID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `BiBTreeMap<NonTerminal, NonTerminalID>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_element`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1732:12
+           |
+      1730 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+           |        ------------ required by a bound in this associated function
+      1731 |     where
+      1732 |         T: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+
+      error[E0277]: the trait bound `StateID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:213:19
+           |
+      213  |     item_set_map: Vec<(BTreeSet<Item>, StateID)>, // Serialized as Vec of pairs
+           |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `StateID`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `StateID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `(BTreeSet<items::Item>, StateID)` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+           = note: 1 redundant requirement hidden
+           = note: required for `Vec<(BTreeSet<items::Item>, StateID)>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_element`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1732:12
+           |
+      1730 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+           |        ------------ required by a bound in this associated function
+      1731 |     where
+      1732 |         T: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+
+      error[E0277]: the trait bound `items::Item: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:213:19
+           |
+      213  |     item_set_map: Vec<(BTreeSet<Item>, StateID)>, // Serialized as Vec of pairs
+           |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `items::Item`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `items::Item` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `BTreeSet<items::Item>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+           = note: 2 redundant requirements hidden
+           = note: required for `Vec<(BTreeSet<items::Item>, StateID)>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_element`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1732:12
+           |
+      1730 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+           |        ------------ required by a bound in this associated function
+      1731 |     where
+      1732 |         T: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+
+      error[E0277]: the trait bound `StateID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:214:21
+           |
+      214  |     start_state_id: StateID,
+           |                     ^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `StateID`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `StateID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+      note: required by a bound in `next_element`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1732:12
+           |
+      1730 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+           |        ------------ required by a bound in this associated function
+      1731 |     where
+      1732 |         T: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+
+      error[E0277]: the trait bound `StateID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:209:20
+           |
+      209  |     stage_7_table: Stage7Table,
+           |                    ^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `StateID`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `StateID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `std::collections::BTreeMap<StateID, Stage7Row>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_value`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1871:12
+           |
+      1869 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
+           |        ---------- required by a bound in this associated function
+      1870 |     where
+      1871 |         V: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
+
+      error[E0277]: the trait bound `Stage7Row: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:209:20
+           |
+      209  |     stage_7_table: Stage7Table,
+           |                    ^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `Stage7Row`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `Stage7Row` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `std::collections::BTreeMap<StateID, Stage7Row>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_value`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1871:12
+           |
+      1869 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
+           |        ---------- required by a bound in this associated function
+      1870 |     where
+      1871 |         V: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
+
+      error[E0277]: the trait bound `Production: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:210:18
+           |
+      210  |     productions: Vec<Production>,
+           |                  ^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `Production`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `Production` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `Vec<Production>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_value`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1871:12
+           |
+      1869 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
+           |        ---------- required by a bound in this associated function
+      1870 |     where
+      1871 |         V: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
+
+      error[E0277]: the trait bound `Terminal: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:211:19
+           |
+      211  |     terminal_map: BiBTreeMap<Terminal, GLRTerminalID>,
+           |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `Terminal`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `Terminal` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `BiBTreeMap<Terminal, TerminalID>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_value`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1871:12
+           |
+      1869 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
+           |        ---------- required by a bound in this associated function
+      1870 |     where
+      1871 |         V: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
+
+      error[E0277]: the trait bound `TerminalID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:211:19
+           |
+      211  |     terminal_map: BiBTreeMap<Terminal, GLRTerminalID>,
+           |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `TerminalID`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `TerminalID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `BiBTreeMap<Terminal, TerminalID>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_value`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1871:12
+           |
+      1869 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
+           |        ---------- required by a bound in this associated function
+      1870 |     where
+      1871 |         V: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
+
+      error[E0277]: the trait bound `NonTerminal: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:212:23
+           |
+      212  |     non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+           |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `NonTerminal`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `NonTerminal` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `BiBTreeMap<NonTerminal, NonTerminalID>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_value`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1871:12
+           |
+      1869 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
+           |        ---------- required by a bound in this associated function
+      1870 |     where
+      1871 |         V: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
+
+      error[E0277]: the trait bound `NonTerminalID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:212:23
+           |
+      212  |     non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+           |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `NonTerminalID`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `NonTerminalID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `BiBTreeMap<NonTerminal, NonTerminalID>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_value`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1871:12
+           |
+      1869 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
+           |        ---------- required by a bound in this associated function
+      1870 |     where
+      1871 |         V: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
+
+      error[E0277]: the trait bound `StateID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:213:19
+           |
+      213  |     item_set_map: Vec<(BTreeSet<Item>, StateID)>, // Serialized as Vec of pairs
+           |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `StateID`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `StateID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `(BTreeSet<items::Item>, StateID)` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+           = note: 1 redundant requirement hidden
+           = note: required for `Vec<(BTreeSet<items::Item>, StateID)>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_value`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1871:12
+           |
+      1869 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
+           |        ---------- required by a bound in this associated function
+      1870 |     where
+      1871 |         V: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
+
+      error[E0277]: the trait bound `items::Item: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:213:19
+           |
+      213  |     item_set_map: Vec<(BTreeSet<Item>, StateID)>, // Serialized as Vec of pairs
+           |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `items::Item`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `items::Item` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `BTreeSet<items::Item>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+           = note: 2 redundant requirements hidden
+           = note: required for `Vec<(BTreeSet<items::Item>, StateID)>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_value`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1871:12
+           |
+      1869 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
+           |        ---------- required by a bound in this associated function
+      1870 |     where
+      1871 |         V: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
+
+      error[E0277]: the trait bound `StateID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:214:21
+           |
+      214  |     start_state_id: StateID,
+           |                     ^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `StateID`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `StateID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+      note: required by a bound in `next_value`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1871:12
+           |
+      1869 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
+           |        ---------- required by a bound in this associated function
+      1870 |     where
+      1871 |         V: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
+
+      error[E0277]: the trait bound `StateID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+         --> src/constraint_serializer.rs:207:21
+          |
+      207 | #[derive(Serialize, Deserialize, Debug)]
+          |                     ^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `StateID`
+          |
+          = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `StateID` type
+          = note: for types from other crates check whether the crate offers a `serde` feature flag
+          = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                    &'a Path
+                    &'a [u8]
+                    &'a str
+                    ()
+                    (T,)
+                    (T0, T1)
+                    (T0, T1, T2)
+                    (T0, T1, T2, T3)
+                  and 165 others
+          = note: required for `std::collections::BTreeMap<StateID, Stage7Row>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `tests_apr25::_::_serde::__private::de::missing_field`
+         --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/private/de.rs:25:8
+          |
+      23  | pub fn missing_field<'de, V, E>(field: &'static str) -> Result<V, E>
+          |        ------------- required by a bound in this function
+      24  | where
+      25  |     V: Deserialize<'de>,
+          |        ^^^^^^^^^^^^^^^^ required by this bound in `missing_field`
+          = note: this error originates in the derive macro `Deserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `Stage7Row: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+         --> src/constraint_serializer.rs:207:21
+          |
+      207 | #[derive(Serialize, Deserialize, Debug)]
+          |                     ^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `Stage7Row`
+          |
+          = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `Stage7Row` type
+          = note: for types from other crates check whether the crate offers a `serde` feature flag
+          = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                    &'a Path
+                    &'a [u8]
+                    &'a str
+                    ()
+                    (T,)
+                    (T0, T1)
+                    (T0, T1, T2)
+                    (T0, T1, T2, T3)
+                  and 165 others
+          = note: required for `std::collections::BTreeMap<StateID, Stage7Row>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `tests_apr25::_::_serde::__private::de::missing_field`
+         --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/private/de.rs:25:8
+          |
+      23  | pub fn missing_field<'de, V, E>(field: &'static str) -> Result<V, E>
+          |        ------------- required by a bound in this function
+      24  | where
+      25  |     V: Deserialize<'de>,
+          |        ^^^^^^^^^^^^^^^^ required by this bound in `missing_field`
+          = note: this error originates in the derive macro `Deserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `Production: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+         --> src/constraint_serializer.rs:207:21
+          |
+      207 | #[derive(Serialize, Deserialize, Debug)]
+          |                     ^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `Production`
+          |
+          = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `Production` type
+          = note: for types from other crates check whether the crate offers a `serde` feature flag
+          = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                    &'a Path
+                    &'a [u8]
+                    &'a str
+                    ()
+                    (T,)
+                    (T0, T1)
+                    (T0, T1, T2)
+                    (T0, T1, T2, T3)
+                  and 165 others
+          = note: required for `Vec<Production>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `tests_apr25::_::_serde::__private::de::missing_field`
+         --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/private/de.rs:25:8
+          |
+      23  | pub fn missing_field<'de, V, E>(field: &'static str) -> Result<V, E>
+          |        ------------- required by a bound in this function
+      24  | where
+      25  |     V: Deserialize<'de>,
+          |        ^^^^^^^^^^^^^^^^ required by this bound in `missing_field`
+          = note: this error originates in the derive macro `Deserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `Terminal: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+         --> src/constraint_serializer.rs:207:21
+          |
+      207 | #[derive(Serialize, Deserialize, Debug)]
+          |                     ^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `Terminal`
+          |
+          = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `Terminal` type
+          = note: for types from other crates check whether the crate offers a `serde` feature flag
+          = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                    &'a Path
+                    &'a [u8]
+                    &'a str
+                    ()
+                    (T,)
+                    (T0, T1)
+                    (T0, T1, T2)
+                    (T0, T1, T2, T3)
+                  and 165 others
+          = note: required for `BiBTreeMap<Terminal, TerminalID>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `tests_apr25::_::_serde::__private::de::missing_field`
+         --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/private/de.rs:25:8
+          |
+      23  | pub fn missing_field<'de, V, E>(field: &'static str) -> Result<V, E>
+          |        ------------- required by a bound in this function
+      24  | where
+      25  |     V: Deserialize<'de>,
+          |        ^^^^^^^^^^^^^^^^ required by this bound in `missing_field`
+          = note: this error originates in the derive macro `Deserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `TerminalID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+         --> src/constraint_serializer.rs:207:21
+          |
+      207 | #[derive(Serialize, Deserialize, Debug)]
+          |                     ^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `TerminalID`
+          |
+          = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `TerminalID` type
+          = note: for types from other crates check whether the crate offers a `serde` feature flag
+          = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                    &'a Path
+                    &'a [u8]
+                    &'a str
+                    ()
+                    (T,)
+                    (T0, T1)
+                    (T0, T1, T2)
+                    (T0, T1, T2, T3)
+                  and 165 others
+          = note: required for `BiBTreeMap<Terminal, TerminalID>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `tests_apr25::_::_serde::__private::de::missing_field`
+         --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/private/de.rs:25:8
+          |
+      23  | pub fn missing_field<'de, V, E>(field: &'static str) -> Result<V, E>
+          |        ------------- required by a bound in this function
+      24  | where
+      25  |     V: Deserialize<'de>,
+          |        ^^^^^^^^^^^^^^^^ required by this bound in `missing_field`
+          = note: this error originates in the derive macro `Deserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `NonTerminal: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+         --> src/constraint_serializer.rs:207:21
+          |
+      207 | #[derive(Serialize, Deserialize, Debug)]
+          |                     ^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `NonTerminal`
+          |
+          = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `NonTerminal` type
+          = note: for types from other crates check whether the crate offers a `serde` feature flag
+          = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                    &'a Path
+                    &'a [u8]
+                    &'a str
+                    ()
+                    (T,)
+                    (T0, T1)
+                    (T0, T1, T2)
+                    (T0, T1, T2, T3)
+                  and 165 others
+          = note: required for `BiBTreeMap<NonTerminal, NonTerminalID>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `tests_apr25::_::_serde::__private::de::missing_field`
+         --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/private/de.rs:25:8
+          |
+      23  | pub fn missing_field<'de, V, E>(field: &'static str) -> Result<V, E>
+          |        ------------- required by a bound in this function
+      24  | where
+      25  |     V: Deserialize<'de>,
+          |        ^^^^^^^^^^^^^^^^ required by this bound in `missing_field`
+          = note: this error originates in the derive macro `Deserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `NonTerminalID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+         --> src/constraint_serializer.rs:207:21
+          |
+      207 | #[derive(Serialize, Deserialize, Debug)]
+          |                     ^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `NonTerminalID`
+          |
+          = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `NonTerminalID` type
+          = note: for types from other crates check whether the crate offers a `serde` feature flag
+          = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                    &'a Path
+                    &'a [u8]
+                    &'a str
+                    ()
+                    (T,)
+                    (T0, T1)
+                    (T0, T1, T2)
+                    (T0, T1, T2, T3)
+                  and 165 others
+          = note: required for `BiBTreeMap<NonTerminal, NonTerminalID>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `tests_apr25::_::_serde::__private::de::missing_field`
+         --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/private/de.rs:25:8
+          |
+      23  | pub fn missing_field<'de, V, E>(field: &'static str) -> Result<V, E>
+          |        ------------- required by a bound in this function
+      24  | where
+      25  |     V: Deserialize<'de>,
+          |        ^^^^^^^^^^^^^^^^ required by this bound in `missing_field`
+          = note: this error originates in the derive macro `Deserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `items::Item: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+         --> src/constraint_serializer.rs:207:21
+          |
+      207 | #[derive(Serialize, Deserialize, Debug)]
+          |                     ^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `items::Item`
+          |
+          = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `items::Item` type
+          = note: for types from other crates check whether the crate offers a `serde` feature flag
+          = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                    &'a Path
+                    &'a [u8]
+                    &'a str
+                    ()
+                    (T,)
+                    (T0, T1)
+                    (T0, T1, T2)
+                    (T0, T1, T2, T3)
+                  and 165 others
+          = note: required for `BTreeSet<items::Item>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+          = note: 2 redundant requirements hidden
+          = note: required for `Vec<(BTreeSet<items::Item>, StateID)>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `tests_apr25::_::_serde::__private::de::missing_field`
+         --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/private/de.rs:25:8
+          |
+      23  | pub fn missing_field<'de, V, E>(field: &'static str) -> Result<V, E>
+          |        ------------- required by a bound in this function
+      24  | where
+      25  |     V: Deserialize<'de>,
+          |        ^^^^^^^^^^^^^^^^ required by this bound in `missing_field`
+          = note: this error originates in the derive macro `Deserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `Regex: tests_apr25::_::_serde::Serialize` is not satisfied
+          --> src/constraint_serializer.rs:217:10
+           |
+      217  | #[derive(Serialize, Deserialize, Debug)]
+           |          ^^^^^^^^^ the trait `tests_apr25::_::_serde::Serialize` is not implemented for `Regex`
+      218  | struct SerializableGrammarConstraint {
+      219  |     tokenizer: Regex, // Regex needs to derive Serialize/Deserialize
+           |     --------- required by a bound introduced by this call
+           |
+           = note: for local types consider adding `#[derive(serde::Serialize)]` to your `Regex` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Serialize`:
+                     &'a T
+                     &'a mut T
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                     (T0, T1, T2, T3, T4)
+                   and 145 others
+      note: required by a bound in `tests_apr25::_::_serde::ser::SerializeStruct::serialize_field`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/ser/mod.rs:1866:21
+           |
+      1864 |     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+           |        --------------- required by a bound in this associated function
+      1865 |     where
+      1866 |         T: ?Sized + Serialize;
+           |                     ^^^^^^^^^ required by this bound in `SerializeStruct::serialize_field`
+           = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `LLMTokenID: tests_apr25::_::_serde::Serialize` is not satisfied
+          --> src/constraint_serializer.rs:217:10
+           |
+      217  | #[derive(Serialize, Deserialize, Debug)]
+           |          ^^^^^^^^^ the trait `tests_apr25::_::_serde::Serialize` is not implemented for `LLMTokenID`
+      ...
+      222  |     llm_token_map: Vec<(String, LLMTokenID)>, // Vec<u8> key as base64 String
+           |     ------------- required by a bound introduced by this call
+           |
+           = note: for local types consider adding `#[derive(serde::Serialize)]` to your `LLMTokenID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Serialize`:
+                     &'a T
+                     &'a mut T
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                     (T0, T1, T2, T3, T4)
+                   and 145 others
+           = note: required for `(std::string::String, LLMTokenID)` to implement `tests_apr25::_::_serde::Serialize`
+           = note: 1 redundant requirement hidden
+           = note: required for `Vec<(std::string::String, LLMTokenID)>` to implement `tests_apr25::_::_serde::Serialize`
+      note: required by a bound in `tests_apr25::_::_serde::ser::SerializeStruct::serialize_field`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/ser/mod.rs:1866:21
+           |
+      1864 |     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
+           |        --------------- required by a bound in this associated function
+      1865 |     where
+      1866 |         T: ?Sized + Serialize;
+           |                     ^^^^^^^^^ required by this bound in `SerializeStruct::serialize_field`
+           = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `Regex: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:219:16
+           |
+      219  |     tokenizer: Regex, // Regex needs to derive Serialize/Deserialize
+           |                ^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `Regex`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `Regex` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+      note: required by a bound in `next_element`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1732:12
+           |
+      1730 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+           |        ------------ required by a bound in this associated function
+      1731 |     where
+      1732 |         T: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+
+      error[E0277]: the trait bound `LLMTokenID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:222:20
+           |
+      222  |     llm_token_map: Vec<(String, LLMTokenID)>, // Vec<u8> key as base64 String
+           |                    ^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `LLMTokenID`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `LLMTokenID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `(std::string::String, LLMTokenID)` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+           = note: 1 redundant requirement hidden
+           = note: required for `Vec<(std::string::String, LLMTokenID)>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_element`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1732:12
+           |
+      1730 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+           |        ------------ required by a bound in this associated function
+      1731 |     where
+      1732 |         T: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+
+      error[E0277]: the trait bound `Regex: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:219:16
+           |
+      219  |     tokenizer: Regex, // Regex needs to derive Serialize/Deserialize
+           |                ^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `Regex`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `Regex` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+      note: required by a bound in `next_value`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1871:12
+           |
+      1869 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
+           |        ---------- required by a bound in this associated function
+      1870 |     where
+      1871 |         V: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
+
+      error[E0277]: the trait bound `LLMTokenID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+          --> src/constraint_serializer.rs:222:20
+           |
+      222  |     llm_token_map: Vec<(String, LLMTokenID)>, // Vec<u8> key as base64 String
+           |                    ^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `LLMTokenID`
+           |
+           = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `LLMTokenID` type
+           = note: for types from other crates check whether the crate offers a `serde` feature flag
+           = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                     &'a Path
+                     &'a [u8]
+                     &'a str
+                     ()
+                     (T,)
+                     (T0, T1)
+                     (T0, T1, T2)
+                     (T0, T1, T2, T3)
+                   and 165 others
+           = note: required for `(std::string::String, LLMTokenID)` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+           = note: 1 redundant requirement hidden
+           = note: required for `Vec<(std::string::String, LLMTokenID)>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `next_value`
+          --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/de/mod.rs:1871:12
+           |
+      1869 |     fn next_value<V>(&mut self) -> Result<V, Self::Error>
+           |        ---------- required by a bound in this associated function
+      1870 |     where
+      1871 |         V: Deserialize<'de>,
+           |            ^^^^^^^^^^^^^^^^ required by this bound in `MapAccess::next_value`
+
+      error[E0277]: the trait bound `Regex: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+         --> src/constraint_serializer.rs:217:21
+          |
+      217 | #[derive(Serialize, Deserialize, Debug)]
+          |                     ^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `Regex`
+          |
+          = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `Regex` type
+          = note: for types from other crates check whether the crate offers a `serde` feature flag
+          = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                    &'a Path
+                    &'a [u8]
+                    &'a str
+                    ()
+                    (T,)
+                    (T0, T1)
+                    (T0, T1, T2)
+                    (T0, T1, T2, T3)
+                  and 165 others
+      note: required by a bound in `tests_apr25::_::_serde::__private::de::missing_field`
+         --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/private/de.rs:25:8
+          |
+      23  | pub fn missing_field<'de, V, E>(field: &'static str) -> Result<V, E>
+          |        ------------- required by a bound in this function
+      24  | where
+      25  |     V: Deserialize<'de>,
+          |        ^^^^^^^^^^^^^^^^ required by this bound in `missing_field`
+          = note: this error originates in the derive macro `Deserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0277]: the trait bound `LLMTokenID: tests_apr25::_::_serde::Deserialize<'_>` is not satisfied
+         --> src/constraint_serializer.rs:217:21
+          |
+      217 | #[derive(Serialize, Deserialize, Debug)]
+          |                     ^^^^^^^^^^^ the trait `tests_apr25::_::_serde::Deserialize<'_>` is not implemented for `LLMTokenID`
+          |
+          = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `LLMTokenID` type
+          = note: for types from other crates check whether the crate offers a `serde` feature flag
+          = help: the following other types implement trait `tests_apr25::_::_serde::Deserialize<'de>`:
+                    &'a Path
+                    &'a [u8]
+                    &'a str
+                    ()
+                    (T,)
+                    (T0, T1)
+                    (T0, T1, T2)
+                    (T0, T1, T2, T3)
+                  and 165 others
+          = note: required for `(std::string::String, LLMTokenID)` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+          = note: 1 redundant requirement hidden
+          = note: required for `Vec<(std::string::String, LLMTokenID)>` to implement `tests_apr25::_::_serde::Deserialize<'_>`
+      note: required by a bound in `tests_apr25::_::_serde::__private::de::missing_field`
+         --> /Users/isaacbreen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.219/src/private/de.rs:25:8
+          |
+      23  | pub fn missing_field<'de, V, E>(field: &'static str) -> Result<V, E>
+          |        ------------- required by a bound in this function
+      24  | where
+      25  |     V: Deserialize<'de>,
+          |        ^^^^^^^^^^^^^^^^ required by this bound in `missing_field`
+          = note: this error originates in the derive macro `Deserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+      error[E0369]: binary operation `==` cannot be applied to type `Trie<std::option::Option<TerminalID>, hybrid_bitset::HybridBitset, PrecomputedNodeContents>`
+         --> src/constraint_serializer.rs:319:37
+          |
+      319 |                 if *locked_arc_node == *root_node_trie { // Requires PrecomputeNode to be PartialEq
+          |                    ---------------- ^^ --------------- Trie<std::option::Option<TerminalID>, hybrid_bitset::HybridBitset, PrecomputedNodeContents>
+          |                    |
+          |                    Trie<std::option::Option<TerminalID>, hybrid_bitset::HybridBitset, PrecomputedNodeContents>
+          |
+      note: an implementation of `PartialEq` might be missing for `Trie<std::option::Option<TerminalID>, hybrid_bitset::HybridBitset, PrecomputedNodeContents>`
+         --> src/datastructures/trie.rs:35:1
+          |
+      35  | pub struct Trie<EK: Ord, EV, T> {
+          | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ must implement `PartialEq`
+      help: consider annotating `Trie<std::option::Option<TerminalID>, hybrid_bitset::HybridBitset, PrecomputedNodeContents>` with `#[derive(PartialEq)]`
+         --> src/datastructures/trie.rs:35:1
+          |
+      35  + #[derive(PartialEq)]
+      36  | pub struct Trie<EK: Ord, EV, T> {
+          |
+
+      error[E0599]: no method named `children_mut` found for struct `MutexGuard<'_, Trie<std::option::Option<TerminalID>, hybrid_bitset::HybridBitset, PrecomputedNodeContents>>` in the current scope
+         --> src/constraint_serializer.rs:390:35
+          |
+      390 |                 source_node_guard.children_mut().insert(edge_key_opt, children_map_for_key);
+          |                                   ^^^^^^^^^^^^
+          |
+      help: there is a method `children` with a similar name
+          |
+      390 -                 source_node_guard.children_mut().insert(edge_key_opt, children_map_for_key);
+      390 +                 source_node_guard.children().insert(edge_key_opt, children_map_for_key);
+          |
+
+      Some errors have detailed explanations: E0277, E0369, E0599.
+      For more information about an error, try `rustc --explain E0277`.
+      error: could not compile `sep1` (lib) due to 57 previous errors
+    metadata:
+  - assistant: |-
+      Okay, it looks like a lot of the errors are due to missing `Serialize` and `Deserialize` derives on various structs, especially the simple ID newtypes, and a few specific issues in the serializer code.
+
+      Here's a breakdown of the changes:
+
+      **I. Add `#[derive(Serialize, Deserialize)]` and other necessary derives:**
+
+      You'll need to go through several files and add `#[derive(Serialize, Deserialize)]` to the struct/enum definitions. Also, ensure they have other necessary derives like `Debug`, `Clone`, `PartialEq`, `Eq`, `Ord`, `PartialOrd`, `Hash` if they are used as map keys or need comparison.
+
+      1.  **`src/tokenizer.rs`**:
+          *   For `pub struct TokenizerStateID(pub usize);`
+              Change to:
+              ```rust
+              #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+              pub struct TokenizerStateID(pub usize);
+              ```
+          *   For `pub struct LLMTokenID(pub usize);`
+              Change to:
+              ```rust
+              #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+              pub struct LLMTokenID(pub usize);
+              ```
+
+      2.  **`src/types.rs`**:
+          *   For `pub struct TerminalID(pub usize);` (this is `GrammarTokenID`)
+              Change to:
+              ```rust
+              #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+              pub struct TerminalID(pub usize);
+              ```
+
+      3.  **`src/glr/table.rs`**:
+          *   For `pub struct StateID(pub usize);`
+              Change to:
+              ```rust
+              #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+              pub struct StateID(pub usize);
+              ```
+          *   For `pub struct ProductionID(pub usize);`
+              Change to:
+              ```rust
+              #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+              pub struct ProductionID(pub usize);
+              ```
+          *   For `pub struct NonTerminalID(pub usize);`
+              Change to:
+              ```rust
+              #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+              pub struct NonTerminalID(pub usize);
+              ```
+          *   For `pub enum Stage7ShiftsAndReduces { ... }`
+              Add `Serialize, Deserialize` to its derives:
+              ```rust
+              #[derive(Debug, Clone, Serialize, Deserialize)]
+              pub enum Stage7ShiftsAndReduces { // ...
+              ```
+          *   For `pub struct Stage7Row { ... }`
+              Add `Serialize, Deserialize` to its derives:
+              ```rust
+              #[derive(Debug, Clone, Serialize, Deserialize)]
+              pub struct Stage7Row { // ...
+              ```
+
+      4.  **`src/glr/grammar.rs`**:
+          *   For `pub struct NonTerminal(pub String);`
+              Change to:
+              ```rust
+              #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+              pub struct NonTerminal(pub String);
+              ```
+          *   For `pub struct Terminal(pub String);`
+              Change to:
+              ```rust
+              #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+              pub struct Terminal(pub String);
+              ```
+          *   For `pub enum Symbol { ... }`
+              Add `Hash, Serialize, Deserialize` to its derives:
+              ```rust
+              #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+              pub enum Symbol { // ...
+              ```
+          *   For `pub struct Production { ... }`
+              Add `Hash, Serialize, Deserialize` to its derives:
+              ```rust
+              #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+              pub struct Production { // ...
+              ```
+
+      5.  **`src/glr/items.rs`**:
+          *   For `pub struct Item { ... }`
+              Add `Hash, Serialize, Deserialize` to its derives:
+              ```rust
+              #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+              pub struct Item { // ...
+              ```
+
+      6.  **`src/finite_automata.rs`**:
+          *   For `pub struct Regex { ... }`
+              Add `Serialize, Deserialize` to its derives:
+              ```rust
+              #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+              pub struct Regex { // ...
+              ```
+          *   For `pub struct DFA { ... }`
+              Add `Serialize, Deserialize` to its derives:
+              ```rust
+              #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+              pub struct DFA { // ...
+              ```
+          *   For `pub struct DFAState { ... }`
+              Add `Serialize, Deserialize` to its derives. Also, the field `group_id_to_u8set` needs a `serde(with)` attribute.
+              ```rust
+              use serde::{Serialize, Deserialize}; // Add this if not already present at the top of the file
+              // ... other imports ...
+              use crate::constraint_serializer::u8set_serde; // Add this import
+
+              #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+              pub struct DFAState {
+                  pub transitions: TrieMap<usize>,
+                  pub finalizers: BTreeSet<GroupID>,
+                  pub possible_future_group_ids: BTreeSet<GroupID>,
+                  #[serde(with = "u8set_serde")] // MODIFIED LINE
+                  pub group_id_to_u8set: BTreeMap<GroupID, U8Set>,
+              }
+              ```
+          *   For `pub enum Expr { ... }`
+              Add `Hash, Serialize, Deserialize` to its derives:
+              ```rust
+              #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+              pub enum Expr { // ...
+              ```
+          *   For `pub enum QuantifierType { ... }`
+              Add `Serialize, Deserialize` to its derives:
+              ```rust
+              #[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+              pub enum QuantifierType { // ...
+              ```
+          *   For `pub struct ExprGroup { ... }`
+              Add `Serialize, Deserialize` to its derives:
+              ```rust
+              #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+              pub struct ExprGroup { // ...
+              ```
+          *   For `pub struct ExprGroups { ... }`
+              Add `Serialize, Deserialize` to its derives:
+              ```rust
+              #[derive(Debug, Clone, Serialize, Deserialize)]
+              pub struct ExprGroups { // ...
+              ```
+          *   For `pub struct Match { ... }`
+              Add `Serialize, Deserialize` to its derives:
+              ```rust
+              #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+              pub struct Match { // ...
+              ```
+          *   For `pub struct FinalStateReport { ... }`
+              Add `Serialize, Deserialize` to its derives:
+              ```rust
+              #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+              pub struct FinalStateReport { // ...
+              ```
+
+      7.  **`src/constraint.rs`**:
+          *   For `pub struct PrecomputedFinalizer { ... }`
+              Ensure it has `PartialEq, Serialize, Deserialize`. The `content` field already has a `serde(with=...)` in `SerializablePrecomputedFinalizer`.
+              ```rust
+              #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)] // Added PartialEq, Serialize, Deserialize
+              pub struct PrecomputedFinalizer {
+                  #[serde(with = "crate::constraint_serializer::btreemap_tokenizerstate_llmtokenbv_serde")] // This attribute applies to SerializablePrecomputedFinalizer, not here directly.
+                                                                                                           // The derive on PrecomputedFinalizer itself is enough if its fields are serializable.
+                                                                                                           // However, since we have SerializablePrecomputedFinalizer, this struct might not need to derive Serialize/Deserialize directly if it's always converted.
+                                                                                                           // Let's assume it's converted. Add PartialEq for Trie.
+                  pub content: BTreeMap<TokenizerStateID, LLMTokenBV>,
+              }
+              ```
+              Actually, looking at `SerializablePrecomputedFinalizer::from`, it takes `&PrecomputedFinalizer`. So `PrecomputedFinalizer` itself doesn't need to derive `Serialize/Deserialize` if it's always converted. But it *does* need `PartialEq` for `PrecomputedNodeContents`'s `PartialEq`.
+              Modify `PrecomputedFinalizer` to:
+              ```rust
+              #[derive(Default, Debug, Clone, PartialEq)] // Removed Serialize/Deserialize, added PartialEq
+              pub struct PrecomputedFinalizer {
+                  pub content: BTreeMap<TokenizerStateID, LLMTokenBV>,
+              }
+              ```
+          *   For `pub struct PrecomputedNodeContents { ... }`
+              This also needs `PartialEq` for `Trie`'s `PartialEq`.
+              ```rust
+              #[derive(Default, Debug, Clone, PartialEq)] // Removed Serialize/Deserialize, added PartialEq
+              pub struct PrecomputedNodeContents {
+                  finalizers: BTreeMap<GrammarTokenID, PrecomputedFinalizer>,
+                  pub clean_end: Option<LLMTokenBV>,
+                  pub active: LLMTokenBV,
+              }
+              ```
+
+      8.  **`src/datastructures/hybrid_bitset.rs`**:
+          *   Ensure `HybridBitset` derives `PartialEq` and `Eq`.
+              ```rust
+              // Example, actual struct might differ
+              #[derive(Clone, Debug, Default, PartialEq, Eq)] // Ensure PartialEq, Eq
+              pub struct HybridBitset { ... }
+              ```
+
+      9.  **`src/datastructures/trie.rs`**:
+          *   For `pub struct Trie<EK: Ord, EV, T> { ... }`
+              Add `#[derive(PartialEq)]` (Requires `EK: PartialEq, EV: PartialEq, T: PartialEq`).
+              ```rust
+              #[derive(Debug, Clone, PartialEq)] // Added PartialEq
+              pub struct Trie<EK: Ord, EV, T> { // ...
+              ```
+
+      **II. Fixes in `src/constraint_serializer.rs`:**
+
+      1.  **`btreemap_tokenizerstate_llmtokenbv_serde::serialize` function (line 66-72):**
+          *   The key `k` is `&TokenizerStateID`. When inserting into `new_map`, it should be dereferenced because `TokenizerStateID` is `Copy`.
+          Modify line 69:
+          ```rust
+          // new_map.insert(k, BVHelper(bv)); // OLD
+          new_map.insert(*k, BVHelper(bv)); // NEW (dereference k)
+          ```
+
+      2.  **`u8set_serde::deserialize` function (line 90-95):**
+          *   `U8Set` does not have `from_iter`. Use `from_slice`.
+          Modify line 93:
+          ```rust
+          // Ok(U8Set::from_iter(v)) // OLD
+          Ok(U8Set::from_slice(&v)) // NEW
+          ```
+
+      3.  **Remove `children_mut` helper from `constraint_serializer.rs`:**
+          *   Delete the `impl PrecomputeNode ... { fn children_mut ... }` block at the end of `src/constraint_serializer.rs` (lines 420-424 in your provided code).
+
+      **III. Add `children_mut` to `Trie` in `src/datastructures/trie.rs`:**
+
+      1.  Open `src/datastructures/trie.rs`.
+      2.  Find an appropriate `impl` block for `Trie` or add a new one. For example, you can add it to an existing `impl<EK: Ord, EV, T> Trie<EK, EV, T> { ... }` block.
+      3.  Add the following method:
+          ```rust
+          /// Provides mutable access to the children map.
+          /// Used internally for deserialization.
+          pub(crate) fn children_mut(&mut self) -> &mut BTreeMap<EK, BTreeMap<ArcPtrWrapper<Mutex<Self>>, EV>> {
+              &mut self.children
+          }
+          ```
+          Make sure the generic bounds are suitable. `EK: Ord` is needed for `BTreeMap` key.
+
+      After making these changes, try compiling again. There might be further cascading errors, but this should address the bulk of the ones related to `serde` and the specific method/type errors. The `PartialEq` requirement for `Trie` and its components is important for the serialization logic that compares nodes.
     metadata:
 ...

@@ -17,7 +17,7 @@ use crate::datastructures::u8set::U8Set;
 use crate::datastructures::ArcPtrWrapper; // For reconstructing children map
 
 use serde::{Serialize, Deserialize, Serializer, Deserializer};
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::iter::FromIterator;
 use bimap::BiBTreeMap;
@@ -445,13 +445,4 @@ pub fn serialize_grammar_constraint(gc: &GrammarConstraint) -> Result<String, St
 pub fn deserialize_grammar_constraint(json_str: &str) -> Result<GrammarConstraint, String> {
     let serializable_gc: SerializableGrammarConstraint = serde_json::from_str(json_str).map_err(|e| e.to_string())?;
     GrammarConstraint::try_from(serializable_gc)
-}
-
-
-// Helper method for PrecomputeNode to access children mutably (if not already present)
-// This is needed because the original Trie methods might not be suitable for direct deserialization logic.
-impl<EK: Ord, EV, T> PrecomputeNode<EK, EV, T> {
-    fn children_mut(&mut self) -> &mut BTreeMap<EK, BTreeMap<ArcPtrWrapper<Mutex<Self>>, EV>> {
-        &mut self.children
-    }
 }
