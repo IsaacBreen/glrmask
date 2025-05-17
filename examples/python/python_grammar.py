@@ -359,6 +359,9 @@ if __name__ == "__main__":
 #     tokenizer_vocab = {"def": 0, " f": 1, "(": 2, ")": 3, "de": 4}
 #     tokenizer_vocab = {"def": 0, "de": 1}
 
+    # Exclude tokens that have more than _ hyphens
+    tokenizer_vocab = {k: v for k, v in tokenizer.get_vocab().items() if k.count("-") <= 14}
+
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
     tokenizer_vocab = {token: actual_vocab[token.replace(" ", "Ġ")] for token in tokenizer_vocab}

@@ -239,7 +239,7 @@ impl GrammarConstraint {
             tokenizer,
             internal_llm_token_map,    // Use new parameter name
             internal_max_llm_token, // Use new parameter name
-            100, // merge threshold
+            999999999999, // merge threshold
         );
 
         // 2.  Run the DFS over the vocabulary prefix tree.
