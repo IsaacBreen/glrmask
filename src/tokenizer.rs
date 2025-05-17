@@ -9,7 +9,6 @@ pub type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct LLMTokenID(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
 pub struct TokenizerStateID(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -54,3 +53,4 @@ impl Regex {
         self.dfa.states.len()
     }
 }
+

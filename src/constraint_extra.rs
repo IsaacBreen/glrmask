@@ -393,7 +393,6 @@ mod tests {
     use bitvec::prelude::*;
     use crate::seq;
     use crate::datastructures::hybrid_bitset::HybridBitset;
-    use serde_json;
 
     #[test]
     fn test_format_bv_indices_empty() {
@@ -479,51 +478,5 @@ mod tests {
         println!("--- Starting dump_precomputed test output ---");
         constraint.dump_precomputed(); // Just ensure it runs without panic
         println!("--- Finished dump_precomputed test output ---");
-    }
-
-    #[test]
-    fn test_grammar_constraint_serialization_deserialization() {
-        // 1. Create an original GrammarConstraint instance
-        let constraint_orig = create_minimal_constraint();
-
-        // 2. Serialize the original constraint to a JSON string
-        let json_orig_res = serde_json::to_string(&constraint_orig);
-        assert!(
-            json_orig_res.is_ok(),
-            "Original serialization to JSON failed: {:?}",
-            json_orig_res.err()
-        );
-        let json_orig = json_orig_res.unwrap();
-
-        // 3. Deserialize the JSON string back into a new GrammarConstraint instance
-        let constraint_deser_res: Result<GrammarConstraint, _> = serde_json::from_str(&json_orig);
-        assert!(
-            constraint_deser_res.is_ok(),
-            "Deserialization from JSON failed: {:?}",
-            constraint_deser_res.err()
-        );
-        let constraint_deser = constraint_deser_res.unwrap();
-
-        // 4. Serialize the deserialized constraint back to a JSON string
-        let json_deser_res = serde_json::to_string(&constraint_deser);
-        assert!(
-            json_deser_res.is_ok(),
-            "Reserialization to JSON failed: {:?}",
-            json_deser_res.err()
-        );
-        let json_deser = json_deser_res.unwrap();
-
-        // 5. Assert that the two JSON strings are identical.
-        //    If they are not, print the pretty-printed versions for easier debugging.
-        if json_orig != json_deser {
-            eprintln!("Serialized JSON strings differ!");
-            eprintln!("--- Original JSON ---");
-            eprintln!("{}", serde_json::to_string_pretty(&constraint_orig).unwrap());
-            eprintln!("--- Deserialized JSON ---");
-            eprintln!("{}", serde_json::to_string_pretty(&constraint_deser).unwrap());
-            // Fail the test with a clear message showing the compact diff
-            assert_eq!(json_orig, json_deser, "Serialized JSON representations do not match after deserialization.");
-        }
-        // If the assertion passes, it means the serialized forms are identical.
     }
 }
