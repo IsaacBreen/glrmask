@@ -11,13 +11,14 @@ use crate::datastructures::trie::{Trie, CycleDetectedError}; // Import Trie and 
 type NodeId = usize;
 type TrieType = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 
+const OPTION_NONE_KEY_STR: &str = "__OPTION_NONE_KEY__";
 
 #[derive(Serialize, Deserialize)]
 struct SerializablePrecomputeNode {
     id: NodeId,
     value: PrecomputedNodeContents,
     max_depth: usize,
-    children: BTreeMap<Option<GrammarTokenID>, BTreeMap<NodeId, LLMTokenBV>>,
+    children: BTreeMap<String, BTreeMap<NodeId, LLMTokenBV>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -89,12 +90,12 @@ where
 
     for (node_ptr, &current_node_id) in sorted_nodes_to_process {
         let node_arc = ptr_to_arc.get(node_ptr)
-             .expect("Node pointer not found in collected arcs during serialization (pass 2)").clone();
+            .expect("Node pointer not found in collected arcs during serialization (pass 2)").clone();
 
         let node_guard = node_arc.lock().expect("Mutex poisoned during serialization (node construction)");
 
         let mut s_children_map_for_node = BTreeMap::new();
-        for (edge_key, dest_map) in node_guard.children().iter() { // Access children via method
+        for (edge_key_opt, dest_map) in node_guard.children().iter() { // edge_key_opt is Option<GrammarTokenID>
             let mut s_dest_map_for_key = BTreeMap::new();
             for (child_arc_ptr_wrapper, edge_val) in dest_map.iter() {
                 let child_arc = child_arc_ptr_wrapper.as_arc();
@@ -104,7 +105,11 @@ where
                 s_dest_map_for_key.insert(child_id, edge_val.clone());
             }
             if !s_dest_map_for_key.is_empty() {
-                s_children_map_for_node.insert(edge_key.clone(), s_dest_map_for_key);
+                let string_key = match edge_key_opt {
+                    Some(gtid) => gtid.0.to_string(), // GrammarTokenID(usize) -> usize.to_string()
+                    None => OPTION_NONE_KEY_STR.to_string(),
+                };
+                s_children_map_for_node.insert(string_key, s_dest_map_for_key);
             }
         }
 
@@ -155,7 +160,7 @@ where
         // Children need to be inserted while holding the lock.
         let mut current_node_guard = current_node_arc.lock().expect("Mutex poisoned during deserialization (pass 2)");
 
-        for (edge_key, s_dest_map) in &s_node.children {
+        for (string_key, s_dest_map) in &s_node.children { // string_key is &String
             let mut dest_map_for_trie = BTreeMap::new();
             for (&child_id, edge_val) in s_dest_map {
                 let child_arc = id_to_node.get(&child_id)
@@ -163,9 +168,20 @@ where
                 dest_map_for_trie.insert(ArcPtrWrapper::new(child_arc), edge_val.clone());
             }
             if !dest_map_for_trie.is_empty() {
-                // This directly modifies the children of the PrecomputeNode (Trie)
-                // Use the children_mut() method to access the private field
-                current_node_guard.children_mut().insert(edge_key.clone(), dest_map_for_trie);
+                let original_edge_key_opt = if string_key == OPTION_NONE_KEY_STR {
+                    None
+                } else {
+                    // Parse the string key back to usize, then wrap in GrammarTokenID
+                    // Handle potential parse error for robustness.
+                    let val = string_key.parse::<usize>().map_err(|e| {
+                        serde::de::Error::custom(format!(
+                            "Failed to parse GrammarTokenID from string key '{}': {}",
+                            string_key, e
+                        ))
+                    })?;
+                    Some(GrammarTokenID(val))
+                };
+                current_node_guard.children_mut().insert(original_edge_key_opt, dest_map_for_trie);
             }
         }
     }
