@@ -9,12 +9,10 @@ use std::ops::{
 
 // --- The Hybrid Bitset Struct ---
 // Ord and PartialOrd will now rely on RangeSetBlaze's implementation (lexicographical on ranges)
-#[derive(Debug, Clone, Ord, PartialOrd, Eq, Serialize, Deserialize)]
-#[serde(bound(
-    serialize = "RangeSetBlaze<usize>: Serialize",
-    deserialize = "RangeSetBlaze<usize>: Deserialize<'de>"
-))]
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Serialize, Deserialize)] // Add Hash and PartialEq here
+// Removed the old serde(bound(...)) attribute
 pub struct HybridBitset {
+    #[serde(with = "crate::serde_helpers::range_set_blaze_serde")]
     inner: RangeSetBlaze<usize>,
 }
 
@@ -33,7 +31,7 @@ impl HybridBitset {
             HybridBitset::new()
         } else {
             HybridBitset {
-                inner: RangeSetBlaze::from_iter([0..=len - 1]),
+                inner: RangeSetBlaze::from_iter(0..len), // Range is exclusive upper bound
             }
         }
     }
@@ -705,13 +703,24 @@ mod tests {
         assert!(!set_ones_large.contains(SPARSE_TO_DENSE_THRESHOLD + 6));
 
         // Test edge case for usize::MAX
+        // `ones` takes the number of elements (length), so `ones(usize::MAX)`
+        // should represent indices 0..usize::MAX-1.
+        // The length of this set is usize::MAX.
         let set_ones_max = HybridBitset::ones(usize::MAX);
         assert!(!set_ones_max.is_empty());
         assert_eq!(set_ones_max.len(), usize::MAX);
+        assert!(set_ones_max.contains(0));
+        assert!(set_ones_max.contains(usize::MAX - 1));
+        assert!(!set_ones_max.contains(usize::MAX));
+
 
         let set_ones_zero = HybridBitset::ones(1); // Should contain only 0
         assert_eq!(set_ones_zero.len(), 1);
         assert!(set_ones_zero.contains(0));
         assert!(!set_ones_zero.contains(1));
+
+        let set_ones_empty = HybridBitset::ones(0); // Should be empty
+        assert_eq!(set_ones_empty.len(), 0);
+        assert!(set_ones_empty.is_empty());
     }
 }

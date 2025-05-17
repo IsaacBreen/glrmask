@@ -14,7 +14,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 use crate::debug;
 
-pub trait MergeAndIntersect: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
+pub trait MergeAndIntersect: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash + Serialize + for<'de> Deserialize<'de> {
     /// Merges the information represented by `self` and `other`.
     fn merge(&self, other: &Self) -> Self;
     /// Intersects the information represented by `self` and `other`.
@@ -44,15 +44,18 @@ pub enum StopReason {
 
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(bound(
-    serialize = "Stage7Table: Serialize, Vec<Production>: Serialize, BiBTreeMap<Terminal, TerminalID>: Serialize, BiBTreeMap<NonTerminal, NonTerminalID>: Serialize, BiBTreeMap<BTreeSet<Item>, StateID>: Serialize",
-    deserialize = "Stage7Table: Deserialize<'de>, Vec<Production>: Deserialize<'de>, BiBTreeMap<Terminal, TerminalID>: Deserialize<'de>, BiBTreeMap<NonTerminal, NonTerminalID>: Deserialize<'de>, BiBTreeMap<BTreeSet<Item>, StateID>: Deserialize<'de>"
-))]
+// Remove the old serde(bound(...)) attribute, fields now use #[serde(with = ...)]
 pub struct GLRParser {
     pub stage_7_table: Stage7Table,
     pub productions: Vec<Production>,
+
+    #[serde(with = "crate::serde_helpers::bibtreemap_serde")]
     pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
+
+    #[serde(with = "crate::serde_helpers::bibtreemap_serde")]
     pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+
+    #[serde(with = "crate::serde_helpers::bibtreemap_serde")]
     pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
     pub start_state_id: StateID,
 }
@@ -153,7 +156,7 @@ impl Display for GLRParser {
 
         writeln!(f, "Parse Table:")?;
         writeln!(f, "  Start State: {}", self.start_state_id.0)?;
-        for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
+        for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>().into_iter() { // Added into_iter()
             writeln!(f, "  State {}:", state_id.0)?;
 
             // Get the core items that define this state
@@ -225,7 +228,7 @@ impl Display for GLRParser {
                                 let nt = non_terminal_map.get_by_right(nt_id).unwrap();
                                 for prod_id in prod_ids {
                                     let prod = self.productions.get(prod_id.0).unwrap();
-                                    writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
+                                    writeln!(f, "          - ProductionID({}) ({})", prod_id.0, prod.lhs.0)?; // Print ProductionID as well
                                 }
                             }
 
@@ -292,13 +295,19 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
 
         for parent in parents {
             let top = parent.peek();
-            let goto = self.parser.stage_7_table[&top.state_id].gotos[&nt];
-            let merged_t = top.t.intersect(cur_t);
-            crate::debug!(4, "  Goto from state {} to state {}", top.state_id.0, goto.0);
-            out.push(Arc::new(parent.push(ParseStateNodeContent {
-                state_id: goto,
-                t: merged_t,
-            })));
+            // Check if goto exists
+            if let Some(&goto) = self.parser.stage_7_table.get(&top.state_id).and_then(|row| row.gotos.get(&nt)) {
+                let merged_t = top.t.intersect(cur_t);
+                crate::debug!(4, "  Goto from state {} via nonterminal {} to state {}", top.state_id.0, nt.0, goto.0);
+                out.push(Arc::new(parent.push(ParseStateNodeContent {
+                    state_id: goto,
+                    t: merged_t,
+                })));
+            } else {
+                 crate::debug!(4, "  No Goto found from state {} via nonterminal {}", top.state_id.0, nt.0);
+                 // Handle case where goto is not found - potentially a parse error or expected termination
+                 // For now, we just don't add to 'out', effectively pruning this path.
+            }
         }
         out
     }
@@ -368,68 +377,84 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
 
         let mut todo = std::mem::take(&mut self.active_states).into_values().collect::<Vec<_>>();
         let mut next = BTreeMap::<ParseStateKey, ParseState<T>>::new();
-        let mut not_found = BTreeMap::<ParseStateKey, ParseState<T>>::new();
+        let mut not_found = BTreeMap::<ParseStateKey, ParseState<T>>::new(); // This map is currently unused but kept from original code
 
         /* ---------- core loop ---------- */
         while let Some(state) = todo.pop() { // Process states from the worklist
             let stack   = state.stack;
             let top     = stack.peek();
-            let row     = &self.parser.stage_7_table[&top.state_id];
+            let row_opt = self.parser.stage_7_table.get(&top.state_id);
 
-            match row.shifts_and_reduces.get(&token_id) {
-                /* ------ 1. plain shift ------ */
-                Some(Stage7ShiftsAndReduces::Shift(to)) => {
-                    crate::debug!(4, "Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
-                    let new_parse_state = self.push_state(&stack, *to, top.t.clone());
-                    next.insert_with(new_parse_state.key(), new_parse_state, |existing, new_s| existing.merge(new_s));
-                }
+             match row_opt {
+                Some(row) => {
+                     match row.shifts_and_reduces.get(&token_id) {
+                        /* ------ 1. plain shift ------ */
+                        Some(Stage7ShiftsAndReduces::Shift(to)) => {
+                            crate::debug!(4, "Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
+                            let new_parse_state = self.push_state(&stack, *to, top.t.clone());
+                            next.insert_with(new_parse_state.key(), new_parse_state, |existing, new_s| existing.merge(new_s));
+                        }
 
-                /* ------ 2. single reduce ------ */
-                Some(Stage7ShiftsAndReduces::Reduce{ nonterminal_id: nt,
-                                                     len, .. }) => {
-                    crate::debug!(4, "Reduce from state {} via token {} to nonterminal {}", top.state_id.0, token_id.0, nt.0);
-                    for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
-                        // Add to worklist for current step; merging happens when moving to `next`
-                        todo.push(ParseState { stack: s });
-                    }
-                }
-
-                /* ------ 3. shift / reduce split ------ */
-                Some(Stage7ShiftsAndReduces::Split { shift, reduces }) => {
-                    crate::debug!(4, "Split from state {} via token {}", top.state_id.0, token_id.0);
-                    // optional shift part
-                    if let Some(to) = shift {
-                        crate::debug!(4, " Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
-                        let new_parse_state = self.push_state(&stack, *to, top.t.clone());
-                        next.insert_with(new_parse_state.key(), new_parse_state, |existing, new_s| existing.merge(new_s));
-                    }
-                    // every reduce alternative
-                    for (len, nts) in reduces {
-                        crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top.state_id.0, token_id.0, nts);
-                        for (nt, _prod_ids) in nts {        // we ignore prod-ids here
+                        /* ------ 2. single reduce ------ */
+                        Some(Stage7ShiftsAndReduces::Reduce{ nonterminal_id: nt,
+                                                             len, .. }) => {
+                            crate::debug!(4, "Reduce from state {} via token {} to nonterminal {}", top.state_id.0, token_id.0, nt.0);
                             for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
-                                // Add to worklist for current step
+                                // Add to worklist for current step; merging happens when moving to `next`
                                 todo.push(ParseState { stack: s });
                             }
                         }
+
+                        /* ------ 3. shift / reduce split ------ */
+                        Some(Stage7ShiftsAndReduces::Split { shift, reduces }) => {
+                            crate::debug!(4, "Split from state {} via token {}", top.state_id.0, token_id.0);
+                            // optional shift part
+                            if let Some(to) = shift {
+                                crate::debug!(4, " Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
+                                let new_parse_state = self.push_state(&stack, *to, top.t.clone());
+                                next.insert_with(new_parse_state.key(), new_parse_state, |existing, new_s| existing.merge(new_s));
+                            }
+                            // every reduce alternative
+                            for (len, nts) in reduces {
+                                crate::debug!(4, " Reduce (len {}) from state {} via token {} to nonterminals {:?}", len, top.state_id.0, token_id.0, nts.keys().map(|ntid| ntid.0).collect::<Vec<_>>());
+                                for (nt, _prod_ids) in nts {        // we ignore prod-ids here
+                                    for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
+                                        // Add to worklist for current step
+                                        todo.push(ParseState { stack: s });
+                                    }
+                                }
+                            }
+                        }
+
+                        /* ------ 4. no action for this token ------ */
+                        None => {
+                             crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, top.state_id.0);
+                             let not_found_state = ParseState { stack };
+                             // This path terminates for this token, it is not moved to `next` or `todo`
+                             // not_found.insert_with(...) kept from original but currently unused.
+                             not_found.insert_with(not_found_state.key(), not_found_state, |existing, new_s| existing.merge(new_s));
+                        },
                     }
                 }
-
-                /* ------ 4. no action ------ */
-                None => {
-                    crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, top.state_id.0);
+                /* ------ 5. state has no row ------ */
+                 None => {
+                    // This state has no defined actions or gotos in the table.
+                    // This path effectively terminates.
+                    crate::debug!(4, "State {} not found in parse table. Path terminated.", top.state_id.0);
                     let not_found_state = ParseState { stack };
+                     // not_found.insert_with(...) kept from original but currently unused.
                     not_found.insert_with(not_found_state.key(), not_found_state, |existing, new_s| existing.merge(new_s));
-                },
+                 }
             }
         }
 
         /* ---------- finish up ---------- */
         self.active_states            = next;
-        self.action_not_found_states  = not_found;   // keep for caller if wanted
+        // self.action_not_found_states  = not_found;   // current design: we drop them
+        self.action_not_found_states.clear(); // Explicitly clear if not used
+
 
         self.log_gss("Step-end", token_id);
-        self.action_not_found_states.clear();        // current design: we drop them
 
         crate::debug!(4, "----------------------------------------------------------------");
     }
@@ -449,9 +474,10 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         for (key, state) in other.active_states {
             self.active_states.insert_with(key, state, |existing, new_s| existing.merge(new_s));
         }
-        for (key, state) in other.action_not_found_states {
-            self.action_not_found_states.insert_with(key, state, |existing, new_s| existing.merge(new_s));
-        }
+        // This was not used in step(), commenting out merge for action_not_found_states as well.
+        // for (key, state) in other.action_not_found_states {
+        //     self.action_not_found_states.insert_with(key, state, |existing, new_s| existing.merge(new_s));
+        // }
     }
 
     pub fn is_ok(&self) -> bool {
@@ -510,4 +536,3 @@ impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
         }
     }
 }
-
