@@ -887,7 +887,7 @@ impl<'a> GrammarConstraintState<'a> {
                     !parse_state.stack.value.t.active.is_empty()
                 });
                 if let Some(gtid) = grammar_token_id {
-                    *step_counts.entry(gtid).or_insert(0) += 1;
+                    *step_counts.entry(*gtid).or_insert(0) += 1;
                 }
                 grammar_token_id.map(|gtid| cloned_glr_parse_state.step(gtid));
                 if cloned_glr_parse_state.active_states.is_empty() {
