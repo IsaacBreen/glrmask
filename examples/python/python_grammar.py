@@ -360,7 +360,7 @@ if __name__ == "__main__":
 #     tokenizer_vocab = {"def": 0, "de": 1}
 
     # Exclude tokens that have more than _ hyphens
-    tokenizer_vocab = {k: v for k, v in tokenizer.get_vocab().items() if k.count("-") <= 14}
+    tokenizer_vocab = {k: v for k, v in tokenizer.get_vocab().items() if k.count("-") <= 5}
 
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
