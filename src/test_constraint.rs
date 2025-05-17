@@ -16,6 +16,7 @@ use reqwest::blocking;
 use serde_json;
 use crate::constraint::GrammarConstraint;
 use crate::datastructures::trie::Trie;
+use crate::representation::IntoAllowedRepresentation;
 // Already a main dependency, but good to be explicit if used directly
 // reqwest will be used if the file isn't cached, ensure it's in dev-dependencies
 use crate::tokenizer::{LLMTokenID, LLMTokenMap};
@@ -130,6 +131,10 @@ fn test_constraint_simple() {
     constraint_state.step_with_all_llm_tokens();
     let mask = constraint_state.get_mask();
     assert_eq!(mask, HybridBitset::from_iter(vec![2])); // Expect "$" (EOF)
+
+    // Convert to AllowedRepresentation
+    let allowed_constraint_state = constraint.into_allowed();
+    
 }
 
 #[test]
