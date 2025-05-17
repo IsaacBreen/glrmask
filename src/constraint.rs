@@ -133,14 +133,9 @@ impl PrecomputedNodeContents {
 }
 
 // Pre-computation graph node / alias types
-// Need manual Serialize/Deserialize for Trie with Arc<Mutex<>> children
 pub type PrecomputeNode =
     Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
-
-// This type alias is used in the GrammarConstraint struct, which is where the custom serializer is applied.
-// The custom serializer handles the BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>> structure.
-pub type Precomputed = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>;
-
+pub type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode>;
 
 // -----------------------------------------------------------------------------
 // GrammarConstraint – public facing object
@@ -468,13 +463,30 @@ impl<'r> Precomputer<'r> {
         calculate_final_stats(&self.roots, &mut self.stats);
         print_precompute_stats(&self.stats, token_name_map);
 
-        // The Precomputed type now holds `Arc<Mutex<PrecomputeNode>>`.
-        // We no longer need to unwrap/clone the roots into plain PrecomputeNode.
-        // The roots map is already the correct type.
-        let out = self.roots;
+        // Turn Arc<Mutex<…>> roots into plain PrecomputeNode roots.
+        let mut out = Precomputed::new();
+        let mut clones = 0;
 
-        // We don't need the cloning warning check anymore as we are not unwrapping/cloning into plain nodes here.
+        for (sid, arc) in self.roots {
+            match Arc::try_unwrap(arc) {
+                Ok(mutex) => out.insert(
+                    sid,
+                    mutex.into_inner().expect("Mutex poisoned during unwrap"),
+                ),
+                Err(arc) => {
+                    clones += 1;
+                    out.insert(sid, arc.lock().unwrap().clone())
+                }
+            };
+        }
 
+        if clones > 0 {
+            crate::debug!(
+                4,
+                "Warning: {} precomputed root(s) had multiple owners; cloned.",
+                clones
+            );
+        }
         out
     }
 
@@ -837,16 +849,7 @@ impl<'a> GrammarConstraintState<'a> {
         };
 
         // Convert original LLMTokenID to internal LLMTokenID for the closure
-        // Ensure the original ID is actually in the map before attempting unwrap
-        let internal_llm_id_val = match self.parent.original_id_to_internal(llm_token_id) {
-             Some(internal_id) => internal_id.0,
-             None => {
-                 // If the token ID isn't in the map, this commit can't be valid.
-                 // The state should become invalid. Clear all active states.
-                 self.state.clear();
-                 return;
-             }
-        };
+        let internal_llm_id_val = self.parent.original_id_to_internal(llm_token_id).unwrap().0;
 
         let closure = |content: &ParseStateNodeContent<LLMTokenInfo>| -> Option<(ParseStateNodeContent<LLMTokenInfo>, bool)> {
             if content.t.active.contains(internal_llm_id_val) { // .active is internal, compare with internal ID
@@ -883,7 +886,7 @@ impl<'a> GrammarConstraintState<'a> {
         }
     }
 
-    fn prepare_initial_nodes_and_values_for_special_map(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'_, LLMTokenInfo>)> {
+    fn prepare_initial_nodes_and_values_for_special_map(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a, LLMTokenInfo>)> {
         let mut initial_nodes_and_values: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'_, LLMTokenInfo>)> = Vec::new();
         let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, GLRParserState<'_, LLMTokenInfo>> = BTreeMap::new();
 
@@ -906,16 +909,9 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(4, "----------------------------------------------------------------");
 
         for (tokenizer_state_id, state) in tokenizer_state_id_to_parse_states {
-            // The roots map already holds Arc<Mutex<PrecomputeNode>>
-            if let Some(token_trie_arc_mutex) = self.parent.precomputed.get(&tokenizer_state_id) {
-                 initial_nodes_and_values.push((token_trie_arc_mutex.clone(), state));
-            } else {
-                 // If a tokenizer state from self.state has no corresponding precomputed root,
-                 // something is wrong, or this state should perhaps be filtered out earlier.
-                 // For now, we'll just skip it.
-                 eprintln!("Warning: Tokenizer state {} in state.keys() has no corresponding precomputed root.", tokenizer_state_id.0);
-            }
-
+            let token_trie_node = self.parent.precomputed[&tokenizer_state_id].clone();
+            let token_trie_arc_mutex = Arc::new(Mutex::new(token_trie_node));
+            initial_nodes_and_values.push((token_trie_arc_mutex, state));
         }
 
 
@@ -965,7 +961,7 @@ impl<'a> GrammarConstraintState<'a> {
             |node, current_glr_parse_state| {
                 let mut active_llm_tokens = HybridBitset::new();
                 for parse_state in current_glr_parse_state.active_states.values() {
-                    active_llm_tokens |= &parse_state.stack.peek().t.active;
+                    active_llm_tokens |= &parse_state.stack.value.t.active;
                 }
                 let node_ptr = std::ptr::addr_of!(*node);
                 crate::debug!(3, "Processing node {:p} with {} active states, {} LLM tokens, {} finalizers", node_ptr, current_glr_parse_state.active_states.len(), active_llm_tokens.len(), node.value.finalizers().len()); // Use .finalizers()
@@ -1031,25 +1027,9 @@ impl<'a> GrammarConstraintState<'a> {
         let mut i = 0;
         let simplified_roots = simplify_gss_forest(&roots);
         for (tokenizer_state_id, glr_state) in self.state.iter_mut() {
-            // Collect keys to avoid iterator invalidation during retain
-            let keys: Vec<_> = glr_state.active_states.keys().cloned().collect();
-            for key in keys {
-                if let Some(active_state) = glr_state.active_states.get_mut(&key) {
-                    if i < simplified_roots.len() {
-                         active_state.stack = simplified_roots[i].clone();
-                         i += 1;
-                    } else {
-                         // This implies a mismatch between original roots count and simplified roots count.
-                         // This should not happen if simplify_gss_forest preserves the number of roots.
-                         eprintln!("Warning: Mismatch in root counts during GSS simplification update.");
-                         // As a fallback, remove the active state if no simplified root is available
-                         glr_state.active_states.remove(&key);
-                    }
-                }
-            }
-            // Ensure no extra simplified roots are left over
-            if i < simplified_roots.len() {
-                 eprintln!("Warning: {} simplified roots were not assigned to any active state.", simplified_roots.len() - i);
+            for active_state in glr_state.active_states.values_mut() {
+                active_state.stack = simplified_roots[i].clone();
+                i += 1;
             }
         }
 

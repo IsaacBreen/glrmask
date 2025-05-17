@@ -11,40 +11,40 @@ pub use crate::types::{TerminalID};
 
 type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
 type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
-type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Table>;
-type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Table>;
-type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Table>;
-type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Table>;
+type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
+type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Row>;
+type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
+type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
 pub type Stage7Table = BTreeMap<StateID, Stage7Row>;
 
 
 type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
-#[derive(Debug)] // Not serialized directly
+#[derive(Debug)]
 struct Stage2Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
     reduces: BTreeSet<Item>,
 }
-#[derive(Debug)] // Not serialized directly
+#[derive(Debug)]
 struct Stage3Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
     reduces: BTreeMap<Terminal, BTreeSet<Item>>,
 }
-#[derive(Debug)] // Not serialized directly
+#[derive(Debug)]
 struct Stage4Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
 }
-type Stage5Row = Stage4Row; // Not serialized directly
-#[derive(Debug)] // Not serialized directly
+type Stage5Row = Stage4Row;
+#[derive(Debug)]
 struct Stage6Row {
     shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
 }
 
-#[derive(Debug)] // Not serialized directly
+#[derive(Debug)]
 enum Stage6ShiftsAndReduces {
     Shift(BTreeSet<Item>),
     Reduce(ProductionID),
@@ -77,12 +77,13 @@ pub struct Stage7Row {
     pub gotos: BTreeMap<NonTerminalID, StateID>,
 }
 
-type Stage1Result = Stage1Table; // Not serialized directly
-type Stage2Result = Stage2Table; // Not serialized directly
-type Stage3Result = Stage3Table; // Not serialized directly
-type Stage4Result = Stage4Table; // Not serialized directly
-type Stage5Result = Stage5Table; // Not serialized directly
-type Stage6Result = Stage6Table; // Not serialized directly
+
+type Stage1Result = Stage1Table;
+type Stage2Result = Stage2Table;
+type Stage3Result = Stage3Table;
+type Stage4Result = Stage4Table;
+type Stage5Result = Stage5Table;
+type Stage6Result = Stage6Table;
 type Stage7Result = (
     Stage7Table,
     BiBTreeMap<BTreeSet<Item>, StateID>,
@@ -443,5 +444,4 @@ pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerm
     }
     non_terminal_map
 }
-
 
