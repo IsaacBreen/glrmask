@@ -20,30 +20,33 @@ pub trait IntoAllowedRepresentation {
     fn into_allowed(self) -> Self::Allowed;
 }
 
-// --- Implementations for Primitives ---
-impl AllowedRepresentation for usize {}
-impl AllowedRepresentation for u8 {}
-impl AllowedRepresentation for u32 {}
-impl AllowedRepresentation for u64 {}
-impl AllowedRepresentation for i32 {}
-impl AllowedRepresentation for i64 {}
-impl AllowedRepresentation for bool {}
-impl AllowedRepresentation for String {}
-
-// Generic implementation for types that are already allowed
-impl<T: AllowedRepresentation> IntoAllowedRepresentation for T {
-    type Allowed = Self;
-    fn into_allowed(self) -> Self::Allowed {
-        self
-    }
+macro_rules! impl_primitive_conversion {
+    ($primitive_type:ty) => {
+        impl AllowedRepresentation for $primitive_type {}
+        impl IntoAllowedRepresentation for $primitive_type {
+            type Allowed = Self;
+            fn into_allowed(self) -> Self::Allowed {
+                self
+            }
+        }
+    };
 }
+
+// Implement AllowedRepresentation and IntoAllowedRepresentation for primitive types
+impl_primitive_conversion!(usize);
+impl_primitive_conversion!(u8);
+impl_primitive_conversion!(u32);
+impl_primitive_conversion!(u64);
+impl_primitive_conversion!(i32);
+impl_primitive_conversion!(i64);
+impl_primitive_conversion!(bool);
+impl_primitive_conversion!(String);
 
 // --- Implementations for Collections of Allowed Types ---
 impl<T: AllowedRepresentation> AllowedRepresentation for Option<T> {}
 impl<T: AllowedRepresentation> AllowedRepresentation for Vec<T> {}
 impl<T: AllowedRepresentation> AllowedRepresentation for BTreeMap<String, T> {}
 
-// For Option<T> where T can be converted
 impl<T: IntoAllowedRepresentation> IntoAllowedRepresentation for Option<T> {
     type Allowed = Option<T::Allowed>;
     fn into_allowed(self) -> Self::Allowed {
@@ -51,7 +54,6 @@ impl<T: IntoAllowedRepresentation> IntoAllowedRepresentation for Option<T> {
     }
 }
 
-// For Vec<T> where T can be converted
 impl<T: IntoAllowedRepresentation> IntoAllowedRepresentation for Vec<T> {
     type Allowed = Vec<T::Allowed>;
     fn into_allowed(self) -> Self::Allowed {
@@ -59,21 +61,6 @@ impl<T: IntoAllowedRepresentation> IntoAllowedRepresentation for Vec<T> {
     }
 }
 
-// For BTreeMap<K, V> where K can be converted to String and V to Allowed
-impl<K, V> IntoAllowedRepresentation for BTreeMap<K, V>
-where
-    K: ToString + Ord,
-    V: IntoAllowedRepresentation,
-{
-    type Allowed = BTreeMap<String, V::Allowed>;
-    fn into_allowed(self) -> Self::Allowed {
-        self.into_iter()
-            .map(|(k, v)| (k.to_string(), v.into_allowed()))
-            .collect()
-    }
-}
-
-// For BTreeSet<T> where T can be converted
 impl<T> IntoAllowedRepresentation for BTreeSet<T>
 where
     T: IntoAllowedRepresentation,
@@ -90,9 +77,6 @@ where
 // --- Specific ID type conversions to usize ---
 macro_rules! impl_id_conversion_to_usize {
     ($id_type:ty) => {
-        impl AllowedRepresentation for $id_type {} // Mark the ID type itself as allowed (it's simple)
-        // Provide a specific conversion to its underlying usize if it's a newtype.
-        // If $id_type is already usize, the generic T: AllowedRep impl handles it.
         impl IntoAllowedRepresentation for $id_type {
             type Allowed = usize;
             fn into_allowed(self) -> usize {
@@ -114,8 +98,6 @@ impl_id_conversion_to_usize!(TokenizerStateID);
 impl_id_conversion_to_usize!(StateID);
 impl_id_conversion_to_usize!(ProductionID);
 impl_id_conversion_to_usize!(NonTerminalID);
-impl_id_conversion_to_usize!(TableTerminalID);
-impl_id_conversion_to_usize!(GroupID);
 
 
 // --- BiBTreeMap conversion ---
@@ -128,30 +110,16 @@ impl<L: AllowedRepresentation, R: AllowedRepresentation> AllowedRepresentation f
 // Generic BiBTreeMap conversion where L and R are IntoAllowedRepresentation
 impl<L, R> IntoAllowedRepresentation for BiBTreeMap<L, R>
 where
-    L: IntoAllowedRepresentation + Ord + Clone,
-    R: IntoAllowedRepresentation + Ord + Clone,
-    L::Allowed: Ord,
-    R::Allowed: Ord,
+    L: IntoAllowedRepresentation,
+    R: IntoAllowedRepresentation,
+    L: Ord + Clone,
+    R: Ord + Clone,
 {
     type Allowed = AllowedBiBTreeMap<L::Allowed, R::Allowed>;
     fn into_allowed(self) -> Self::Allowed {
-        let mut pairs: Vec<(L::Allowed, R::Allowed)> = self
-            .iter()
-            .map(|(l, r)| (l.clone().into_allowed(), r.clone().into_allowed()))
-            .collect();
-        pairs.sort_unstable_by(|(l1, r1), (l2, r2)| l1.cmp(l2).then_with(|| r1.cmp(r2)));
-        AllowedBiBTreeMap(pairs)
+        todo!()
     }
 }
-
-// Special handling for Vec<u8> to convert to base64 String
-impl IntoAllowedRepresentation for Vec<u8> {
-    type Allowed = String;
-    fn into_allowed(self) -> String {
-        base64::encode(&self)
-    }
-}
-
 
 // --- U8Set conversion ---
 #[derive(Debug, Clone, PartialEq)]
@@ -278,7 +246,7 @@ impl IntoAllowedRepresentation for DFAState {
             transitions: self.transitions.into_iter().map(|(k,v)| (k.to_string(), v)).collect(),
             finalizers: self.finalizers.into_allowed(),
             possible_future_group_ids: self.possible_future_group_ids.into_allowed(),
-            group_id_to_u8set: self.group_id_to_u8set.into_iter().map(|(k,v)|(k.0.to_string(), v.into_allowed())).collect(),
+            group_id_to_u8set: self.group_id_to_u8set.into_iter().map(|(k,v)|(k.to_string(), v.into_allowed())).collect(),
         }
     }
 }
@@ -461,7 +429,7 @@ impl IntoAllowedRepresentation for PrecomputeNode { // PrecomputeNode is Trie<..
     type Allowed = AllowedPrecomputeNode;
     fn into_allowed(self) -> Self::Allowed {
         AllowedPrecomputeNode {
-            value: self.value.into_allowed(),
+            value: self.value.clone().into_allowed(),
             children_placeholder: format!("todo: PrecomputeNode children are complex ({} edge keys)", self.children().len()),
             max_depth: self.max_depth,
         }
