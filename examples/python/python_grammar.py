@@ -363,7 +363,7 @@ if __name__ == "__main__":
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if k.count("-") <= 1}
 
     # Exclude tokens of length more than 3
-    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(k) <= 1}
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(k) <= 2}
 #     # Exclude tokens where any character appears more than once
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(set(k)) == len(k)}
 
