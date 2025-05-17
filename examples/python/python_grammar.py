@@ -359,8 +359,13 @@ if __name__ == "__main__":
 #     tokenizer_vocab = {"def": 0, " f": 1, "(": 2, ")": 3, "de": 4}
 #     tokenizer_vocab = {"def": 0, "de": 1}
 
-    # Exclude tokens that have more than _ hyphens
-    tokenizer_vocab = {k: v for k, v in tokenizer.get_vocab().items() if k.count("-") <= 5}
+#     # Exclude tokens that have more than _ hyphens
+#     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if k.count("-") <= 1}
+
+    # Exclude tokens of length more than 3
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(k) <= 3}
+#     # Exclude tokens where any character appears more than once
+#     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(set(k)) == len(k)}
 
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
