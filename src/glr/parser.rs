@@ -14,7 +14,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 use crate::debug;
 
-pub trait MergeAndIntersect: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash + Serialize + for<'de> Deserialize<'de> {
+pub trait MergeAndIntersect: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash + Serialize {
     /// Merges the information represented by `self` and `other`.
     fn merge(&self, other: &Self) -> Self;
     /// Intersects the information represented by `self` and `other`.

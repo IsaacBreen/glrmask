@@ -21,9 +21,7 @@ use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::datastructures::ArcPtrWrapper;
 use crate::finite_automata::Regex;
-use crate::glr::parser::{
-    MergeAndIntersect, GLRParser, GLRParserState, ParseState, ParseStateNodeContent,
-};
+use crate::glr::parser::{MergeAndIntersect, GLRParser, GLRParserState, ParseState, ParseStateNodeContent, InsertWith};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
 use crate::constraint_serializer;
@@ -525,7 +523,7 @@ impl<'r> Precomputer<'r> {
         for (sid, set) in assoc_by_state {
             let merged = self.merge_handles(&set);
             if !merged.is_empty() {
-                effective.insert(*sid, merged); // Clone sid to avoid error
+                effective.insert(sid, merged); // Clone sid to avoid error
             }
         }
 
