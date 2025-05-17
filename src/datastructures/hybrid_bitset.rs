@@ -15,20 +15,6 @@ pub struct HybridBitset {
     inner: RangeSetBlaze<usize>,
 }
 
-// Add this at the top
-use crate::json_serialization::{JSONNode, JSONConvertible};
-
-impl JSONConvertible for HybridBitset {
-    fn to_json(&self) -> JSONNode {
-        let elements: Vec<usize> = self.iter().collect();
-        elements.to_json()
-    }
-    fn from_json(node: &JSONNode) -> Result<Self, String> {
-        Vec::<usize>::from_json(node).map(HybridBitset::from_iter)
-    }
-}
-
-
 // --- Core Implementation (`impl HybridBitset`) ---
 impl HybridBitset {
     /// Creates a new, empty HybridBitset.

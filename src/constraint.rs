@@ -16,20 +16,15 @@ use crate::constraint_extra::{calculate_final_stats, print_precompute_stats, Pre
 use crate::datastructures::charmap::TrieMap;
 use crate::datastructures::gss::{prune_and_transform_recursive, prune_and_transform_recursive_canonical, simplify_gss_forest};
 use crate::datastructures::hybrid_bitset::HybridBitset;
-use crate::datastructures::trie::{Trie, CycleDetectedError}; // Import CycleDetectedError
+use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::datastructures::ArcPtrWrapper;
 use crate::finite_automata::Regex;
 use crate::glr::parser::{
     MergeAndIntersect, GLRParser, GLRParserState, ParseState, ParseStateNodeContent,
-    ParseStateKey, // Import ParseStateKey
 };
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
-use crate::glr::table::{StateID, NonTerminalID, TerminalID as TableTerminalID}; // Import StateID etc.
-
-use crate::json_serialization::{JSONNode, JSONConvertible}; // Add this line
-
 
 pub type LLMTokenBV = HybridBitset;
 pub type GrammarTokenBV = BitVec;
@@ -42,24 +37,6 @@ pub struct LLMTokenInfo {
     pub active:       LLMTokenBV,
     pub intersection: LLMTokenBV,
 }
-
-// Implement JSONConvertible for LLMTokenInfo
-impl JSONConvertible for LLMTokenInfo {
-    fn to_json(&self) -> JSONNode {
-        crate::json_serialization::struct_to_json_object(vec![
-            ("active", self.active.to_json()),
-            ("intersection", self.intersection.to_json()),
-        ])
-    }
-    fn from_json(node: &JSONNode) -> Result<Self, String> {
-        let map = crate::json_serialization::json_object_to_btreemap(node)?;
-        Ok(LLMTokenInfo {
-            active: map.get("active").ok_or_else(|| "Missing 'active' for LLMTokenInfo".to_string()).and_then(LLMTokenBV::from_json)?,
-            intersection: map.get("intersection").ok_or_else(|| "Missing 'intersection' for LLMTokenInfo".to_string()).and_then(LLMTokenBV::from_json)?,
-        })
-    }
-}
-
 
 impl Default for LLMTokenInfo {
     fn default() -> Self {
@@ -112,21 +89,6 @@ pub struct PrecomputedFinalizer {
     pub content: BTreeMap<TokenizerStateID, LLMTokenBV>,
 }
 
-// Implement JSONConvertible for PrecomputedFinalizer
-impl JSONConvertible for PrecomputedFinalizer {
-    fn to_json(&self) -> JSONNode {
-        crate::json_serialization::struct_to_json_object(vec![
-            ("content", self.content.to_json()),
-        ])
-    }
-    fn from_json(node: &JSONNode) -> Result<Self, String> {
-        let map = crate::json_serialization::json_object_to_btreemap(node)?;
-        Ok(PrecomputedFinalizer {
-            content: map.get("content").ok_or_else(|| "Missing 'content' for PrecomputedFinalizer".to_string()).and_then(|n| BTreeMap::<TokenizerStateID, LLMTokenBV>::from_json(n))?,
-        })
-    }
-}
-
 impl PrecomputedFinalizer {
     fn new(tokens: LLMTokenBV, tokenizer_state: TokenizerStateID) -> Self {
         Self {
@@ -142,22 +104,29 @@ pub struct PrecomputedNodeContents {
     pub active: LLMTokenBV, // Add this line
 }
 
-// Implement JSONConvertible for PrecomputedNodeContents
-impl JSONConvertible for PrecomputedNodeContents {
-    fn to_json(&self) -> JSONNode {
-        crate::json_serialization::struct_to_json_object(vec![
-            ("finalizers", self.finalizers.to_json()),
-            ("clean_end", self.clean_end.to_json()),
-            ("active", self.active.to_json()),
-        ])
+impl PrecomputedNodeContents {
+    pub(crate) fn finalizers(&self) -> &BTreeMap<GrammarTokenID, PrecomputedFinalizer> {
+        &self.finalizers
     }
-    fn from_json(node: &JSONNode) -> Result<Self, String> {
-        let map = crate::json_serialization::json_object_to_btreemap(node)?;
-        Ok(PrecomputedNodeContents {
-            finalizers: map.get("finalizers").ok_or_else(|| "Missing 'finalizers' for PrecomputedNodeContents".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, PrecomputedFinalizer>::from_json(n))?,
-            clean_end: map.get("clean_end").ok_or_else(|| "Missing 'clean_end' for PrecomputedNodeContents".to_string()).and_then(Option::<LLMTokenBV>::from_json)?,
-            active: map.get("active").ok_or_else(|| "Missing 'active' for PrecomputedNodeContents".to_string()).and_then(LLMTokenBV::from_json)?,
-        })
+
+    fn push_finalizer_info(
+        &mut self,
+        grammar_token: GrammarTokenID,
+        llm_token: LLMTokenID,
+        tokenizer_state: TokenizerStateID,
+    ) {
+        let mut bv = HybridBitset::new();
+        bv.insert(llm_token.0);
+
+        self.finalizers
+            .entry(grammar_token)
+            .and_modify(|f| {
+                f.content
+                    .entry(tokenizer_state)
+                    .and_modify(|existing| *existing |= &bv)
+                    .or_insert(bv.clone());
+            })
+            .or_insert_with(|| PrecomputedFinalizer::new(bv, tokenizer_state));
     }
 }
 
@@ -182,42 +151,6 @@ pub struct GrammarConstraint {
     // The number of unique internal tokens is derived from the size of this bimap.
     pub(crate) original_to_internal_id_bimap: BiBTreeMap<usize, usize>, // original_id.0 <-> internal_id.0
     pub(crate) internal_max_llm_token: usize, // Number of unique internal LLM tokens (capacity for bitsets)
-}
-
-// Implement JSONConvertible for GrammarConstraint
-impl JSONConvertible for GrammarConstraint {
-    fn to_json(&self) -> JSONNode {
-        crate::json_serialization::struct_to_json_object(vec![
-            ("tokenizer", self.tokenizer.to_json()),
-            ("parser", self.parser.to_json()),
-            ("precomputed", self.precomputed.to_json()),
-            ("llm_token_map", self.llm_token_map.to_json()),
-            ("token_name_map", self.token_name_map.to_json()),
-            ("max_original_llm_token_id", self.max_original_llm_token_id.to_json()),
-            ("original_to_internal_id_bimap", self.original_to_internal_id_bimap.to_json()),
-            ("internal_max_llm_token", self.internal_max_llm_token.to_json()),
-        ])
-    }
-
-    fn from_json(node: &JSONNode) -> Result<Self, String> {
-        let map = crate::json_serialization::json_object_to_btreemap(node)?;
-        Ok(GrammarConstraint {
-            tokenizer: map.get("tokenizer").ok_or_else(|| "Missing 'tokenizer'".to_string()).and_then(Regex::from_json)?,
-            parser: map.get("parser").ok_or_else(|| "Missing 'parser'".to_string()).and_then(GLRParser::from_json)?,
-            precomputed: map.get("precomputed").ok_or_else(|| "Missing 'precomputed'".to_string())
-                .and_then(|n| BTreeMap::<TokenizerStateID, PrecomputeNode>::from_json(n))?,
-            llm_token_map: map.get("llm_token_map").ok_or_else(|| "Missing 'llm_token_map'".to_string())
-                .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?,
-            token_name_map: map.get("token_name_map").ok_or_else(|| "Missing 'token_name_map'".to_string())
-                .and_then(|n| BiBTreeMap::<String, usize>::from_json(n))?,
-            max_original_llm_token_id: map.get("max_original_llm_token_id").ok_or_else(|| "Missing 'max_original_llm_token_id'".to_string())
-                .and_then(usize::from_json)?,
-            original_to_internal_id_bimap: map.get("original_to_internal_id_bimap").ok_or_else(|| "Missing 'original_to_internal_id_bimap'".to_string())
-                .and_then(|n| BiBTreeMap::<usize, usize>::from_json(n))?,
-            internal_max_llm_token: map.get("internal_max_llm_token").ok_or_else(|| "Missing 'internal_max_llm_token'".to_string())
-                .and_then(usize::from_json)?,
-        })
-    }
 }
 
 impl GrammarConstraint {
@@ -605,7 +538,7 @@ impl<'r> Precomputer<'r> {
                     for src in &src_set {
                         self.insert_edge(
                             src.as_arc().clone(),
-                            Some(grammar_tok),
+                            grammar_tok,
                             edge_tokens.clone(),
                             child_vocab_of_segment.token_id(),
                             match_end_offset,
@@ -655,7 +588,7 @@ impl<'r> Precomputer<'r> {
     fn insert_edge(
         &self,
         source_arc: Arc<Mutex<PrecomputeNode>>,
-        grammar_tok: Option<GrammarTokenID>,
+        grammar_tok: GrammarTokenID,
         edge_tokens: LLMTokenBV,
         final_llm_token_id_at_child_vocab: usize,
         match_end_offset_in_segment: usize,
@@ -669,13 +602,11 @@ impl<'r> Precomputer<'r> {
             BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
     ) {
-        let merge_edge_value = |existing: &mut HybridBitset, new_bv_ref: HybridBitset| *existing |= new_bv_ref;
-
         let mut inserter = EdgeInserter::new(
             source_arc.clone(),
-            grammar_tok.clone(),
+            Some(grammar_tok),
             edge_tokens.clone(), // Clone for inserter
-            merge_edge_value,
+            |existing: &mut HybridBitset, new_bv_ref: HybridBitset| *existing |= new_bv_ref,
         );
 
         // First try existing children
@@ -712,7 +643,7 @@ impl<'r> Precomputer<'r> {
             {
                 let guard = source_arc.lock().unwrap();
                 if let Some(dest_map) =
-                    guard.children().get(&grammar_tok)
+                    guard.children().get(&Some(grammar_tok))
                 {
                     for child_wrap in dest_map.keys() {
                          extra.push(child_wrap.as_arc().clone());
@@ -758,7 +689,6 @@ impl<'r> Precomputer<'r> {
         }
     }
 
-
     // -------------------------------------------------------------------------
     // Merge logic (union vs fresh node)
     // -------------------------------------------------------------------------
@@ -774,15 +704,13 @@ impl<'r> Precomputer<'r> {
             PrecomputedNodeContents::default(),
         )));
 
-        let merge_edge_value = |existing: &mut HybridBitset, new_bv_ref: HybridBitset| *existing |= new_bv_ref;
-
         for child in set {
             let edge_tokens_for_merge = self.all_llm_tokens.clone();
             let mut inserter = EdgeInserter::new(
                 child.as_arc().clone(), // Source of the edge
                 None::<GrammarTokenID>,   // Key for the edge (epsilon)
                 edge_tokens_for_merge.clone(), // Data for the edge
-                merge_edge_value,
+                |existing_edge_data: &mut HybridBitset, new_edge_data| *existing_edge_data |= new_edge_data,
             );
 
             // Try to reuse an existing child of `child.as_arc()`
@@ -822,12 +750,12 @@ fn count_vocab_nodes(node: &VocabPrefixTreeNode) -> u64 {
 // Runtime state object
 // -----------------------------------------------------------------------------
 #[derive(Debug, Clone)]
-pub struct GrammarConstraintState<'a, T: MergeAndIntersect> {
+pub struct GrammarConstraintState<'a> {
     parent: &'a GrammarConstraint,
-    state:  BTreeMap<TokenizerStateID, GLRParserState<'a, T>>,
+    state:  BTreeMap<TokenizerStateID, GLRParserState<'a, LLMTokenInfo>>,
 }
 
-impl<'a, T: MergeAndIntersect> GrammarConstraintState<'a, T> {
+impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&mut self) -> LLMTokenBV {
         let mut internal_mask = HybridBitset::new(); // This will be composed of internal IDs
         for (_tokenizer_state_id, glr_parser_state) in &self.state {
@@ -902,9 +830,9 @@ impl<'a, T: MergeAndIntersect> GrammarConstraintState<'a, T> {
         }
     }
 
-    fn prepare_initial_nodes_and_values_for_special_map(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a, T>)> {
-        let mut initial_nodes_and_values: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'_, T>)> = Vec::new();
-        let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, GLRParserState<'_, T>> = BTreeMap::new();
+    fn prepare_initial_nodes_and_values_for_special_map(&mut self, llm_tokens: &LLMTokenBV) -> Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a, LLMTokenInfo>)> {
+        let mut initial_nodes_and_values: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'_, LLMTokenInfo>)> = Vec::new();
+        let mut tokenizer_state_id_to_parse_states: BTreeMap<TokenizerStateID, GLRParserState<'_, LLMTokenInfo>> = BTreeMap::new();
 
         for (tokenizer_state_id, state) in &self.state {
             let mut cloned_state = state.clone();

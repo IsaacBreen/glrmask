@@ -11,28 +11,10 @@ use std::collections::BinaryHeap;
 use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
 use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
 
-use crate::json_serialization::{JSONNode, JSONConvertible}; // Add this line
-use crate::types::TerminalID as GrammarTokenID; // For Option<GrammarTokenID>
-
-
 /// Error type indicating that a cycle was detected during an operation
 /// that updates graph structure or properties like max_depth.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CycleDetectedError;
-
-// Implement JSONConvertible for CycleDetectedError
-impl JSONConvertible for CycleDetectedError {
-    fn to_json(&self) -> JSONNode {
-        JSONNode::String("CycleDetectedError".to_string())
-    }
-    fn from_json(node: &JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::String(s) if s == "CycleDetectedError" => Ok(CycleDetectedError),
-            _ => Err("Expected string 'CycleDetectedError' for CycleDetectedError".to_string()),
-        }
-    }
-}
-
 
 impl fmt::Display for CycleDetectedError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -59,96 +41,6 @@ pub struct Trie<EK: Ord, EV, T> {
     /// If A -> B, then A.max_depth < B.max_depth.
     pub max_depth: usize,
 }
-
-// Implement JSONConvertible for Trie
-// EK: Option<GrammarTokenID>, EV: LLMTokenBV, T: PrecomputedNodeContents
-impl<EK, EV, T_NodeVal> JSONConvertible for Trie<EK, EV, T_NodeVal>
-where
-    EK: JSONConvertible + Ord + Clone,
-    EV: JSONConvertible + Clone,
-    T_NodeVal: JSONConvertible,
-{
-    fn to_json(&self) -> JSONNode {
-        // Children: BTreeMap<EK, BTreeMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T_NodeVal>>>, EV>>
-        // Convert to Vec<(EK_json, Vec< (Trie_json, EV_json) >)>
-        let children_json_intermediate: Vec<(JSONNode, JSONNode)> = self.children.iter().map(|(ek, inner_map)| {
-            let inner_map_json_pairs: Vec<JSONNode> = inner_map.iter().map(|(arc_ptr_wrapper, ev_val)| {
-                // Serialize the Trie node pointed to by ArcPtrWrapper
-                let trie_node_json = arc_ptr_wrapper.as_arc().to_json(); // Arc<Mutex<Trie>>.to_json()
-                JSONNode::Array(vec![trie_node_json, ev_val.to_json()])
-            }).collect();
-            (ek.to_json(), JSONNode::Array(inner_map_json_pairs))
-        }).collect();
-
-        // Convert intermediate to final JSON structure for BTreeMap (Array of Arrays)
-        let children_json = JSONNode::Array(
-            children_json_intermediate.into_iter()
-            .map(|(k_json, v_json)| JSONNode::Array(vec![k_json, v_json]))
-            .collect()
-        );
-
-        crate::json_serialization::struct_to_json_object(vec![
-            ("value", self.value.to_json()),
-            ("children", children_json),
-            ("max_depth", self.max_depth.to_json()),
-        ])
-    }
-
-    fn from_json(node: &JSONNode) -> Result<Self, String> {
-        let map = crate::json_serialization::json_object_to_btreemap(node)?;
-
-        let value = map.get("value").ok_or_else(|| "Missing 'value' for Trie".to_string())
-            .and_then(T_NodeVal::from_json)?;
-        let max_depth = map.get("max_depth").ok_or_else(|| "Missing 'max_depth' for Trie".to_string())
-            .and_then(usize::from_json)?;
-
-        let children_outer_array_node = map.get("children").ok_or_else(|| "Missing 'children' for Trie".to_string())?;
-        let mut children_btreemap = BTreeMap::new();
-
-        if let JSONNode::Array(outer_pairs_array) = children_outer_array_node {
-            for ek_inner_map_pair_node in outer_pairs_array {
-                if let JSONNode::Array(ek_inner_map_vec) = ek_inner_map_pair_node {
-                    if ek_inner_map_vec.len() != 2 {
-                        return Err("Trie children entry pair should have 2 elements (EK, InnerMap)".to_string());
-                    }
-                    let ek = EK::from_json(&ek_inner_map_vec[0])?;
-
-                    let inner_map_array_node = &ek_inner_map_vec[1];
-                    if let JSONNode::Array(inner_map_pairs_array) = inner_map_array_node {
-                        let mut inner_btreemap = BTreeMap::new();
-                        for trie_ev_pair_node in inner_map_pairs_array {
-                             if let JSONNode::Array(trie_ev_vec) = trie_ev_pair_node {
-                                if trie_ev_vec.len() != 2 {
-                                    return Err("Trie inner map entry pair should have 2 elements (TrieNode, EV)".to_string());
-                                }
-                                // Deserialize Arc<Mutex<Trie>>
-                                let trie_arc_mutex = Arc::<Mutex<Trie<EK, EV, T_NodeVal>>>::from_json(&trie_ev_vec[0])?;
-                                let ev = EV::from_json(&trie_ev_vec[1])?;
-                                inner_btreemap.insert(ArcPtrWrapper::new(trie_arc_mutex), ev);
-                             } else {
-                                 return Err("Expected Array for Trie inner map entry pair".to_string());
-                             }
-                        }
-                        children_btreemap.insert(ek, inner_btreemap);
-                    } else {
-                        return Err("Expected Array for Trie inner map".to_string());
-                    }
-                } else {
-                    return Err("Expected Array for Trie children entry pair".to_string());
-                }
-            }
-        } else {
-            return Err("Expected Array for Trie children".to_string());
-        }
-
-        Ok(Trie {
-            value,
-            children: children_btreemap,
-            max_depth,
-        })
-    }
-}
-
 
 // Implementation block for core Trie functionality
 // Added Clone bound for EK needed in try_insert_or_merge_edge and others
@@ -1889,6 +1781,213 @@ mod tests {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string())));
         let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
+        let initial_edge_val1: HybridBitset = vec![10].into_iter().collect();
+        let initial_edge_val2: HybridBitset = vec![20].into_iter().collect();
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
+        let merged_edge_val1: HybridBitset = vec![1, 10].into_iter().collect(); // Expected merge with child1
+
+        // Pre-insert edges with the target key
+        {
+            let mut s = source.lock().unwrap();
+            s.try_insert("key", &mut Some(initial_edge_val1), child1.clone()).unwrap();
+            s.try_insert("key", &mut Some(initial_edge_val2.clone()), child2.clone()).unwrap();
+        }
+
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
+        // Should try child1, merge succeeds. Should not try child2.
+        let result_node = inserter.try_children().unwrap();
+
+        assert!(Arc::ptr_eq(&result_node, &child1)); // Merged with child1
+        let s = source.lock().unwrap();
+        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
+        assert_eq!(children_map.len(), 2); // Still two children
+
+        let edge1_entry = children_map.iter().find(|(ca, _)| Arc::ptr_eq(ca.as_arc(), &child1)).unwrap();
+        assert_eq!(*edge1_entry.1, merged_edge_val1); // Merged value
+
+        let edge2_entry = children_map.iter().find(|(ca, _)| Arc::ptr_eq(ca.as_arc(), &child2)).unwrap();
+        assert_eq!(*edge2_entry.1, initial_edge_val2); // Unchanged
+    }
+
+    #[test]
+    fn test_ei_else_create_with_value() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
+
+
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
+        // No try calls, should go straight to else_create
+        let result_node = inserter.else_create_destination_with_value("created".to_string()).unwrap();
+
+        assert_eq!(result_node.lock().unwrap().value, "created");
+        assert_eq!(result_node.lock().unwrap().max_depth, 1); // Depth updated
+        let s = source.lock().unwrap();
+        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
+        assert_eq!(children_map.len(), 1);
+        let (ca, ev) = children_map.iter().next().unwrap();
+        assert!(Arc::ptr_eq(ca.as_arc(), &result_node));
+        assert_eq!(*ev, new_edge_val);
+    }
+
+    #[test]
+    fn test_ei_else_create_with() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let created_flag = Arc::new(AtomicUsize::new(0));
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
+
+
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
+        let flag_clone = created_flag.clone();
+        let result_node = inserter.else_create_destination_with(|| {
+            flag_clone.fetch_add(1, Ordering::SeqCst);
+            "created_via_fn".to_string()
+        }).unwrap();
+
+        assert_eq!(created_flag.load(Ordering::SeqCst), 1); // Closure was called
+        assert_eq!(result_node.lock().unwrap().value, "created_via_fn");
+        assert_eq!(result_node.lock().unwrap().max_depth, 1);
+    }
+
+    #[test]
+    fn test_ei_else_create_default() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
+
+
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
+        // String::default() is ""
+        let result_node = inserter.else_create_destination().unwrap();
+
+        assert_eq!(result_node.lock().unwrap().value, ""); // Default value
+        assert_eq!(result_node.lock().unwrap().max_depth, 1);
+    }
+
+    #[test]
+    fn test_ei_chaining_try_then_else() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
+        let dummy_edge_val = HybridBitset::new();
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
+
+        // Setup: dest1 causes cycle
+        dest1.lock().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
+
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
+        let result_node = inserter
+            .try_destination(dest1.clone()) // Fails (cycle)
+            .else_create_destination_with_value("fallback".to_string()) // Executes
+            .unwrap();
+
+        assert_eq!(result_node.lock().unwrap().value, "fallback"); // Fallback was created
+        assert!(!Arc::ptr_eq(&result_node, &dest1));
+        let s = source.lock().unwrap();
+        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
+        assert_eq!(children_map.len(), 1);
+        let (ca, ev) = children_map.iter().next().unwrap();
+        assert!(Arc::ptr_eq(ca.as_arc(), &result_node));
+        assert_eq!(*ev, new_edge_val);
+    }
+
+    #[test]
+    fn test_ei_chaining_try_success_skips_else() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
+
+
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
+        let result_node = inserter
+            .try_destination(dest1.clone()) // Succeeds
+            .else_create_destination_with_value("fallback".to_string()) // Should be skipped
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&result_node, &dest1)); // Original dest1 was used
+        assert_eq!(result_node.lock().unwrap().value, "dest1");
+        let s = source.lock().unwrap();
+        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
+        assert_eq!(children_map.len(), 1);
+        let (ca, ev) = children_map.iter().next().unwrap();
+        assert!(Arc::ptr_eq(ca.as_arc(), &dest1));
+        assert_eq!(*ev, new_edge_val);
+    }
+
+    #[test]
+    #[should_panic(expected = "EdgeInserter::unwrap() called but no destination was found or created")]
+    fn test_ei_unwrap_panic() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
+        let dummy_edge_val = HybridBitset::new();
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
+
+        // Setup: dest1 causes cycle
+        dest1.lock().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
+
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
+        // Try fails, no else_create called
+        inserter.try_destination(dest1.clone()).unwrap(); // Panic here
+    }
+
+    #[test]
+    fn test_ei_get() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
+        let dummy_edge_val = HybridBitset::new();
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
+
+        // Setup: dest1 causes cycle
+        dest1.lock().unwrap().force_insert_to_node("d1->s", dummy_edge_val.clone(), &source);
+
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
+
+        // Try fails
+        let inserter_after_try = inserter.try_destination(dest1.clone());
+        assert!(inserter_after_try.clone_into_option().is_none());
+
+        // Now use else_create
+        let inserter_after_else = inserter_after_try.else_create_destination_with_value("fallback".to_string());
+        let result_opt = inserter_after_else.into_option();
+        assert!(result_opt.is_some());
+        assert_eq!(result_opt.unwrap().lock().unwrap().value, "fallback");
+    }
+
+    #[test]
+    fn test_ei_chaining_stops_after_success() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string()))); // This one succeeds
+        let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
+        let new_node_val_if_created = "new_node_val".to_string();
+        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
+
+
+        let destinations_for_slice = vec![child2.clone()];
+
+        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
+        let result_node = inserter
+            .try_destination(child1.clone()) // This succeeds, result is set to child1
+            // try_slice, else_create_with_value should now have no effect
+            .try_destinations(&destinations_for_slice) // Should be skipped
+            .else_create_destination_with_value(new_node_val_if_created.clone()) // Should be skipped
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&result_node, &child1), "Chain should stop after first success (try_insert)");
+
+        // Check only the edge to child1 was added
+        let s = source.lock().unwrap();
+        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
+        assert_eq!(children_map.len(), 1);
+        let (ca, ev) = children_map.iter().next().unwrap();
+        assert!(Arc::ptr_eq(ca.as_arc(), &child1));
+        assert_eq!(*ev, new_edge_val);
+
+        // Ensure the value for the skipped else_create was not used
+        assert_ne!(result_node.lock().unwrap().value, new_node_val_if_created);
+    }
+
+     #[test]
+    fn test_ei_try_children_new_logic() {
+        let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
+        let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string())));
+        let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
         let child_other_key: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child_other_key".to_string())));
 
         let edge_key = "target_key";
@@ -1982,4 +2081,3 @@ mod tests {
         assert_eq!(*ev_chain, new_ev_chain, "Edge should have the new_ev_chain value");
     }
 }
-
