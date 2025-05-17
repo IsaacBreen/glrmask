@@ -1,3 +1,4 @@
+use serde::{Serialize, Deserialize, Serializer, Deserializer};
 use crate::datastructures::gss::{print_gss_forest, BulkMerge, gather_gss_stats, find_longest_path};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
@@ -25,25 +26,28 @@ impl MergeAndIntersect for () {
     fn intersect(&self, _: &Self) -> Self { () }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ParseStateNodeContent<T: MergeAndIntersect> {
     pub state_id: StateID,
     pub t: T,
 }
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)] // ParseState is not serialized directly
 pub struct ParseState<T: MergeAndIntersect> {
     pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)] // StopReason is not serialized directly
 pub enum StopReason {
     ActionNotFound,
     GotoNotFound,
 }
 
 
-// TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "Stage7Table: Serialize, Vec<Production>: Serialize, BiBTreeMap<Terminal, TerminalID>: Serialize, BiBTreeMap<NonTerminal, NonTerminalID>: Serialize, BiBTreeMap<BTreeSet<Item>, StateID>: Serialize",
+    deserialize = "Stage7Table: Deserialize<'de>, Vec<Production>: Deserialize<'de>, BiBTreeMap<Terminal, TerminalID>: Deserialize<'de>, BiBTreeMap<NonTerminal, NonTerminalID>: Deserialize<'de>, BiBTreeMap<BTreeSet<Item>, StateID>: Deserialize<'de>"
+))]
 pub struct GLRParser {
     pub stage_7_table: Stage7Table,
     pub productions: Vec<Production>,
@@ -251,7 +255,7 @@ impl Display for GLRParser {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone)] // GLRParserState is not serialized directly
 pub struct GLRParserState<'a, T: MergeAndIntersect> {
     pub parser: &'a GLRParser,
     pub active_states: BTreeMap<ParseStateKey, ParseState<T>>,
@@ -386,7 +390,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                     crate::debug!(4, "Reduce from state {} via token {} to nonterminal {}", top.state_id.0, token_id.0, nt.0);
                     for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
                         // Add to worklist for current step; merging happens when moving to `next`
-                        todo.push(ParseState { stack: s }); 
+                        todo.push(ParseState { stack: s });
                     }
                 }
 
@@ -455,7 +459,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ParseStateKey {
     stack_state_id: StateID,
     // Removed action_stack
@@ -506,3 +510,4 @@ impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
         }
     }
 }
+

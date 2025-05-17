@@ -1,5 +1,4 @@
-#![allow(dead_code)] // Allow unused code for the example
-
+use serde::{Serialize, Deserialize};
 use range_set_blaze::RangeSetBlaze; // Import RangeSetBlaze
 use std::convert::TryInto;
 use std::hash::{Hash, Hasher};
@@ -10,7 +9,11 @@ use std::ops::{
 
 // --- The Hybrid Bitset Struct ---
 // Ord and PartialOrd will now rely on RangeSetBlaze's implementation (lexicographical on ranges)
-#[derive(Debug, Clone, Ord, PartialOrd, Eq)]
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "RangeSetBlaze<usize>: Serialize",
+    deserialize = "RangeSetBlaze<usize>: Deserialize<'de>"
+))]
 pub struct HybridBitset {
     inner: RangeSetBlaze<usize>,
 }

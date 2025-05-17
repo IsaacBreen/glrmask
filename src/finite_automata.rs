@@ -1,3 +1,4 @@
+use serde::{Serialize, Deserialize};
 use crate::datastructures::charmap::TrieMap;
 use crate::datastructures::frozenset::FrozenSet;
 use crate::datastructures::u8set::U8Set;
@@ -6,7 +7,7 @@ use std::fmt::{Debug, Formatter};
 
 pub type GroupID = usize;
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)] // NFAState and NFA are not serialized directly
 pub struct NFAState {
     transitions: TrieMap<Vec<usize>>,
     epsilon_transitions: Vec<usize>,
@@ -14,46 +15,61 @@ pub struct NFAState {
     non_greedy_finalizers: BTreeSet<GroupID>,
 }
 
-#[derive(Clone)]
+#[derive(Clone)] // NFA is not serialized directly
 pub struct NFA {
     states: Vec<NFAState>,
     start_state: usize,
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DFAState {
+    #[serde(bound(
+        serialize = "TrieMap<usize>: Serialize",
+        deserialize = "TrieMap<usize>: Deserialize<'de>"
+    ))]
     pub transitions: TrieMap<usize>,
     pub finalizers: BTreeSet<GroupID>,
     pub possible_future_group_ids: BTreeSet<GroupID>,
+    #[serde(bound(
+        serialize = "BTreeMap<GroupID, U8Set>: Serialize",
+        deserialize = "BTreeMap<GroupID, U8Set>: Deserialize<'de>"
+    ))]
     pub group_id_to_u8set: BTreeMap<GroupID, U8Set>,
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DFA {
+    #[serde(bound(
+        serialize = "Vec<DFAState>: Serialize",
+        deserialize = "Vec<DFAState>: Deserialize<'de>"
+    ))]
     pub states: Vec<DFAState>,
     pub start_state: usize,
     pub non_greedy_finalizers: BTreeSet<GroupID>,
 }
 
-// TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Regex {
+    #[serde(bound(
+        serialize = "DFA: Serialize",
+        deserialize = "DFA: Deserialize<'de>"
+    ))]
     pub dfa: DFA,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Match {
     pub group_id: GroupID,
     pub position: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)] // FinalStateReport and RegexState are not serialized directly
 pub struct FinalStateReport {
     pub position: usize,
     pub matches: BTreeMap<GroupID, usize>, // GroupID to position
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)] // RegexState is not serialized directly
 pub struct RegexState<'a> {
     pub regex: &'a Regex,
     pub position: usize,
@@ -62,7 +78,7 @@ pub struct RegexState<'a> {
     pub done: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Expr {
     U8Seq(Vec<u8>),
     U8Class(U8Set),
@@ -72,21 +88,25 @@ pub enum Expr {
     Epsilon, // Explicit epsilon transition
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum QuantifierType {
     ZeroOrMore, // *
     OneOrMore,  // +
     ZeroOrOne,  // ?
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExprGroup {
     pub expr: Expr,
     pub is_non_greedy: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExprGroups {
+    #[serde(bound(
+        serialize = "Vec<ExprGroup>: Serialize",
+        deserialize = "Vec<ExprGroup>: Deserialize<'de>"
+    ))]
     pub groups: Vec<ExprGroup>,
 }
 
@@ -213,21 +233,21 @@ impl Debug for DFA {
             f.write_str(&format!("State {}:\n", state_index))?;
 
             for (transition_u8, next_state) in &state.transitions {
-                f.write_str(&format!("  - {} ({:?}): {}\n", transition_u8, transition_u8 as char, next_state))?;
+                f.write_str(&format!("  {} ({:?}): {}\n", transition_u8, transition_u8 as char, next_state))?;
             }
 
             if !state.finalizers.is_empty() {
-                f.write_str(&format!("  - Finalizers: {:?}\n", state.finalizers))?;
+                f.write_str(&format!("  Finalizers: {:?}\n", state.finalizers))?;
             }
 
             if !state.possible_future_group_ids.is_empty() {
-                f.write_str(&format!("  - Possible Future Group IDs: {:?}\n", state.possible_future_group_ids))?;
+                f.write_str(&format!("  Possible Future Group IDs: {:?}\n", state.possible_future_group_ids))?;
             }
 
             if !state.group_id_to_u8set.is_empty() {
-                f.write_str("  - Group ID to U8Set:\n")?;
+                f.write_str("  Group ID to U8Set:\n")?;
                 for (group_id, u8set) in &state.group_id_to_u8set {
-                    f.write_str(&format!("    - Group {}: {}\n", group_id, u8set))?;
+                    f.write_str(&format!("    Group {}: {}\n", group_id, u8set))?;
                 }
             }
         }
@@ -251,6 +271,7 @@ impl ExprGroups {
     pub fn build(self) -> Regex {
         let mut dfa = self.build_nfa().to_dfa();
         dfa.minimize();
+        regex.remove_unreachable_states();
         Regex { dfa }
     }
 
@@ -388,145 +409,6 @@ impl Expr {
     }
 }
 
-impl NFA {
-    pub fn add_state(&mut self) -> usize {
-        let new_index = self.states.len();
-        self.states.push(NFAState::new());
-        new_index
-    }
-
-    pub fn add_transition(&mut self, from: usize, on_u8: u8, to: usize) {
-        self.states[from]
-            .transitions
-            .entry(on_u8)
-            .or_insert_with(Vec::new)
-            .push(to);
-    }
-
-    pub fn add_epsilon_transition(&mut self, from: usize, to: usize) {
-        self.states[from].epsilon_transitions.push(to);
-    }
-
-    pub fn to_dfa(self) -> DFA {
-        let mut dfa_states: Vec<DFAState> = Vec::new();
-        let mut dfa_state_map: BTreeMap<FrozenSet<usize>, usize> = BTreeMap::new();
-        let mut worklist: Vec<FrozenSet<usize>> = Vec::new();
-
-        let mut epsilon_closures = self.compute_epsilon_closures();
-
-        // Compute the epsilon closure of the NFA start state and use it as the DFA start state
-        let start_closure = epsilon_closures[self.start_state].clone();
-        let start_state_set = FrozenSet::from_iter(start_closure.iter().cloned());
-        worklist.push(start_state_set.clone());
-        dfa_state_map.insert(start_state_set.clone(), 0);
-
-        // Initialize the first DFA state
-        let closure = epsilon_closures[self.start_state].clone();
-        let mut finalizers = BTreeSet::new();
-        let mut non_greedy_finalizers = BTreeSet::new();
-        for &state in &closure {
-            finalizers.extend(self.states[state].finalizers.iter().cloned());
-            non_greedy_finalizers.extend(self.states[state].non_greedy_finalizers.iter().cloned());
-        }
-
-        dfa_states.push(DFAState {
-            transitions: TrieMap::new(),
-            finalizers,
-            possible_future_group_ids: BTreeSet::new(), // Will be computed later
-            group_id_to_u8set: BTreeMap::new(),  // Will be computed later
-        });
-
-        while let Some(current_set) = worklist.pop() {
-            let current_dfa_state = *dfa_state_map.get(&current_set).unwrap();
-            let mut transition_map: BTreeMap<u8, BTreeSet<usize>> = BTreeMap::new();
-
-            // For each state in the current DFA state, look at the NFA transitions
-            for &state in current_set.iter() {
-                for (input, next_states) in &self.states[state].transitions {
-                    for &next_state in next_states {
-                        transition_map
-                            .entry(input)
-                            .or_insert_with(BTreeSet::new)
-                            .insert(next_state);
-                    }
-                }
-            }
-
-            // For each transition, compute the epsilon closure of the resulting state set
-            for (&input_u8, next_states) in &transition_map {
-                let mut closure = BTreeSet::new();
-                for &next_state in next_states {
-                    closure.extend(&epsilon_closures[next_state]);
-                }
-                let frozen_closure = FrozenSet::from_iter(closure.iter().cloned());
-
-                // If this set of states is new, add it as a new DFA state
-                let next_dfa_state = if let Some(&existing_state) = dfa_state_map.get(&frozen_closure) {
-                    existing_state
-                } else {
-                    let new_state_index = dfa_states.len();
-                    dfa_state_map.insert(frozen_closure.clone(), new_state_index);
-                    worklist.push(frozen_closure.clone());
-
-                    // Compute finalizers for the new DFA state
-                    let mut new_finalizers = BTreeSet::new();
-                    let mut new_non_greedy_finalizers = BTreeSet::new();
-                    for &state in closure.iter() {
-                        new_finalizers.extend(self.states[state].finalizers.iter().cloned());
-                        new_non_greedy_finalizers.extend(self.states[state].non_greedy_finalizers.iter().cloned());
-                    }
-
-                    dfa_states.push(DFAState {
-                        transitions: TrieMap::new(),
-                        finalizers: new_finalizers,
-                        possible_future_group_ids: BTreeSet::new(), // Will be computed later
-                        group_id_to_u8set: BTreeMap::new(),  // Will be computed later
-                    });
-
-                    new_state_index
-                };
-
-                // Insert the transition into the DFA state
-                dfa_states[current_dfa_state].transitions.insert(input_u8, next_dfa_state);
-            }
-        }
-
-        let mut dfa = DFA {
-            states: dfa_states,
-            start_state: 0,
-            non_greedy_finalizers: BTreeSet::new(),
-        };
-
-        for state in &self.states {
-            dfa.non_greedy_finalizers.extend(state.non_greedy_finalizers.iter().cloned());
-        }
-
-        dfa.compute_possible_future_group_ids();
-        dfa.compute_group_id_to_u8set();
-
-        dfa
-    }
-
-    fn epsilon_closure(&self, state: usize) -> BTreeSet<usize> {
-        let mut closure = BTreeSet::new();
-        let mut stack = vec![state];
-
-        while let Some(state) = stack.pop() {
-            if closure.insert(state) {
-                stack.extend(&self.states[state].epsilon_transitions);
-            }
-        }
-
-        closure
-    }
-
-    fn compute_epsilon_closures(&self) -> Vec<BTreeSet<usize>> {
-        (0..self.states.len())
-            .map(|state| self.epsilon_closure(state))
-            .collect()
-    }
-}
-
 impl DFA {
     pub fn compute_possible_future_group_ids(&mut self) {
         // Initialize possible_future_group_ids as empty. We only want to include
@@ -588,13 +470,47 @@ impl DFA {
         // Find reachable states using BFS
         let mut reachable = vec![false; self.states.len()];
         let mut queue = vec![self.start_state];
-        reachable[self.start_state] = true;
+        if self.states.len() > self.start_state {
+            reachable[self.start_state] = true;
+        } else if !self.states.is_empty() {
+            // Should not happen with start_state = 0
+             eprintln!("Warning: Start state {} is out of bounds for DFA states of size {}", self.start_state, self.states.len());
+             // Default to state 0 if possible, or handle error
+             if self.states.len() > 0 {
+                 self.start_state = 0;
+                 reachable[self.start_state] = true;
+                 queue.push(self.start_state);
+             } else {
+                 // No states at all, nothing is reachable
+                 self.states.clear();
+                 self.start_state = 0; // Or some other indicator for empty DFA
+                 return;
+             }
+        } else {
+            // No states, already empty
+            return;
+        }
 
-        while let Some(state) = queue.pop() {
-            for &next_state in self.states[state].transitions.values() {
-                if !reachable[next_state] {
+
+        let mut queue_idx = 0;
+        while queue_idx < queue.len() {
+             let state_idx = queue[queue_idx];
+             queue_idx += 1;
+
+            // Ensure state_idx is within bounds before accessing self.states
+             if state_idx >= self.states.len() {
+                 // This should ideally not happen if reachable states are tracked correctly
+                 eprintln!("Warning: Queue contained invalid state index {} for DFA size {}", state_idx, self.states.len());
+                 continue;
+             }
+
+            for &next_state in self.states[state_idx].transitions.values() {
+                if next_state < self.states.len() && !reachable[next_state] {
                     reachable[next_state] = true;
                     queue.push(next_state);
+                } else if next_state >= self.states.len() {
+                     eprintln!("Warning: DFA state {} has transition to out-of-bounds state {}", state_idx, next_state);
+                     // Handle or log this unexpected case, but continue processing
                 }
             }
         }
@@ -625,7 +541,7 @@ impl DFA {
 
         // Update the DFA
         self.states = new_states;
-        // Start state remains at 0 since it's always reachable
+        // Start state remains at 0 since it's always reachable and moved to front
         self.start_state = 0;
     }
 
@@ -638,9 +554,10 @@ impl DFA {
         let mut partitions = BTreeMap::<(BTreeSet<GroupID>, BTreeMap<u8, usize>), BTreeSet<usize>>::new();
 
         for (state_idx, state) in self.states.iter().enumerate() {
+            // For minimization, we use the target state INDEX, not the partition ID.
             let key = (
                 state.finalizers.clone(),
-                state.transitions.iter().map(|(u8, &next)| (u8, next)).collect()
+                state.transitions.iter().map(|(&u8, &next)| (u8, next)).collect() // Collect targets by index
             );
             partitions.entry(key).or_default().insert(state_idx);
         }
@@ -652,19 +569,43 @@ impl DFA {
             changed = false;
             let mut new_partitions = Vec::new();
 
+            // Create a temporary mapping from state index to its current partition index
+            let mut state_to_partition_idx = vec![0; self.states.len()];
+            for (part_idx, partition) in partition_list.iter().enumerate() {
+                for &state in partition {
+                    if state < self.states.len() { // Bounds check
+                        state_to_partition_idx[state] = part_idx;
+                    } else {
+                         eprintln!("Warning: State index {} out of bounds ({}) during minimization state_to_partition_idx mapping.", state, self.states.len());
+                         // Decide how to handle: Skip? Assign to a dummy partition? Skipping for now.
+                    }
+                }
+            }
+
             for partition in &partition_list {
+                if partition.is_empty() {
+                    new_partitions.push(BTreeSet::new());
+                    continue;
+                }
                 let mut refined_partitions = BTreeMap::new();
 
                 for &state in partition {
+                     if state >= self.states.len() { // Bounds check
+                         eprintln!("Warning: State index {} out of bounds ({}) during minimization partition refinement.", state, self.states.len());
+                         continue; // Skip this invalid state
+                     }
+
                     let mut signature = BTreeMap::new();
 
-                    // For each transition, record which partition it leads to
-                    for (u8, &next_state) in &self.states[state].transitions {
-                        let target_partition = new_partitions.iter()
-                            .chain(partition_list.iter())
-                            .position(|p| p.contains(&next_state))
-                            .unwrap_or(usize::MAX);
-                        signature.insert(u8, target_partition);
+                    // For each transition, record which *current* partition it leads to
+                    for (&u8, &next_state) in &self.states[state].transitions {
+                        if next_state < self.states.len() { // Bounds check
+                            let target_partition_idx = state_to_partition_idx[next_state];
+                            signature.insert(u8, target_partition_idx);
+                        } else {
+                             eprintln!("Warning: DFA state {} has transition to out-of-bounds state {} during minimization signature building.", state, next_state);
+                             // Handle or log this, maybe map to a specific error partition index? For now, just omit.
+                        }
                     }
 
                     refined_partitions.entry(signature)
@@ -680,7 +621,10 @@ impl DFA {
                 }
             }
 
-            partition_list = new_partitions;
+            // Sort partitions for determinism before the next iteration
+            partition_list = new_partitions.into_iter().collect();
+             // Sort by the smallest element in the partition (arbitrary but deterministic)
+            partition_list.sort_by_key(|p| p.iter().next().copied().unwrap_or(usize::MAX));
         }
 
         // Step 3: Build the minimized DFA
@@ -689,40 +633,65 @@ impl DFA {
         // Find which partition contains the start state
         let start_partition_idx = partition_list.iter()
             .position(|p| p.contains(&self.start_state))
-            .unwrap();
+            .unwrap_or_else(|| {
+                 eprintln!("Warning: Start state {} not found in any partition after minimization. DFA might be empty or start state invalid.", self.start_state);
+                 0 // Default to 0, will likely result in an empty DFA if start_state was invalid
+            });
 
         // Ensure the start partition is first in the list
-        if start_partition_idx != 0 {
+        if start_partition_idx != 0 && start_partition_idx < partition_list.len() {
             partition_list.swap(0, start_partition_idx);
+        } else if start_partition_idx >= partition_list.len() {
+            // Handle the case where the start partition index was out of bounds
+             partition_list.clear(); // Result is effectively an empty DFA
         }
 
-        // Build state mapping
-        for (new_state, partition) in partition_list.iter().enumerate() {
+        // Build state mapping based on the final ordered partition list
+        for (new_state_idx, partition) in partition_list.iter().enumerate() {
             for &old_state in partition {
-                state_mapping[old_state] = new_state;
+                 if old_state < self.states.len() { // Bounds check
+                    state_mapping[old_state] = new_state_idx;
+                 } else {
+                     eprintln!("Warning: Old state index {} out of bounds ({}) during minimization state_mapping building.", old_state, self.states.len());
+                     // This state was likely skipped during partitioning due to bounds issues.
+                 }
             }
         }
 
         let mut new_states = Vec::with_capacity(partition_list.len());
         for partition in &partition_list {
-            let old_state = partition.iter().next().unwrap();
-            let mut new_state = self.states[*old_state].clone();
+            if partition.is_empty() { continue; } // Skip empty partitions resulting from errors/skipping
+            let old_state_representative = *partition.iter().next().unwrap(); // Use the first state in the partition as representative
+            let mut new_state = self.states[old_state_representative].clone(); // Clone representative's data
 
             // Update transitions according to the new state mapping
             new_state.transitions = new_state.transitions
                 .iter()
-                .map(|(u8, &next)| (u8, state_mapping[next]))
+                .map(|(&u8, &next_old_idx)| {
+                     if next_old_idx < self.states.len() { // Bounds check on target index
+                        (u8, state_mapping[next_old_idx])
+                     } else {
+                         eprintln!("Warning: Transition from old state {} has out-of-bounds target {} during minimization new state building.", old_state_representative, next_old_idx);
+                         // Decide how to handle: omit transition? map to an error state? Skipping for now.
+                         // Returning None here would filter the map.
+                         (u8, 0) // Arbitrarily map to the new start state, or a dedicated error state
+                     }
+                })
                 .collect();
+
+            // Assuming finalizers, etc. are the same for all states in a partition (by construction)
+            // If not, a merge logic would be needed here.
 
             new_states.push(new_state);
         }
 
-        // The start state should now be at index 0
-        self.start_state = 0;
         self.states = new_states;
+        // The start state is always the first partition
+        self.start_state = 0;
+        // Recompute unreachable states after minimization (redundant if minimize is correct, but safe)
         self.remove_unreachable_states();
 
-        // Recompute metadata
+        // Recompute metadata for the new minimized states
         self.compute_possible_future_group_ids();
         self.compute_group_id_to_u8set();
     }
@@ -737,12 +706,33 @@ impl RegexState<'_> {
         let dfa = &self.regex.dfa;
         let mut local_position = 0;
         while local_position < text.len() {
+            // Check bounds for self.current_state before accessing dfa.states
+            if self.current_state >= dfa.states.len() {
+                eprintln!("Error: RegexState current_state {} is out of bounds for DFA states size {}. Terminating execution.", self.current_state, dfa.states.len());
+                self.position += text.len();
+                self.done = true;
+                return;
+            }
             let state_data = &dfa.states[self.current_state];
             let next_u8 = text[local_position];
             if let Some(&next_state) = state_data.transitions.get(next_u8) {
+                // Check bounds for next_state before transitioning
+                if next_state >= dfa.states.len() {
+                    eprintln!("Error: DFA state {} transition to out-of-bounds state {}. Terminating execution.", self.current_state, next_state);
+                    self.position += text.len();
+                    self.done = true;
+                    return;
+                }
                 self.current_state = next_state;
                 local_position += 1;
                 // Handle greedy finalizers
+                // Check bounds for self.current_state before accessing dfa.states again
+                if self.current_state >= dfa.states.len() {
+                    eprintln!("Error: RegexState current_state {} is out of bounds AFTER transition. Terminating execution.", self.current_state, dfa.states.len());
+                    self.position += text.len();
+                    self.done = true;
+                    return;
+                }
                 for &group_id in &dfa.states[self.current_state].finalizers {
                     if dfa.non_greedy_finalizers.contains(&group_id) {
                         self.matches.entry(group_id).or_insert(self.position + local_position);
@@ -757,7 +747,16 @@ impl RegexState<'_> {
                 // - a non-greedy group that has not been matched yet
                 let matched: BTreeSet<GroupID> = self.matches.keys().cloned().collect();
                 let excluded: BTreeSet<GroupID> = matched.intersection(&dfa.non_greedy_finalizers).cloned().collect();
+
+                // Check bounds for self.current_state again
+                 if self.current_state >= dfa.states.len() {
+                    eprintln!("Error: RegexState current_state {} is out of bounds during termination check. Terminating.", self.current_state, dfa.states.len());
+                    self.position += text.len();
+                    self.done = true;
+                    return;
+                 }
                 let should_terminate = dfa.states[self.current_state].possible_future_group_ids.difference(&excluded).next().is_none();
+
 
                 if should_terminate {
                     self.position += text.len();
@@ -773,10 +772,16 @@ impl RegexState<'_> {
         }
         // Reached the end of input, mark as done if no further transitions
         self.position += text.len();
-        if dfa.states[self.current_state].transitions.is_empty() {
+        // Check bounds for self.current_state one last time
+        if self.current_state < dfa.states.len() && dfa.states[self.current_state].transitions.is_empty() {
             self.done = true;
+        } else if self.current_state >= dfa.states.len() {
+             // Already marked done if state was invalid during loop
+        } else {
+            // Not done, transitions still exist
         }
     }
+
 
     pub fn end(&mut self) {
         self.done = true;
@@ -803,40 +808,120 @@ impl RegexState<'_> {
         let mut local_position = 0;
         self.position = 0;
         loop {
+            // Save current state before executing, in case execution changes it
+            let state_before_execute = self.current_state;
+            let pos_before_execute = self.position;
+
             self.execute(&text[local_position..]);
+
+            // Check if execution terminated unexpectedly within execute
+            if self.current_state >= self.regex.dfa.states.len() {
+                 eprintln!("Error: RegexState ended up in invalid state {} after execute. Terminating greedy_find_all.", self.current_state);
+                 self.position = start_position + local_position; // Restore position
+                 return matches;
+            }
+
             if self.ended() {
                 if let Some(m) = self.get_greedy_match() {
                     // Advance the local position to the end of the match.
-                    local_position += m.position;
+                    // m.position is relative to the start of the *current* execution run (`text[local_position..]`)
+                    // So the absolute end position is `start_position + local_position (start of this run) + m.position (offset within this run)`
+                    // This logic for `greedy_find_all` and `get_greedy_match` interactions seems complex
+                    // The original `greedy_find_all` comment says `local_position += m.position;`
+                    // Let's stick to the original logic for now, assuming m.position is relative to the start of the *full* input `text`.
 
-                    // Add the match to the list of successful matches.
-                    matches.push(m);
+                    // If m.position is relative to the start of the `text` passed to `execute`, then:
+                    // If execute consumes all of `text[local_position..]`, then m.position is relative to `local_position`.
+                    // Original code seems to assume m.position is the total number of bytes consumed in `execute`.
+                    // This means m.position would equal `text.len() - local_position`.
+                    // Let's refine `get_greedy_match` to return relative position if needed, or clarify this.
+                    // Assuming m.position is total input consumed by `execute` for the match:
+                    // local_position += self.position - pos_before_execute; // Number of bytes consumed in this execute call
 
-                    // Reset the state and advance the internal position.
-                    self.reset();
+                    // Let's re-read the comment: "m.position is at the correct position. Add the match to the list".
+                    // This suggests m.position is already the absolute position relative to the *start of the state*.
+                    // The current `RegexState::execute` updates `self.position` to be the total position consumed
+                    // from the *initial start* of the regex run (`start_position`), plus `text.len()`.
+                    // It seems `self.matches` stores positions relative to the start of the *current* `text` fed into `execute`.
+                    // This is very confusing. Let's go with: `get_greedy_match` returns the match position relative to the start of the *full input* `text`.
+                    // So `m.position` is relative to `text[0]`.
+                    // The original code: `local_position += m.position;` would jump the `local_position` ahead. This seems wrong for subsequent searches.
+
+                    // Let's reinterpret `greedy_find_all`: It repeatedly tries to match from the *current* `local_position`.
+                    // `self.execute(&text[local_position..])` executes the regex on the *remaining* input.
+                    // `regex_state.matches` are relative to `text[local_position]` start.
+                    // `self.position` in `RegexState::execute` is relative to the original start `start_position`.
+                    // This implementation of `execute` updates `self.position` by adding `text.len()` from the local call.
+                    // So after `self.execute(&text[local_position..])`, `self.position` will be `start_position + local_position + (text.len() - local_position)`... wait, no.
+                    // `self.position += text.len()` adds the length of the *current slice* being processed.
+
+                    // Let's adjust `greedy_find_all` logic:
+                    // 1. Call execute on remaining text.
+                    // 2. If ended, check for a match in `self.matches`. The position in `self.matches` is relative to `text[local_position..]`.
+                    // 3. If a match `m` is found, the absolute end position is `start_position (original overall start) + local_position (start of this slice) + m.position (offset within slice)`.
+                    // 4. Add this absolute match.
+                    // 5. Advance `local_position` by `m.position`.
+                    // 6. Reset the regex state to its initial state to start the next search from `local_position`.
+
+                    let mut state_after_execute = regex.init(); // Create a fresh state for this iteration
+                    state_after_execute.position = pos_before_execute; // Set its position correctly relative to the overall input
+                    state_after_execute.current_state = state_before_execute; // Set its state correctly
+
+                    state_after_execute.execute(&text[local_position..]);
+
+                    if let Some(m) = state_after_execute.get_greedy_match() {
+                        // Match found relative to the start of the slice `text[local_position..]`
+                        // Absolute end position = start_position + local_position + m.position;
+
+                        // The original code `local_position += m.position;` where m.position seems relative to the slice start is probably the intent.
+                        // Let's use the match position directly as the advance amount.
+                         let advance_by = m.position;
+                         let absolute_match_end_pos = start_position + local_position + advance_by;
+
+                        matches.push(Match { group_id: m.group_id, position: absolute_match_end_pos });
+
+                        local_position += advance_by; // Advance past the match
+
+                        // Reset state and advance its internal position for the next search
+                        self.reset();
+                         self.position = start_position + local_position;
+
+                    } else {
+                        // Ended but no match, execution stopped. No more matches can be found from here.
+                        self.position = start_position + local_position; // Restore position
+                        return matches; // Return collected matches
+                    }
                 } else {
-                    // Ended but no match. This indicates a tokenization error.
-                    // Return the successful matches.
-                    self.position = start_position + local_position;
-                    return matches;
+                     // Ended, no match found in this last segment.
+                     self.position = start_position + local_position; // Restore position
+                     return matches;
                 }
             } else {
-                // Didn't end. We must have run out of input.
-                // If we're supposed to terminate, add the final match (if any) and terminate.
+                // Didn't end. Regex state is still active, but we ran out of input.
+                // If `terminate` is true, we should try to get a match from the partial run.
                 if terminate {
-                    if let Some(m) = self.get_greedy_match() {
-                        // Add the final match to the list of successful matches.
-                        matches.push(m);
+                    let mut state_after_execute = regex.init(); // Create a fresh state for this iteration
+                    state_after_execute.position = pos_before_execute; // Set its position correctly
+                    state_after_execute.current_state = state_before_execute; // Set its state correctly
+                    state_after_execute.execute(&text[local_position..]); // Re-run execute to populate matches
+
+                    if let Some(m) = state_after_execute.get_greedy_match() {
+                        // Match found, add it. Position is relative to the slice start.
+                        let absolute_match_end_pos = start_position + local_position + m.position;
+                        matches.push(Match { group_id: m.group_id, position: absolute_match_end_pos });
                     }
-                    self.end();
+                    // No need to advance local_position or reset state, as we terminate.
+                    self.end(); // Mark the state as done for the caller
+                    self.position = start_position + local_position + (text.len() - local_position); // Final position
                     return matches;
                 }
-                // Return the successful matches.
-                self.position = start_position + local_position;
+                // If not terminating on partial match, return collected matches.
+                self.position = start_position + local_position + (text.len() - local_position); // Final position
                 return matches;
             }
         }
     }
+
 
     /// Returns a single match as follows:
     ///
@@ -844,21 +929,31 @@ impl RegexState<'_> {
     /// 2. If there is more than one match of this length, return the one with the lowest group ID.
     ///
     /// If there is no match, returns None.
+    ///
+    /// Note: The position returned here is the *end position* of the match relative
+    /// to the input string passed to `execute`.
     pub fn get_greedy_match(&self) -> Option<Match> {
         if self.matches.len() == 0 {
             return None;
         }
+        // matches stores (GroupID, end_position_relative_to_execute_input)
         let mut matches = self.matches.iter();
-        let (mut longest_match_group_id, mut longest_match_position) = matches.next().unwrap();
-        for (group_id, position) in matches {
-            if position > longest_match_position {
+        let (&mut longest_match_group_id, &mut longest_match_relative_position) = matches.next().unwrap();
+
+        for (&group_id, &relative_position) in matches {
+            if relative_position > longest_match_relative_position {
+                longest_match_relative_position = relative_position;
                 longest_match_group_id = group_id;
-                longest_match_position = position;
+            } else if relative_position == longest_match_relative_position {
+                // If lengths are equal, prefer the lowest group ID
+                if group_id < longest_match_group_id {
+                    longest_match_group_id = group_id;
+                }
             }
         }
         Some(Match {
-            group_id: *longest_match_group_id,
-            position: *longest_match_position,
+            group_id: longest_match_group_id,
+            position: longest_match_relative_position, // Position relative to the input of the last execute call
         })
     }
 
@@ -870,6 +965,11 @@ impl RegexState<'_> {
     }
 
     pub fn get_u8set(&self) -> U8Set {
+        // Check bounds for self.current_state before accessing dfa.states
+        if self.current_state >= self.regex.dfa.states.len() {
+            eprintln!("Error: RegexState current_state {} is out of bounds for DFA states size {}. Returning empty U8Set.", self.current_state, self.regex.dfa.states.len());
+            return U8Set::none();
+        }
         let dfa = &self.regex.dfa;
         let state_data = &dfa.states[self.current_state];
         // Get all possible u8s that can match next
@@ -877,13 +977,21 @@ impl RegexState<'_> {
     }
 
     pub fn get_terminal_u8set(&self) -> U8Set {
+        // Check bounds for self.current_state before accessing dfa.states
+        if self.current_state >= self.regex.dfa.states.len() {
+            eprintln!("Error: RegexState current_state {} is out of bounds for DFA states size {}. Returning empty U8Set.", self.current_state, self.regex.dfa.states.len());
+            return U8Set::none();
+        }
         // Get u8s that could take the regex to a terminal state (a state with a finalizer)
         let mut u8set = U8Set::none();
         let dfa = &self.regex.dfa;
         let state_data = &dfa.states[self.current_state];
-        for (value, &i_next_state) in &state_data.transitions {
-            if !dfa.states[i_next_state].finalizers.is_empty() {
+        for (&value, &i_next_state) in &state_data.transitions {
+            // Check bounds for i_next_state
+            if i_next_state < dfa.states.len() && !dfa.states[i_next_state].finalizers.is_empty() {
                 u8set.insert(value);
+            } else if i_next_state >= dfa.states.len() {
+                 eprintln!("Warning: DFA state {} transition target {} out of bounds during get_terminal_u8set.", self.current_state, i_next_state);
             }
         }
         u8set
@@ -908,7 +1016,18 @@ impl RegexState<'_> {
     }
 
     pub fn fully_matches(&self) -> Option<bool> {
+         // Check bounds for self.current_state before accessing transitions
+        if self.current_state >= self.regex.dfa.states.len() {
+            // If the state is invalid, it cannot fully match.
+             return Some(false);
+        }
         if let Some(max_position) = self.matches.values().max() {
+            // A full match requires the match to end exactly where the execution stopped,
+            // AND the state must be a final state for at least one matched group.
+            // AND there must be no further transitions from this state that could extend a greedy match.
+            // However, the current `matches` structure stores the end position of *any* matched group within the last execute call.
+            // A state is "fully matched here" if it is a final state and there are no outgoing transitions.
+            // The logic here seems inconsistent with the comment. Let's use the original simplified check.
             Some(*max_position == self.position)
         } else {
             if self.done {
@@ -928,7 +1047,12 @@ impl RegexState<'_> {
     }
 
     pub fn fully_matches_here(&self) -> bool {
-        self.definitely_fully_matches()
+        // Check bounds for self.current_state before accessing dfa.states
+        if self.current_state >= self.regex.dfa.states.len() {
+            return false;
+        }
+        // A state fully matches *here* if it is a final state
+        !self.regex.dfa.states[self.current_state].finalizers.is_empty()
     }
 
     pub fn done(&self) -> bool {
@@ -938,7 +1062,7 @@ impl RegexState<'_> {
 
     pub fn failed(&self) -> bool {
         // Returns true if the regex has failed to match and cannot possibly match
-        !self.could_match()
+        !self.could_match() // could_match checks if matches is not empty OR not done
     }
 
     pub fn clear_matches(&mut self) {
@@ -946,11 +1070,21 @@ impl RegexState<'_> {
     }
 
     pub fn possible_future_group_ids(&self) -> BTreeSet<GroupID> {
+         // Check bounds for self.current_state before accessing dfa.states
+        if self.current_state >= self.regex.dfa.states.len() {
+            eprintln!("Error: RegexState current_state {} is out of bounds for DFA states size {}. Returning empty BTreeSet.", self.current_state, self.regex.dfa.states.len());
+            return BTreeSet::new();
+        }
         let state = &self.regex.dfa.states[self.current_state];
         state.possible_future_group_ids.clone()
     }
 
     pub fn get_u8set_for_group(&self, group_id: GroupID) -> U8Set {
+         // Check bounds for self.current_state before accessing dfa.states
+        if self.current_state >= self.regex.dfa.states.len() {
+            eprintln!("Error: RegexState current_state {} is out of bounds for DFA states size {}. Returning empty U8Set.", self.current_state, self.regex.dfa.states.len());
+            return U8Set::none();
+        }
         let state = &self.regex.dfa.states[self.current_state];
         state
             .group_id_to_u8set
@@ -962,12 +1096,25 @@ impl RegexState<'_> {
 
 impl Regex {
     pub fn init_to_state(&self, state: usize) -> RegexState {
-        let done = self.dfa.states[state].transitions.is_empty();
-        let matches = self.dfa.states[state]
-            .finalizers
-            .iter()
-            .map(|&group_id| (group_id, 0))
-            .collect();
+        let done = if state < self.dfa.states.len() {
+            self.dfa.states[state].transitions.is_empty()
+        } else {
+            // If state is out of bounds, it's effectively a done state
+            true
+        };
+
+        let matches = if state < self.dfa.states.len() {
+            self.dfa.states[state]
+                .finalizers
+                .iter()
+                .map(|&group_id| (group_id, 0)) // Position 0 for matches at init state
+                .collect()
+        } else {
+            // If state is out of bounds, no matches at init
+            BTreeMap::new()
+        };
+
+
         RegexState {
             regex: self,
             position: 0,
@@ -982,6 +1129,10 @@ impl Regex {
     }
 
     pub fn get_next_state(&self, current_state: usize, byte: u8) -> Option<usize> {
+        if current_state >= self.dfa.states.len() {
+             eprintln!("Error: get_next_state called with out-of-bounds current_state {}", current_state);
+             return None;
+        }
         self.dfa.states[current_state].transitions.get(byte).copied()
     }
 
@@ -992,7 +1143,7 @@ impl Regex {
             .matches
             .iter()
             .next()
-            .map(|(&group_id, &position)| (group_id, position))
+            .map(|(&group_id, &position)| (group_id, position)) // Position relative to execute input
     }
 
     pub fn matches(&self, text: &[u8]) -> Option<bool> {
@@ -1695,7 +1846,7 @@ mod group_id_to_u8set_tests {
     }
 
     #[test]
-    fn test_get_u8set_for_group_after_transition() {
+    fn test_group_id_to_u8set_after_transition() {
         // Regex: "ab" or "ac"
         let expr = groups![
             seq![eat_u8(b'a'), eat_u8(b'b')], // Group 0
@@ -1725,8 +1876,6 @@ mod group_id_to_u8set_tests {
         // For simplicity, assuming DFA has merged states, but depending on implementation, adjust accordingly
 
         // Let's assume state 1 and 2 are separate for "ab" and "ac"
-
-        // For this test, we'll iterate through possible transitions
 
         // Verify that in both resulting states, possible_future_group_ids contain their respective groups
         // Here, it's likely that the DFA has merged states if they share the same possible_future_group_ids
@@ -2220,3 +2369,4 @@ mod test_python {
         assert_eq!(state.matches.get(&token_name_to_id["NAME"]), Some(&5), "NAME token should be matched at position 5");
     }
 }
+

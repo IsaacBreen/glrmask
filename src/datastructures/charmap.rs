@@ -1,9 +1,14 @@
+use serde::{Serialize, Deserialize};
 use crate::datastructures::u8set::U8Set;
 use std::ops::{Index, IndexMut};
 
 const CHARMAP_SIZE: usize = 256;
 
-#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "T: Serialize, Option<Box<T>>: Serialize",
+    deserialize = "T: Deserialize<'de>, Option<Box<T>>: Deserialize<'de>"
+))]
 pub struct TrieMap<T> {
     data: Vec<Option<Box<T>>>,
     // TODO: what's the point of `children`? Is it for nondeterminism? If so, let's remove it.

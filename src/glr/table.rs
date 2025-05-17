@@ -1,3 +1,4 @@
+use serde::{Serialize, Deserialize};
 use super::items::{compute_closure, compute_goto, split_on_dot, Item};
 use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParser;
@@ -10,40 +11,40 @@ pub use crate::types::{TerminalID};
 
 type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
 type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
-type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
-type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Row>;
-type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
-type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
+type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Table>;
+type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Table>;
+type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Table>;
+type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Table>;
 pub type Stage7Table = BTreeMap<StateID, Stage7Row>;
 
 
 type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
-#[derive(Debug)]
+#[derive(Debug)] // Not serialized directly
 struct Stage2Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
     reduces: BTreeSet<Item>,
 }
-#[derive(Debug)]
+#[derive(Debug)] // Not serialized directly
 struct Stage3Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
     reduces: BTreeMap<Terminal, BTreeSet<Item>>,
 }
-#[derive(Debug)]
+#[derive(Debug)] // Not serialized directly
 struct Stage4Row {
     shifts: BTreeMap<Terminal, BTreeSet<Item>>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
 }
-type Stage5Row = Stage4Row;
-#[derive(Debug)]
+type Stage5Row = Stage4Row; // Not serialized directly
+#[derive(Debug)] // Not serialized directly
 struct Stage6Row {
     shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
     gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug)] // Not serialized directly
 enum Stage6ShiftsAndReduces {
     Shift(BTreeSet<Item>),
     Reduce(ProductionID),
@@ -53,7 +54,14 @@ enum Stage6ShiftsAndReduces {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct StateID(pub usize);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ProductionID(pub usize);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct NonTerminalID(pub usize);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Stage7ShiftsAndReduces {
     Shift(StateID),
     Reduce { production_id: ProductionID, nonterminal_id: NonTerminalID, len: usize },
@@ -63,25 +71,18 @@ pub enum Stage7ShiftsAndReduces {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stage7Row {
     pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
     pub gotos: BTreeMap<NonTerminalID, StateID>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StateID(pub usize);
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProductionID(pub usize);
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NonTerminalID(pub usize);
-
-type Stage1Result = Stage1Table;
-type Stage2Result = Stage2Table;
-type Stage3Result = Stage3Table;
-type Stage4Result = Stage4Table;
-type Stage5Result = Stage5Table;
-type Stage6Result = Stage6Table;
+type Stage1Result = Stage1Table; // Not serialized directly
+type Stage2Result = Stage2Table; // Not serialized directly
+type Stage3Result = Stage3Table; // Not serialized directly
+type Stage4Result = Stage4Table; // Not serialized directly
+type Stage5Result = Stage5Table; // Not serialized directly
+type Stage6Result = Stage6Table; // Not serialized directly
 type Stage7Result = (
     Stage7Table,
     BiBTreeMap<BTreeSet<Item>, StateID>,
@@ -442,4 +443,5 @@ pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerm
     }
     non_terminal_map
 }
+
 
