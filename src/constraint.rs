@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::BitOr;
 use std::sync::{Arc, Mutex};
+use std::cell::RefCell; // Added this line
 
 use bimap::BiBTreeMap;
 use bitvec::prelude::*;
@@ -866,7 +867,7 @@ impl<'a> GrammarConstraintState<'a> {
         let initial_nodes_and_values = self.prepare_initial_nodes_and_values_for_special_map(llm_tokens);
 
         // Initialize the counter
-        let mut step_counts: BTreeMap<GrammarTokenID, usize> = BTreeMap::new();
+        let step_counts = RefCell::new(BTreeMap::<GrammarTokenID, usize>::new());
 
         self.state = BTreeMap::new();
 
@@ -887,7 +888,7 @@ impl<'a> GrammarConstraintState<'a> {
                     !parse_state.stack.value.t.active.is_empty()
                 });
                 if let Some(gtid) = grammar_token_id {
-                    *step_counts.entry(*gtid).or_insert(0) += 1;
+                    *step_counts.borrow_mut().entry(*gtid).or_insert(0) += 1;
                 }
                 grammar_token_id.map(|gtid| cloned_glr_parse_state.step(gtid));
                 if cloned_glr_parse_state.active_states.is_empty() {
@@ -930,7 +931,7 @@ impl<'a> GrammarConstraintState<'a> {
                 for (possible_final_grammar_token, precomputed_finalizer) in node.value.finalizers().iter() { // Use .finalizers()
                     let mut possible_next_glr_parse_state = current_glr_parse_state.clone();
                     crate::debug!(3, "Stepping semi-final GLR parse state");
-                    *step_counts.entry(*possible_final_grammar_token).or_insert(0) += 1;
+                    *step_counts.borrow_mut().entry(*possible_final_grammar_token).or_insert(0) += 1;
                     possible_next_glr_parse_state.step(*possible_final_grammar_token);
                     if possible_next_glr_parse_state.is_ok() {
                         crate::debug!(3, "Semi-final GLR parse state is OK");
@@ -982,9 +983,9 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         // Print GLRParserState::step call counts
-        if !step_counts.is_empty() {
+        let mut sorted_counts: Vec<(GrammarTokenID, usize)> = step_counts.into_inner().into_iter().collect();
+        if !sorted_counts.is_empty() {
             println!("--- GLRParserState::step call counts (this GrammarConstraintState::step) ---");
-            let mut sorted_counts: Vec<(GrammarTokenID, usize)> = step_counts.into_iter().collect();
             sorted_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0))); // Sort by count desc, then by ID asc
 
             for (gtid, count) in sorted_counts {

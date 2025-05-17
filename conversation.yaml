@@ -3,7 +3,7 @@ local_system:
     - src/constraint.rs
     - src/constraint_extra.rs
     - src/glr/parser.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/glr/parser.rs: |
@@ -6032,6 +6032,185 @@ messages:
       *   At the end, you're converting the `BTreeMap` to a `Vec`, sorting it by count (descending) and then by token ID (ascending, for stable sort), and then printing each token's name, ID, and call count.
 
       This should give you the desired profiling output.
+    metadata:
+  - user: |
+      Using model 'gemini/gemini-2.5-flash-preview-04-17' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/constraint.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/constraint.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/constraint.rs
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+      --- original version of src/constraint.rs+++ current version of src/constraint.rs@@ -229,7 +229,7 @@     // -------------------------------------------------------------------------
+           pub fn precompute(
+               tokenizer:        &Regex,
+      -        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, // Renamed and now contains internal IDs
+      +        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, // Renamed
+               token_name_map:   &BiBTreeMap<String, usize>,
+               internal_max_llm_token: usize,                       // Number of internal tokens
+           ) -> Precomputed {
+      @@ -865,6 +865,9 @@         crate::debug!(2, "Stepping grammar constraint state with tokenizer states {:?}", self.state.keys().map(|k| k.0).collect::<Vec<_>>());
+               let initial_nodes_and_values = self.prepare_initial_nodes_and_values_for_special_map(llm_tokens);
+       
+      +        // Initialize the counter
+      +        let mut step_counts: BTreeMap<GrammarTokenID, usize> = BTreeMap::new();
+      +
+               self.state = BTreeMap::new();
+       
+               Trie::special_map(
+      @@ -883,6 +886,9 @@                     // }
+                           !parse_state.stack.value.t.active.is_empty()
+                       });
+      +                if let Some(gtid) = grammar_token_id {
+      +                    *step_counts.entry(*gtid).or_insert(0) += 1;
+      +                }
+                       grammar_token_id.map(|gtid| cloned_glr_parse_state.step(gtid));
+                       if cloned_glr_parse_state.active_states.is_empty() {
+                           crate::debug!(3, "No active states after processing grammar token {:?}", grammar_token_id.map(|gtid| gtid.0));
+      @@ -924,6 +930,7 @@                 for (possible_final_grammar_token, precomputed_finalizer) in node.value.finalizers().iter() { // Use .finalizers()
+                           let mut possible_next_glr_parse_state = current_glr_parse_state.clone();
+                           crate::debug!(3, "Stepping semi-final GLR parse state");
+      +                    *step_counts.entry(*possible_final_grammar_token).or_insert(0) += 1;
+                           possible_next_glr_parse_state.step(*possible_final_grammar_token);
+                           if possible_next_glr_parse_state.is_ok() {
+                               crate::debug!(3, "Semi-final GLR parse state is OK");
+      @@ -973,5 +980,25 @@         for (tokenizer_state_id, glr_state) in self.state.iter() {
+                   glr_state.log_gss(format!("After simplifying GSS for state {}", tokenizer_state_id.0).as_str(), GrammarTokenID(0));
+               }
+      -    }
+      -}
+      +
+      +        // Print GLRParserState::step call counts
+      +        if !step_counts.is_empty() {
+      +            println!("--- GLRParserState::step call counts (this GrammarConstraintState::step) ---");
+      +            let mut sorted_counts: Vec<(GrammarTokenID, usize)> = step_counts.into_iter().collect();
+      +            sorted_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0))); // Sort by count desc, then by ID asc
+      +
+      +            for (gtid, count) in sorted_counts {
+      +                let token_name = self
+      +                    .parent
+      +                    .token_name_map
+      +                    .get_by_right(&gtid.0)
+      +                    .map(|s| s.as_str())
+      +                    .unwrap_or("<Unknown Name>");
+      +                println!("  Token \"{}\" (ID: {}): {} calls", token_name, gtid.0, count);
+      +            }
+      +            println!("--------------------------------------------------------------------------");
+      +        } else {
+      +            println!("--- GLRParserState::step was not called in this GrammarConstraintState::step ---");
+      +        }
+      +    }
+      +}
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_extra.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |+
+      error[E0499]: cannot borrow `step_counts` as mutable more than once at a time
+         --> src/constraint.rs:904:13
+          |
+      873 |         Trie::special_map(
+          |         ----------------- first borrow later used by call
+      874 |             initial_nodes_and_values,
+      875 |             |glr_parse_state, grammar_token_id, edge_llm_tokens, child_node| {
+          |             ---------------------------------------------------------------- first mutable borrow occurs here
+      ...
+      890 |                     *step_counts.entry(*gtid).or_insert(0) += 1;
+          |                      ----------- first borrow occurs due to use of `step_counts` in closure
+      ...
+      904 |             |node, current_glr_parse_state| {
+          |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ second mutable borrow occurs here
+      ...
+      933 |                     *step_counts.entry(*possible_final_grammar_token).or_insert(0) += 1;
+          |                      ----------- second borrow occurs due to use of `step_counts` in closure
+
+    metadata:
+  - assistant: |-
+      You've hit a classic Rust borrowing problem! The `Trie::special_map` function takes multiple closures, and both of them are trying to mutably borrow `step_counts`. The Rust compiler can't prove that these mutable borrows won't overlap in time, so it disallows it at compile time.
+
+      To fix this, we can use `std::cell::RefCell` for interior mutability. This moves the borrow checking from compile time to runtime for `step_counts`.
+
+      Here's how to modify the code in `src/constraint.rs`:
+
+      1.  **Add `use std::cell::RefCell;`**:
+          At the top of your `src/constraint.rs` file, add or ensure this line is present:
+          ```rust
+          use std::cell::RefCell;
+          ```
+
+      2.  **Change the initialization of `step_counts`**:
+          In the `pub fn step(&mut self, llm_tokens: &LLMTokenBV)` method, modify the line where `step_counts` is initialized:
+          *   Currently:
+              ```rust
+              let mut step_counts: BTreeMap<GrammarTokenID, usize> = BTreeMap::new();
+              ```
+          *   Change to:
+              ```rust
+              let step_counts = RefCell::new(BTreeMap::<GrammarTokenID, usize>::new());
+              ```
+
+      3.  **Modify the first closure to use `borrow_mut()`**:
+          Locate the first closure argument to `Trie::special_map`.
+          *   Currently:
+              ```rust
+              if let Some(gtid) = grammar_token_id {
+                  *step_counts.entry(gtid).or_insert(0) += 1;
+              }
+              ```
+          *   Change to:
+              ```rust
+              if let Some(gtid) = grammar_token_id {
+                  *step_counts.borrow_mut().entry(gtid).or_insert(0) += 1;
+              }
+              ```
+
+      4.  **Modify the third closure to use `borrow_mut()`**:
+          Locate the third closure argument to `Trie::special_map`.
+          *   Currently:
+              ```rust
+              *step_counts.entry(*possible_final_grammar_token).or_insert(0) += 1;
+              ```
+          *   Change to:
+              ```rust
+              *step_counts.borrow_mut().entry(*possible_final_grammar_token).or_insert(0) += 1;
+              ```
+
+      5.  **Modify the printing logic to use `into_inner()`**:
+          At the end of the `step` function, where you prepare `sorted_counts`:
+          *   Currently:
+              ```rust
+              let mut sorted_counts: Vec<(GrammarTokenID, usize)> = step_counts.into_iter().collect();
+              ```
+          *   Change to:
+              ```rust
+              let mut sorted_counts: Vec<(GrammarTokenID, usize)> = step_counts.into_inner().into_iter().collect();
+              ```
+          This change uses `into_inner()` to retrieve the `BTreeMap` from the `RefCell` once we're done mutating it.
+
+      These changes should resolve the borrowing error by deferring the borrow checks for `step_counts` to runtime, which is safe in this single-threaded context as long as `Trie::special_map` doesn't re-entrantly call these closures in a way that would cause a panic (e.g., one closure's execution leading to the other being called before the first one releases its mutable borrow). This is a common pattern for situations like this.
     metadata:
   - user: |
       Using model 'gemini/gemini-2.5-flash-preview-04-17' for code completion.
