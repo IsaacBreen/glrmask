@@ -6,22 +6,20 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::hash::Hash;
 use std::cmp::Ord;
+use std::clone::Clone;
 
 pub mod bibtreemap_serde {
-    use super::*;
+    use super::*; // Imports BiBTreeMap, Serialize, Serializer, Deserialize, Deserializer, Ord, Hash, Eq, Clone
 
     pub fn serialize<L, R, S>(map: &BiBTreeMap<L, R>, serializer: S) -> Result<S::Ok, S::Error>
     where
-        L: Serialize + Ord,
-        R: Serialize + Ord, // R must also be Serialize to be a value in BTreeMap<L,R>
+        L: Serialize + Clone + Ord,
+        R: Serialize + Clone + Ord,
         S: Serializer,
     {
-        // Serialize the forward map (L -> R)
-        let mut left_map = BTreeMap::new();
-        for (l, r) in map.iter() {
-            left_map.insert(l.clone(), r.clone());
-        }
-        left_map.serialize(serializer)
+        // Serialize as a vector of (key, value) pairs
+        let entries: Vec<(L, R)> = map.iter().map(|(l, r)| (l.clone(), r.clone())).collect();
+        entries.serialize(serializer)
     }
 
     pub fn deserialize<'de, L, R, D>(deserializer: D) -> Result<BiBTreeMap<L, R>, D::Error>
@@ -30,12 +28,10 @@ pub mod bibtreemap_serde {
         R: Deserialize<'de> + Ord + Hash + Eq,
         D: Deserializer<'de>,
     {
-        let btree_map = BTreeMap::<L, R>::deserialize(deserializer)?;
+        // Deserialize from a vector of (key, value) pairs
+        let entries: Vec<(L, R)> = Vec::deserialize(deserializer)?;
         let mut bibtree_map = BiBTreeMap::new();
-        for (l, r) in btree_map {
-            // insert can panic if r is already associated with a different l,
-            // or l with a different r. This implies the serialized BTreeMap
-            // must represent a valid bimap.
+        for (l, r) in entries {
             bibtree_map.insert(l, r);
         }
         Ok(bibtree_map)
@@ -44,7 +40,7 @@ pub mod bibtreemap_serde {
 
 pub mod range_set_blaze_serde {
     use std::ops::RangeInclusive;
-    use super::*;
+    use super::*; // Imports RangeSetBlaze, Serialize, Serializer, Deserialize, Deserializer, Ord, Hash, Eq, Clone
 
     pub fn serialize<S>(set: &RangeSetBlaze<usize>, serializer: S) -> Result<S::Ok, S::Error>
     where
