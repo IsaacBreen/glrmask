@@ -1,4 +1,3 @@
-use serde::{Serialize, Deserialize};
 use super::items::{compute_closure, compute_goto, split_on_dot, Item};
 use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParser;
@@ -54,14 +53,7 @@ enum Stage6ShiftsAndReduces {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct StateID(pub usize);
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct ProductionID(pub usize);
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct NonTerminalID(pub usize);
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum Stage7ShiftsAndReduces {
     Shift(StateID),
     Reduce { production_id: ProductionID, nonterminal_id: NonTerminalID, len: usize },
@@ -71,12 +63,18 @@ pub enum Stage7ShiftsAndReduces {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Stage7Row {
     pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
     pub gotos: BTreeMap<NonTerminalID, StateID>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StateID(pub usize);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProductionID(pub usize);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NonTerminalID(pub usize);
 
 type Stage1Result = Stage1Table;
 type Stage2Result = Stage2Table;

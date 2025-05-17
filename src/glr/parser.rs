@@ -1,4 +1,3 @@
-use serde::{Serialize, Deserialize, Serializer, Deserializer};
 use crate::datastructures::gss::{print_gss_forest, BulkMerge, gather_gss_stats, find_longest_path};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
@@ -14,7 +13,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 use crate::debug;
 
-pub trait MergeAndIntersect: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash + Serialize {
+pub trait MergeAndIntersect: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
     /// Merges the information represented by `self` and `other`.
     fn merge(&self, other: &Self) -> Self;
     /// Intersects the information represented by `self` and `other`.
@@ -26,36 +25,30 @@ impl MergeAndIntersect for () {
     fn intersect(&self, _: &Self) -> Self { () }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseStateNodeContent<T: MergeAndIntersect> {
     pub state_id: StateID,
     pub t: T,
 }
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)] // ParseState is not serialized directly
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseState<T: MergeAndIntersect> {
     pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)] // StopReason is not serialized directly
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StopReason {
     ActionNotFound,
     GotoNotFound,
 }
 
 
-#[derive(Clone, Serialize, Deserialize)]
-// Remove the old serde(bound(...)) attribute, fields now use #[serde(with = ...)]
+// TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
+#[derive(Clone)]
 pub struct GLRParser {
     pub stage_7_table: Stage7Table,
     pub productions: Vec<Production>,
-
-    #[serde(with = "crate::serde_helpers::bibtreemap_serde")]
     pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
-
-    #[serde(with = "crate::serde_helpers::bibtreemap_serde")]
     pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
-
-    #[serde(with = "crate::serde_helpers::bibtreemap_serde")]
     pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
     pub start_state_id: StateID,
 }

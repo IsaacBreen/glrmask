@@ -1,7 +1,6 @@
-use serde::{Serialize, Deserialize};
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
 
-#[derive(Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct U8Set {
     pub(crate) x: u128,
     pub(crate) y: u128,
@@ -112,7 +111,7 @@ impl U8Set {
     pub fn from_char_negation_range(range: impl IntoIterator<Item = u8>) -> U8Set {
         Self::from_byte_range(range).complement()
     }
-
+    
     pub fn from_slice(slice: &[u8]) -> Self {
         let mut result = Self::none();
         for byte in slice {

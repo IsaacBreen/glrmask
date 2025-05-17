@@ -311,11 +311,6 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
         &self.children
     }
 
-    // Added children_mut for deserialization
-    pub fn children_mut(&mut self) -> &mut BTreeMap<EK, BTreeMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
-        &mut self.children
-    }
-
     // is_leaf remains unchanged
     pub fn is_leaf(&self) -> bool {
         self.children.is_empty()

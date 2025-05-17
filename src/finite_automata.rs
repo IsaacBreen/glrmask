@@ -3,7 +3,6 @@ use crate::datastructures::frozenset::FrozenSet;
 use crate::datastructures::u8set::U8Set;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Formatter};
-use serde::{Deserialize, Serialize};
 
 pub type GroupID = usize;
 
@@ -21,7 +20,7 @@ pub struct NFA {
     start_state: usize,
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DFAState {
     pub transitions: TrieMap<usize>,
     pub finalizers: BTreeSet<GroupID>,
@@ -29,7 +28,7 @@ pub struct DFAState {
     pub group_id_to_u8set: BTreeMap<GroupID, U8Set>,
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DFA {
     pub states: Vec<DFAState>,
     pub start_state: usize,
@@ -37,7 +36,7 @@ pub struct DFA {
 }
 
 // TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Regex {
     pub dfa: DFA,
 }

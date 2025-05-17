@@ -11,7 +11,6 @@ use std::cell::RefCell; // Added this line
 use bimap::BiBTreeMap;
 use bitvec::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
-use serde::{Serialize, Deserialize, Serializer, Deserializer};
 
 use crate::constraint_extra::{calculate_final_stats, print_precompute_stats, PrecomputeStats};
 use crate::datastructures::charmap::TrieMap;
@@ -21,11 +20,11 @@ use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::datastructures::ArcPtrWrapper;
 use crate::finite_automata::Regex;
-use crate::glr::parser::{MergeAndIntersect, GLRParser, GLRParserState, ParseState, ParseStateNodeContent, InsertWith};
+use crate::glr::parser::{
+    MergeAndIntersect, GLRParser, GLRParserState, ParseState, ParseStateNodeContent,
+};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
-use crate::constraint_serializer;
-use crate::serde_helpers::bibtreemap_serde; // Import the bibtreemap serde module
 
 pub type LLMTokenBV = HybridBitset;
 pub type GrammarTokenBV = BitVec;
@@ -33,7 +32,7 @@ pub type GrammarTokenBV = BitVec;
 // -----------------------------------------------------------------------------
 // Small data-types used by the constraint
 // -----------------------------------------------------------------------------
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LLMTokenInfo {
     pub active:       LLMTokenBV,
     pub intersection: LLMTokenBV,
@@ -85,7 +84,7 @@ impl MergeAndIntersect for LLMTokenInfo {
 // -----------------------------------------------------------------------------
 // Pre-computation node values
 // -----------------------------------------------------------------------------
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone)]
 pub struct PrecomputedFinalizer {
     pub content: BTreeMap<TokenizerStateID, LLMTokenBV>,
 }
@@ -98,7 +97,7 @@ impl PrecomputedFinalizer {
     }
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone)]
 pub struct PrecomputedNodeContents {
     finalizers: BTreeMap<GrammarTokenID, PrecomputedFinalizer>,
     pub clean_end: Option<LLMTokenBV>,
@@ -134,17 +133,16 @@ impl PrecomputedNodeContents {
 // Pre-computation graph node / alias types
 pub type PrecomputeNode =
     Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
-// Precomputed is now BTreeMap<TokenizerStateID, PrecomputeNode> as per original definition
 pub type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode>;
 
 // -----------------------------------------------------------------------------
 // GrammarConstraint – public facing object
 // -----------------------------------------------------------------------------
-#[derive(Debug, Clone)] // Remove Serialize, Deserialize here, will be implemented manually
+#[derive(Debug, Clone)]
 pub struct GrammarConstraint {
     pub(crate) tokenizer:        Regex,
     pub(crate) parser:           GLRParser,
-    pub(crate) precomputed:      Precomputed, // BTreeMap<TokenizerStateID, PrecomputeNode> as defined above
+    pub(crate) precomputed:      Precomputed,
     pub(crate) llm_token_map:    BiBTreeMap<Vec<u8>, LLMTokenID>, // Stores original LLMTokenIDs (bytes -> original ID)
     pub(crate) token_name_map:   BiBTreeMap<String, usize>,
     pub(crate) max_original_llm_token_id: usize, // Max ID from the input llm_token_map
@@ -154,71 +152,6 @@ pub struct GrammarConstraint {
     pub(crate) original_to_internal_id_bimap: BiBTreeMap<usize, usize>, // original_id.0 <-> internal_id.0
     pub(crate) internal_max_llm_token: usize, // Number of unique internal LLM tokens (capacity for bitsets)
 }
-
-// Define a helper struct for serializing/deserializing GrammarConstraint
-#[derive(Serialize, Deserialize)]
-struct GrammarConstraintSerdeHelper {
-    tokenizer: Regex,
-    parser: GLRParser,
-    #[serde(with = "constraint_serializer")]
-    precomputed: Precomputed, // This uses the custom module
-
-    #[serde(with = "bibtreemap_serde")]
-    llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
-
-    #[serde(with = "bibtreemap_serde")]
-    token_name_map: BiBTreeMap<String, usize>,
-    max_original_llm_token_id: usize,
-
-    #[serde(with = "bibtreemap_serde")]
-    original_to_internal_id_bimap: BiBTreeMap<usize, usize>,
-    internal_max_llm_token: usize,
-}
-
-
-impl Serialize for GrammarConstraint {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        // Need to convert the precomputed map of Trie nodes (not Arc<Mutex>)
-        // to a format the custom serializer can handle.
-        // The custom serializer in `constraint_serializer` expects `&Precomputed` (BTreeMap<TokenizerStateID, PrecomputeNode>).
-        // Since `self.precomputed` is already `BTreeMap<TokenizerStateID, PrecomputeNode>`,
-        // we can pass it directly.
-        let helper = GrammarConstraintSerdeHelper {
-            tokenizer: self.tokenizer.clone(), // Assuming Regex is Clone
-            parser: self.parser.clone(),       // Assuming GLRParser is Clone
-            precomputed: self.precomputed.clone(), // Clone the BTreeMap of Trie nodes
-            llm_token_map: self.llm_token_map.clone(),
-            token_name_map: self.token_name_map.clone(),
-            max_original_llm_token_id: self.max_original_llm_token_id,
-            original_to_internal_id_bimap: self.original_to_internal_id_bimap.clone(),
-            internal_max_llm_token: self.internal_max_llm_token,
-        };
-        helper.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for GrammarConstraint {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let helper = GrammarConstraintSerdeHelper::deserialize(deserializer)?;
-        Ok(GrammarConstraint {
-            tokenizer: helper.tokenizer,
-            parser: helper.parser,
-            precomputed: helper.precomputed, // Deserialize directly into BTreeMap<_, Trie>
-            llm_token_map: helper.llm_token_map,
-            token_name_map: helper.token_name_map,
-            max_original_llm_token_id: helper.max_original_llm_token_id,
-            original_to_internal_id_bimap: helper.original_to_internal_id_bimap,
-            internal_max_llm_token: helper.internal_max_llm_token,
-        })
-    }
-}
-
 
 impl GrammarConstraint {
     // Helper function to set up LLM token mappings

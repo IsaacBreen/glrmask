@@ -1,4 +1,3 @@
-use serde::{Serialize, Deserialize};
 use crate::finite_automata::{GroupID, Regex};
 use crate::types::{TerminalID as GrammarTokenID};
 use bimap::BiBTreeMap;
@@ -6,12 +5,12 @@ use bimap::BiBTreeMap;
 pub type LLMToken = Vec<u8>;
 pub type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LLMTokenID(pub usize);
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TokenizerStateID(pub usize);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Token {
     pub id: GroupID,
     pub width: usize,
@@ -53,4 +52,3 @@ impl Regex {
         self.dfa.states.len()
     }
 }
-

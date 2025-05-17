@@ -1,8 +1,7 @@
-use serde::{Serialize, Deserialize};
 use crate::glr::grammar::{Production, Symbol};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Item {
     pub production: Production,
     pub dot_position: usize,

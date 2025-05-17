@@ -1,19 +1,18 @@
-use serde::{Serialize, Deserialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NonTerminal(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Terminal(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Symbol {
     Terminal(Terminal),
     NonTerminal(NonTerminal),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Production {
     pub lhs: NonTerminal,
     pub rhs: Vec<Symbol>,
@@ -64,7 +63,7 @@ pub fn compute_first_sets(productions: &[Production]) -> BTreeMap<NonTerminal, B
     for production in productions {
         let lhs = &production.lhs;
         first_sets.entry(lhs.clone()).or_default();
-
+        
         for symbol in &production.rhs {
             match symbol {
                 Symbol::Terminal(t) => {
@@ -142,7 +141,7 @@ pub fn compute_follow_sets(productions: &[Production]) -> BTreeMap<NonTerminal, 
                             Symbol::NonTerminal(nt_next) => {
                                 let first_next = &first_sets[nt_next];
                                 follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned());
-
+                                
                                 if !epsilon_nonterminals.contains(nt_next) {
                                     nullable = false;
                                     break;
