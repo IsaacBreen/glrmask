@@ -8,6 +8,9 @@ use std::fmt::Display;
 use crate::glr::analyze::{drop_dead, remove_productions_with_undefined_nonterminals, validate};
 pub use crate::types::{TerminalID};
 
+use crate::json_serialization::{JSONNode, JSONConvertible}; // Add this line
+
+
 type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
 type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
 type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
@@ -75,6 +78,93 @@ pub struct StateID(pub usize);
 pub struct ProductionID(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NonTerminalID(pub usize);
+
+// Implement JSONConvertible for StateID, ProductionID, NonTerminalID
+impl JSONConvertible for StateID {
+    fn to_json(&self) -> JSONNode { self.0.to_json() }
+    fn from_json(node: &JSONNode) -> Result<Self, String> { usize::from_json(node).map(StateID) }
+}
+impl JSONConvertible for ProductionID {
+    fn to_json(&self) -> JSONNode { self.0.to_json() }
+    fn from_json(node: &JSONNode) -> Result<Self, String> { usize::from_json(node).map(ProductionID) }
+}
+impl JSONConvertible for NonTerminalID {
+    fn to_json(&self) -> JSONNode { self.0.to_json() }
+    fn from_json(node: &JSONNode) -> Result<Self, String> { usize::from_json(node).map(NonTerminalID) }
+}
+
+// Implement JSONConvertible for Stage7ShiftsAndReduces
+impl JSONConvertible for Stage7ShiftsAndReduces {
+    fn to_json(&self) -> JSONNode {
+        match self {
+            Stage7ShiftsAndReduces::Shift(state_id) => crate::json_serialization::struct_to_json_object(vec![
+                ("type", JSONNode::String("Shift".to_string())),
+                ("state_id", state_id.to_json()),
+            ]),
+            Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len } => crate::json_serialization::struct_to_json_object(vec![
+                ("type", JSONNode::String("Reduce".to_string())),
+                ("production_id", production_id.to_json()),
+                ("nonterminal_id", nonterminal_id.to_json()),
+                ("len", len.to_json()),
+            ]),
+            Stage7ShiftsAndReduces::Split { shift, reduces } => crate::json_serialization::struct_to_json_object(vec![
+                ("type", JSONNode::String("Split".to_string())),
+                ("shift", shift.to_json()),
+                ("reduces", reduces.to_json()),
+            ]),
+        }
+    }
+    fn from_json(node: &JSONNode) -> Result<Self, String> {
+        let map = crate::json_serialization::json_object_to_btreemap(node)?;
+        let type_str = map.get("type").ok_or_else(|| "Missing 'type' field for Stage7ShiftsAndReduces".to_string())
+            .and_then(String::from_json)?;
+
+        match type_str.as_str() {
+            "Shift" => {
+                let state_id = map.get("state_id").ok_or_else(|| "Missing 'state_id' for Shift".to_string())
+                    .and_then(StateID::from_json)?;
+                Ok(Stage7ShiftsAndReduces::Shift(state_id))
+            }
+            "Reduce" => {
+                let production_id = map.get("production_id").ok_or_else(|| "Missing 'production_id' for Reduce".to_string())
+                    .and_then(ProductionID::from_json)?;
+                let nonterminal_id = map.get("nonterminal_id").ok_or_else(|| "Missing 'nonterminal_id' for Reduce".to_string())
+                    .and_then(NonTerminalID::from_json)?;
+                let len = map.get("len").ok_or_else(|| "Missing 'len' for Reduce".to_string())
+                    .and_then(usize::from_json)?;
+                Ok(Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len })
+            }
+            "Split" => {
+                let shift = map.get("shift").ok_or_else(|| "Missing 'shift' for Split".to_string())
+                    .and_then(Option::<StateID>::from_json)?;
+                let reduces = map.get("reduces").ok_or_else(|| "Missing 'reduces' for Split".to_string())
+                    .and_then(|n| BTreeMap::<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>::from_json(n))?;
+                Ok(Stage7ShiftsAndReduces::Split { shift, reduces })
+            }
+            _ => Err(format!("Unknown Stage7ShiftsAndReduces type: {}", type_str)),
+        }
+    }
+}
+
+// Implement JSONConvertible for Stage7Row
+impl JSONConvertible for Stage7Row {
+    fn to_json(&self) -> JSONNode {
+        crate::json_serialization::struct_to_json_object(vec![
+            ("shifts_and_reduces", self.shifts_and_reduces.to_json()),
+            ("gotos", self.gotos.to_json()),
+        ])
+    }
+    fn from_json(node: &JSONNode) -> Result<Self, String> {
+        let map = crate::json_serialization::json_object_to_btreemap(node)?;
+        Ok(Stage7Row {
+            shifts_and_reduces: map.get("shifts_and_reduces").ok_or_else(|| "Missing 'shifts_and_reduces' for Stage7Row".to_string())
+                .and_then(|n| BTreeMap::<TerminalID, Stage7ShiftsAndReduces>::from_json(n))?,
+            gotos: map.get("gotos").ok_or_else(|| "Missing 'gotos' for Stage7Row".to_string())
+                .and_then(|n| BTreeMap::<NonTerminalID, StateID>::from_json(n))?,
+        })
+    }
+}
+
 
 type Stage1Result = Stage1Table;
 type Stage2Result = Stage2Table;

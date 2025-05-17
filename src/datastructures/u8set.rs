@@ -6,6 +6,24 @@ pub struct U8Set {
     pub(crate) y: u128,
 }
 
+use crate::json_serialization::{JSONNode, JSONConvertible};
+
+impl JSONConvertible for U8Set {
+    fn to_json(&self) -> JSONNode {
+        crate::json_serialization::struct_to_json_object(vec![
+            ("x", self.x.to_json()),
+            ("y", self.y.to_json()),
+        ])
+    }
+    fn from_json(node: &JSONNode) -> Result<Self, String> {
+        let map = crate::json_serialization::json_object_to_btreemap(node)?;
+        Ok(U8Set {
+            x: map.get("x").ok_or_else(|| "Missing field 'x' for U8Set".to_string()).and_then(u128::from_json)?,
+            y: map.get("y").ok_or_else(|| "Missing field 'y' for U8Set".to_string()).and_then(u128::from_json)?,
+        })
+    }
+}
+
 impl Default for U8Set {
     fn default() -> Self {
         Self::none()
@@ -111,7 +129,7 @@ impl U8Set {
     pub fn from_char_negation_range(range: impl IntoIterator<Item = u8>) -> U8Set {
         Self::from_byte_range(range).complement()
     }
-    
+
     pub fn from_slice(slice: &[u8]) -> Self {
         let mut result = Self::none();
         for byte in slice {
@@ -324,9 +342,11 @@ impl std::fmt::Display for U8Set {
             }
             if start == end {
                 output.push_str(&format!("{:?}", *start as char));
-            } else if end - start == 1 {
+            }
+            else if end - start == 1 {
                 output.push_str(&format!("{:?}, {:?}", *start as char, *end as char));
-            } else {
+            }
+            else {
                 output.push_str(&format!("{:?}..{:?}", *start as char, *end as char));
             }
         }

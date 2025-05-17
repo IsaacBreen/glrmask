@@ -13,7 +13,10 @@ use std::hash::Hash;
 use std::sync::Arc;
 use crate::debug;
 
-pub trait MergeAndIntersect: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
+use crate::json_serialization::{JSONNode, JSONConvertible}; // Add this line
+
+
+pub trait MergeAndIntersect: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash + JSONConvertible {
     /// Merges the information represented by `self` and `other`.
     fn merge(&self, other: &Self) -> Self;
     /// Intersects the information represented by `self` and `other`.
@@ -30,9 +33,42 @@ pub struct ParseStateNodeContent<T: MergeAndIntersect> {
     pub state_id: StateID,
     pub t: T,
 }
+
+// Implement JSONConvertible for ParseStateNodeContent
+impl<T: MergeAndIntersect> JSONConvertible for ParseStateNodeContent<T> {
+    fn to_json(&self) -> JSONNode {
+        crate::json_serialization::struct_to_json_object(vec![
+            ("state_id", self.state_id.to_json()),
+            ("t", self.t.to_json()),
+        ])
+    }
+    fn from_json(node: &JSONNode) -> Result<Self, String> {
+        let map = crate::json_serialization::json_object_to_btreemap(node)?;
+        Ok(ParseStateNodeContent {
+            state_id: map.get("state_id").ok_or_else(|| "Missing 'state_id' for ParseStateNodeContent".to_string()).and_then(StateID::from_json)?,
+            t: map.get("t").ok_or_else(|| "Missing 't' for ParseStateNodeContent".to_string()).and_then(T::from_json)?,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseState<T: MergeAndIntersect> {
     pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
+}
+
+// Implement JSONConvertible for ParseState
+impl<T: MergeAndIntersect> JSONConvertible for ParseState<T> {
+    fn to_json(&self) -> JSONNode {
+        crate::json_serialization::struct_to_json_object(vec![
+            ("stack", self.stack.to_json()), // Delegates to Arc<GSSNode<...>>'s to_json
+        ])
+    }
+    fn from_json(node: &JSONNode) -> Result<Self, String> {
+        let map = crate::json_serialization::json_object_to_btreemap(node)?;
+        Ok(ParseState {
+            stack: map.get("stack").ok_or_else(|| "Missing 'stack' for ParseState".to_string()).and_then(|n| Arc::<GSSNode<ParseStateNodeContent<T>>>::from_json(n))?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -52,6 +88,38 @@ pub struct GLRParser {
     pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
     pub start_state_id: StateID,
 }
+
+// Implement JSONConvertible for GLRParser
+impl JSONConvertible for GLRParser {
+    fn to_json(&self) -> JSONNode {
+        crate::json_serialization::struct_to_json_object(vec![
+            ("stage_7_table", self.stage_7_table.to_json()),
+            ("productions", self.productions.to_json()),
+            ("terminal_map", self.terminal_map.to_json()),
+            ("non_terminal_map", self.non_terminal_map.to_json()),
+            ("item_set_map", self.item_set_map.to_json()),
+            ("start_state_id", self.start_state_id.to_json()),
+        ])
+    }
+    fn from_json(node: &JSONNode) -> Result<Self, String> {
+        let map = crate::json_serialization::json_object_to_btreemap(node)?;
+        Ok(GLRParser {
+            stage_7_table: map.get("stage_7_table").ok_or_else(|| "Missing 'stage_7_table'".to_string())
+                .and_then(|n| BTreeMap::<StateID, Stage7Row>::from_json(n))?,
+            productions: map.get("productions").ok_or_else(|| "Missing 'productions'".to_string())
+                .and_then(Vec::<Production>::from_json)?,
+            terminal_map: map.get("terminal_map").ok_or_else(|| "Missing 'terminal_map'".to_string())
+                .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?,
+            non_terminal_map: map.get("non_terminal_map").ok_or_else(|| "Missing 'non_terminal_map'".to_string())
+                .and_then(|n| BiBTreeMap::<NonTerminal, NonTerminalID>::from_json(n))?,
+            item_set_map: map.get("item_set_map").ok_or_else(|| "Missing 'item_set_map'".to_string())
+                .and_then(|n| BiBTreeMap::<BTreeSet<Item>, StateID>::from_json(n))?,
+            start_state_id: map.get("start_state_id").ok_or_else(|| "Missing 'start_state_id'".to_string())
+                .and_then(StateID::from_json)?,
+        })
+    }
+}
+
 
 impl GLRParser {
     pub fn new(
@@ -386,7 +454,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                     crate::debug!(4, "Reduce from state {} via token {} to nonterminal {}", top.state_id.0, token_id.0, nt.0);
                     for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
                         // Add to worklist for current step; merging happens when moving to `next`
-                        todo.push(ParseState { stack: s }); 
+                        todo.push(ParseState { stack: s });
                     }
                 }
 
@@ -460,6 +528,22 @@ pub struct ParseStateKey {
     stack_state_id: StateID,
     // Removed action_stack
 }
+
+// Implement JSONConvertible for ParseStateKey
+impl JSONConvertible for ParseStateKey {
+    fn to_json(&self) -> JSONNode {
+        crate::json_serialization::struct_to_json_object(vec![
+            ("stack_state_id", self.stack_state_id.to_json()),
+        ])
+    }
+    fn from_json(node: &JSONNode) -> Result<Self, String> {
+        let map = crate::json_serialization::json_object_to_btreemap(node)?;
+        Ok(ParseStateKey {
+            stack_state_id: map.get("stack_state_id").ok_or_else(|| "Missing 'stack_state_id' for ParseStateKey".to_string()).and_then(StateID::from_json)?,
+        })
+    }
+}
+
 
 impl<T: MergeAndIntersect> ParseState<T> {
     pub fn key(&self) -> ParseStateKey {

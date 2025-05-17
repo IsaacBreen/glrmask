@@ -7,6 +7,24 @@ pub struct Item {
     pub dot_position: usize,
 }
 
+use crate::json_serialization::{JSONNode, JSONConvertible}; // Add this line
+
+impl JSONConvertible for Item {
+    fn to_json(&self) -> JSONNode {
+        crate::json_serialization::struct_to_json_object(vec![
+            ("production", self.production.to_json()),
+            ("dot_position", self.dot_position.to_json()),
+        ])
+    }
+    fn from_json(node: &JSONNode) -> Result<Self, String> {
+        let map = crate::json_serialization::json_object_to_btreemap(node)?;
+        Ok(Item {
+            production: map.get("production").ok_or_else(|| "Missing 'production' field for Item".to_string()).and_then(Production::from_json)?,
+            dot_position: map.get("dot_position").ok_or_else(|| "Missing 'dot_position' field for Item".to_string()).and_then(usize::from_json)?,
+        })
+    }
+}
+
 pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BTreeSet<Item> {
     // crate::debug!(3, "Computing closure");
     let mut closure = items.clone();

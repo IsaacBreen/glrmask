@@ -22,6 +22,58 @@ pub struct ExecuteResult {
     pub end_state: Option<usize>,
 }
 
+use crate::json_serialization::{JSONNode, JSONConvertible};
+
+impl JSONConvertible for LLMTokenID {
+    fn to_json(&self) -> JSONNode {
+        self.0.to_json()
+    }
+    fn from_json(node: &JSONNode) -> Result<Self, String> {
+        usize::from_json(node).map(LLMTokenID)
+    }
+}
+
+impl JSONConvertible for TokenizerStateID {
+    fn to_json(&self) -> JSONNode {
+        self.0.to_json()
+    }
+    fn from_json(node: &JSONNode) -> Result<Self, String> {
+        usize::from_json(node).map(TokenizerStateID)
+    }
+}
+
+impl JSONConvertible for Token {
+    fn to_json(&self) -> JSONNode {
+        crate::json_serialization::struct_to_json_object(vec![
+            ("id", self.id.to_json()),
+            ("width", self.width.to_json()),
+        ])
+    }
+    fn from_json(node: &JSONNode) -> Result<Self, String> {
+        let map = crate::json_serialization::json_object_to_btreemap(node)?;
+        Ok(Token {
+            id: map.get("id").ok_or_else(|| "Missing field 'id'".to_string()).and_then(GroupID::from_json)?,
+            width: map.get("width").ok_or_else(|| "Missing field 'width'".to_string()).and_then(usize::from_json)?,
+        })
+    }
+}
+
+impl JSONConvertible for ExecuteResult {
+    fn to_json(&self) -> JSONNode {
+        crate::json_serialization::struct_to_json_object(vec![
+            ("matches", self.matches.to_json()),
+            ("end_state", self.end_state.to_json()),
+        ])
+    }
+    fn from_json(node: &JSONNode) -> Result<Self, String> {
+        let map = crate::json_serialization::json_object_to_btreemap(node)?;
+        Ok(ExecuteResult {
+            matches: map.get("matches").ok_or_else(|| "Missing field 'matches'".to_string()).and_then(Vec::<Token>::from_json)?,
+            end_state: map.get("end_state").ok_or_else(|| "Missing field 'end_state'".to_string()).and_then(Option::<usize>::from_json)?,
+        })
+    }
+}
+
 impl Regex {
     pub(crate) fn initial_state_id(&self) -> TokenizerStateID {
         TokenizerStateID(0)
