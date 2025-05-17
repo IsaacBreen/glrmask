@@ -367,6 +367,9 @@ if __name__ == "__main__":
 #     # Exclude tokens where any character appears more than once
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(set(k)) == len(k)}
 
+    print("Tokenizer vocab:")
+    print(tokenizer_vocab)
+
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
     tokenizer_vocab = {token: actual_vocab[token.replace(" ", "Ġ")] for token in tokenizer_vocab}
