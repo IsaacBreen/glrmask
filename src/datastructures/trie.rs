@@ -12,7 +12,9 @@ use std::cell::RefCell; // Not strictly needed with the chosen direct BFS approa
 use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
 use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
+use std::collections::BTreeMap as StdMap;
+use std::hash::{Hash, Hasher};
+// Added for derive macro pattern
 
 
 /// Error type indicating that a cycle was detected during an operation
@@ -989,6 +991,39 @@ where
 {
 }
 
+
+impl<EK, EV, T> PartialOrd for Trie<EK, EV, T>
+where
+    EK: Ord + Clone,
+    EV: PartialOrd + Clone,
+    T: PartialOrd,
+{
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        todo!()
+    }
+}
+
+impl<EK, EV, T> Ord for Trie<EK, EV, T>
+where
+    EK: Ord + Clone,
+    EV: Ord + Clone,
+    T: Ord,
+{
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        todo!()
+    }
+}
+
+impl<EK, EV, T> Hash for Trie<EK, EV, T>
+where
+    EK: Ord + Clone,
+    EV: Ord + Clone,
+    T: Ord,
+{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        todo!()
+    }
+}
 
 /// A helper struct to facilitate inserting an edge into a Trie,
 /// trying multiple potential destinations and optionally creating a new node.
