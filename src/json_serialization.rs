@@ -6,6 +6,10 @@ use bimap::BiBTreeMap;
 // Import the derive macro
 use json_convertible_derive::JSONConvertible;
 
+// Add these lines for serde_json
+use serde_json::Value as SerdeValue;
+use serde_json::Map as SerdeMap; // BTreeMap<String, SerdeValue> is SerdeMap
+
 // --- JSONNode Enum ---
 #[derive(Debug, Clone, PartialEq)]
 pub enum JSONNode {
@@ -16,7 +20,91 @@ pub enum JSONNode {
     Float(f64),
     String(String),
     Array(Vec<JSONNode>),
-    Object(BTreeMap<String, JSONNode>),
+    Object(BTreeMap<String, JSONNode>), // BTreeMap for sorted keys
+}
+
+impl JSONNode {
+    // New method to convert JSONNode to serde_json::Value
+    fn to_serde_value(&self) -> SerdeValue {
+        match self {
+            JSONNode::Null => SerdeValue::Null,
+            JSONNode::Bool(b) => SerdeValue::Bool(*b),
+            JSONNode::Int(i) => SerdeValue::Number(serde_json::Number::from(*i)),
+            JSONNode::UInt(u) => SerdeValue::Number(serde_json::Number::from(*u)),
+            JSONNode::Float(f) => {
+                // serde_json::Number::from_f64 returns None for NaN/Infinity
+                // We'll convert such cases to SerdeValue::Null, a common practice.
+                serde_json::Number::from_f64(*f)
+                    .map(SerdeValue::Number)
+                    .unwrap_or(SerdeValue::Null)
+            }
+            JSONNode::String(s) => SerdeValue::String(s.clone()),
+            JSONNode::Array(arr) => {
+                SerdeValue::Array(arr.iter().map(|node| node.to_serde_value()).collect())
+            }
+            JSONNode::Object(obj) => {
+                let mut map = SerdeMap::new();
+                for (k, v) in obj {
+                    map.insert(k.clone(), v.to_serde_value());
+                }
+                SerdeValue::Object(map)
+            }
+        }
+    }
+
+    // New method to convert serde_json::Value to JSONNode
+    fn from_serde_value(s_val: SerdeValue) -> Result<Self, String> {
+        match s_val {
+            SerdeValue::Null => Ok(JSONNode::Null),
+            SerdeValue::Bool(b) => Ok(JSONNode::Bool(b)),
+            SerdeValue::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Ok(JSONNode::Int(i as i128))
+                } else if let Some(u) = n.as_u64() {
+                    Ok(JSONNode::UInt(u as u128))
+                } else if let Some(f) = n.as_f64() {
+                    Ok(JSONNode::Float(f))
+                } else {
+                    Err(format!("Unsupported number type in serde_json::Value: {}", n))
+                }
+            }
+            SerdeValue::String(s) => Ok(JSONNode::String(s)),
+            SerdeValue::Array(arr) => {
+                let mut nodes = Vec::with_capacity(arr.len());
+                for val in arr {
+                    nodes.push(Self::from_serde_value(val)?);
+                }
+                Ok(JSONNode::Array(nodes))
+            }
+            SerdeValue::Object(obj_map) => {
+                let mut btree_map = BTreeMap::new();
+                for (k, v) in obj_map {
+                    btree_map.insert(k, Self::from_serde_value(v)?);
+                }
+                Ok(JSONNode::Object(btree_map))
+            }
+        }
+    }
+
+    // Update to_json_string to use serde_json
+    pub fn to_json_string(&self) -> String {
+        let serde_value = self.to_serde_value();
+        // serde_json::to_string can fail, though less likely for SerdeValue -> String
+        // For simplicity here, unwrap, but consider error handling for production
+        serde_json::to_string(&serde_value).unwrap_or_else(|e| {
+            // Fallback or panic for critical error
+            eprintln!("Critical error: Failed to serialize SerdeValue to string: {}", e);
+            // A minimal JSON representation of an error or "null"
+            "{\"error\":\"serialization_failed\"}".to_string()
+        })
+    }
+
+    // Update from_json_string to use serde_json
+    pub fn from_json_string(s: &str) -> Result<JSONNode, String> {
+        let serde_value: SerdeValue = serde_json::from_str(s)
+            .map_err(|e| format!("Failed to parse JSON string with serde_json: {}", e))?;
+        Self::from_serde_value(serde_value)
+    }
 }
 
 // --- JSONConvertible Trait ---
@@ -571,5 +659,60 @@ mod tests {
         assert!(u8::from_json(JSONNode::Int(256)).is_err()); // 256 is out of range for u8
         assert!(u8::from_json(JSONNode::UInt(256)).is_err());// 256 is out of range for u8
         assert!(u8::from_json(JSONNode::Int(-1)).is_err());  // -1 is out of range for u8
+    }
+
+    #[test]
+    fn test_json_string_conversion() {
+        let original = MyStruct {
+            field1: 42,
+            field2: "hello \"world\" \\ / \\b \\f \n \r \t".to_string(),
+            optional_field: Some(true),
+            list_of_numbers: vec![1, 2, 3],
+            byte_buffer: vec![10, 20, 30],
+        };
+
+        let json_node_via_trait = original.to_json();
+        let json_string = json_node_via_trait.to_json_string();
+
+        // Expected string from serde_json (keys will be sorted due to BTreeMap in JSONNode::Object
+        // and SerdeMap in serde_json::Value::Object if built from a sorted iterator,
+        // or if serde_json::to_string sorts them by default for `Map`).
+        // serde_json sorts object keys by default when serializing.
+        let expected_json_string = r#"{"byte_buffer":[10,20,30],"field1":42,"field2":"hello \"world\" \\ / \b \f \n \r \t","list_of_numbers":[1,2,3],"optional_field":true}"#;
+
+        // We can parse the expected string and our generated string to SerdeValue and compare them
+        // to avoid issues with exact string formatting (e.g. spacing if pretty print was used).
+        let serde_val_generated: SerdeValue = serde_json::from_str(&json_string).unwrap();
+        let serde_val_expected: SerdeValue = serde_json::from_str(expected_json_string).unwrap();
+
+        assert_eq!(serde_val_generated, serde_val_expected);
+
+        // Test deserialization from string
+        let parsed_node = JSONNode::from_json_string(&json_string).expect("Failed to parse JSON string back to JSONNode");
+        assert_eq!(json_node_via_trait, parsed_node);
+
+        let deserialized_struct = MyStruct::from_json(parsed_node).expect("Deserialization from parsed_node failed");
+        assert_eq!(original, deserialized_struct);
+    }
+
+    #[test]
+    fn test_non_finite_float_serialization() {
+        let node_nan = JSONNode::Float(f64::NAN);
+        assert_eq!(node_nan.to_json_string(), "null");
+
+        let node_inf = JSONNode::Float(f64::INFINITY);
+        assert_eq!(node_inf.to_json_string(), "null");
+
+        let node_neg_inf = JSONNode::Float(f64::NEG_INFINITY);
+        assert_eq!(node_neg_inf.to_json_string(), "null");
+
+        // Test deserialization of null back to float (will become 0.0 or error based on from_serde_value)
+        // Current from_serde_value for SerdeValue::Null will become JSONNode::Null.
+        // If you want null in JSON to become a specific float (e.g. 0.0 or NaN),
+        // you'd adjust JSONConvertible for Option<f64> or f64 itself.
+        // Here, we are testing JSONNode::from_json_string directly.
+        let parsed_nan_node = JSONNode::from_json_string("null").unwrap();
+        assert_eq!(parsed_nan_node, JSONNode::Null); // serde_json parses "null" to SerdeValue::Null
+                                                     // then from_serde_value converts SerdeValue::Null to JSONNode::Null
     }
 }
