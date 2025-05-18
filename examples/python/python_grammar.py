@@ -409,7 +409,7 @@ if __name__ == "__main__":
     from rich.json import JSON
     console = Console(record=True, width=80)
     console.print(JSON(json_string, indent=4))
-    json_string = console.export_text(styles=True)
+    json_string = console.export_text(styles=False)
     # Optionally print a snippet or save to file if too long
     # print(textwrap.shorten(json_string, width=200, placeholder="..."))
     with open("serialized_grammar_constraint.json", "w") as f:
