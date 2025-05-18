@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, TryLockError, MutexGuard};
 use std::sync::atomic::{AtomicUsize, Ordering}; // Added for tests
 use std::cmp::Reverse;          // min-heap helper
 use std::collections::BinaryHeap;
+use std::cell::RefCell; // Not strictly needed with the chosen direct BFS approach in to_json, but good to keep in mind for context-passing alternatives.
 
 
 use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
@@ -47,21 +48,215 @@ pub struct Trie<EK: Ord, EV, T> {
 
 impl<EK, EV, T> JSONConvertible for Trie<EK, EV, T>
 where
-    EK: Ord + JSONConvertible,
-    EV: JSONConvertible,
-    T: JSONConvertible,
+    EK: Ord + Clone + JSONConvertible,
+    EV: Clone + JSONConvertible,
+    T: Clone + JSONConvertible,
 {
     fn to_json(&self) -> JSONNode {
-        // WARNING: This is a naive serialization that does NOT handle cycles or shared structure.
-        // It will likely lead to infinite recursion for cyclic Tries or excessive data duplication.
-        // A proper graph serialization strategy is needed for robust Trie serialization.
-        todo!("Trie to_json: Complex graph structure, requires advanced serialization strategy.")
+        let mut nodes_json_list: Vec<JSONNode> = Vec::new();
+        // Maps the raw pointer of an Arc<Mutex<Trie>> to its index in nodes_json_list
+        let mut arc_ptr_to_idx_map: HashMap<*const Mutex<Trie<EK, EV, T>>, usize> = HashMap::new();
+        // Queue for BFS traversal, storing Arcs to keep them alive and allow locking
+        let mut bfs_q: VecDeque<Arc<Mutex<Trie<EK, EV, T>>>> = VecDeque::new();
+
+        // --- Step 1: Serialize `self` (the root node for this call) ---
+        // `self` is node at index 0.
+        let root_idx = 0;
+        // We need to store the JSON representation of `self`'s direct data.
+        // Since `self` is not an Arc here, we handle it specially as the first node.
+        // Its children, which are Arcs, will be processed via the BFS queue.
+        nodes_json_list.push(JSONNode::Null); // Placeholder for root, will be filled after processing its children.
+
+        let mut root_children_json_data = Vec::new(); // Stores [EK_json, [[ChildIdx, EV_json], ...]]
+
+        for (edge_key, destinations_map) in &self.children {
+            let ek_json = edge_key.to_json();
+            let mut dest_map_json_array = Vec::new();
+            for (child_arc_ptr_wrapper, edge_val) in destinations_map {
+                let child_arc = child_arc_ptr_wrapper.as_arc();
+                let child_arc_ptr = Arc::as_ptr(child_arc);
+
+                let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
+                    Some(idx) => *idx,
+                    None => {
+                        let new_idx = nodes_json_list.len(); // Next available index
+                        arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
+                        bfs_q.push_back(child_arc.clone());
+                        nodes_json_list.push(JSONNode::Null); // Placeholder for this new child
+                        new_idx
+                    }
+                };
+                dest_map_json_array.push(JSONNode::Array(vec![
+                    (child_idx as f64).to_json(), // Child index
+                    edge_val.to_json(),          // Edge value
+                ]));
+            }
+            root_children_json_data.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array)]));
+        }
+
+        // Fill in the root node's (self's) data
+        nodes_json_list[root_idx] = JSONNode::Object(StdMap::from_iter(vec![
+            ("value".to_string(), self.value.to_json()),
+            ("max_depth".to_string(), self.max_depth.to_json()),
+            ("children".to_string(), JSONNode::Array(root_children_json_data)),
+        ]));
+
+
+        // --- Step 2: Process the rest of the nodes in the queue (BFS) ---
+        while let Some(current_arc) = bfs_q.pop_front() {
+            let current_arc_ptr = Arc::as_ptr(&current_arc);
+            let current_node_json_idx = *arc_ptr_to_idx_map.get(&current_arc_ptr)
+                .expect("Node in BFS queue must have an assigned index");
+
+            let node_guard = current_arc.lock().expect("Mutex poisoned during Trie serialization (BFS part)");
+            let mut current_node_children_json_bfs = Vec::new();
+
+            for (edge_key, destinations_map) in &node_guard.children {
+                let ek_json = edge_key.to_json();
+                let mut dest_map_json_array_bfs = Vec::new();
+                for (child_arc_ptr_wrapper, edge_val) in destinations_map {
+                    let child_arc = child_arc_ptr_wrapper.as_arc();
+                    let child_arc_ptr = Arc::as_ptr(child_arc);
+
+                    let child_idx = match arc_ptr_to_idx_map.get(&child_arc_ptr) {
+                        Some(idx) => *idx,
+                        None => {
+                            let new_idx = nodes_json_list.len();
+                            arc_ptr_to_idx_map.insert(child_arc_ptr, new_idx);
+                            bfs_q.push_back(child_arc.clone());
+                            nodes_json_list.push(JSONNode::Null); // Placeholder
+                            new_idx
+                        }
+                    };
+                    dest_map_json_array_bfs.push(JSONNode::Array(vec![
+                        (child_idx as f64).to_json(),
+                        edge_val.to_json(),
+                    ]));
+                }
+                current_node_children_json_bfs.push(JSONNode::Array(vec![ek_json, JSONNode::Array(dest_map_json_array_bfs)]));
+            }
+
+            // Fill in the data for the current node from the BFS queue
+            nodes_json_list[current_node_json_idx] = JSONNode::Object(StdMap::from_iter(vec![
+                ("value".to_string(), node_guard.value.to_json()),
+                ("max_depth".to_string(), node_guard.max_depth.to_json()),
+                ("children".to_string(), JSONNode::Array(current_node_children_json_bfs)),
+            ]));
+        }
+
+        JSONNode::Object(StdMap::from_iter(vec![
+            ("nodes".to_string(), JSONNode::Array(nodes_json_list)),
+            ("root_idx".to_string(), (root_idx as f64).to_json()),
+        ]))
     }
 
-    fn from_json(_node: JSONNode) -> Result<Self, String> {
-        // WARNING: Deserializing a Trie with shared structure or cycles from a simple JSON
-        // representation is non-trivial and not implemented here.
-        todo!("Trie from_json: Complex graph structure, requires advanced deserialization strategy.")
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let nodes_json = obj.remove("nodes").ok_or_else(|| "Missing 'nodes' field for Trie deserialization".to_string())?;
+                let root_idx_json = obj.remove("root_idx").ok_or_else(|| "Missing 'root_idx' field for Trie deserialization".to_string())?;
+
+                let nodes_array = match nodes_json {
+                    JSONNode::Array(arr) => arr,
+                    _ => return Err("'nodes' field is not an array".to_string()),
+                };
+                let root_idx = usize::from_json(root_idx_json)?;
+
+                if root_idx >= nodes_array.len() {
+                    return Err(format!("Root index {} is out of bounds for nodes array of length {}", root_idx, nodes_array.len()));
+                }
+
+                let mut deserialized_arcs: HashMap<usize, Arc<Mutex<Trie<EK, EV, T>>>> = HashMap::new();
+
+                // Pass 1: Create node shells (value, max_depth, empty children)
+                for (i, node_data_json) in nodes_array.iter().enumerate() {
+                    match node_data_json {
+                        JSONNode::Object(n_obj) => {
+                            let value_json = n_obj.get("value").ok_or_else(|| format!("Node at index {} missing 'value'", i))?;
+                            let max_depth_json = n_obj.get("max_depth").ok_or_else(|| format!("Node at index {} missing 'max_depth'", i))?;
+
+                            let value = T::from_json(value_json.clone())?;
+                            let max_depth = usize::from_json(max_depth_json.clone())?;
+
+                            let new_node_arc = Arc::new(Mutex::new(Trie {
+                                value,
+                                children: BTreeMap::new(), // Children populated in Pass 2
+                                max_depth,
+                            }));
+                            deserialized_arcs.insert(i, new_node_arc);
+                        }
+                        _ => return Err(format!("Node data at index {} is not an object", i)),
+                    }
+                }
+
+                // Pass 2: Link children by populating the `children` BTreeMaps
+                for (i, node_data_json) in nodes_array.iter().enumerate() {
+                    match node_data_json {
+                        JSONNode::Object(n_obj) => {
+                            let current_node_arc = deserialized_arcs.get(&i)
+                                .ok_or_else(|| format!("Failed to find node for index {} in Pass 2", i))?
+                                .clone();
+                            let mut current_node_guard = current_node_arc.lock().unwrap();
+
+                            let children_json_outer_array = n_obj.get("children")
+                                .ok_or_else(|| format!("Node at index {} missing 'children' field in Pass 2", i))?;
+
+                            match children_json_outer_array {
+                                JSONNode::Array(children_ek_map_array) => {
+                                    for ek_entry_json in children_ek_map_array {
+                                        match ek_entry_json {
+                                            JSONNode::Array(ek_pair) if ek_pair.len() == 2 => {
+                                                let ek_json = &ek_pair[0];
+                                                let dest_map_json_array = &ek_pair[1];
+
+                                                let edge_key = EK::from_json(ek_json.clone())?;
+                                                let mut destinations_for_this_ek = BTreeMap::new();
+
+                                                match dest_map_json_array {
+                                                    JSONNode::Array(dest_array_inner) => {
+                                                        for child_ev_pair_json in dest_array_inner {
+                                                            match child_ev_pair_json {
+                                                                JSONNode::Array(child_ev_pair_inner) if child_ev_pair_inner.len() == 2 => {
+                                                                    let child_idx_json = &child_ev_pair_inner[0];
+                                                                    let ev_json = &child_ev_pair_inner[1];
+
+                                                                    let child_idx = usize::from_json(child_idx_json.clone())?;
+                                                                    let child_arc = deserialized_arcs.get(&child_idx)
+                                                                        .ok_or_else(|| format!("Child index {} not found for node {} in Pass 2", child_idx, i))?
+                                                                        .clone();
+                                                                    let edge_value = EV::from_json(ev_json.clone())?;
+                                                                    destinations_for_this_ek.insert(ArcPtrWrapper::new(child_arc), edge_value);
+                                                                }
+                                                                _ => return Err(format!("Invalid child_idx-EV pair format for node {} under edge key {:?}", i, edge_key)),
+                                                            }
+                                                        }
+                                                    }
+                                                    _ => return Err(format!("Children destination map for node {} under edge key {:?} is not an array", i, edge_key)),
+                                                }
+                                                current_node_guard.children.insert(edge_key, destinations_for_this_ek);
+                                            }
+                                            _ => return Err(format!("Invalid EK-children_map_array pair format for node {}", i)),
+                                        }
+                                    }
+                                }
+                                _ => return Err(format!("'children' field for node {} is not an array of EK-entries", i)),
+                            }
+                        }
+                        _ => unreachable!("Node data should be an object, checked in Pass 1"),
+                    }
+                }
+
+                let root_arc_final = deserialized_arcs.get(&root_idx)
+                    .ok_or_else(|| format!("Root index {} not found in deserialized_arcs map after linking", root_idx))?
+                    .clone();
+
+                // The trait requires returning Self, so we clone the content of the root Arc.
+                // The shared graph structure is maintained by the Arcs held within the children maps.
+                let root_trie_content = root_arc_final.lock().unwrap().clone();
+                Ok(root_trie_content)
+            }
+            _ => Err("Expected JSONNode::Object for Trie graph structure".to_string()),
+        }
     }
 }
 
@@ -275,14 +470,12 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
 
         // Collect *all* child Arcs outside of the lock to avoid holding lock during recursion.
         let children_arcs: Vec<Arc<Mutex<Trie<EK, EV, T>>>> = {
-            let node = node_arc
-                .lock()
-                .expect("Mutex poisoned in _propagate_max_depth (getting children)");
-            node.children
+            let node_guard_val = node_arc.lock().expect("Mutex poisoned in _propagate_max_depth (getting children)"); // Renamed node_guard
+            node_guard_val.children // Use node_guard_val
                 .values() // Iterates over BTreeMap<ArcPtrWrapper<Mutex<...>>, EV>
                 .flat_map(|dest_map| dest_map.keys().map(|wrapper_arc| wrapper_arc.as_arc().clone()))
                 .collect()
-        }; // child_guard lock released here
+        }; // node_guard_val lock is released here.
 
         // For each child, compute the candidate depth.
         let candidate_depth_val = current_depth.saturating_add(1); // Renamed candidate_depth
@@ -1341,7 +1534,7 @@ mod tests {
 
     #[test]
     fn test_cycle_all_nodes_no_panic() {
-        // Cycle:  root -> child -> root
+        // Cycle:  root -> child -> root.
         // Manually create cycle without insert's propagation.
         let root: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(0)));
         let child: TestNodeBasic = Arc::new(Mutex::new(TestTrieBasic::new(1)));
@@ -1809,32 +2002,97 @@ mod tests {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let child1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1".to_string())));
         let child2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child2".to_string())));
-        let initial_edge_val1: HybridBitset = vec![10].into_iter().collect();
-        let initial_edge_val2: HybridBitset = vec![20].into_iter().collect();
-        let new_edge_val: HybridBitset = vec![1].into_iter().collect();
-        let merged_edge_val1: HybridBitset = vec![1, 10].into_iter().collect(); // Expected merge with child1
+        let child_other_key: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child_other_key".to_string())));
 
-        // Pre-insert edges with the target key
+        let edge_key = "target_key";
+        let initial_ev_c1: HybridBitset = vec![10].into_iter().collect();
+        let initial_ev_c2: HybridBitset = vec![20].into_iter().collect();
+        let new_ev_for_inserter: HybridBitset = vec![1].into_iter().collect();
+        let merged_ev_c1: HybridBitset = vec![1, 10].into_iter().collect(); // Expected merge with child1
+
+        // Setup:
+        // source --(target_key, initial_ev_c1)--> child1
+        // source --(target_key, initial_ev_c2)--> child2
+        // source --("other_key", dummy_ev)--> child_other_key
         {
             let mut s = source.lock().unwrap();
-            s.try_insert("key", &mut Some(initial_edge_val1), child1.clone()).unwrap();
-            s.try_insert("key", &mut Some(initial_edge_val2.clone()), child2.clone()).unwrap();
+            s.try_insert(edge_key, &mut Some(initial_ev_c1), child1.clone()).unwrap();
+            s.try_insert(edge_key, &mut Some(initial_ev_c2.clone()), child2.clone()).unwrap();
+            s.try_insert("other_key", &mut Some(HybridBitset::new()), child_other_key.clone()).unwrap();
         }
 
-        let inserter = EdgeInserter::new(source.clone(), "key", new_edge_val.clone(), merge_bitset_union);
-        // Should try child1, merge succeeds. Should not try child2.
-        let result_node = inserter.try_children().unwrap();
+        // 1. Test successful merge with the first child under the key.
+        //    EdgeInserter is created with source, target_key, and new_ev_for_inserter.
+        //    merge_bitset_union should merge new_ev_for_inserter into initial_ev_c1.
+        let inserter = EdgeInserter::new(source.clone(), edge_key, new_ev_for_inserter.clone(), merge_bitset_union);
+        let result_node_opt = inserter.try_children().into_option();
 
-        assert!(Arc::ptr_eq(&result_node, &child1)); // Merged with child1
-        let s = source.lock().unwrap();
-        let children_map = s.get(&"key").unwrap(); // Now a BTreeMap
-        assert_eq!(children_map.len(), 2); // Still two children
+        assert!(result_node_opt.is_some(), "Should find and merge with child1");
+        let result_node = result_node_opt.unwrap();
+        assert!(Arc::ptr_eq(&result_node, &child1), "Result should be child1");
 
-        let edge1_entry = children_map.iter().find(|(ca, _)| Arc::ptr_eq(ca.as_arc(), &child1)).unwrap();
-        assert_eq!(*edge1_entry.1, merged_edge_val1); // Merged value
+        // Check edge values:
+        // Edge to child1 should be merged.
+        // Edge to child2 should be unchanged (because merge with child1 succeeded first).
+        // Edge to child_other_key should be unchanged.
+        {
+            let s_guard = source.lock().unwrap();
+            let children_map_target_key = s_guard.get(&edge_key).expect("Target key should exist");
 
-        let edge2_entry = children_map.iter().find(|(ca, _)| Arc::ptr_eq(ca.as_arc(), &child2)).unwrap();
-        assert_eq!(*edge2_entry.1, initial_edge_val2); // Unchanged
+            let ev_c1 = children_map_target_key.get(&ArcPtrWrapper::new(child1.clone())).expect("Child1 should be under target_key");
+            assert_eq!(*ev_c1, merged_ev_c1, "Edge value for child1 should be merged");
+
+            let ev_c2 = children_map_target_key.get(&ArcPtrWrapper::new(child2.clone())).expect("Child2 should be under target_key");
+            assert_eq!(*ev_c2, initial_ev_c2, "Edge value for child2 should be unchanged");
+
+            let children_map_other_key = s_guard.get(&"other_key").expect("Other key should exist");
+            assert_eq!(children_map_other_key.len(), 1, "Should be one child under other_key");
+            // You could also check the value of the edge to child_other_key if necessary.
+        }
+
+        // 2. Test when merge_edge_value fails for all children under the key.
+        //    (This test needs a merge function that can fail or a different EV type,
+        //     merge_bitset_union always succeeds by design).
+        //    Re-using this section to verify the initial state for part 3 is correct.
+        let source_nm: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source_nm".to_string())));
+        let child1_nm: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("child1_nm".to_string())));
+        let edge_key_nm = "nm_key"; // "nm" for "no merge"
+        let initial_ev_nm: HybridBitset = vec![50].into_iter().collect();
+        let new_ev_inserter_nm: HybridBitset = vec![5].into_iter().collect();
+
+        source_nm.lock().unwrap().try_insert(edge_key_nm, &mut Some(initial_ev_nm.clone()), child1_nm.clone()).unwrap();
+
+        // Check edge value for child1_nm is unchanged - this is now done in part 3.
+
+        // 3. Test when no children exist under the specified edge_key.
+        let source_empty: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source_empty".to_string())));
+        let edge_key_empty = "empty_key"; // This key has no children in source_empty
+        let new_ev_inserter_empty: HybridBitset = vec![7].into_iter().collect();
+
+        let inserter_empty = EdgeInserter::new(source_empty.clone(), edge_key_empty, new_ev_inserter_empty.clone(), merge_bitset_union);
+        let result_node_empty_opt = inserter_empty.try_children().into_option();
+        assert!(result_node_empty_opt.is_none(), "try_children should return None if no children under the key");
+
+        // 4. Test chaining with else_create: try_children (no children under key) -> else_create
+        let source_chain: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source_chain".to_string())));
+        let edge_key_chain = "chain_key"; // No children under this key initially in source_chain
+        let new_ev_chain: HybridBitset = vec![8].into_iter().collect();
+        let created_val = "created_node_via_fallback".to_string();
+
+        let inserter_chain = EdgeInserter::new(source_chain.clone(), edge_key_chain, new_ev_chain.clone(), merge_bitset_union);
+        let result_node_chain = inserter_chain
+            .try_children() // Will do nothing as no children under "chain_key"
+            .else_create_destination_with_value(created_val.clone()) // This should execute
+            .unwrap();
+
+        assert_eq!(result_node_chain.lock().unwrap().value, created_val, "Fallback node should be created with correct value");
+        // Check that an edge was created to this new node
+        let s_chain_guard = source_chain.lock().unwrap();
+        let children_map_chain = s_chain_guard.get(&edge_key_chain).expect("Chain key should now exist in source_chain");
+        assert_eq!(children_map_chain.len(), 1, "One edge should be created under chain_key");
+        let (wrapper_chain, ev_chain) = children_map_chain.iter().next().unwrap();
+        assert!(Arc::ptr_eq(wrapper_chain.as_arc(), &result_node_chain), "Edge should point to the newly created node");
+        assert_eq!(*ev_chain, new_ev_chain, "Edge should have the new_ev_chain value");
     }
 
     #[test]
