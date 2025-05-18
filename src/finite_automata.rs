@@ -2,7 +2,7 @@ use crate::datastructures::charmap::TrieMap;
 use crate::datastructures::frozenset::FrozenSet;
 use crate::datastructures::u8set::U8Set;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use std::collections::BTreeMap as StdMap; // Added for derive macro pattern, aliased
 
@@ -50,7 +50,7 @@ impl JSONConvertible for NFAState {
 }
 
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct NFA {
     states: Vec<NFAState>,
     start_state: usize,
@@ -79,7 +79,7 @@ impl JSONConvertible for NFA {
 }
 
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DFAState {
     pub transitions: TrieMap<usize>,
     pub finalizers: BTreeSet<GroupID>,
@@ -121,7 +121,7 @@ impl JSONConvertible for DFAState {
 }
 
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DFA {
     pub states: Vec<DFAState>,
     pub start_state: usize,
@@ -523,7 +523,7 @@ pub fn non_greedy_group<T: Into<ExprGroup>>(expr: T) -> ExprGroup {
     group
 }
 
-impl Debug for NFA {
+impl Display for NFA {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str("Regex State NFA:\n")?;
 
@@ -551,7 +551,7 @@ impl Debug for NFA {
     }
 }
 
-impl Debug for DFA {
+impl Display for DFA {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str("Regex State DFA:\n")?;
 
