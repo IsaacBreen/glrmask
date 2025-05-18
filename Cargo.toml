@@ -17,5 +17,8 @@ indicatif = "0.17.11"
 reqwest = { version = "0.12.15", features = ["blocking", "json"] }
 range-set-blaze = { version = "0.1.16", default-features = false, features = ["alloc"] }
 
+# Add the derive macro crate
+json_convertible_derive = { path = "json_convertible_derive" }
+
 [dev-dependencies]
 reqwest = { version = "0.12.15", features = ["blocking", "json"] }
