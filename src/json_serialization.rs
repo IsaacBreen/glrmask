@@ -29,8 +29,8 @@ impl JSONNode {
         match self {
             JSONNode::Null => SerdeValue::Null,
             JSONNode::Bool(b) => SerdeValue::Bool(*b),
-            JSONNode::Int(i) => SerdeValue::Number(serde_json::Number::from(*i)),
-            JSONNode::UInt(u) => SerdeValue::Number(serde_json::Number::from(*u)),
+            JSONNode::Int(i) => SerdeValue::Number(serde_json::Number::from_i128(*i).unwrap()),
+            JSONNode::UInt(u) => SerdeValue::Number(serde_json::Number::from_u128(*u).unwrap()),
             JSONNode::Float(f) => {
                 // serde_json::Number::from_f64 returns None for NaN/Infinity
                 // We'll convert such cases to SerdeValue::Null, a common practice.

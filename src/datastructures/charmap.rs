@@ -80,11 +80,11 @@ impl<T: Debug> Debug for TrieMap<T> {
                                     end_key = j as u8;
                                 } else {
                                     // Value changed (or different Box for same logical value)
-                                    break; 
+                                    break;
                                 }
                             } else {
                                 // Gap (None), run ends
-                                break; 
+                                break;
                             }
                             j += 1;
                         }
@@ -98,10 +98,10 @@ impl<T: Debug> Debug for TrieMap<T> {
                         map_formatter.entry(&key_display, current_val_ref);
 
                         // Advance i to the position after the processed range
-                        i = (end_key as usize) + 1; 
+                        i = (end_key as usize) + 1;
                     } else {
                         // No value at data[i], advance to the next key
-                        i += 1; 
+                        i += 1;
                     }
                 }
                 map_formatter.finish()
