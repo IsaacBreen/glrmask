@@ -247,8 +247,8 @@ where
 
 impl<L, R> JSONConvertible for BiBTreeMap<L, R>
 where
-    L: JSONConvertible + Ord + Eq + Hash,
-    R: JSONConvertible + Ord + Eq + Hash,
+    L: JSONConvertible + Ord + Eq,
+    R: JSONConvertible + Ord + Eq,
 {
     fn to_json(&self) -> JSONNode {
         let pairs = self.iter().map(|(l, r)| {

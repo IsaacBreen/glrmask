@@ -531,7 +531,7 @@ impl Debug for NFA {
             f.write_str(&format!("State {}:\n", state_index))?;
 
             for (transition_u8, next_states) in &state.transitions {
-                f.write_str(&format!("  - '{}': {:?}\n", *transition_u8 as char, next_states))?; // Display u8 as char
+                f.write_str(&format!("  - '{}': {:?}\n", transition_u8 as char, next_states))?; // Display u8 as char
             }
 
             for next_state in &state.epsilon_transitions {
@@ -559,7 +559,7 @@ impl Debug for DFA {
             f.write_str(&format!("State {}:\n", state_index))?;
 
             for (transition_u8, next_state) in &state.transitions {
-                f.write_str(&format!("  - {} ({:?}): {}\n", transition_u8, *transition_u8 as char, next_state))?; // Display u8 as char
+                f.write_str(&format!("  - {} ({:?}): {}\n", transition_u8, transition_u8 as char, next_state))?; // Display u8 as char
             }
 
             if !state.finalizers.is_empty() {

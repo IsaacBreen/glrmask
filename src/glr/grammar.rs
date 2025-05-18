@@ -3,6 +3,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Hash)]
 pub struct NonTerminal(pub String);
 
 impl JSONConvertible for NonTerminal {
@@ -13,6 +14,7 @@ impl JSONConvertible for NonTerminal {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Hash)]
 pub struct Terminal(pub String);
 
 impl JSONConvertible for Terminal {

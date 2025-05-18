@@ -438,7 +438,7 @@ pub fn print_precompute_stats(
 mod tests {
     use std::collections::BTreeMap;
     use crate::finite_automata::{eat_u8, Regex};
-    use crate::glr::grammar::{prod, t, Terminal};
+    use crate::glr::grammar::{nt, prod, t, Terminal};
     use crate::glr::parser::GLRParser;
     use crate::glr::table::generate_glr_parser_with_terminal_map;
     use crate::tokenizer::{LLMTokenID, LLMTokenMap};
