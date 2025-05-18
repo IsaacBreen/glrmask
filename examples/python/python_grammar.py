@@ -52,7 +52,7 @@ def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Regex:
             raise ValueError(f"Invalid string literal: {value}")
 #         # TODO: delete this
 #         return ge.literal(value.encode())
-        return ge.eps()
+        return ge.literal("2".encode())
     elif isinstance(item, pegen.grammar.Opt):
         return ge.optional(pegen_to_sep1_regex(item.node, memo))
     elif isinstance(item, pegen.grammar.Gather):
