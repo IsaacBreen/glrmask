@@ -111,7 +111,7 @@ impl MergeAndIntersect for LLMTokenInfo {
 // -----------------------------------------------------------------------------
 // Pre-computation node values
 // -----------------------------------------------------------------------------
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrecomputedFinalizer {
     pub content: BTreeMap<TokenizerStateID, LLMTokenBV>,
 }
@@ -144,7 +144,7 @@ impl PrecomputedFinalizer {
     }
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrecomputedNodeContents {
     finalizers: BTreeMap<GrammarTokenID, PrecomputedFinalizer>,
     pub clean_end: Option<LLMTokenBV>,
@@ -533,6 +533,10 @@ impl<'r> Precomputer<'r> {
     fn merge_nodes(&mut self) {
         // Merge equal nodes.
         let mut unique: BTreeSet<_> = self.roots.values().map(|r| r.lock().unwrap().clone()).collect();
+
+        for (tokenizer_state_id, root) in &mut self.roots {
+            // let new_root = unique.get(root).unwrap().clone();
+        }
     }
 
     // -------------------------------------------------------------------------
