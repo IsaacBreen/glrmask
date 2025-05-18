@@ -206,7 +206,6 @@ impl PrecomputedNodeContents {
 // Pre-computation graph node / alias types
 pub type PrecomputeNode =
     Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
-// JSONConvertible for PrecomputeNode (Trie) will be todo!() in trie.rs
 
 pub type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode>;
 // JSONConvertible for Precomputed will depend on PrecomputeNode.
@@ -234,7 +233,7 @@ impl JSONConvertible for GrammarConstraint {
         let mut obj = StdMap::new();
         obj.insert("tokenizer".to_string(), self.tokenizer.to_json());
         obj.insert("parser".to_string(), self.parser.to_json());
-        obj.insert("precomputed".to_string(), JSONNode::String("TODO: Precomputed serialization".to_string())); // todo!()
+        obj.insert("precomputed".to_string(), self.precomputed.to_json());
         obj.insert("llm_token_map".to_string(), self.llm_token_map.to_json());
         obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
         obj.insert("max_original_llm_token_id".to_string(), self.max_original_llm_token_id.to_json());
@@ -250,9 +249,8 @@ impl JSONConvertible for GrammarConstraint {
                                    .and_then(Regex::from_json)?;
                 let parser = obj.remove("parser").ok_or_else(|| "Missing field parser".to_string())
                                 .and_then(GLRParser::from_json)?;
-                // precomputed: todo!()
-                let _precomputed_node = obj.remove("precomputed").ok_or_else(|| "Missing field precomputed".to_string())?;
-                let precomputed = BTreeMap::new(); // Placeholder
+                let precomputed = obj.remove("precomputed").ok_or_else(|| "Missing field precomputed".to_string())
+                                     .and_then(|n| Precomputed::from_json(n))?;
 
                 let llm_token_map = obj.remove("llm_token_map").ok_or_else(|| "Missing field llm_token_map".to_string())
                                        .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;

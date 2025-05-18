@@ -183,8 +183,48 @@ impl JSONConvertible for PrecomputeStats {
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        todo!()
-    }
+        match node {
+            JSONNode::Object(mut obj) => {
+                let initial_root_nodes_created = obj.remove("initial_root_nodes_created").ok_or_else(|| "Missing field initial_root_nodes_created for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                let final_unique_nodes_count = obj.remove("final_unique_nodes_count").ok_or_else(|| "Missing field final_unique_nodes_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                let final_root_nodes_count = obj.remove("final_root_nodes_count").ok_or_else(|| "Missing field final_root_nodes_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                let final_non_root_internal_nodes_count = obj.remove("final_non_root_internal_nodes_count").ok_or_else(|| "Missing field final_non_root_internal_nodes_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                let final_leaf_nodes_count = obj.remove("final_leaf_nodes_count").ok_or_else(|| "Missing field final_leaf_nodes_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                let final_edges_count = obj.remove("final_edges_count").ok_or_else(|| "Missing field final_edges_count for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                let final_edges_with_none_key = obj.remove("final_edges_with_none_key").ok_or_else(|| "Missing field final_edges_with_none_key for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                let final_edges_with_some_key = obj.remove("final_edges_with_some_key").ok_or_else(|| "Missing field final_edges_with_some_key for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                let final_nodes_with_clean_end = obj.remove("final_nodes_with_clean_end").ok_or_else(|| "Missing field final_nodes_with_clean_end for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                let final_total_finalizer_entries_in_graph = obj.remove("final_total_finalizer_entries_in_graph").ok_or_else(|| "Missing field final_total_finalizer_entries_in_graph for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                let final_total_occupancy_sum_for_some_keys = obj.remove("final_total_occupancy_sum_for_some_keys").ok_or_else(|| "Missing field final_total_occupancy_sum_for_some_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                let final_num_occupied_some_edge_keys = obj.remove("final_num_occupied_some_edge_keys").ok_or_else(|| "Missing field final_num_occupied_some_edge_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                let final_total_occupancy_sum_for_none_keys = obj.remove("final_total_occupancy_sum_for_none_keys").ok_or_else(|| "Missing field final_total_occupancy_sum_for_none_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                let final_num_occupied_none_edge_keys = obj.remove("final_num_occupied_none_edge_keys").ok_or_else(|| "Missing field final_num_occupied_none_edge_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                let final_grammar_token_edge_key_counts = obj.remove("final_grammar_token_edge_key_counts").ok_or_else(|| "Missing field final_grammar_token_edge_key_counts for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, usize>::from_json(n))?;
+                let final_grammar_token_edge_fanouts_dist = obj.remove("final_grammar_token_edge_fanouts_dist").ok_or_else(|| "Missing field final_grammar_token_edge_fanouts_dist for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, Vec<usize>>::from_json(n))?;
+                let final_grammar_token_edge_token_set_sizes_dist = obj.remove("final_grammar_token_edge_token_set_sizes_dist").ok_or_else(|| "Missing field final_grammar_token_edge_token_set_sizes_dist for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, Vec<usize>>::from_json(n))?;
+                Ok(PrecomputeStats {
+                    initial_root_nodes_created,
+                    final_unique_nodes_count,
+                    final_root_nodes_count,
+                    final_non_root_internal_nodes_count,
+                    final_leaf_nodes_count,
+                    final_edges_count,
+                    final_edges_with_none_key,
+                    final_edges_with_some_key,
+                    final_nodes_with_clean_end,
+                    final_total_finalizer_entries_in_graph,
+                    final_total_occupancy_sum_for_some_keys,
+                    final_num_occupied_some_edge_keys,
+                    final_total_occupancy_sum_for_none_keys,
+                    final_num_occupied_none_edge_keys,
+                    final_grammar_token_edge_key_counts,
+                    final_grammar_token_edge_fanouts_dist,
+                    final_grammar_token_edge_token_set_sizes_dist,
+                })
+            }
+            _ => Err("Expected JSONNode::Object for PrecomputeStats".to_string()),
+        }
+    }   
 }
 
 
