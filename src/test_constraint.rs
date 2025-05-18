@@ -135,7 +135,8 @@ fn test_constraint_simple() {
     // Test Serialization/Deserialization
     let json = constraint.to_json();
     let constraint_from_json = GrammarConstraint::from_json(json).unwrap();
-    assert_eq!(constraint, constraint_from_json);
+    // assert_eq!(constraint, constraint_from_json);
+    constraint.assert_eq(&constraint_from_json);
 }
 
 #[test]

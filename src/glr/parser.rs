@@ -71,7 +71,7 @@ impl JSONConvertible for StopReason {
 
 
 // TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GLRParser {
     pub stage_7_table: Stage7Table,
     pub productions: Vec<Production>,
@@ -197,12 +197,6 @@ impl GLRParser {
         let mut state = self.init_glr_parser();
         state.parse(input);
         state
-    }
-}
-
-impl Debug for GLRParser {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)
     }
 }
 

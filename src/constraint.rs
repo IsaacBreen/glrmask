@@ -228,6 +228,19 @@ pub struct GrammarConstraint {
     pub(crate) internal_max_llm_token: usize, // Number of unique internal LLM tokens (capacity for bitsets)
 }
 
+impl GrammarConstraint {
+    pub fn assert_eq(&self, other: &Self) {
+        assert_eq!(self.tokenizer, other.tokenizer);
+        assert_eq!(self.parser, other.parser);
+        assert_eq!(self.precomputed, other.precomputed);
+        assert_eq!(self.llm_token_map, other.llm_token_map);
+        assert_eq!(self.token_name_map, other.token_name_map);
+        assert_eq!(self.max_original_llm_token_id, other.max_original_llm_token_id);
+        assert_eq!(self.original_to_internal_id_bimap, other.original_to_internal_id_bimap);
+        assert_eq!(self.internal_max_llm_token, other.internal_max_llm_token);
+    }
+}
+
 impl JSONConvertible for GrammarConstraint {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
