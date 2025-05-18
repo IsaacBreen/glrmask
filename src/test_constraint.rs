@@ -135,8 +135,7 @@ fn test_constraint_simple() {
     // Test Serialization/Deserialization
     let json = constraint.to_json();
     let constraint_from_json = GrammarConstraint::from_json(json).unwrap();
-    // assert_eq!(constraint, constraint_from_json);
-    constraint.assert_eq(&constraint_from_json);
+    assert_eq!(constraint, constraint_from_json);
 }
 
 #[test]
@@ -530,4 +529,9 @@ fn test_hideous_ambiguity() {
         println!("{}. Stepping with LLM token ID {}", i, a_id);
         constraint_state.step_with_all_llm_tokens();
     }
+    
+    // Test Serialization/Deserialization
+    let json = constraint.to_json();
+    let constraint_from_json = GrammarConstraint::from_json(json).unwrap();
+    assert_eq!(constraint, constraint_from_json);
 }
