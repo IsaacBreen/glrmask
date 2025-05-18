@@ -209,6 +209,19 @@ impl PyGrammar {
     fn print(&self) {
         println!("{:?}", self.inner)
     }
+
+    fn to_json_string(&self) -> PyResult<String> {
+        Ok(self.inner.to_json().to_json_string())
+    }
+
+    #[staticmethod]
+    fn from_json_string(json_str: &str) -> PyResult<Self> {
+        let json_node = sep1::json_serialization::JSONNode::from_json_string(json_str)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
+        let grammar = Grammar::from_json(json_node)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize GrammarConstraint from JSONNode: {}", e)))?;
+        Ok(PyGrammar { inner: grammar })
+    }
 }
 
 #[pyclass]

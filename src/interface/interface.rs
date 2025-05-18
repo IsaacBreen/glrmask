@@ -1,3 +1,4 @@
+use json_convertible_derive::JSONConvertible;
 use crate::constraint::{GrammarConstraint};
 use crate::debug;
 use crate::finite_automata::{greedy_group, groups, ExprGroup, GroupID};
