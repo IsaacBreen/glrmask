@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import json
 import textwrap
 import time
 import tokenize
@@ -405,8 +404,12 @@ if __name__ == "__main__":
     print("Serializing grammar constraint to JSON...")
     json_string = grammar_constraint.to_json_string()
     print(f"Serialized GrammarConstraint JSON (length: {len(json_string)}):")
-    # Indent it.
-    json_string = json.dumps(json.loads(json_string), indent=4)
+    # Prettify it.
+    from rich.console import Console
+    from rich.json import JSON
+    console = Console(record=True, width=80)
+    console.print(JSON(json_string, indent=4))
+    json_string = console.export_text(styles=True)
     # Optionally print a snippet or save to file if too long
     # print(textwrap.shorten(json_string, width=200, placeholder="..."))
     with open("serialized_grammar_constraint.json", "w") as f:
