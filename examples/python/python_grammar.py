@@ -359,6 +359,10 @@ if __name__ == "__main__":
     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(k) <= 2}
 #     # Exclude tokens where any character appears more than once
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(set(k)) == len(k)}
+    # Exclude tokens that have any letter other than 'a'
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isalpha() and c != 'a' for c in k)}
+    # Exclude tokens that have any digit other than '1'
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isdigit() and c != '1' for c in k)}
 
     print("Tokenizer vocab:")
     for token, id in sorted(tokenizer_vocab.items(), key=lambda x: x[0]):
