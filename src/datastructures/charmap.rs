@@ -39,7 +39,7 @@ impl<T: JSONConvertible> JSONConvertible for TrieMap<T> {
         match node {
             JSONNode::Object(mut obj) => {
                 let data_node = obj.remove("data").ok_or_else(|| "Missing field data for TrieMap".to_string())?;
-                let mut data_vec: Vec<Option<Box<T>>> = vec![None; CHARMAP_SIZE];
+                let mut data_vec: Vec<Option<Box<T>>> = std::iter::repeat_with(|| None).take(CHARMAP_SIZE).collect();
                 match data_node {
                     JSONNode::Object(json_obj) => {
                         for (key_str, val_node) in json_obj {

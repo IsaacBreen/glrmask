@@ -19,7 +19,7 @@ pub struct HybridBitset {
 impl JSONConvertible for HybridBitset {
     fn to_json(&self) -> JSONNode {
         // Serialize as an array of [start, end] inclusive ranges
-        let ranges_json: Vec<JSONNode> = self.inner.iter_ranges().map(|range_inclusive| {
+        let ranges_json: Vec<JSONNode> = self.inner.ranges().map(|range_inclusive| {
             JSONNode::Array(vec![
                 JSONNode::Number(*range_inclusive.start() as f64),
                 JSONNode::Number(*range_inclusive.end() as f64),

@@ -183,28 +183,7 @@ impl JSONConvertible for PrecomputeStats {
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => Ok(PrecomputeStats {
-                initial_root_nodes_created: obj.remove("initial_root_nodes_created").ok_or_else(|| "Missing field initial_root_nodes_created".to_string())?.from_json()?,
-                final_unique_nodes_count: obj.remove("final_unique_nodes_count").ok_or_else(|| "Missing field final_unique_nodes_count".to_string())?.from_json()?,
-                final_root_nodes_count: obj.remove("final_root_nodes_count").ok_or_else(|| "Missing field final_root_nodes_count".to_string())?.from_json()?,
-                final_non_root_internal_nodes_count: obj.remove("final_non_root_internal_nodes_count").ok_or_else(|| "Missing field final_non_root_internal_nodes_count".to_string())?.from_json()?,
-                final_leaf_nodes_count: obj.remove("final_leaf_nodes_count").ok_or_else(|| "Missing field final_leaf_nodes_count".to_string())?.from_json()?,
-                final_edges_count: obj.remove("final_edges_count").ok_or_else(|| "Missing field final_edges_count".to_string())?.from_json()?,
-                final_edges_with_none_key: obj.remove("final_edges_with_none_key").ok_or_else(|| "Missing field final_edges_with_none_key".to_string())?.from_json()?,
-                final_edges_with_some_key: obj.remove("final_edges_with_some_key").ok_or_else(|| "Missing field final_edges_with_some_key".to_string())?.from_json()?,
-                final_nodes_with_clean_end: obj.remove("final_nodes_with_clean_end").ok_or_else(|| "Missing field final_nodes_with_clean_end".to_string())?.from_json()?,
-                final_total_finalizer_entries_in_graph: obj.remove("final_total_finalizer_entries_in_graph").ok_or_else(|| "Missing field final_total_finalizer_entries_in_graph".to_string())?.from_json()?,
-                final_total_occupancy_sum_for_some_keys: obj.remove("final_total_occupancy_sum_for_some_keys").ok_or_else(|| "Missing field final_total_occupancy_sum_for_some_keys".to_string())?.from_json()?,
-                final_num_occupied_some_edge_keys: obj.remove("final_num_occupied_some_edge_keys").ok_or_else(|| "Missing field final_num_occupied_some_edge_keys".to_string())?.from_json()?,
-                final_total_occupancy_sum_for_none_keys: obj.remove("final_total_occupancy_sum_for_none_keys").ok_or_else(|| "Missing field final_total_occupancy_sum_for_none_keys".to_string())?.from_json()?,
-                final_num_occupied_none_edge_keys: obj.remove("final_num_occupied_none_edge_keys").ok_or_else(|| "Missing field final_num_occupied_none_edge_keys".to_string())?.from_json()?,
-                final_grammar_token_edge_key_counts: obj.remove("final_grammar_token_edge_key_counts").ok_or_else(|| "Missing field final_grammar_token_edge_key_counts".to_string())?.from_json()?,
-                final_grammar_token_edge_fanouts_dist: obj.remove("final_grammar_token_edge_fanouts_dist").ok_or_else(|| "Missing field final_grammar_token_edge_fanouts_dist".to_string())?.from_json()?,
-                final_grammar_token_edge_token_set_sizes_dist: obj.remove("final_grammar_token_edge_token_set_sizes_dist").ok_or_else(|| "Missing field final_grammar_token_edge_token_set_sizes_dist".to_string())?.from_json()?,
-            }),
-            _ => Err("Expected JSONNode::Object for PrecomputeStats".to_string()),
-        }
+        todo!()
     }
 }
 
