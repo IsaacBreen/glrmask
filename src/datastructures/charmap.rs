@@ -356,6 +356,7 @@ impl<'a, T> OccupiedEntry<'a, T> {
     }
 
     pub fn remove(self) -> T {
+        self.map.u8set.remove(self.index as u8); // Keep u8set consistent
         *self.map.data[self.index].take().unwrap()
     }
 }
@@ -363,6 +364,7 @@ impl<'a, T> OccupiedEntry<'a, T> {
 impl<'a, T> VacantEntry<'a, T> {
     pub fn insert(self, value: T) -> &'a mut T {
         self.map.data[self.index] = Some(Box::new(value));
+        self.map.u8set.insert(self.index as u8); // Keep u8set consistent
         self.map.data[self.index].as_mut().unwrap().as_mut()
     }
 }
