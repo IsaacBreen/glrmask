@@ -532,10 +532,11 @@ impl<'r> Precomputer<'r> {
 
     fn merge_nodes(&mut self) {
         // Merge equal nodes.
-        let mut unique: BTreeSet<_> = self.roots.values().map(|r| r.lock().unwrap().clone()).collect();
+        let mut unique: BTreeMap<PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = self.roots.values().map(|r| (r.lock().unwrap().clone(), r.clone())).collect();
 
         for (tokenizer_state_id, root) in &mut self.roots {
-            // let new_root = unique.get(root).unwrap().clone();
+            let new_root = unique.get(&root.lock().unwrap().clone()).unwrap().clone();
+            *root = new_root;
         }
     }
 
