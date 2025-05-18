@@ -50,7 +50,9 @@ def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Regex:
             value = value[1:-1]
         else:
             raise ValueError(f"Invalid string literal: {value}")
-        return ge.literal(value.encode())
+#         # TODO: delete this
+#         return ge.literal(value.encode())
+        return ge.eps()
     elif isinstance(item, pegen.grammar.Opt):
         return ge.optional(pegen_to_sep1_regex(item.node, memo))
     elif isinstance(item, pegen.grammar.Gather):
@@ -145,18 +147,21 @@ def define_tokens() -> list[tuple[str, Any]]:
     tokens["NEWLINE"] = eps()
     tokens["INDENT"] = eps()
     tokens["DEDENT"] = eps()
-    tokens["STRING"] = choice([
-        seq([eat_u8(ord('"')), rep(choice([eat_u8_negation(ord('"')), eat('\"')])), eat_u8(ord('"'))]),
-        seq([eat_u8(ord("'")), rep(choice([eat_u8_negation(ord("'")), eat('\'')])), eat_u8(ord("'"))]),
-    ])
-    tokens["FSTRING_START"] = choice([
-        eat('"""'),
-        eat("'''"),
-    ])
-    tokens["FSTRING_END"] = choice([
-        eat('"""'),
-        eat("'''"),
-    ])
+#     tokens["STRING"] = choice([
+#         seq([eat_u8(ord('"')), rep(choice([eat_u8_negation(ord('"')), eat('\"')])), eat_u8(ord('"'))]),
+#         seq([eat_u8(ord("'")), rep(choice([eat_u8_negation(ord("'")), eat('\'')])), eat_u8(ord("'"))]),
+#     ])
+#     tokens["FSTRING_START"] = choice([
+#         eat('"""'),
+#         eat("'''"),
+#     ])
+#     tokens["FSTRING_END"] = choice([
+#         eat('"""'),
+#         eat("'''"),
+#     ])
+    tokens["STRING"] = eps()
+    tokens["FSTRING_START"] = eps()
+    tokens["FSTRING_END"] = eps()
 #     tokens["FSTRING_MIDDLE"] = rep(choice([
 #         eat_u8_negation(ord("{")),
 #         eat("{{"),
