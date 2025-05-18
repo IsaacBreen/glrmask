@@ -17,11 +17,6 @@ from _sep1 import PyRegexExpr as Regex, PyGrammar, PyGrammarExpr as ge, PyGramma
 from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
-# --- New imports for rich ---
-from rich.console import Console as RichConsole # Renamed to avoid conflict if 'Console' is used elsewhere
-from rich.json import JSON as RichJSON
-# --- End new imports ---
-
 def regex(expr, name=None):
     if not isinstance(expr, ge):
         expr = ge.regex(expr)
@@ -321,10 +316,6 @@ def generate_text(model, tokenizer, grammar_processor, pre_input_text, input_tex
 
 if __name__ == "__main__":
     from _sep1 import PyIncrementalParser # Import here after module is built
-
-    # --- Instantiate RichConsole for pretty printing to terminal ---
-    rich_console = RichConsole()
-
     model_name = "Qwen/Qwen2.5-Coder-0.5B"
 #     model_name = "gpt2"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -410,40 +401,20 @@ if __name__ == "__main__":
     print("Initializing grammar constraint...")
     grammar_constraint = PyGrammarConstraint(grammar, llm_token_to_id, max(llm_token_to_id.values()))
 
-    # --- Serialize to JSON string using rich for pretty formatting ---
+    # Serialize to JSON string
     print("Serializing grammar constraint to JSON...")
-    compact_json_from_constraint = grammar_constraint.to_json_string()
-    print(f"Serialized GrammarConstraint JSON (compact length: {len(compact_json_from_constraint)}):")
-
-    # Parse the compact JSON to a Python object
-    python_data_obj = json.loads(compact_json_from_constraint)
-
-    # Create a rich JSON object for pretty printing
-    rich_json_for_display = RichJSON.from_data(python_data_obj)
-
-    # Print to console using rich (this will be pretty)
-    rich_console.print("Prettyfied GrammarConstraint JSON (for console display):")
-    rich_console.print(rich_json_for_display)
-
-    # To get the string for the file, capture rich's output
-    string_io_buffer = io.StringIO()
-    # Use a specific width for file output.
-    # force_terminal=False and color_system=None ensure plain text output for the file.
-    file_console = RichConsole(file=string_io_buffer, width=120, force_terminal=False, color_system=None)
-    file_console.print(rich_json_for_display)
-    pretty_json_string_for_file = string_io_buffer.getvalue()
-    # Rich might add a trailing newline, which is usually fine for files.
-    # If you need to remove it: pretty_json_string_for_file = pretty_json_string_for_file.rstrip('\n')
-
-    print(f"Prettyfied GrammarConstraint JSON for file (length: {len(pretty_json_string_for_file)}):")
+    json_string = grammar_constraint.to_json_string()
+    print(f"Serialized GrammarConstraint JSON (length: {len(json_string)}):")
+    # Indent it.
+    json_string = json.dumps(json.loads(json_string), indent=4)
+    # Optionally print a snippet or save to file if too long
+    # print(textwrap.shorten(json_string, width=200, placeholder="..."))
     with open("serialized_grammar_constraint.json", "w") as f:
-        f.write(pretty_json_string_for_file)
-    # --- End of rich JSON formatting ---
+        f.write(json_string)
 
-    # Deserialize from the pretty-printed JSON string
-    print("Deserializing grammar constraint from pretty-printed JSON...")
-    # Use the string that was written to the file for deserialization
-    grammar_constraint_from_json = PyGrammarConstraint.from_json_string(pretty_json_string_for_file)
+    # Deserialize from JSON string
+    print("Deserializing grammar constraint from JSON...")
+    grammar_constraint_from_json = PyGrammarConstraint.from_json_string(json_string)
     print("Grammar constraint deserialized successfully.")
 
     # Use the deserialized constraint for subsequent operations
