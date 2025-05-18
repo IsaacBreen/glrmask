@@ -1,18 +1,66 @@
 use crate::datastructures::u8set::U8Set;
 use std::ops::{Index, IndexMut};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
+use std::collections::BTreeMap as StdMap;
+use std::fmt::{self, Debug, Formatter};
+// Added for derive macro pattern
 
 
 const CHARMAP_SIZE: usize = 256;
 
-#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Eq, PartialEq, PartialOrd, Ord)]
 pub struct TrieMap<T> {
     data: Vec<Option<Box<T>>>,
     // TODO: what's the point of `children`? Is it for nondeterminism? If so, let's remove it.
     children: Vec<Vec<usize>>, // This field is problematic for general JSON serialization if its meaning is tied to specific graph structures.
                                // For now, we'll serialize it as is, but it might need context-specific handling.
     u8set: U8Set,
+}
+
+impl<T: Debug> Debug for TrieMap<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        // ───── `debug_struct` lets us build something that looks like
+        // TrieMap { len: 3, entries: {65: "A", 66: "B", 255: "🎉"}, transitions: {65: [1]} }
+        let mut ds = f.debug_struct("TrieMap");
+
+        // A small helper that formats only the present key/value pairs.
+        struct Entries<'a, T>(&'a TrieMap<T>);
+        impl<'a, T: Debug> Debug for Entries<'a, T> {
+            fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+                let mut map = f.debug_map();
+                for (k, v) in self.0.iter() {
+                    map.entry(&k, v);
+                }
+                map.finish()
+            }
+        }
+
+        // Another helper that prints only the non-empty transition lists
+        // (you can drop this block if you do not care about the `children`
+        // field in the debug view).
+        struct Transitions<'a>(&'a [Vec<usize>]);
+        impl<'a> Debug for Transitions<'a> {
+            fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+                let mut map = f.debug_map();
+                for (idx, list) in self.0.iter().enumerate() {
+                    if !list.is_empty() {
+                        map.entry(&idx, list);
+                    }
+                }
+                map.finish()
+            }
+        }
+
+        ds.field("len", &self.len())
+          .field("entries", &Entries(self));
+
+        // Only show transitions if there actually are some.
+        if self.children.iter().any(|v| !v.is_empty()) {
+            ds.field("transitions", &Transitions(&self.children));
+        }
+
+        ds.finish()
+    }
 }
 
 impl<T: JSONConvertible> JSONConvertible for TrieMap<T> {
