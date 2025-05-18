@@ -14,7 +14,7 @@ use std::sync::Arc;
 use ouroboros::self_referencing;
 use numpy::{IntoPyArray, PyArray1, ToPyArray};
 use sep1::interface::IncrementalParser; // Added import
-use sep1::json_serialization::JSONNode; // Added for JSON serialization/deserialization
+use sep1::json_serialization::{JSONConvertible, JSONNode}; // Added for JSON serialization/deserialization
 
 #[pyclass]
 #[derive(Clone)]

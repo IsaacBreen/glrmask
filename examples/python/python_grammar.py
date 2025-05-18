@@ -406,6 +406,8 @@ if __name__ == "__main__":
     print(f"Serialized GrammarConstraint JSON (length: {len(json_string)}):")
     # Optionally print a snippet or save to file if too long
     # print(textwrap.shorten(json_string, width=200, placeholder="..."))
+    with open("serialized_grammar_constraint.json", "w") as f:
+        f.write(json_string)
 
     # Deserialize from JSON string
     print("Deserializing grammar constraint from JSON...")
