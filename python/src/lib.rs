@@ -14,6 +14,7 @@ use std::sync::Arc;
 use ouroboros::self_referencing;
 use numpy::{IntoPyArray, PyArray1, ToPyArray};
 use sep1::interface::IncrementalParser; // Added import
+use sep1::json_serialization::JSONNode; // Added for JSON serialization/deserialization
 
 #[pyclass]
 #[derive(Clone)]
@@ -265,7 +266,20 @@ impl PyGrammarConstraint {
         println!("Printing precomputed data is not implemented in this binding yet.");
     }
 
+    // Add this method
+    fn to_json_string(&self) -> PyResult<String> {
+        Ok(self.inner.to_json().to_json_string())
+    }
 
+    // Add this static method
+    #[staticmethod]
+    fn from_json_string(json_str: &str) -> PyResult<Self> {
+        let json_node = sep1::json_serialization::JSONNode::from_json_string(json_str)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
+        let constraint = GrammarConstraint::from_json(json_node)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize GrammarConstraint from JSONNode: {}", e)))?;
+        Ok(Self { inner: Arc::new(constraint) })
+    }
 }
 
 

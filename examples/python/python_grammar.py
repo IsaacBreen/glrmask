@@ -202,17 +202,9 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
 #     exprs.append(("file", ge.sequence([ge.regex(eat("fk")), ge.regex(eat("ing"))])))
 
 #     # TODO: delete this
-#     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))])])))
+#     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.regex(eat("hello"))])))
 #     SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g", "h"]
 #     exprs.append(("file", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
-
-#     # TODO: delete this
-#     exprs.append(("start'''", ge.choice([ge.ref("file"), ge.regex(eat("hello"))])))
-#     SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g"]
-#     exprs.append(("file", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
-
-#     SOFT_KEYWORDS = ["a", "b", "c", "d", "e", "f", "g", "hello"]
-#     exprs.append(("start'''", ge.choice([ge.regex(eat(soft_keyword)) for soft_keyword in SOFT_KEYWORDS])))
 
 #     # TODO: delete this
 #     def eat_range(start: char, end: char) -> Regex:
@@ -373,10 +365,10 @@ if __name__ == "__main__":
 
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
-    tokenizer_vocab = {token: actual_vocab[token.replace(" ", "Ġ")] for token in tokenizer_vocab}
+    tokenizer_vocab = {token.replace("Ġ", " "): actual_vocab[token] for token in tokenizer_vocab}
     print(f"tokenizer_vocab: {textwrap.shorten(str(tokenizer_vocab), width=100)}")
 
-    llm_token_to_id = {token.replace("Ġ", " ").encode(): i for token, i in tokenizer_vocab.items()}
+    llm_token_to_id = {token.encode(): i for token, i in tokenizer_vocab.items()}
     id_to_llm_token = {i: token for token, i in llm_token_to_id.items()}
     llm_tokens = list(tokenizer_vocab.keys()) # Use all tokens
 
@@ -407,8 +399,26 @@ if __name__ == "__main__":
 
     print("Initializing grammar constraint...")
     grammar_constraint = PyGrammarConstraint(grammar, llm_token_to_id, max(llm_token_to_id.values()))
+
+    # Serialize to JSON string
+    print("Serializing grammar constraint to JSON...")
+    json_string = grammar_constraint.to_json_string()
+    print(f"Serialized GrammarConstraint JSON (length: {len(json_string)}):")
+    # Optionally print a snippet or save to file if too long
+    # print(textwrap.shorten(json_string, width=200, placeholder="..."))
+
+    # Deserialize from JSON string
+    print("Deserializing grammar constraint from JSON...")
+    grammar_constraint_from_json = PyGrammarConstraint.from_json_string(json_string)
+    print("Grammar constraint deserialized successfully.")
+
+    # Use the deserialized constraint for subsequent operations
+    grammar_constraint_to_use = grammar_constraint_from_json
+    # To test with the original, uncomment the line below and comment out the line above
+    # grammar_constraint_to_use = grammar_constraint
+
     print("Initializing grammar constraint state...")
-    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
+    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint_to_use)
     print("Initializing grammar processor...")
     grammar_processor = GrammarConstrainedLogitsProcessor(grammar_constraint_state, llm_token_to_id)
 
@@ -442,7 +452,7 @@ if __name__ == "__main__":
     print("--- End Incremental Parser Demo ---")
 
     # DEMO: Get the mask
-    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
+    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint_to_use)
 
     tokens = tokenizer.encode(input_text, return_tensors="pt")
     tokens: list[int] = tokens.tolist()[0]
@@ -476,7 +486,15 @@ if __name__ == "__main__":
         assert expected_next_token in mask_tokens, f"Expected '{expected_next_token}' in mask"
 
     # DEMO: Generate text.
-    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint)
-#     output_text = generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text)
+    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint_to_use)
+    # The line below this one already uses grammar_constraint_state, so it's fine:
+    # output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
+    # However, grammar_processor was initialized with the *original* grammar_constraint_state.
+    # For a full test of the deserialized object, grammar_processor should also be re-initialized
+    # if you want the generation itself to use the deserialized constraint.
+    # Let's re-initialize grammar_processor here for consistency:
+    print("Re-initializing grammar processor with deserialized constraint state...")
+    grammar_processor = GrammarConstrainedLogitsProcessor(grammar_constraint_state, llm_token_to_id)
+
     output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
     print(output_text)
