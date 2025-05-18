@@ -11,7 +11,7 @@ use json_convertible_derive::JSONConvertible;
 pub enum JSONNode {
     Null,
     Bool(bool),
-    Number(f64),
+    Number(String), // Store numbers as strings to preserve precision
     String(String),
     Array(Vec<JSONNode>),
     Object(BTreeMap<String, JSONNode>),
@@ -49,13 +49,13 @@ macro_rules! impl_json_for_number {
     ($($t:ty),*) => {
         $(
             impl JSONConvertible for $t {
-                fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
+                fn to_json(&self) -> JSONNode { JSONNode::Number(self.to_string()) }
                 fn from_json(node: JSONNode) -> Result<Self, String> {
                     match node {
-                        JSONNode::Number(n) => {
-                            Ok(n as $t)
+                        JSONNode::Number(s) => {
+                            s.parse::<$t>().map_err(|e| format!("Failed to parse number string '{}' as {}: {}", s, stringify!($t), e))
                         }
-                        _ => Err(format!("Expected JSONNode::Number for {}", stringify!($t))),
+                        _ => Err(format!("Expected JSONNode::Number(String) for {}", stringify!($t))),
                     }
                 }
             }
@@ -67,36 +67,36 @@ impl_json_for_number!(usize, isize, u16, u32, u64, i8, i16, i32, i64, f32, f64);
 
 // Specific implementation for u8 to handle range/integer validation
 impl JSONConvertible for u8 {
-    fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
+    fn to_json(&self) -> JSONNode { JSONNode::Number(self.to_string()) }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Number(n) => {
-                if n >= 0.0 && n <= 255.0 && n.fract() == 0.0 {
-                    Ok(n as u8)
-                } else {
-                    Err(format!("Number {} out of range or not an integer, cannot be converted to u8", n))
-                }
+            JSONNode::Number(s) => {
+                s.parse::<u8>().map_err(|e| format!("Failed to parse number string '{}' as u8: {}", s, e))
             }
-            _ => Err("Expected JSONNode::Number for u8".to_string()),
+            _ => Err("Expected JSONNode::Number(String) for u8".to_string()),
         }
     }
 }
 
 impl JSONConvertible for u128 {
-    fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) } // Potential precision loss
+    fn to_json(&self) -> JSONNode { JSONNode::Number(self.to_string()) }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Number(n) => Ok(n as u128), // Potential precision loss
-            _ => Err("Expected JSONNode::Number for u128".to_string()),
+            JSONNode::Number(s) => {
+                s.parse::<u128>().map_err(|e| format!("Failed to parse number string '{}' as u128: {}", s, e))
+            }
+            _ => Err("Expected JSONNode::Number(String) for u128".to_string()),
         }
     }
 }
 impl JSONConvertible for i128 {
-    fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) } // Potential precision loss
+    fn to_json(&self) -> JSONNode { JSONNode::Number(self.to_string()) }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Number(n) => Ok(n as i128), // Potential precision loss
-            _ => Err("Expected JSONNode::Number for i128".to_string()),
+            JSONNode::Number(s) => {
+                s.parse::<i128>().map_err(|e| format!("Failed to parse number string '{}' as i128: {}", s, e))
+            }
+            _ => Err("Expected JSONNode::Number(String) for i128".to_string()),
         }
     }
 }
@@ -317,26 +317,26 @@ mod tests {
 
         let json_node = original.to_json();
 
-        // Expected JSON structure (BTreeMap for object means fields are sorted by key)
+        // Expected JSON structure representation within JSONNode (BTreeMap for object means fields are sorted by key)
         // {
-        //   "byte_buffer": [10.0, 20.0, 30.0],
-        //   "field1": 42.0,
+        //   "byte_buffer": ["10", "20", "30"],
+        //   "field1": "42",
         //   "field2": "hello",
-        //   "list_of_numbers": [1.0, 2.0, 3.0],
+        //   "list_of_numbers": ["1", "2", "3"],
         //   "optional_field": true
         // }
 
         if let JSONNode::Object(obj) = &json_node {
-            assert_eq!(obj.get("field1"), Some(&JSONNode::Number(42.0)));
+            assert_eq!(obj.get("field1"), Some(&JSONNode::Number("42".to_string())));
             assert_eq!(obj.get("field2"), Some(&JSONNode::String("hello".to_string())));
             assert_eq!(obj.get("optional_field"), Some(&JSONNode::Bool(true)));
             if let Some(JSONNode::Array(arr)) = obj.get("list_of_numbers") {
-                 assert_eq!(arr, &vec![JSONNode::Number(1.0), JSONNode::Number(2.0), JSONNode::Number(3.0)]);
+                 assert_eq!(arr, &vec![JSONNode::Number("1".to_string()), JSONNode::Number("2".to_string()), JSONNode::Number("3".to_string())]);
             } else {
                 panic!("list_of_numbers not found or not an array");
             }
             if let Some(JSONNode::Array(arr)) = obj.get("byte_buffer") {
-                 assert_eq!(arr, &vec![JSONNode::Number(10.0), JSONNode::Number(20.0), JSONNode::Number(30.0)]);
+                 assert_eq!(arr, &vec![JSONNode::Number("10".to_string()), JSONNode::Number("20".to_string()), JSONNode::Number("30".to_string())]);
             } else {
                 panic!("byte_buffer not found or not an array");
             }
@@ -358,9 +358,10 @@ mod tests {
             byte_buffer: vec![],
         };
         let json_node = original.to_json();
-        // { "byte_buffer": [], "field1": 1.0, "field2": "world", "list_of_numbers": [], "optional_field": null }
+        // Expected JSON structure representation within JSONNode: { "byte_buffer": [], "field1": "1", "field2": "world", "list_of_numbers": [], "optional_field": null }
         if let JSONNode::Object(obj) = &json_node {
              assert_eq!(obj.get("optional_field"), Some(&JSONNode::Null));
+             assert_eq!(obj.get("field1"), Some(&JSONNode::Number("1".to_string())));
         } else {
             panic!("Expected JSONNode::Object");
         }
@@ -376,11 +377,19 @@ mod tests {
             description: "A generic item".to_string(),
         };
         let json_node = original.to_json();
+        // Expected JSON structure representation within JSONNode:
         // {
         //   "description": "A generic item",
-        //   "item_t": 123.0,
+        //   "item_t": "123",
         //   "item_u": "test_string"
         // }
+        if let JSONNode::Object(obj) = &json_node {
+             assert_eq!(obj.get("item_t"), Some(&JSONNode::Number("123".to_string())));
+             assert_eq!(obj.get("item_u"), Some(&JSONNode::String("test_string".to_string())));
+             assert_eq!(obj.get("description"), Some(&JSONNode::String("A generic item".to_string())));
+        } else {
+            panic!("Expected JSONNode::Object");
+        }
         let deserialized = GenericStruct::<i32, String>::from_json(json_node).expect("Deserialization failed");
         assert_eq!(original, deserialized);
     }
@@ -416,7 +425,7 @@ mod tests {
         map.insert("a_key".to_string(), 10);
 
         let json_node = map.to_json();
-        // Expected: [["a_key", 10.0], ["b_key", 20.0]] (sorted by key)
+        // Expected JSON structure representation within JSONNode: [["a_key", "10"], ["b_key", "20"]] (sorted by key)
         match json_node {
             JSONNode::Array(pairs) => {
                 assert_eq!(pairs.len(), 2);
@@ -424,7 +433,7 @@ mod tests {
                 match &pairs[0] {
                     JSONNode::Array(pair1) => {
                         assert_eq!(pair1[0], JSONNode::String("a_key".to_string()));
-                        assert_eq!(pair1[1], JSONNode::Number(10.0));
+                        assert_eq!(pair1[1], JSONNode::Number("10".to_string()));
                     }
                     _ => panic!("Expected array for pair"),
                 }
@@ -432,7 +441,7 @@ mod tests {
                 match &pairs[1] {
                     JSONNode::Array(pair2) => {
                         assert_eq!(pair2[0], JSONNode::String("b_key".to_string()));
-                        assert_eq!(pair2[1], JSONNode::Number(20.0));
+                        assert_eq!(pair2[1], JSONNode::Number("20".to_string()));
                     }
                     _ => panic!("Expected array for pair"),
                 }
@@ -448,23 +457,118 @@ mod tests {
     fn test_vec_u8_specialization() {
         let data: Vec<u8> = vec![1, 2, 255];
         let json_node = data.to_json();
-        // Expected: [1.0, 2.0, 255.0]
+        // Expected JSON structure representation within JSONNode: ["1", "2", "255"]
         match json_node {
             JSONNode::Array(ref nums) => {
                 assert_eq!(nums.len(), 3);
-                assert_eq!(nums[0], JSONNode::Number(1.0));
-                assert_eq!(nums[1], JSONNode::Number(2.0));
-                assert_eq!(nums[2], JSONNode::Number(255.0));
+                assert_eq!(nums[0], JSONNode::Number("1".to_string()));
+                assert_eq!(nums[1], JSONNode::Number("2".to_string()));
+                assert_eq!(nums[2], JSONNode::Number("255".to_string()));
             }
             _ => panic!("Expected JSONNode::Array for Vec<u8>"),
         }
         let deserialized: Vec<u8> = Vec::from_json(json_node).unwrap();
         assert_eq!(data, deserialized);
 
-        // Test invalid u8 from f64
-        let invalid_json = JSONNode::Array(vec![JSONNode::Number(256.0)]);
+        // Test invalid u8 from string
+        let invalid_json = JSONNode::Array(vec![JSONNode::Number("256".to_string())]);
         assert!(Vec::<u8>::from_json(invalid_json).is_err());
-        let invalid_json_fract = JSONNode::Array(vec![JSONNode::Number(10.5)]);
+        let invalid_json_fract = JSONNode::Array(vec![JSONNode::Number("10.5".to_string())]);
         assert!(Vec::<u8>::from_json(invalid_json_fract).is_err());
+        let invalid_json_text = JSONNode::Array(vec![JSONNode::Number("abc".to_string())]);
+        assert!(Vec::<u8>::from_json(invalid_json_text).is_err());
+    }
+
+     #[test]
+     fn test_f64_precision() {
+        let val: f64 = 0.1 + 0.2; // This often results in a value slightly different from 0.3 in f64
+        let val_str = format!("{:?}", val); // Use debug formatting to see the exact f64 value
+        let json_node = val.to_json();
+
+        match json_node {
+            JSONNode::Number(s) => {
+                // The string representation in the JSONNode should match the exact f64 value
+                // Note: The parse back might still have f64 precision issues if you were to
+                // check equality of f64 values, but the string representation in the JSONNode
+                // is preserved.
+                 assert_eq!(s, val_str);
+                 let deserialized: f64 = f64::from_json(JSONNode::Number(s)).unwrap();
+                 // Direct f64 equality check might fail for floating point inaccuracies
+                 // assert_eq!(val, deserialized); // This could fail
+
+                 // A better check is to compare their string representations after deserialization
+                 assert_eq!(format!("{:?}", val), format!("{:?}", deserialized));
+
+            }
+            _ => panic!("Expected JSONNode::Number(String)"),
+        }
+
+         let large_int_f64 = 9007199254740992.0_f64; // An integer within f64 range but beyond i64::MAX
+         let large_int_f64_str = large_int_f64.to_string();
+         let json_node_large = large_int_f64.to_json();
+         match json_node_large {
+             JSONNode::Number(s) => {
+                 assert_eq!(s, large_int_f64_str);
+                 let deserialized: f64 = f64::from_json(JSONNode::Number(s)).unwrap();
+                 assert_eq!(format!("{:?}", large_int_f64), format!("{:?}", deserialized));
+             }
+             _ => panic!("Expected JSONNode::Number(String)"),
+         }
+
+         // Test a number that requires more precision than f64 offers
+         let high_precision_str = "0.1234567890123456789"; // More decimal places than f64 can precisely store
+         let json_node_hp = JSONNode::Number(high_precision_str.to_string());
+
+         // Deserializing this back into f64 WILL lose precision
+         let deserialized_hp: f64 = f64::from_json(json_node_hp.clone()).unwrap();
+         // The deserialized f64 will not be exactly equal to the original high_precision_str when formatted back
+         // assert_ne!(format!("{:?}", deserialized_hp), high_precision_str); // This is expected
+
+         // The point is that the *JSONNode* itself holds the precise string:
+         match json_node_hp {
+             JSONNode::Number(s) => {
+                 assert_eq!(s, high_precision_str);
+             }
+             _ => panic!("Expected JSONNode::Number(String)"),
+         }
+     }
+
+    #[test]
+    fn test_i128_u128_serialization_deserialization() {
+        let large_i128: i128 = 12345678901234567890123456789012345_i128;
+        let large_u128: u128 = 98765432109876543210987654321098765_u128;
+
+        let json_i128 = large_i128.to_json();
+        let json_u128 = large_u128.to_json();
+
+        match json_i128 {
+            JSONNode::Number(s) => assert_eq!(s, large_i128.to_string()),
+            _ => panic!("Expected JSONNode::Number(String) for i128"),
+        }
+
+        match json_u128 {
+            JSONNode::Number(s) => assert_eq!(s, large_u128.to_string()),
+            _ => panic!("Expected JSONNode::Number(String) for u128"),
+        }
+
+        let deserialized_i128 = i128::from_json(json_i128).unwrap();
+        let deserialized_u128 = u128::from_json(json_u128).unwrap();
+
+        assert_eq!(large_i128, deserialized_i128);
+        assert_eq!(large_u128, deserialized_u128);
+
+        // Test deserializing an out-of-range string for i128/u128
+        let too_large_i128_str = "1701411834604692317316873037158841057280"; // i128::MAX + 1
+        let invalid_i128_json = JSONNode::Number(too_large_i128_str.to_string());
+        assert!(i128::from_json(invalid_i128_json).is_err());
+
+         let too_large_u128_str = "3402823669209384634633746074317682114560"; // u128::MAX + 1
+        let invalid_u128_json = JSONNode::Number(too_large_u128_str.to_string());
+        assert!(u128::from_json(invalid_u128_json).is_err());
+
+        let invalid_number_format_str = "not_a_number";
+        let invalid_format_json = JSONNode::Number(invalid_number_format_str.to_string());
+        assert!(i128::from_json(invalid_format_json.clone()).is_err());
+        assert!(u128::from_json(invalid_format_json.clone()).is_err());
     }
 }
