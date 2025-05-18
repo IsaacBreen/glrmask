@@ -1,7 +1,6 @@
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
-use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap;
-
 
 #[derive(Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct U8Set {
@@ -9,35 +8,53 @@ pub struct U8Set {
     pub(crate) y: u128,
 }
 
-// Manual impl for U8Set (could be derived)
-impl JSONConvertible for U8Set {
+// Assuming u8 implements JSONConvertible like this (or similar):
+// (You might need to add this if it's not already part of your json_serialization module)
+/*
+impl JSONConvertible for u8 {
     fn to_json(&self) -> JSONNode {
-        let mut obj = BTreeMap::new();
-        // Split into four u64 fields to avoid overflow
-        let x0 = self.x as u64;
-        let x1 = (self.x >> 64) as u64;
-        let y0 = self.y as u64;
-        let y1 = (self.y >> 64) as u64;
-        obj.insert("x0".to_string(), x0.to_json());
-        obj.insert("x1".to_string(), x1.to_json());
-        obj.insert("y0".to_string(), y0.to_json());
-        obj.insert("y1".to_string(), y1.to_json());
-        JSONNode::Object(obj)
+        // JSON numbers are often f64. u8 fits perfectly.
+        JSONNode::Number(*self as f64)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Object(mut obj) => {
-                let x0 = obj.remove("x0").ok_or_else(|| "Missing field x0 for U8Set".to_string())
-                           .and_then(u64::from_json)?;
-                let x1 = obj.remove("x1").ok_or_else(|| "Missing field x1 for U8Set".to_string())
-                           .and_then(u64::from_json)?;
-                let y0 = obj.remove("y0").ok_or_else(|| "Missing field y0 for U8Set".to_string())
-                           .and_then(u64::from_json)?;
-                let y1 = obj.remove("y1").ok_or_else(|| "Missing field y1 for U8Set".to_string())
-                           .and_then(u64::from_json)?;
-                Ok(U8Set { x: (x0 as u128) | ((x1 as u128) << 64), y: (y0 as u128) | ((y1 as u128) << 64) })
+            JSONNode::Number(n) => {
+                if n.fract() == 0.0 && n >= 0.0 && n <= 255.0 {
+                    Ok(n as u8)
+                } else {
+                    Err(format!("Number {} is not a valid u8", n))
+                }
             }
-            _ => Err("Expected JSONNode::Object for U8Set".to_string()),
+            // Optionally, support strings if your u8s might be serialized that way
+            // JSONNode::String(s) => s.parse::<u8>().map_err(|e| format!("Invalid u8 string: {}", e)),
+            _ => Err("Expected JSONNode::Number for u8".to_string()),
+        }
+    }
+}
+*/
+
+// More elegant and readable JSON conversion for U8Set
+impl JSONConvertible for U8Set {
+    fn to_json(&self) -> JSONNode {
+        let members: Vec<JSONNode> = self
+            .iter()
+            .map(|byte_val| byte_val.to_json()) // Relies on u8 implementing JSONConvertible
+            .collect();
+        JSONNode::Array(members)
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Array(arr) => {
+                let mut set = U8Set::none();
+                for item_node in arr {
+                    // Relies on u8 implementing JSONConvertible
+                    let byte_val = u8::from_json(item_node)?;
+                    set.insert(byte_val);
+                }
+                Ok(set)
+            }
+            _ => Err("Expected JSONNode::Array for U8Set".to_string()),
         }
     }
 }
@@ -139,7 +156,6 @@ impl U8Set {
     pub fn from_byte_range(range: impl IntoIterator<Item = u8>) -> U8Set {
         let mut result = U8Set::none();
         for c in range {
-            // assert!(c <= 255, "Character {} is not a valid u8 value", c); // u8 is always <= 255
             result.insert(c);
         }
         result
@@ -148,7 +164,7 @@ impl U8Set {
     pub fn from_char_negation_range(range: impl IntoIterator<Item = u8>) -> U8Set {
         Self::from_byte_range(range).complement()
     }
-    
+
     pub fn from_slice(slice: &[u8]) -> Self {
         let mut result = Self::none();
         for byte in slice {
@@ -179,13 +195,13 @@ impl U8Set {
     }
 
     pub fn without(&self, value: impl Into<u8>) -> Self {
-        let mut result = *self; // Use copy since U8Set is Copy
+        let mut result = *self;
         result.remove(value.into());
         result
     }
 
     pub fn difference(&self, other: &Self) -> Self {
-        let mut result = *self; // Use copy
+        let mut result = *self;
         result.x &= !other.x;
         result.y &= !other.y;
         result
@@ -214,7 +230,7 @@ impl U8Set {
     pub fn from_chars(chars: &str) -> Self {
         let mut result = Self::none();
         for c in chars.chars() {
-            assert!(c.is_ascii(), "Character {} is not a valid ASCII u8 value", c); // Ensure ASCII for direct cast
+            assert!(c.is_ascii(), "Character {} is not a valid ASCII u8 value", c);
             result.insert(c as u8);
         }
         result
@@ -280,42 +296,23 @@ impl U8Set {
 
 impl BitOr for &U8Set {
     type Output = U8Set;
-
-    fn bitor(self, other: &U8Set) -> U8Set {
-        self.union(other)
-    }
+    fn bitor(self, other: &U8Set) -> U8Set { self.union(other) }
 }
-
 impl BitAnd for &U8Set {
     type Output = U8Set;
-
-    fn bitand(self, other: &U8Set) -> U8Set {
-        self.intersection(other)
-    }
+    fn bitand(self, other: &U8Set) -> U8Set { self.intersection(other) }
 }
-
 impl BitOr for U8Set {
     type Output = U8Set;
-
-    fn bitor(self, other: U8Set) -> U8Set {
-        &self | &other
-    }
+    fn bitor(self, other: U8Set) -> U8Set { &self | &other }
 }
-
 impl BitAnd for U8Set {
     type Output = U8Set;
-
-    fn bitand(self, other: U8Set) -> U8Set {
-        &self & &other
-    }
+    fn bitand(self, other: U8Set) -> U8Set { &self & &other }
 }
-
 impl BitOrAssign for U8Set {
-    fn bitor_assign(&mut self, other: U8Set) {
-        self.update(&other);
-    }
+    fn bitor_assign(&mut self, other: U8Set) { self.update(&other); }
 }
-
 impl BitAndAssign for U8Set {
     fn bitand_assign(&mut self, other: U8Set) {
         self.x &= other.x;
@@ -325,59 +322,98 @@ impl BitAndAssign for U8Set {
 
 impl std::fmt::Debug for U8Set {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "U8Set({})", self)
+        // To avoid overly long debug output for dense sets,
+        // consider using the Display format or a summary if it's very full.
+        // For now, let's keep it similar to Display but with a "U8Set" prefix.
+        let mut items_str = String::new();
+        let mut count = 0;
+        const MAX_DEBUG_ITEMS: usize = 16; // Show up to 16 items then "..."
+
+        for item in self.iter() {
+            if count > 0 {
+                items_str.push_str(", ");
+            }
+            if count < MAX_DEBUG_ITEMS {
+                 if item.is_ascii_graphic() || item == b' ' {
+                    items_str.push_str(&format!("'{}'", item as char));
+                } else {
+                    items_str.push_str(&format!("0x{:02x}", item));
+                }
+            } else if count == MAX_DEBUG_ITEMS {
+                items_str.push_str("...");
+            }
+            count += 1;
+        }
+        write!(f, "U8Set([{}] len: {})", items_str, self.len())
     }
 }
 
 impl std::fmt::Display for U8Set {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut ranges = Vec::new();
-        let mut start = None;
-        let mut prev = None;
+        let mut current_start = None;
+        let mut current_prev = None;
 
         for i in self.iter() {
-            match (start, prev) {
-                (None, None) => {
-                    start = Some(i);
+            match (current_start, current_prev) {
+                (None, None) => { // First item in a potential new range
+                    current_start = Some(i);
                 }
-                (Some(_), Some(p)) if i == p + 1 => {}
-                (Some(s), Some(p)) => {
-                    ranges.push((s, p));
-                    start = Some(i);
+                (Some(_start_val), Some(p_val)) if i == p_val + 1 => { // Continues a range
+                    // Just update prev, start remains the same
                 }
-                _ => unreachable!(),
+                (Some(s_val), Some(p_val)) => { // End of a range, start of a new one
+                    ranges.push((s_val, p_val));
+                    current_start = Some(i);
+                }
+                _ => unreachable!("Invalid state in U8Set Display fmt"),
             }
-            prev = Some(i);
+            current_prev = Some(i);
         }
 
-        if let Some(s) = start {
-            ranges.push((s, prev.unwrap()));
+        if let Some(s_val) = current_start {
+            if let Some(p_val) = current_prev {
+                ranges.push((s_val, p_val));
+            }
         }
 
-        let mut output = String::new();
-        for (i, (start_val, end_val)) in ranges.iter().enumerate() { // Renamed start, end
+        write!(f, "[")?;
+        for (i, (start_val, end_val)) in ranges.iter().enumerate() {
             if i > 0 {
-                output.push_str(", ");
+                write!(f, ", ")?;
             }
+            // Helper to format char or byte hex
+            let format_byte = |b: u8, ff: &mut std::fmt::Formatter<'_>| {
+                if b.is_ascii_graphic() || b == b' ' { // Check for printable ASCII or space
+                    write!(ff, "'{}'", b as char)
+                } else {
+                    write!(ff, "0x{:02x}", b) // Non-printable as hex
+                }
+            };
+
             if start_val == end_val {
-                output.push_str(&format!("{:?}", *start_val as char));
-            } else if end_val - start_val == 1 {
-                output.push_str(&format!("{:?}, {:?}", *start_val as char, *end_val as char));
-            } else {
-                output.push_str(&format!("{:?}..{:?}", *start_val as char, *end_val as char));
+                format_byte(*start_val, f)?;
+            } else if end_val - start_val == 1 { // Two consecutive items, print both
+                format_byte(*start_val, f)?;
+                write!(f, ", ")?;
+                format_byte(*end_val, f)?;
+            } else { // A range
+                format_byte(*start_val, f)?;
+                write!(f, "..")?;
+                format_byte(*end_val, f)?;
             }
         }
-
-        write!(f, "[{}]", output)
+        write!(f, "]")
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::json_serialization::JSONConvertible;
     use super::*;
 
     #[test]
-    fn test_u8set() {
+    fn test_u8set_basic_ops() {
         let mut set = U8Set::none();
         assert!(set.insert(b'a'));
         assert!(set.insert(b'b'));
@@ -397,13 +433,88 @@ mod tests {
         let set2 = U8Set::from_chars("bcd");
         let union = &set1 | &set2;
         let intersection = &set1 & &set2;
-        assert_eq!(union.len(), 4);
-        assert_eq!(intersection.len(), 2);
+        assert_eq!(union.len(), 4); // abcd
+        assert_eq!(intersection.len(), 2); // bc
 
         let even_set = U8Set::from_match_fn(|x| x % 2 == 0);
         assert!(even_set.contains(0));
         assert!(even_set.contains(2));
         assert!(!even_set.contains(1));
         assert_eq!(even_set.len(), 128);
+    }
+
+    #[test]
+    fn test_u8set_json_serialization() {
+        let mut set = U8Set::none();
+        set.insert(10);
+        set.insert(20);
+        set.insert(30);
+
+        let json_node = set.to_json();
+        match json_node {
+            JSONNode::Array(ref arr) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], JSONNode::UInt(10));
+                assert_eq!(arr[1], JSONNode::UInt(20));
+                assert_eq!(arr[2], JSONNode::UInt(30));
+            }
+            _ => panic!("Expected JSONNode::Array"),
+        }
+
+        let deserialized_set = U8Set::from_json(json_node).unwrap();
+        assert_eq!(deserialized_set.len(), 3);
+        assert!(deserialized_set.contains(10));
+        assert!(deserialized_set.contains(20));
+        assert!(deserialized_set.contains(30));
+        assert!(!deserialized_set.contains(40));
+        assert_eq!(set, deserialized_set);
+
+        // Test empty set
+        let empty_set = U8Set::none();
+        let empty_json = empty_set.to_json();
+        match empty_json {
+            JSONNode::Array(ref arr) => assert!(arr.is_empty()),
+            _ => panic!("Expected JSONNode::Array for empty set"),
+        }
+        let deserialized_empty = U8Set::from_json(empty_json).unwrap();
+        assert!(deserialized_empty.is_empty());
+        assert_eq!(empty_set, deserialized_empty);
+
+        // Test full set (might be slow to construct JSON, but check logic)
+        let full_set = U8Set::all();
+        let full_json = full_set.to_json();
+         match full_json {
+            JSONNode::Array(ref arr) => assert_eq!(arr.len(), 256),
+            _ => panic!("Expected JSONNode::Array for full set"),
+        }
+        let deserialized_full = U8Set::from_json(full_json).unwrap();
+        assert_eq!(deserialized_full.len(), 256);
+        assert_eq!(full_set, deserialized_full);
+    }
+
+    #[test]
+    fn test_u8set_display_and_debug() {
+        let set1 = U8Set::from_bytes(&[b'a', b'b', b'c', b'z', 0, 1, 2, 15]);
+        // Display: ['a'..'c', 'z', 0x00..0x02, 0x0f] (order might vary based on iter)
+        // Iteration is 0..255, so it will be sorted.
+        assert_eq!(format!("{}", set1), "[0x00..0x02, 0x0f, 'a'..'c', 'z']");
+
+        let set2 = U8Set::from_bytes(&[b'a', b'c', b'e']);
+        assert_eq!(format!("{}", set2), "['a', 'c', 'e']");
+
+        let set3 = U8Set::from_bytes(&[10, 12, 11]); // Order of insertion doesn't matter
+        assert_eq!(format!("{}", set3), "[0x0a..0x0c]"); // Display will sort
+
+        let set4 = U8Set::from_bytes(&[b'h', b'e', b'l', b'l', b'o']);
+        assert_eq!(format!("{}", set4), "['e', 'h', 'l', 'o']"); // 'l' is unique
+
+        // Debug format
+        let debug_str = format!("{:?}", set1);
+        assert!(debug_str.starts_with("U8Set(["));
+        assert!(debug_str.contains("0x00, 0x01, 0x02"));
+        assert!(debug_str.contains("'a', 'b', 'c'"));
+        assert!(debug_str.contains("'z'"));
+        assert!(debug_str.contains("0x0f"));
+        assert!(debug_str.ends_with("] len: 8)"));
     }
 }

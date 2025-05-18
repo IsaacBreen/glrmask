@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import textwrap
 import time
 import tokenize
