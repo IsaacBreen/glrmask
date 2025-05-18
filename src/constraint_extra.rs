@@ -8,6 +8,9 @@ use bitvec::prelude::BitVec;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use bimap::BiBTreeMap;
 use crate::datastructures::ArcPtrWrapper;
+use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
+
 
 /// Helper function to print the indices of set bits in a HybridBitset, optionally mapping them.
 fn format_bv_indices(
@@ -55,18 +58,24 @@ pub(crate) fn print_finalizer(
 fn dump_precompute_trie_recursive(
     node_arc: &Arc<Mutex<PrecomputeNode>>,
     indent: String,
-    visited: &mut HashSet<*const PrecomputeNode>,
+    visited: &mut HashSet<*const PrecomputeNode>, // Changed to *const PrecomputeNode
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>
 ) {
-    let node_ptr_val = node_ptr(node_arc);
-    if !visited.insert(node_ptr_val) {
-        println!("{}-> Ref {:p} (already printed)", indent, node_ptr_val);
+    // To get a raw pointer to the PrecomputeNode data inside the Mutex for visited tracking:
+    let node_data_ptr_for_visited_check = {
+        let guard = node_arc.lock().expect("Mutex poisoned during dump (getting ptr for visited check)");
+        &*guard as *const PrecomputeNode
+    };
+
+    if !visited.insert(node_data_ptr_for_visited_check) {
+        println!("{}-> Ref {:p} (already printed via data ptr {:p})", indent, Arc::as_ptr(node_arc), node_data_ptr_for_visited_check);
         return;
     }
 
+
     let node = node_arc.lock().expect("Mutex poisoned during dump");
 
-    println!("{}-> Node {:p} (MaxDepth: {})", indent, &node, node.max_depth); // Node struct doesn't have max_depth field based on the original Trie definition provided. Keeping this as is based on previous code state.
+    println!("{}-> Node {:p} (Data {:p}, MaxDepth: {})", indent, Arc::as_ptr(node_arc), &*node, node.max_depth);
 
     // Print Node Value (Finalizers)
     if !node.value.finalizers().is_empty() {
@@ -88,11 +97,11 @@ fn dump_precompute_trie_recursive(
         for (edge_key, children_vec) in node.children() {
             for (child_wrapper_arc, edge_val_bv) in children_vec {
                  println!(
-                    "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Ptr: {:p}",
+                    "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Arc Ptr: {:p}", // Changed to Child Arc Ptr
                     indent,
                     edge_key.map(|grammar_token_id| grammar_token_id.0),
                     format_bv_indices(edge_val_bv, original_internal_bimap), // Pass original_internal_bimap
-                    node_ptr(child_wrapper_arc.as_arc()) // Use as_arc() to get the Arc
+                    Arc::as_ptr(child_wrapper_arc.as_arc()) // Use as_arc() to get the Arc and then its pointer
                 );
                 // Recurse
                 dump_precompute_trie_recursive(child_wrapper_arc.as_arc(), new_indent.clone(), visited, original_internal_bimap); // Pass original_internal_bimap
@@ -154,6 +163,57 @@ pub struct PrecomputeStats {
     pub final_grammar_token_edge_token_set_sizes_dist: BTreeMap<GrammarTokenID, Vec<usize>>,
 }
 
+// Manual impl for PrecomputeStats
+impl JSONConvertible for PrecomputeStats {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("initial_root_nodes_created".to_string(), self.initial_root_nodes_created.to_json());
+        obj.insert("final_unique_nodes_count".to_string(), self.final_unique_nodes_count.to_json());
+        obj.insert("final_root_nodes_count".to_string(), self.final_root_nodes_count.to_json());
+        obj.insert("final_non_root_internal_nodes_count".to_string(), self.final_non_root_internal_nodes_count.to_json());
+        obj.insert("final_leaf_nodes_count".to_string(), self.final_leaf_nodes_count.to_json());
+        obj.insert("final_edges_count".to_string(), self.final_edges_count.to_json());
+        obj.insert("final_edges_with_none_key".to_string(), self.final_edges_with_none_key.to_json());
+        obj.insert("final_edges_with_some_key".to_string(), self.final_edges_with_some_key.to_json());
+        obj.insert("final_nodes_with_clean_end".to_string(), self.final_nodes_with_clean_end.to_json());
+        obj.insert("final_total_finalizer_entries_in_graph".to_string(), self.final_total_finalizer_entries_in_graph.to_json());
+        obj.insert("final_total_occupancy_sum_for_some_keys".to_string(), self.final_total_occupancy_sum_for_some_keys.to_json());
+        obj.insert("final_num_occupied_some_edge_keys".to_string(), self.final_num_occupied_some_edge_keys.to_json());
+        obj.insert("final_total_occupancy_sum_for_none_keys".to_string(), self.final_total_occupancy_sum_for_none_keys.to_json());
+        obj.insert("final_num_occupied_none_edge_keys".to_string(), self.final_num_occupied_none_edge_keys.to_json());
+        obj.insert("final_grammar_token_edge_key_counts".to_string(), self.final_grammar_token_edge_key_counts.to_json());
+        obj.insert("final_grammar_token_edge_fanouts_dist".to_string(), self.final_grammar_token_edge_fanouts_dist.to_json());
+        obj.insert("final_grammar_token_edge_token_set_sizes_dist".to_string(), self.final_grammar_token_edge_token_set_sizes_dist.to_json());
+        JSONNode::Object(obj)
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => Ok(PrecomputeStats {
+                initial_root_nodes_created: obj.remove("initial_root_nodes_created").ok_or_else(|| "Missing field initial_root_nodes_created".to_string())?.from_json()?,
+                final_unique_nodes_count: obj.remove("final_unique_nodes_count").ok_or_else(|| "Missing field final_unique_nodes_count".to_string())?.from_json()?,
+                final_root_nodes_count: obj.remove("final_root_nodes_count").ok_or_else(|| "Missing field final_root_nodes_count".to_string())?.from_json()?,
+                final_non_root_internal_nodes_count: obj.remove("final_non_root_internal_nodes_count").ok_or_else(|| "Missing field final_non_root_internal_nodes_count".to_string())?.from_json()?,
+                final_leaf_nodes_count: obj.remove("final_leaf_nodes_count").ok_or_else(|| "Missing field final_leaf_nodes_count".to_string())?.from_json()?,
+                final_edges_count: obj.remove("final_edges_count").ok_or_else(|| "Missing field final_edges_count".to_string())?.from_json()?,
+                final_edges_with_none_key: obj.remove("final_edges_with_none_key").ok_or_else(|| "Missing field final_edges_with_none_key".to_string())?.from_json()?,
+                final_edges_with_some_key: obj.remove("final_edges_with_some_key").ok_or_else(|| "Missing field final_edges_with_some_key".to_string())?.from_json()?,
+                final_nodes_with_clean_end: obj.remove("final_nodes_with_clean_end").ok_or_else(|| "Missing field final_nodes_with_clean_end".to_string())?.from_json()?,
+                final_total_finalizer_entries_in_graph: obj.remove("final_total_finalizer_entries_in_graph").ok_or_else(|| "Missing field final_total_finalizer_entries_in_graph".to_string())?.from_json()?,
+                final_total_occupancy_sum_for_some_keys: obj.remove("final_total_occupancy_sum_for_some_keys").ok_or_else(|| "Missing field final_total_occupancy_sum_for_some_keys".to_string())?.from_json()?,
+                final_num_occupied_some_edge_keys: obj.remove("final_num_occupied_some_edge_keys").ok_or_else(|| "Missing field final_num_occupied_some_edge_keys".to_string())?.from_json()?,
+                final_total_occupancy_sum_for_none_keys: obj.remove("final_total_occupancy_sum_for_none_keys").ok_or_else(|| "Missing field final_total_occupancy_sum_for_none_keys".to_string())?.from_json()?,
+                final_num_occupied_none_edge_keys: obj.remove("final_num_occupied_none_edge_keys").ok_or_else(|| "Missing field final_num_occupied_none_edge_keys".to_string())?.from_json()?,
+                final_grammar_token_edge_key_counts: obj.remove("final_grammar_token_edge_key_counts").ok_or_else(|| "Missing field final_grammar_token_edge_key_counts".to_string())?.from_json()?,
+                final_grammar_token_edge_fanouts_dist: obj.remove("final_grammar_token_edge_fanouts_dist").ok_or_else(|| "Missing field final_grammar_token_edge_fanouts_dist".to_string())?.from_json()?,
+                final_grammar_token_edge_token_set_sizes_dist: obj.remove("final_grammar_token_edge_token_set_sizes_dist").ok_or_else(|| "Missing field final_grammar_token_edge_token_set_sizes_dist".to_string())?.from_json()?,
+            }),
+            _ => Err("Expected JSONNode::Object for PrecomputeStats".to_string()),
+        }
+    }
+}
+
+
 /// Helper function to calculate sum, mean, and median from Vec<usize>
 fn calculate_stats_from_vec_usize(numbers: &Vec<usize>) -> (usize, Option<f64>, Option<f64>) {
     if numbers.is_empty() {
@@ -183,7 +243,7 @@ pub fn calculate_final_stats(
     crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
     let mut all_reachable_nodes_for_final_stats: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = HashSet::new();
     for root_arc_mutex_node in precomputed_roots.values() {
-        // Assuming PrecomputeNode::all_nodes is accessible and returns HashSet<Arc<Mutex<PrecomputeNode>>>
+        // Assuming PrecomputeNode::all_nodes is accessible and returns Vec<Arc<Mutex<PrecomputeNode>>>
         // If PrecomputeNode is crate::constraint::PrecomputeNode, it should be.
         let nodes_from_this_root = crate::constraint::PrecomputeNode::all_nodes(root_arc_mutex_node.clone());
         for node_arc in nodes_from_this_root {
@@ -237,7 +297,7 @@ pub fn calculate_final_stats(
 
             if let Some(gtid) = edge_key_opt {
                 stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
-                *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += 1;
+                *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += num_edges_for_this_key_to_distinct_children; // Corrected: sum edges not occurrences of key
 
                 stats.final_grammar_token_edge_fanouts_dist
                     .entry(*gtid)
@@ -293,7 +353,7 @@ pub fn print_precompute_stats(
     println!("  There are:");
     println!("  - {} unique nodes, of which", stats.final_unique_nodes_count);
     println!("    - {} are roots", stats.final_root_nodes_count);
-    let non_root_count = stats.final_unique_nodes_count - stats.final_root_nodes_count;
+    let non_root_count = stats.final_unique_nodes_count.saturating_sub(stats.final_root_nodes_count); // Use saturating_sub
     println!("    - {} are non-roots, of which", non_root_count);
     println!("        - {} are internal (non-root, non-leaf)", stats.final_non_root_internal_nodes_count);
     println!("        - {} are leaves (non-root)", stats.final_leaf_nodes_count);
@@ -399,8 +459,8 @@ mod tests {
         let bv = HybridBitset::new();
         assert_eq!(format_bv_indices(&bv, None), "[]");
 
-        let bv = HybridBitset::new();
-        assert_eq!(format_bv_indices(&bv, None), "[]");
+        // let bv = HybridBitset::new(); // Duplicate test removed
+        // assert_eq!(format_bv_indices(&bv, None), "[]");
     }
 
     #[test]
@@ -451,13 +511,13 @@ mod tests {
 
         // Grammar: S -> A $
         let productions = vec![
-            prod("S", vec![t("A"), t("AA"), t("EOF")]),
+            prod("S", vec![nt("A"), nt("AA"), t("EOF")]), // S' -> S EOF is implicit
         ];
 
         // Map grammar terminals to the tokenizer's token IDs
         let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
         grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0)); // "a" from tokenizer
-        grammar_token_map.insert(Terminal("AA".to_string()), TerminalID(1)); // "a" from tokenizer
+        grammar_token_map.insert(Terminal("AA".to_string()), TerminalID(1)); // "aa" from tokenizer
         grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(2)); // "$" from tokenizer
 
         // Generate parser
@@ -480,3 +540,4 @@ mod tests {
         println!("--- Finished dump_precomputed test output ---");
     }
 }
+

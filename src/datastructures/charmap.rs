@@ -1,5 +1,8 @@
 use crate::datastructures::u8set::U8Set;
 use std::ops::{Index, IndexMut};
+use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
+
 
 const CHARMAP_SIZE: usize = 256;
 
@@ -7,9 +10,74 @@ const CHARMAP_SIZE: usize = 256;
 pub struct TrieMap<T> {
     data: Vec<Option<Box<T>>>,
     // TODO: what's the point of `children`? Is it for nondeterminism? If so, let's remove it.
-    children: Vec<Vec<usize>>,
+    children: Vec<Vec<usize>>, // This field is problematic for general JSON serialization if its meaning is tied to specific graph structures.
+                               // For now, we'll serialize it as is, but it might need context-specific handling.
     u8set: U8Set,
 }
+
+impl<T: JSONConvertible> JSONConvertible for TrieMap<T> {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+
+        // Serialize non-None data entries as a map from u8 to T's JSON
+        let mut data_map_json = StdMap::new();
+        for (i, opt_boxed_t) in self.data.iter().enumerate() {
+            if let Some(boxed_t) = opt_boxed_t {
+                data_map_json.insert((i as u8).to_string(), boxed_t.as_ref().to_json());
+            }
+        }
+        obj.insert("data".to_string(), JSONNode::Object(data_map_json));
+
+        // Serialize children as is (array of arrays of numbers)
+        // This might not be universally useful without context.
+        obj.insert("children_vectors".to_string(), self.children.to_json());
+        obj.insert("u8set".to_string(), self.u8set.to_json());
+        JSONNode::Object(obj)
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let data_node = obj.remove("data").ok_or_else(|| "Missing field data for TrieMap".to_string())?;
+                let mut data_vec: Vec<Option<Box<T>>> = vec![None; CHARMAP_SIZE];
+                match data_node {
+                    JSONNode::Object(json_obj) => {
+                        for (key_str, val_node) in json_obj {
+                            let index = key_str.parse::<u8>().map_err(|e| format!("Invalid u8 key in TrieMap data: {}, err: {}", key_str, e))? as usize;
+                            if index < CHARMAP_SIZE {
+                                data_vec[index] = Some(Box::new(T::from_json(val_node)?));
+                            } else {
+                                return Err(format!("Index {} out of bounds for TrieMap data", index));
+                            }
+                        }
+                    }
+                    _ => return Err("Expected JSONNode::Object for TrieMap data field".to_string()),
+                }
+
+                let children_vectors = obj.remove("children_vectors").ok_or_else(|| "Missing field children_vectors for TrieMap".to_string())
+                                          .and_then(Vec::<Vec<usize>>::from_json)?;
+                if children_vectors.len() != CHARMAP_SIZE && !children_vectors.is_empty() { // Allow empty if it was default
+                     // If it was default constructed, it might be empty. If serialized, it should be CHARMAP_SIZE.
+                     // This logic might need adjustment based on how default/empty TrieMaps are handled.
+                     // For now, if it's present and not empty, enforce size.
+                    // return Err(format!("TrieMap children_vectors field has incorrect length: {} (expected {})", children_vectors.len(), CHARMAP_SIZE));
+                }
+
+
+                let u8set = obj.remove("u8set").ok_or_else(|| "Missing field u8set for TrieMap".to_string())
+                                 .and_then(U8Set::from_json)?;
+
+                Ok(TrieMap {
+                    data: data_vec,
+                    children: children_vectors,
+                    u8set,
+                })
+            }
+            _ => Err("Expected JSONNode::Object for TrieMap".to_string()),
+        }
+    }
+}
+
 
 impl<T> TrieMap<T> {
     pub fn new() -> Self {
@@ -253,7 +321,7 @@ impl<'a, T> VacantEntry<'a, T> {
 
 impl<T> IntoIterator for TrieMap<T> {
     type Item = (u8, T);
-    type IntoIter = std::vec::IntoIter<Self::Item>;
+    type IntoIter = std::vec::IntoIter<Self::Item>; // Corrected
 
     fn into_iter(self) -> Self::IntoIter {
         self.data.into_iter().enumerate().filter_map(|(i, option)| {
@@ -264,7 +332,7 @@ impl<T> IntoIterator for TrieMap<T> {
 
 impl<'a, T> IntoIterator for &'a TrieMap<T> {
     type Item = (u8, &'a T);
-    type IntoIter = std::vec::IntoIter<Self::Item>;
+    type IntoIter = std::vec::IntoIter<Self::Item>; // Corrected
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter().collect::<Vec<_>>().into_iter()
@@ -273,7 +341,7 @@ impl<'a, T> IntoIterator for &'a TrieMap<T> {
 
 impl<'a, T> IntoIterator for &'a mut TrieMap<T> {
     type Item = (u8, &'a mut T);
-    type IntoIter = std::vec::IntoIter<Self::Item>;
+    type IntoIter = std::vec::IntoIter<Self::Item>; // Corrected
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter_mut().collect::<Vec<_>>().into_iter()

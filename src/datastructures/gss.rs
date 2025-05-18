@@ -5,6 +5,9 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
+use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
+
 
 // Type alias for the canonicalization cache key
 type NodeCacheKey<T> = (T, BTreeSet<Arc<GSSNode<T>>>);
@@ -31,6 +34,19 @@ pub struct GSSNode<T> {
     predecessors: BTreeSet<Arc<GSSNode<T>>>, // Changed from ArcPtrWrapper
     hash_key_cache: u64,
 }
+
+impl<T: JSONConvertible> JSONConvertible for GSSNode<T> {
+    fn to_json(&self) -> JSONNode {
+        // WARNING: Naive serialization. Does not handle cycles or shared structure well.
+        // Will lead to infinite recursion for cycles.
+        todo!("GSSNode to_json: Complex graph structure, requires advanced serialization strategy.")
+    }
+
+    fn from_json(_node: JSONNode) -> Result<Self, String> {
+        todo!("GSSNode from_json: Complex graph structure, requires advanced deserialization strategy.")
+    }
+}
+
 
 // Methods for creating non-canonical GSSNode instances (original API style)
 impl<T: Hash> GSSNode<T> {
@@ -98,10 +114,10 @@ impl<T: Clone + Ord + Hash + Debug> GSSNode<T> {
     where
         I: IntoIterator<Item = T>,
     {
-        let mut iter = iter.into_iter();
-        let first_val = iter.next().expect("from_iter_canonical requires at least one element");
+        let mut iter_val = iter.into_iter(); // Renamed iter
+        let first_val = iter_val.next().expect("from_iter_canonical requires at least one element"); // Use iter_val
         let mut root = Self::new_canonical(first_val, cache);
-        for value in iter {
+        for value in iter_val { // Use iter_val
             root = Self::push_onto_canonical(root, value, cache);
         }
         root
@@ -161,9 +177,9 @@ impl<T> GSSNode<T> {
         I: IntoIterator<Item = T>,
         T: Ord + Hash, // Needed for push -> new -> compute_internal_hash_key
     {
-        let mut iter = iter.into_iter();
-        let mut root = Self::new(iter.next().unwrap()); // Uses non-canonical new
-        for value in iter {
+        let mut iter_val = iter.into_iter(); // Renamed iter
+        let mut root = Self::new(iter_val.next().unwrap()); // Uses non-canonical new // Use iter_val
+        for value in iter_val { // Use iter_val
             root = root.push(value); // Uses non-canonical push
         }
         root
@@ -226,16 +242,16 @@ impl<T> GSSNode<T> {
         T: Clone,
     {
         let mut result = Vec::new();
-        let mut stack: Vec<T> = Vec::new();
+        // let mut stack: Vec<T> = Vec::new(); // Unused
         // For flatten on &self, we need to Arc self to put on stack if it's a root of a path.
         // However, flatten explores predecessors which are already Arcs.
         // The initial call path starts from `self`.
 
         // To handle the initial `self` correctly without Arcing it unnecessarily if it's never a predecessor itself:
-        let mut initial_path = vec![self.value.clone()];
+        // let initial_path = vec![self.value.clone()]; // Unused
 
         if self.predecessors.is_empty() {
-            result.push(initial_path);
+            result.push(vec![self.value.clone()]); // Path for a root node
         } else {
             // Each predecessor_arc starts a new exploration from that point.
             // The path passed down should be the path *to* that predecessor.
@@ -243,19 +259,25 @@ impl<T> GSSNode<T> {
             // Let's use a structure that tracks the GSSNode reference and current path.
             // (node_ref, path_to_node_ref_value)
             let mut q: VecDeque<(&GSSNode<T>, Vec<T>)> = VecDeque::new();
+            // For the initial call on `self`, the path leading to it is empty.
+            // The path will be built by prepending current node's value.
             q.push_back((self, Vec::new()));
 
-            while let Some((current_node, mut current_path_values)) = q.pop_front() {
-                current_path_values.push(current_node.value.clone());
+            while let Some((current_node, path_so_far)) = q.pop_front() { // Renamed current_path_values
+                let mut new_path = vec![current_node.value.clone()]; // Start new path with current value
+                new_path.extend(path_so_far); // Prepend current value to path from successor
+
                 if current_node.predecessors.is_empty() {
-                    // Path is built in reverse, then reversed at the end. Or build forward.
-                    // Let's build forward.
-                    result.push(current_path_values);
+                    result.push(new_path); // This is a full path from a leaf up to `self`
                 } else {
                     for pred_arc in &current_node.predecessors {
-                        q.push_back((pred_arc.as_ref(), current_path_values.clone()));
+                        q.push_back((pred_arc.as_ref(), new_path.clone()));
                     }
                 }
+            }
+            // Paths are built in reverse (leaf to root), so reverse them at the end.
+            for path in &mut result {
+                path.reverse();
             }
         }
         result
@@ -273,7 +295,7 @@ impl<T> GSSNode<T> {
     where
         T: Ord + Hash, // Hash for re-calculating hash_key_cache
     {
-        assert!(self.value == other.value);
+        assert!(self.value == other.value); // Requires T: PartialEq, which is implied by Ord
         self.predecessors.append(&mut other.predecessors);
         self.hash_key_cache = compute_internal_hash_key(&self.value, &self.predecessors);
     }
@@ -409,8 +431,11 @@ impl<T: Clone + Hash> GSSTrait<T> for Arc<GSSNode<T>> {
         // self is &Arc<GSSNode<T>>.
         let mut new_node = GSSNode::new(value); // Non-canonical new
         new_node.predecessors.insert(self.clone()); // Insert the Arc
+        // Recompute hash_key_cache after modifying predecessors
+        new_node.hash_key_cache = compute_internal_hash_key(&new_node.value, &new_node.predecessors);
         new_node
     }
+
 
     fn pop(&self) -> Vec<Arc<GSSNode<T>>> {
         self.as_ref().pop()
@@ -626,7 +651,7 @@ fn find_longest_path_recursive<T>(
     if !node_arc.predecessors.is_empty() {
         for pred_arc in &node_arc.predecessors { // pred_arc is &Arc<GSSNode<T>>
             let pred_path = find_longest_path_recursive(pred_arc, memo, visited_recursion);
-            if !pred_path.is_empty() && pred_path.len() > longest_pred_path.len() {
+            if pred_path.len() > longest_pred_path.len() { // Removed !pred_path.is_empty() as len check covers it
                 longest_pred_path = pred_path;
             }
         }
@@ -662,6 +687,52 @@ pub struct GSSStats {
     pub max_predecessors: usize,
     pub average_predecessors: f64,
 }
+
+// Manual impl for GSSStats
+impl JSONConvertible for GSSStats {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("num_roots".to_string(), self.num_roots.to_json());
+        obj.insert("unique_nodes".to_string(), self.unique_nodes.to_json());
+        obj.insert("max_depth".to_string(), self.max_depth.to_json());
+        obj.insert("average_depth".to_string(), self.average_depth.to_json());
+        obj.insert("merge_points".to_string(), self.merge_points.to_json());
+        obj.insert("max_predecessors".to_string(), self.max_predecessors.to_json());
+        obj.insert("average_predecessors".to_string(), self.average_predecessors.to_json());
+        JSONNode::Object(obj)
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let num_roots = obj.remove("num_roots").ok_or_else(|| "Missing field num_roots".to_string())
+                                   .and_then(usize::from_json)?;
+                let unique_nodes = obj.remove("unique_nodes").ok_or_else(|| "Missing field unique_nodes".to_string())
+                                      .and_then(usize::from_json)?;
+                let max_depth = obj.remove("max_depth").ok_or_else(|| "Missing field max_depth".to_string())
+                                   .and_then(usize::from_json)?;
+                let average_depth = obj.remove("average_depth").ok_or_else(|| "Missing field average_depth".to_string())
+                                       .and_then(f64::from_json)?;
+                let merge_points = obj.remove("merge_points").ok_or_else(|| "Missing field merge_points".to_string())
+                                      .and_then(usize::from_json)?;
+                let max_predecessors = obj.remove("max_predecessors").ok_or_else(|| "Missing field max_predecessors".to_string())
+                                          .and_then(usize::from_json)?;
+                let average_predecessors = obj.remove("average_predecessors").ok_or_else(|| "Missing field average_predecessors".to_string())
+                                              .and_then(f64::from_json)?;
+                Ok(GSSStats {
+                    num_roots,
+                    unique_nodes,
+                    max_depth,
+                    average_depth,
+                    merge_points,
+                    max_predecessors,
+                    average_predecessors,
+                })
+            }
+            _ => Err("Expected JSONNode::Object for GSSStats".to_string()),
+        }
+    }
+}
+
 
 pub fn gather_gss_stats<T>(roots: &[Arc<GSSNode<T>>]) -> GSSStats {
     let mut stats = GSSStats::default();
@@ -759,7 +830,7 @@ pub fn print_gss_forest<T: Debug>(roots: &[Arc<GSSNode<T>>], max_nodes: usize) -
         writeln!(&mut output, "Root {}:", i).unwrap();
         match print_gss_node_recursive(root_arc, &mut visited, 1, &mut node_count, max_nodes, &mut output) {
             Ok(_) => {
-                if node_count >= max_nodes {
+                if node_count >= max_nodes && i < roots.len() -1 { // Check if max_nodes reached and not the last root
                     writeln!(&mut output, "... (Truncated: Reached max nodes {})", max_nodes).unwrap();
                     break;
                 }
@@ -770,10 +841,15 @@ pub fn print_gss_forest<T: Debug>(roots: &[Arc<GSSNode<T>>], max_nodes: usize) -
             }
         }
     }
-
-    if node_count < max_nodes && visited.len() > node_count { // Corrected condition
-         writeln!(&mut output, "... (Truncated: Reached max nodes {})", max_nodes).unwrap();
+    // This check was slightly off, if max_nodes is hit on the last root, it might not print truncated.
+    // The check inside the loop is better.
+    // if node_count < max_nodes && visited.len() > node_count { // Corrected condition
+    //      writeln!(&mut output, "... (Truncated: Reached max nodes {})", max_nodes).unwrap();
+    // }
+    if node_count >= max_nodes && visited.len() > node_count { // If we printed max_nodes but there were more visited (due to shared structure not printed)
+         writeln!(&mut output, "... (More nodes exist but not printed due to max_nodes limit)").unwrap();
     }
+
     output
 }
 

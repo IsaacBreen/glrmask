@@ -12,6 +12,9 @@ use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
 use std::sync::Arc;
 use crate::debug;
+use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
+
 
 pub trait MergeAndIntersect: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
     /// Merges the information represented by `self` and `other`.
@@ -30,16 +33,41 @@ pub struct ParseStateNodeContent<T: MergeAndIntersect> {
     pub state_id: StateID,
     pub t: T,
 }
+// No JSONConvertible for ParseStateNodeContent<T> directly, as T is generic.
+// It would be needed if GSSNode<ParseStateNodeContent<T>> was serialized.
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseState<T: MergeAndIntersect> {
     pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
 }
+// No JSONConvertible for ParseState<T> directly.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StopReason {
     ActionNotFound,
     GotoNotFound,
 }
+// Manual impl for StopReason (enum)
+impl JSONConvertible for StopReason {
+    fn to_json(&self) -> JSONNode {
+        let variant_name = match self {
+            StopReason::ActionNotFound => "ActionNotFound",
+            StopReason::GotoNotFound => "GotoNotFound",
+        };
+        JSONNode::String(variant_name.to_string()) // Simple enum as string
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::String(s) => match s.as_str() {
+                "ActionNotFound" => Ok(StopReason::ActionNotFound),
+                "GotoNotFound" => Ok(StopReason::GotoNotFound),
+                _ => Err(format!("Unknown variant {} for StopReason", s)),
+            },
+            _ => Err("Expected JSONNode::String for StopReason".to_string()),
+        }
+    }
+}
+
 
 
 // TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
@@ -52,6 +80,48 @@ pub struct GLRParser {
     pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
     pub start_state_id: StateID,
 }
+
+impl JSONConvertible for GLRParser {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("stage_7_table".to_string(), self.stage_7_table.to_json());
+        obj.insert("productions".to_string(), self.productions.to_json());
+        obj.insert("terminal_map".to_string(), self.terminal_map.to_json());
+        obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
+        obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
+        obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
+        JSONNode::Object(obj)
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let stage_7_table = obj.remove("stage_7_table").ok_or_else(|| "Missing field stage_7_table".to_string())
+                                       .and_then(Stage7Table::from_json)?;
+                let productions = obj.remove("productions").ok_or_else(|| "Missing field productions".to_string())
+                                     .and_then(Vec::<Production>::from_json)?;
+                let terminal_map = obj.remove("terminal_map").ok_or_else(|| "Missing field terminal_map".to_string())
+                                      .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
+                let non_terminal_map = obj.remove("non_terminal_map").ok_or_else(|| "Missing field non_terminal_map".to_string())
+                                          .and_then(|n| BiBTreeMap::<NonTerminal, NonTerminalID>::from_json(n))?;
+                let item_set_map = obj.remove("item_set_map").ok_or_else(|| "Missing field item_set_map".to_string())
+                                      .and_then(|n| BiBTreeMap::<BTreeSet<Item>, StateID>::from_json(n))?;
+                let start_state_id = obj.remove("start_state_id").ok_or_else(|| "Missing field start_state_id".to_string())
+                                        .and_then(StateID::from_json)?;
+                Ok(GLRParser {
+                    stage_7_table,
+                    productions,
+                    terminal_map,
+                    non_terminal_map,
+                    item_set_map,
+                    start_state_id,
+                })
+            }
+            _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
+        }
+    }
+}
+
 
 impl GLRParser {
     pub fn new(
@@ -215,12 +285,12 @@ impl Display for GLRParser {
                         if let Some(shift_state) = shift {
                             writeln!(f, "        - Shift {}", shift_state.0)?;
                         }
-                        for (len, nt_id_to_prod_ids) in reduces {
+                        for (len, nts) in reduces {
                             writeln!(f, "        - Reduce (len {}):", len)?;
-                            for (nt_id, prod_ids) in nt_id_to_prod_ids {
+                            for (nt_id, prod_ids) in nts {
                                 let nt = non_terminal_map.get_by_right(nt_id).unwrap();
-                                for prod_id in prod_ids {
-                                    let prod = self.productions.get(prod_id.0).unwrap();
+                                for prod_id_val in prod_ids { // Renamed prod_id
+                                    let prod = self.productions.get(prod_id_val.0).unwrap();
                                     writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
                                 }
                             }
@@ -308,7 +378,7 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         let roots: Vec<_> = self.active_states.values().map(|s| s.stack.clone()).collect();
         let stats = gather_gss_stats(&roots);
         crate::debug!(3, "{} - token {} ({:?}) - – active: {}, nodes: {:?}",
-                      phase, token.0, self.parser.terminal_map.get_by_right(&token).unwrap().0, self.active_states.len(), stats);
+                      phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0), self.active_states.len(), stats); // Added map(|t| &t.0)
 
         let make_msg = |print_full_forest, max_nodes_to_print| {
             if print_full_forest {
@@ -485,7 +555,7 @@ impl<T: MergeAndIntersect> ParseState<T> {
         mutable_stack.value.t = combined_t;
 
         // Merge the parent structures using GSSNode's merge
-        mutable_stack.merge_unchecked(Arc::unwrap_or_clone(other.stack));
+        mutable_stack.merge_unchecked(Arc::try_unwrap(other.stack).unwrap_or_else(|arc| (*arc).clone())); // Use try_unwrap or clone
     }
 }
 
@@ -506,3 +576,4 @@ impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
         }
     }
 }
+

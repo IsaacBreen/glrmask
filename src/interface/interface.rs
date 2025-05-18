@@ -11,6 +11,9 @@ use bimap::BiBTreeMap;
 use kdam::tqdm;
 use std::collections::{BTreeMap, HashSet, HashMap, BTreeSet};
 use std::fmt::{Debug, Formatter};
+use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
+
 
 type LLMToken<'a> = &'a [u8];
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
@@ -25,6 +28,49 @@ pub struct Grammar {
     pub tokenizer: Regex,
     pub glr_parser: GLRParser, // Store the generated parser
 }
+
+// Manual impl for Grammar
+impl JSONConvertible for Grammar {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("productions".to_string(), self.productions.to_json());
+        obj.insert("start_production_id".to_string(), self.start_production_id.to_json());
+        obj.insert("terminal_name_to_group_id".to_string(), self.terminal_name_to_group_id.to_json());
+        obj.insert("terminal_expr_to_group_id".to_string(), self.terminal_expr_to_group_id.to_json());
+        obj.insert("tokenizer".to_string(), self.tokenizer.to_json());
+        obj.insert("glr_parser".to_string(), self.glr_parser.to_json());
+        JSONNode::Object(obj)
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let productions = obj.remove("productions").ok_or_else(|| "Missing field productions for Grammar".to_string())
+                                     .and_then(Vec::<Production>::from_json)?;
+                let start_production_id = obj.remove("start_production_id").ok_or_else(|| "Missing field start_production_id for Grammar".to_string())
+                                             .and_then(usize::from_json)?;
+                let terminal_name_to_group_id = obj.remove("terminal_name_to_group_id").ok_or_else(|| "Missing field terminal_name_to_group_id for Grammar".to_string())
+                                                   .and_then(|n| BiBTreeMap::<String, usize>::from_json(n))?;
+                let terminal_expr_to_group_id = obj.remove("terminal_expr_to_group_id").ok_or_else(|| "Missing field terminal_expr_to_group_id for Grammar".to_string())
+                                                   .and_then(|n| BiBTreeMap::<Expr, usize>::from_json(n))?;
+                let tokenizer = obj.remove("tokenizer").ok_or_else(|| "Missing field tokenizer for Grammar".to_string())
+                                   .and_then(Regex::from_json)?;
+                let glr_parser = obj.remove("glr_parser").ok_or_else(|| "Missing field glr_parser for Grammar".to_string())
+                                    .and_then(GLRParser::from_json)?;
+                Ok(Grammar {
+                    productions,
+                    start_production_id,
+                    terminal_name_to_group_id,
+                    terminal_expr_to_group_id,
+                    tokenizer,
+                    glr_parser,
+                })
+            }
+            _ => Err("Expected JSONNode::Object for Grammar".to_string()),
+        }
+    }
+}
+
 
 impl Debug for Grammar {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -54,8 +100,8 @@ impl Debug for Grammar {
 
 
         writeln!(f, "  Terminals:")?;
-        let mut terminals = self.terminal_name_to_group_id.iter().collect::<Vec<_>>();
-        terminals.sort_by_key(|(group_id, _)| *group_id);
+        let mut terminals: Vec<_> = self.terminal_name_to_group_id.iter().collect(); // Collect to sort
+        terminals.sort_by_key(|(_name, group_id)| **group_id); // Sort by group_id
         for (name, group_id) in terminals {
             writeln!(f, "    {:?}: {:?}", name, group_id)?;
         }
@@ -111,6 +157,90 @@ pub enum GrammarExpr {
     Literal(Vec<u8>), // Add this line
 }
 
+impl JSONConvertible for GrammarExpr {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        match self {
+            GrammarExpr::RegexExpr(expr) => {
+                obj.insert("variant".to_string(), JSONNode::String("RegexExpr".to_string()));
+                obj.insert("expr".to_string(), expr.to_json());
+            }
+            GrammarExpr::Ref(name) => {
+                obj.insert("variant".to_string(), JSONNode::String("Ref".to_string()));
+                obj.insert("name".to_string(), name.to_json());
+            }
+            GrammarExpr::Sequence(exprs) => {
+                obj.insert("variant".to_string(), JSONNode::String("Sequence".to_string()));
+                obj.insert("exprs".to_string(), exprs.to_json());
+            }
+            GrammarExpr::Choice(exprs) => {
+                obj.insert("variant".to_string(), JSONNode::String("Choice".to_string()));
+                obj.insert("exprs".to_string(), exprs.to_json());
+            }
+            GrammarExpr::Optional(expr_box) => {
+                obj.insert("variant".to_string(), JSONNode::String("Optional".to_string()));
+                obj.insert("expr".to_string(), expr_box.to_json());
+            }
+            GrammarExpr::Repeat(expr_box) => {
+                obj.insert("variant".to_string(), JSONNode::String("Repeat".to_string()));
+                obj.insert("expr".to_string(), expr_box.to_json());
+            }
+            GrammarExpr::Literal(bytes) => {
+                obj.insert("variant".to_string(), JSONNode::String("Literal".to_string()));
+                obj.insert("bytes".to_string(), bytes.to_json());
+            }
+        }
+        JSONNode::Object(obj)
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for GrammarExpr".to_string())
+                                   .and_then(String::from_json)?;
+                match variant.as_str() {
+                    "RegexExpr" => {
+                        let expr = obj.remove("expr").ok_or_else(|| "Missing field expr for RegexExpr".to_string())
+                                      .and_then(Expr::from_json)?;
+                        Ok(GrammarExpr::RegexExpr(expr))
+                    }
+                    "Ref" => {
+                        let name = obj.remove("name").ok_or_else(|| "Missing field name for Ref".to_string())
+                                      .and_then(String::from_json)?;
+                        Ok(GrammarExpr::Ref(name))
+                    }
+                    "Sequence" => {
+                        let exprs = obj.remove("exprs").ok_or_else(|| "Missing field exprs for Sequence".to_string())
+                                       .and_then(Vec::<GrammarExpr>::from_json)?;
+                        Ok(GrammarExpr::Sequence(exprs))
+                    }
+                    "Choice" => {
+                        let exprs = obj.remove("exprs").ok_or_else(|| "Missing field exprs for Choice".to_string())
+                                       .and_then(Vec::<GrammarExpr>::from_json)?;
+                        Ok(GrammarExpr::Choice(exprs))
+                    }
+                    "Optional" => {
+                        let expr_node = obj.remove("expr").ok_or_else(|| "Missing field expr for Optional".to_string())?;
+                        Ok(GrammarExpr::Optional(Box::new(GrammarExpr::from_json(expr_node)?)))
+                    }
+                    "Repeat" => {
+                        let expr_node = obj.remove("expr").ok_or_else(|| "Missing field expr for Repeat".to_string())?;
+                        Ok(GrammarExpr::Repeat(Box::new(GrammarExpr::from_json(expr_node)?)))
+                    }
+                    "Literal" => {
+                        let bytes = obj.remove("bytes").ok_or_else(|| "Missing field bytes for Literal".to_string())
+                                       .and_then(Vec::<u8>::from_json)?;
+                        Ok(GrammarExpr::Literal(bytes))
+                    }
+                    _ => Err(format!("Unknown variant {} for GrammarExpr", variant)),
+                }
+            }
+            _ => Err("Expected JSONNode::Object for GrammarExpr".to_string()),
+        }
+    }
+}
+
+
 pub fn regex(expr: Expr) -> GrammarExpr {
     GrammarExpr::RegexExpr(expr)
 }
@@ -146,7 +276,9 @@ impl Grammar {
         // Return a clone or reference if stored
         // Note: This currently regenerates the parser. If self.glr_parser is already stored,
         // perhaps return self.glr_parser.clone() instead?
-        generate_glr_parser(&self.productions, self.start_production_id)
+        // For now, let's assume it's okay to regenerate or that it's cheap enough.
+        // If glr_parser is already stored, this should be: self.glr_parser.clone()
+        self.glr_parser.clone() // Assuming GLRParser is Clone
     }
 }
 
@@ -297,9 +429,9 @@ impl Grammar {
                     let nt = NonTerminal(choice_nt_name.clone());
                     // all_names is updated by generate_unique_indexed_name
 
-                    for expr in exprs {
+                    for expr_val in exprs { // Renamed expr to expr_val
                         let rhs = convert_expr(
-                            expr,
+                            expr_val, // Use expr_val
                             &choice_nt_name, // Pass the new NT name as the base for its children
                             productions,
                             // literal_map, // if used // Remove this line
@@ -395,12 +527,12 @@ impl Grammar {
         let mut terminal_string_to_expr = BTreeMap::new();
 
         // Process each rule definition
-        for (name, expr) in tqdm!(exprs.iter()) {
+        for (name, expr_val) in tqdm!(exprs.iter()) { // Renamed expr to expr_val
             let lhs = NonTerminal(name.clone());
             let lhs_name_str = &name; // This is the top-level rule name, e.g., "S"
 
             // Optimization: If the top-level expression is a Choice, create multiple productions directly.
-            if let GrammarExpr::Choice(choices) = expr {
+            if let GrammarExpr::Choice(choices) = expr_val { // Use expr_val
                 for choice_expr in choices {
                     let rhs = convert_expr(
                         choice_expr,
@@ -419,7 +551,7 @@ impl Grammar {
             } else {
                 // Otherwise, convert the expression as usual and create a single production.
                 let rhs = convert_expr(
-                    expr,
+                    expr_val, // Use expr_val
                     lhs_name_str, // Pass current rule's name as base
                     &mut productions,
                     // &mut literal_map, // if used // Remove this line
@@ -439,14 +571,14 @@ impl Grammar {
         let mut sorted_terminals: Vec<_> = terminal_string_to_expr.iter().collect();
         sorted_terminals.sort_by_key(|(name, _)| terminal_name_to_group_id.get_by_left(*name).unwrap());
 
-        for (name, expr) in sorted_terminals {
+        for (name, expr_val) in sorted_terminals { // Renamed expr to expr_val
              // Use the group ID assigned during convert_expr
             let group_id = *terminal_name_to_group_id.get_by_left(name).unwrap();
             // Ensure we add the expr to the tokenizer_exprs_vec at the correct index (group_id)
              while tokenizer_exprs_vec.len() <= group_id {
-                 tokenizer_exprs_vec.push(greedy_group(Expr::Epsilon));
+                 tokenizer_exprs_vec.push(greedy_group(Expr::Epsilon)); // Fill with a non-matching default
              }
-            tokenizer_exprs_vec[group_id] = greedy_group(expr.clone());
+            tokenizer_exprs_vec[group_id] = greedy_group(expr_val.clone()); // Use expr_val
         }
 
 
@@ -469,7 +601,7 @@ impl Grammar {
 }
 
 impl GrammarConstraint {
-    pub fn from_grammar(grammar: Grammar, llm_tokens: LLMTokenMap, eof_llm_token_id: usize, max_llm_token_id: usize) -> Self {
+    pub fn from_grammar(grammar: Grammar, llm_tokens: LLMTokenMap, _eof_llm_token_id: usize, max_llm_token_id: usize) -> Self { // _eof_llm_token_id not used
         GrammarConstraint::new(grammar.tokenizer, grammar.glr_parser, llm_tokens, grammar.terminal_name_to_group_id, max_llm_token_id)
     }
 }
@@ -486,6 +618,7 @@ pub struct IncrementalParser<'a> {
     // Maps current tokenizer state IDs to the GLR parser states reachable at that point.
     pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>>,
 }
+// IncrementalParser is a runtime state, likely not for direct serialization.
 
 impl<'a> IncrementalParser<'a> {
     /// Creates a new incremental parser initialized to the start state.
@@ -499,15 +632,15 @@ impl<'a> IncrementalParser<'a> {
     /// Processes a chunk of input bytes, updating the internal state.
     pub fn feed(&mut self, bytes: &[u8]) {
         crate::debug!(3, "Processing input bytes: {:?} with {} active tokenizer states", bytes, self.state.len());
-        let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>> = BTreeMap::new();
-        let mut queue: BTreeMap<(usize, TokenizerStateID), GLRParserState<'a, ()>> = BTreeMap::new();
+        let mut next_glr_states_by_tokenizer_state: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>> = BTreeMap::new(); // Renamed next_states
+        let mut work_queue: BTreeMap<(usize, TokenizerStateID), GLRParserState<'a, ()>> = BTreeMap::new(); // Renamed queue to work_queue
 
-        // Initialize the queue with the current state
+        // Initialize the work_queue with the current state
         for (tokenizer_state_id, glr_state) in std::mem::take(&mut self.state) {
-            queue.insert((0, tokenizer_state_id), glr_state);
+            work_queue.insert((0, tokenizer_state_id), glr_state);
         }
 
-        while let Some(((position, current_tokenizer_state_id), current_glr_state)) = queue.pop_first() {
+        while let Some(((position, current_tokenizer_state_id), current_glr_state)) = work_queue.pop_first() {
             // Execute the tokenizer from the current state with the new bytes
             let results: ExecuteResult = self
                 .grammar
@@ -516,50 +649,45 @@ impl<'a> IncrementalParser<'a> {
 
             crate::debug!(4, "Processing position {} in state {}. Matches: {}", position, current_tokenizer_state_id.0, results.matches.len());
             // Handle full token matches
-            for token in results.matches {
-                crate::debug!(4, "Found match for token {:?} ({}) with width {}", token.id, self.grammar.terminal_name_to_group_id.get_by_right(&token.id).unwrap(), token.width);
-                let grammar_token_id = TerminalID(token.id); // Assuming GroupID maps directly to TerminalID
-                let mut next_glr_state = current_glr_state.clone(); // Clone before stepping
-                next_glr_state.step(grammar_token_id);
+            for token_match in results.matches { // Renamed token to token_match
+                crate::debug!(4, "Found match for token {:?} ({}) with width {}", token_match.id, self.grammar.terminal_name_to_group_id.get_by_right(&token_match.id).map(|s|s.as_str()).unwrap_or("UNKNOWN"), token_match.width); // Added map for name
+                let grammar_token_id = TerminalID(token_match.id); // Assuming GroupID maps directly to TerminalID
+                let mut next_glr_state_after_match = current_glr_state.clone(); // Clone before stepping // Renamed next_glr_state
+                next_glr_state_after_match.step(grammar_token_id); // Use next_glr_state_after_match
 
-                if next_glr_state.is_ok() {
-                    if position + token.width == bytes.len() {
-                        // Reached the end of the input, so this is a clean match
-                        let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
-                        next_states.entry(next_tokenizer_state_id)
-                            .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
-                            .or_insert(next_glr_state.clone()); // Carry over the *original* GLR state
+                if next_glr_state_after_match.is_ok() { // Use next_glr_state_after_match
+                    let match_end_position = position + token_match.width; // Renamed token to token_match
+                    if match_end_position == bytes.len() {
+                        // Reached the end of the input, so this is a clean match for this path
+                        // The tokenizer state for the *next* chunk would be initial.
+                        let next_chunk_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
+                        next_glr_states_by_tokenizer_state.entry(next_chunk_tokenizer_state_id) // Use next_glr_states_by_tokenizer_state
+                            .and_modify(|existing_state| existing_state.merge_with(next_glr_state_after_match.clone())) // Use next_glr_state_after_match
+                            .or_insert_with(|| next_glr_state_after_match.clone()); // Use next_glr_state_after_match
                     } else {
-                        // After a full match, the tokenizer resets to its initial state
-                        let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
-                        queue.entry((position + token.width, next_tokenizer_state_id))
-                            .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
-                            .or_insert(next_glr_state);
+                        // After a full match, the tokenizer resets to its initial state for the *next token within this chunk*.
+                        let next_token_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
+                        work_queue.entry((match_end_position, next_token_tokenizer_state_id)) // Use work_queue
+                            .and_modify(|existing_state| existing_state.merge_with(next_glr_state_after_match.clone())) // Use next_glr_state_after_match
+                            .or_insert(next_glr_state_after_match); // Use next_glr_state_after_match
                     }
                 }
             }
 
-            // Handle partial matches (tokenizer ended mid-token)
-            if let Some(end_state_id) = results.end_state {
-                // Ensure at least one possible final token parses
-                // TODO: no need to do this here unless it's needed in is_valid. Don't want to do it in is_valid because it's expensive.
-                //  Would be better to put this in a lazily-initialized field in each entry in self.states, and compute it only when is_valid is called.
-                let possible_final_grammar_tokens: Vec<_> = self.grammar.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id));
-                for possible_final_grammar_token in possible_final_grammar_tokens {
-                    let mut final_glr_state = current_glr_state.clone(); // Clone before stepping
-                    final_glr_state.step(possible_final_grammar_token);
-                    if final_glr_state.is_ok() {
-                        let next_tokenizer_state_id = TokenizerStateID(end_state_id);
-                        next_states.entry(next_tokenizer_state_id)
-                            .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
-                            .or_insert(current_glr_state.clone()); // Carry over the *original* GLR state
-                    }
-                }
+            // Handle partial matches (tokenizer ended mid-token, but could still form a token if more input arrives)
+            if let Some(end_state_id_val) = results.end_state { // Renamed end_state_id
+                // This GLR state (current_glr_state) is carried forward, associated with the new tokenizer state (end_state_id_val).
+                // No GLR step happens here because no full grammar token was consumed.
+                let next_tokenizer_state_id_for_partial = TokenizerStateID(end_state_id_val); // Renamed next_tokenizer_state_id
+                next_glr_states_by_tokenizer_state.entry(next_tokenizer_state_id_for_partial) // Use next_glr_states_by_tokenizer_state, next_tokenizer_state_id_for_partial
+                    .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
+                    .or_insert_with(|| current_glr_state.clone());
             }
         }
 
-        self.state = next_states;
+        self.state = next_glr_states_by_tokenizer_state; // Use next_glr_states_by_tokenizer_state
     }
+
 
     /// Checks if the current state is valid (i.e., there's at least one active parse path).
     pub fn is_valid(&self) -> bool {
@@ -581,13 +709,15 @@ mod tests {
     use crate::datastructures::hybrid_bitset::HybridBitset;
 
     fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> HybridBitset {
-        let mut bitvec = BitVec::new();
-        bitvec.resize(capacity, false);
+        let mut bitvec = HybridBitset::new(); // Changed from BitVec
+        // HybridBitset doesn't need explicit capacity setting like BitVec for `ones` or direct insertion.
+        // It grows as needed. The `ones` method takes a length for the universe.
         for value in values {
-            bitvec.set(value, true);
+            bitvec.insert(value); // Use insert for HybridBitset
         }
-        bitvec.into()
+        bitvec
     }
+
 
     #[ignore]
     #[test]
@@ -637,7 +767,7 @@ mod tests {
         let llm_tokens: Vec<Vec<u8>> = vec![b"i".to_vec(), b"+".to_vec(), b"*".to_vec(), b"(".to_vec(), b")".to_vec(), b"(i".to_vec(), b"+i".to_vec()];
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let eof_llm_token_id = llm_tokens.len();
-        let max_llm_token_id = llm_tokens.len();
+        let max_llm_token_id = llm_tokens.len() -1; // Max ID is len - 1
         let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
         let mut grammar_constraint_state = grammar_constraint.init();
 
@@ -654,7 +784,7 @@ mod tests {
         // Get the mask.
         // The valid LLM tokens initially are ["i", "(", "(i"].
         let mask = grammar_constraint_state.get_mask();
-        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"i", b"(", b"(i"));
+        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len(), llm_token_vec!(b"i", b"(", b"(i")); // Capacity is len
         assert_eq!(mask, expected_mask);
 
         // Simulate generating from a LLM with the grammar constraint.
@@ -677,7 +807,7 @@ mod tests {
         state.step_with_llm_token_sequence(&prefill_tokens);
         let mask = state.get_mask();
          // After "(i+i*i", expecting '+', '*', ')', or '+i'
-        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"+", b"*", b")", b"+i"));
+        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len(), llm_token_vec!(b"+", b"*", b")", b"+i")); // Capacity is len
         assert_eq!(mask, expected_mask);
 
 
@@ -690,9 +820,9 @@ mod tests {
         // After "(i+i*i)", we are in a state where we expect ')'. Committing ')' reduces F -> (E).
         // After that, we are left with E + F, which expects '+' or '*'.
         // Plus EOF.
-        let mut expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"+", b"*", b"+i"));
+        let mut expected_mask = bitvec_with_capacity_and_values(llm_tokens.len(), llm_token_vec!(b"+", b"*", b"+i")); // Capacity is len
         // Add the EOF token
-        expected_mask.set(llm_tokens.len(), true);
+        expected_mask.insert(eof_llm_token_id); // Use insert for HybridBitset
         assert_eq!(mask, expected_mask);
     }
 
@@ -718,7 +848,7 @@ mod tests {
         let llm_tokens: Vec<Vec<u8>> = vec![b"a".to_vec(), b"b".to_vec()];
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let eof_llm_token_id = llm_tokens.len();
-        let max_llm_token_id = llm_tokens.len();
+        let max_llm_token_id = llm_tokens.len() -1; // Max ID is len - 1
         let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
         let mut grammar_constraint_state = grammar_constraint.init();
 
@@ -734,7 +864,7 @@ mod tests {
 
         // Get the mask.
         let mask = grammar_constraint_state.get_mask();
-        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"a"));
+        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len(), llm_token_vec!(b"a")); // Capacity is len
         assert_eq!(mask, expected_mask);
 
         // Commit "a"
@@ -743,7 +873,7 @@ mod tests {
 
         // Get the mask.
         let mask = grammar_constraint_state.get_mask();
-        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"b"));
+        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len(), llm_token_vec!(b"b")); // Capacity is len
         assert_eq!(mask, expected_mask);
     }
 
@@ -765,7 +895,7 @@ mod tests {
         let llm_tokens: Vec<Vec<u8>> = vec![b"a".to_vec()];
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let eof_llm_token_id = llm_tokens.len();
-        let max_llm_token_id = llm_tokens.len(); // max_llm_token_id should be tokens.len() for HybridBitset
+        let max_llm_token_id = llm_tokens.len() -1; // max_llm_token_id should be tokens.len() - 1 for HybridBitset
         let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
         let mut grammar_constraint_state = grammar_constraint.init();
 
@@ -783,7 +913,7 @@ mod tests {
         // Get the mask.
         grammar_constraint_state.step_with_all_llm_tokens();
         let mask = grammar_constraint_state.get_mask();
-        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"a"));
+        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len(), llm_token_vec!(b"a")); // Capacity is len
         assert_eq!(mask, expected_mask);
 
         // Commit "a"
@@ -841,10 +971,10 @@ mod tests {
         dbg!(&tokenizer);
 
         let llm_tokens: Vec<Vec<u8>> = (0..2).map(|i| format!("abcdefghijk{}", i).as_bytes().to_vec()).collect();
-        let llm_tokens_slices: Vec<&[u8]> = llm_tokens.iter().map(|token| &token[..]).collect();
+        // let llm_tokens_slices: Vec<&[u8]> = llm_tokens.iter().map(|token| &token[..]).collect(); // Unused
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
-        let eof_llm_token_id = llm_tokens.len();
-        let max_llm_token_id = llm_tokens.len();
+        // let eof_llm_token_id = llm_tokens.len(); // Unused
+        let max_llm_token_id = llm_tokens.len() -1; // Max ID is len - 1
 
         let mut token_name_map = BiBTreeMap::new();
         token_name_map.insert("ignore".to_string(), 0);
@@ -857,11 +987,11 @@ mod tests {
         token_name_map.insert("name".to_string(), 7);
 
 
-        let precomputed = GrammarConstraint::precompute(
+        let _precomputed = GrammarConstraint::precompute( // Renamed precomputed
             &tokenizer,
-            &llm_token_map,
+            &llm_token_map, // Pass original map, precompute handles internal mapping
             &token_name_map,
-            max_llm_token_id,
+            max_llm_token_id, // Pass max *original* ID
         );
         // print_precomputed(&precomputed);
         println!("Done precomputing");
@@ -870,3 +1000,4 @@ mod tests {
 
 
 }
+

@@ -1,10 +1,26 @@
 use std::collections::{BTreeMap, BTreeSet};
+use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NonTerminal(pub String);
 
+impl JSONConvertible for NonTerminal {
+    fn to_json(&self) -> JSONNode { self.0.to_json() }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        String::from_json(node).map(NonTerminal)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Terminal(pub String);
+
+impl JSONConvertible for Terminal {
+    fn to_json(&self) -> JSONNode { self.0.to_json() }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        String::from_json(node).map(Terminal)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Symbol {
@@ -12,11 +28,67 @@ pub enum Symbol {
     NonTerminal(NonTerminal),
 }
 
+impl JSONConvertible for Symbol {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        match self {
+            Symbol::Terminal(t) => {
+                obj.insert("variant".to_string(), JSONNode::String("Terminal".to_string()));
+                obj.insert("value".to_string(), t.to_json());
+            }
+            Symbol::NonTerminal(nt) => {
+                obj.insert("variant".to_string(), JSONNode::String("NonTerminal".to_string()));
+                obj.insert("value".to_string(), nt.to_json());
+            }
+        }
+        JSONNode::Object(obj)
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for Symbol".to_string())
+                                   .and_then(String::from_json)?;
+                let value_node = obj.remove("value").ok_or_else(|| "Missing field value for Symbol".to_string())?;
+                match variant.as_str() {
+                    "Terminal" => Terminal::from_json(value_node).map(Symbol::Terminal),
+                    "NonTerminal" => NonTerminal::from_json(value_node).map(Symbol::NonTerminal),
+                    _ => Err(format!("Unknown variant {} for Symbol", variant)),
+                }
+            }
+            _ => Err("Expected JSONNode::Object for Symbol".to_string()),
+        }
+    }
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Production {
     pub lhs: NonTerminal,
     pub rhs: Vec<Symbol>,
 }
+
+// Manual impl for Production (could be derived)
+impl JSONConvertible for Production {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("lhs".to_string(), self.lhs.to_json());
+        obj.insert("rhs".to_string(), self.rhs.to_json());
+        JSONNode::Object(obj)
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let lhs = obj.remove("lhs").ok_or_else(|| "Missing field lhs for Production".to_string())
+                                 .and_then(NonTerminal::from_json)?;
+                let rhs = obj.remove("rhs").ok_or_else(|| "Missing field rhs for Production".to_string())
+                                 .and_then(Vec::<Symbol>::from_json)?;
+                Ok(Production { lhs, rhs })
+            }
+            _ => Err("Expected JSONNode::Object for Production".to_string()),
+        }
+    }
+}
+
 
 pub fn nt(name: &str) -> Symbol {
     Symbol::NonTerminal(NonTerminal(name.to_string()))
@@ -91,12 +163,15 @@ pub fn compute_first_sets(productions: &[Production]) -> BTreeMap<NonTerminal, B
 
             for symbol in rhs {
                 if let Symbol::NonTerminal(nt) = symbol {
-                    let first_nt = first_sets[nt].clone();
+                    let first_nt = first_sets.get(nt).cloned().unwrap_or_default(); // Handle case where nt might not be in first_sets yet
                     first_sets.get_mut(lhs).unwrap().extend(first_nt);
 
                     if !epsilon_nonterminals.contains(nt) {
                         break;
                     }
+                } else if let Symbol::Terminal(t) = symbol { // Added this case
+                    first_sets.get_mut(lhs).unwrap().insert(t.clone());
+                    break;
                 }
             }
 
@@ -116,7 +191,13 @@ pub fn compute_follow_sets(productions: &[Production]) -> BTreeMap<NonTerminal, 
 
     for production in productions {
         follow_sets.entry(production.lhs.clone()).or_default();
+        for symbol in &production.rhs { // Ensure all non-terminals in RHS are in follow_sets
+            if let Symbol::NonTerminal(nt) = symbol {
+                follow_sets.entry(nt.clone()).or_default();
+            }
+        }
     }
+
 
     let mut changed = true;
     while changed {
@@ -139,7 +220,7 @@ pub fn compute_follow_sets(productions: &[Production]) -> BTreeMap<NonTerminal, 
                                 break;
                             }
                             Symbol::NonTerminal(nt_next) => {
-                                let first_next = &first_sets[nt_next];
+                                let first_next = first_sets.get(nt_next).cloned().unwrap_or_default();
                                 follow_sets.get_mut(nt).unwrap().extend(first_next.iter().cloned());
                                 
                                 if !epsilon_nonterminals.contains(nt_next) {

@@ -3,6 +3,7 @@ use std::ops::Deref;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::cmp::Ordering;
+use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 
 /// A wrapper around `Arc<T>` that implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`,
 /// and `Hash` based on the pointer value of the `Arc`.
@@ -10,6 +11,21 @@ use std::cmp::Ordering;
 /// `HashMap` where identity is determined by the `Arc`'s pointer, not its content.
 /// It also dereferences to the underlying `Arc<T>`.
 pub struct ArcPtrWrapper<T>(Arc<T>);
+
+// ArcPtrWrapper serialization:
+// Serializing based on pointer identity is not meaningful for JSON.
+// We will serialize the *content* of the Arc.
+// Deserialization will create a new Arc, so pointer identity will not be preserved.
+// This is a fundamental limitation when serializing pointer-based identity wrappers.
+impl<T: JSONConvertible> JSONConvertible for ArcPtrWrapper<T> {
+    fn to_json(&self) -> JSONNode {
+        self.0.as_ref().to_json() // Serialize the content
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        T::from_json(node).map(|content| ArcPtrWrapper(Arc::new(content)))
+    }
+}
+
 
 impl<T> ArcPtrWrapper<T> {
     /// Creates a new `ArcPtrWrapper` from an `Arc<T>`.
@@ -74,3 +90,4 @@ impl<T> fmt::Debug for ArcPtrWrapper<T> {
          .finish()
     }
 }
+

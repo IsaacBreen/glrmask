@@ -1,10 +1,22 @@
 use std::collections::BTreeSet;
+use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+use std::hash::Hash; // Added for T bound in JSONConvertible for HashSet
 
 /// A frozen set implementation in Rust, similar to Python's frozenset.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FrozenSet<T: Eq + Ord> {
     inner: BTreeSet<T>,
 }
+
+impl<T: Eq + Ord + JSONConvertible> JSONConvertible for FrozenSet<T> {
+    fn to_json(&self) -> JSONNode {
+        self.inner.to_json() // Delegate to BTreeSet<T>'s implementation
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        BTreeSet::<T>::from_json(node).map(|inner_set| FrozenSet { inner: inner_set })
+    }
+}
+
 
 impl<T: Eq + Ord> FrozenSet<T> {
     /// Creates a new empty FrozenSet.
@@ -46,7 +58,7 @@ where
 
 impl<T: Eq + Ord> FromIterator<T> for FrozenSet<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        Self::from_iter(iter)
+        Self::from_iter(iter) // Calls the inherent method
     }
 }
 
@@ -127,17 +139,17 @@ impl<T: Eq + Ord> IntoIterator for FrozenSet<T> {
 }
 
 impl<T: Eq + Ord> FrozenSet<T> {
-    pub fn iter(&self) -> Iter<T> {
+    pub fn iter(&self) -> Iter<'_, T> { // Added lifetime '_, T
         Iter {
             inner: self.inner.iter(),
         }
     }
 
-    pub fn into_iter(self) -> IntoIter<T> {
-        IntoIter {
-            inner: self.inner.into_iter(),
-        }
-    }
+    // pub fn into_iter(self) -> IntoIter<T> { // This conflicts with the trait impl
+    //     IntoIter {
+    //         inner: self.inner.into_iter(),
+    //     }
+    // }
 }
 
 
@@ -188,3 +200,4 @@ mod tests {
         }
     }
 }
+

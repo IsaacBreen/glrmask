@@ -1,10 +1,36 @@
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
+use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
+
 
 #[derive(Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct U8Set {
     pub(crate) x: u128,
     pub(crate) y: u128,
 }
+
+// Manual impl for U8Set (could be derived)
+impl JSONConvertible for U8Set {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("x".to_string(), self.x.to_json());
+        obj.insert("y".to_string(), self.y.to_json());
+        JSONNode::Object(obj)
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let x = obj.remove("x").ok_or_else(|| "Missing field x for U8Set".to_string())
+                           .and_then(u128::from_json)?;
+                let y = obj.remove("y").ok_or_else(|| "Missing field y for U8Set".to_string())
+                           .and_then(u128::from_json)?;
+                Ok(U8Set { x, y })
+            }
+            _ => Err("Expected JSONNode::Object for U8Set".to_string()),
+        }
+    }
+}
+
 
 impl Default for U8Set {
     fn default() -> Self {
@@ -102,7 +128,7 @@ impl U8Set {
     pub fn from_byte_range(range: impl IntoIterator<Item = u8>) -> U8Set {
         let mut result = U8Set::none();
         for c in range {
-            assert!(c <= 255, "Character {} is not a valid u8 value", c);
+            // assert!(c <= 255, "Character {} is not a valid u8 value", c); // u8 is always <= 255
             result.insert(c);
         }
         result
@@ -142,13 +168,13 @@ impl U8Set {
     }
 
     pub fn without(&self, value: impl Into<u8>) -> Self {
-        let mut result = self.clone();
+        let mut result = *self; // Use copy since U8Set is Copy
         result.remove(value.into());
         result
     }
 
     pub fn difference(&self, other: &Self) -> Self {
-        let mut result = self.clone();
+        let mut result = *self; // Use copy
         result.x &= !other.x;
         result.y &= !other.y;
         result
@@ -177,7 +203,7 @@ impl U8Set {
     pub fn from_chars(chars: &str) -> Self {
         let mut result = Self::none();
         for c in chars.chars() {
-            assert!(c as usize <= 255, "Character {} is not a valid u8 value", c);
+            assert!(c.is_ascii(), "Character {} is not a valid ASCII u8 value", c); // Ensure ASCII for direct cast
             result.insert(c as u8);
         }
         result
@@ -318,16 +344,16 @@ impl std::fmt::Display for U8Set {
         }
 
         let mut output = String::new();
-        for (i, (start, end)) in ranges.iter().enumerate() {
+        for (i, (start_val, end_val)) in ranges.iter().enumerate() { // Renamed start, end
             if i > 0 {
                 output.push_str(", ");
             }
-            if start == end {
-                output.push_str(&format!("{:?}", *start as char));
-            } else if end - start == 1 {
-                output.push_str(&format!("{:?}, {:?}", *start as char, *end as char));
+            if start_val == end_val {
+                output.push_str(&format!("{:?}", *start_val as char));
+            } else if end_val - start_val == 1 {
+                output.push_str(&format!("{:?}, {:?}", *start_val as char, *end_val as char));
             } else {
-                output.push_str(&format!("{:?}..{:?}", *start as char, *end as char));
+                output.push_str(&format!("{:?}..{:?}", *start_val as char, *end_val as char));
             }
         }
 

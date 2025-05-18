@@ -1,26 +1,96 @@
 use crate::finite_automata::{GroupID, Regex};
 use crate::types::{TerminalID as GrammarTokenID};
 use bimap::BiBTreeMap;
+use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+use std::collections::BTreeMap as StdMap; // Added for derive macro pattern, aliased to avoid conflict
 
 pub type LLMToken = Vec<u8>;
 pub type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LLMTokenID(pub usize);
+
+// Manual impl for LLMTokenID (could be derived)
+impl JSONConvertible for LLMTokenID {
+    fn to_json(&self) -> JSONNode {
+        self.0.to_json()
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        usize::from_json(node).map(LLMTokenID)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TokenizerStateID(pub usize);
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+// Manual impl for TokenizerStateID (could be derived)
+impl JSONConvertible for TokenizerStateID {
+    fn to_json(&self) -> JSONNode {
+        self.0.to_json()
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        usize::from_json(node).map(TokenizerStateID)
+    }
+}
+
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)] // Added Ord for potential use in BTreeSet/Map
 pub struct Token {
-    pub id: GroupID,
+    pub id: GroupID, // GroupID is usize
     pub width: usize,
 }
+
+// Manual impl for Token (could be derived)
+impl JSONConvertible for Token {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("id".to_string(), self.id.to_json());
+        obj.insert("width".to_string(), self.width.to_json());
+        JSONNode::Object(obj)
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let id = obj.remove("id").ok_or_else(|| "Missing field id for Token".to_string())
+                                 .and_then(GroupID::from_json)?;
+                let width = obj.remove("width").ok_or_else(|| "Missing field width for Token".to_string())
+                                 .and_then(usize::from_json)?;
+                Ok(Token { id, width })
+            }
+            _ => Err("Expected JSONNode::Object for Token".to_string()),
+        }
+    }
+}
+
 
 #[derive(Debug)]
 pub struct ExecuteResult {
     pub matches: Vec<Token>,
     pub end_state: Option<usize>,
 }
+
+// Manual impl for ExecuteResult (could be derived)
+impl JSONConvertible for ExecuteResult {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("matches".to_string(), self.matches.to_json());
+        obj.insert("end_state".to_string(), self.end_state.to_json());
+        JSONNode::Object(obj)
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let matches = obj.remove("matches").ok_or_else(|| "Missing field matches for ExecuteResult".to_string())
+                                 .and_then(Vec::<Token>::from_json)?;
+                let end_state = obj.remove("end_state").ok_or_else(|| "Missing field end_state for ExecuteResult".to_string())
+                                 .and_then(Option::<usize>::from_json)?;
+                Ok(ExecuteResult { matches, end_state })
+            }
+            _ => Err("Expected JSONNode::Object for ExecuteResult".to_string()),
+        }
+    }
+}
+
 
 impl Regex {
     pub(crate) fn initial_state_id(&self) -> TokenizerStateID {
@@ -52,3 +122,4 @@ impl Regex {
         self.dfa.states.len()
     }
 }
+

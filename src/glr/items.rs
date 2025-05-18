@@ -1,11 +1,37 @@
 use crate::glr::grammar::{Production, Symbol};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
+
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Item {
     pub production: Production,
     pub dot_position: usize,
 }
+
+// Manual impl for Item (could be derived)
+impl JSONConvertible for Item {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("production".to_string(), self.production.to_json());
+        obj.insert("dot_position".to_string(), self.dot_position.to_json());
+        JSONNode::Object(obj)
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let production = obj.remove("production").ok_or_else(|| "Missing field production for Item".to_string())
+                                    .and_then(Production::from_json)?;
+                let dot_position = obj.remove("dot_position").ok_or_else(|| "Missing field dot_position for Item".to_string())
+                                      .and_then(usize::from_json)?;
+                Ok(Item { production, dot_position })
+            }
+            _ => Err("Expected JSONNode::Object for Item".to_string()),
+        }
+    }
+}
+
 
 pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BTreeSet<Item> {
     // crate::debug!(3, "Computing closure");
