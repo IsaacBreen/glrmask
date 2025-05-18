@@ -953,24 +953,22 @@ system:
 
     You are a helpful assistant.
     Respond in markdown format.
-    If asked for full code, provide it.
-    Otherwise, don't write the full code (it's too long); instead, give detailed, step-by-step instructions for modifying the code. Be very specific.
-    Do NOT write diffs (git-style or otherwise) or patches unless explicitly asked to do so.
-    A git diff uses "+" or "-" at the start lines. Do NOT use "+" or "-" at the start of any line (unless incidental and not part of a git diff).
-    Explain exactly what changes to make, line by line if needed, so the instructions are clear even without conversation context.
+    Respond with a git diff patch for each modified or added files. Use the ```diff markdown code block.
+    One diff code block per file. Do not attempt to combine multiple all changes into one diff with multiple files.
+    Include filenames in the diff code block, e.g. "diff --git a/file.py b/file.py".
     Avoid asking the user to clear their caches or do local configuration related stuff. That's rarely the cause of errors.
     If you ask them, and they reply with a compilation error, assume they've already done everything you suggested and move on.
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - copy-one/paste
+    - o4-mini
   code_completion_model:
     - gemini/gemini-2.5-flash-preview-04-17
   commit_message_model:
     - gemini/gemini-2.5-flash-preview-04-17
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: llm
+  apply_mode: git
 messages:
   - user: |-
       ```rust 'src/json_serialization.rs'
@@ -1450,290 +1448,644 @@ messages:
       filename: src/json_serialization.rs
   - user: Modify this so there's no precision loss for numbers.
     metadata:
-  - assistant: |-
-      Okay, I'll guide you through the modifications to ensure no precision loss for numbers. This primarily involves changing the `JSONNode::Number` variant to store numbers as strings and updating the serialization/deserialization logic accordingly.
-
-      Here are the step-by-step instructions:
-
-      **File: `src/json_serialization.rs`**
-
-      1.  **Modify the `JSONNode` Enum Definition:**
-          *   Locate the `JSONNode` enum definition.
-          *   Change the `Number` variant:
-              *   **Current:**
-                  ```rust
-                  Number(f64),
-                  ```
-              *   **Change to:**
-                  ```rust
-                  Number(String), // Store numbers as strings to preserve precision
-                  ```
-
-      2.  **Update the `impl_json_for_number!` macro:**
-          *   **`to_json` method:**
-              *   **Current:**
-                  ```rust
-                  fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
-                  ```
-              *   **Change to:**
-                  ```rust
-                  fn to_json(&self) -> JSONNode { JSONNode::Number(self.to_string()) }
-                  ```
-          *   **`from_json` method:**
-              *   **Current:**
-                  ```rust
-                  fn from_json(node: JSONNode) -> Result<Self, String> {
-                      match node {
-                          JSONNode::Number(n) => {
-                              Ok(n as $t)
-                          }
-                          _ => Err(format!("Expected JSONNode::Number for {}", stringify!($t))),
-                      }
-                  }
-                  ```
-              *   **Change to:**
-                  ```rust
-                  fn from_json(node: JSONNode) -> Result<Self, String> {
-                      match node {
-                          JSONNode::Number(s) => {
-                              s.parse::<$t>().map_err(|e| format!("Failed to parse number string '{}' as {}: {}", s, stringify!($t), e))
-                          }
-                          _ => Err(format!("Expected JSONNode::Number(String) for {}", stringify!($t))),
-                      }
-                  }
-                  ```
-
-      3.  **Update the specific `impl JSONConvertible for u8`:**
-          *   **`to_json` method:**
-              *   **Current:**
-                  ```rust
-                  fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
-                  ```
-              *   **Change to:**
-                  ```rust
-                  fn to_json(&self) -> JSONNode { JSONNode::Number(self.to_string()) }
-                  ```
-          *   **`from_json` method:**
-              *   **Current:**
-                  ```rust
-                  fn from_json(node: JSONNode) -> Result<Self, String> {
-                      match node {
-                          JSONNode::Number(n) => {
-                              if n >= 0.0 && n <= 255.0 && n.fract() == 0.0 {
-                                  Ok(n as u8)
-                              } else {
-                                  Err(format!("Number {} out of range or not an integer, cannot be converted to u8", n))
-                              }
-                          }
-                          _ => Err("Expected JSONNode::Number for u8".to_string()),
-                      }
-                  }
-                  ```
-              *   **Change to:**
-                  ```rust
-                  fn from_json(node: JSONNode) -> Result<Self, String> {
-                      match node {
-                          JSONNode::Number(s) => {
-                              s.parse::<u8>().map_err(|e| format!("Failed to parse number string '{}' as u8: {}", s, e))
-                          }
-                          _ => Err("Expected JSONNode::Number(String) for u8".to_string()),
-                      }
-                  }
-                  ```
-
-      4.  **Update the `impl JSONConvertible for u128`:**
-          *   **`to_json` method:**
-              *   **Current:**
-                  ```rust
-                  fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) } // Potential precision loss
-                  ```
-              *   **Change to:**
-                  ```rust
-                  fn to_json(&self) -> JSONNode { JSONNode::Number(self.to_string()) }
-                  ```
-          *   **`from_json` method:**
-              *   **Current:**
-                  ```rust
-                  fn from_json(node: JSONNode) -> Result<Self, String> {
-                      match node {
-                          JSONNode::Number(n) => Ok(n as u128), // Potential precision loss
-                          _ => Err("Expected JSONNode::Number for u128".to_string()),
-                      }
-                  }
-                  ```
-              *   **Change to:**
-                  ```rust
-                  fn from_json(node: JSONNode) -> Result<Self, String> {
-                      match node {
-                          JSONNode::Number(s) => {
-                              s.parse::<u128>().map_err(|e| format!("Failed to parse number string '{}' as u128: {}", s, e))
-                          }
-                          _ => Err("Expected JSONNode::Number(String) for u128".to_string()),
-                      }
-                  }
-                  ```
-
-      5.  **Update the `impl JSONConvertible for i128`:**
-          *   **`to_json` method:**
-              *   **Current:**
-                  ```rust
-                  fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) } // Potential precision loss
-                  ```
-              *   **Change to:**
-                  ```rust
-                  fn to_json(&self) -> JSONNode { JSONNode::Number(self.to_string()) }
-                  ```
-          *   **`from_json` method:**
-              *   **Current:**
-                  ```rust
-                  fn from_json(node: JSONNode) -> Result<Self, String> {
-                      match node {
-                          JSONNode::Number(n) => Ok(n as i128), // Potential precision loss
-                          _ => Err("Expected JSONNode::Number for i128".to_string()),
-                      }
-                  }
-                  ```
-              *   **Change to:**
-                  ```rust
-                  fn from_json(node: JSONNode) -> Result<Self, String> {
-                      match node {
-                          JSONNode::Number(s) => {
-                              s.parse::<i128>().map_err(|e| format!("Failed to parse number string '{}' as i128: {}", s, e))
-                          }
-                          _ => Err("Expected JSONNode::Number(String) for i128".to_string()),
-                      }
-                  }
-                  ```
-
-      6.  **Update Tests (`#[cfg(test)] mod tests`):**
-          You'll need to update assertions where `JSONNode::Number` is explicitly checked. The number values should now be strings.
-
-          *   **In `test_my_struct_serialization_deserialization`:**
-              *   Change:
-                  ```rust
-                  assert_eq!(obj.get("field1"), Some(&JSONNode::Number(42.0)));
-                  ```
-                  to:
-                  ```rust
-                  assert_eq!(obj.get("field1"), Some(&JSONNode::Number("42".to_string())));
-                  ```
-              *   Change:
-                  ```rust
-                  if let Some(JSONNode::Array(arr)) = obj.get("list_of_numbers") {
-                       assert_eq!(arr, &vec![JSONNode::Number(1.0), JSONNode::Number(2.0), JSONNode::Number(3.0)]);
-                  } else { // ... }
-                  ```
-                  to:
-                  ```rust
-                  if let Some(JSONNode::Array(arr)) = obj.get("list_of_numbers") {
-                       assert_eq!(arr, &vec![JSONNode::Number("1".to_string()), JSONNode::Number("2".to_string()), JSONNode::Number("3".to_string())]);
-                  } else { // ... }
-                  ```
-              *   Change:
-                  ```rust
-                  if let Some(JSONNode::Array(arr)) = obj.get("byte_buffer") {
-                       assert_eq!(arr, &vec![JSONNode::Number(10.0), JSONNode::Number(20.0), JSONNode::Number(30.0)]);
-                  } else { // ... }
-                  ```
-                  to:
-                  ```rust
-                  if let Some(JSONNode::Array(arr)) = obj.get("byte_buffer") {
-                       assert_eq!(arr, &vec![JSONNode::Number("10".to_string()), JSONNode::Number("20".to_string()), JSONNode::Number("30".to_string())]);
-                  } else { // ... }
-                  ```
-
-          *   **In `test_btreemap_serialization`:**
-              *   Change:
-                  ```rust
-                  assert_eq!(pair1[1], JSONNode::Number(10.0));
-                  ```
-                  to:
-                  ```rust
-                  assert_eq!(pair1[1], JSONNode::Number("10".to_string()));
-                  ```
-              *   Change:
-                  ```rust
-                  assert_eq!(pair2[1], JSONNode::Number(20.0));
-                  ```
-                  to:
-                  ```rust
-                  assert_eq!(pair2[1], JSONNode::Number("20".to_string()));
-                  ```
-
-          *   **In `test_vec_u8_specialization`:**
-              *   Change:
-                  ```rust
-                  assert_eq!(nums[0], JSONNode::Number(1.0));
-                  assert_eq!(nums[1], JSONNode::Number(2.0));
-                  assert_eq!(nums[2], JSONNode::Number(255.0));
-                  ```
-                  to:
-                  ```rust
-                  assert_eq!(nums[0], JSONNode::Number("1".to_string()));
-                  assert_eq!(nums[1], JSONNode::Number("2".to_string()));
-                  assert_eq!(nums[2], JSONNode::Number("255".to_string()));
-                  ```
-              *   Change:
-                  ```rust
-                  let invalid_json = JSONNode::Array(vec![JSONNode::Number(256.0)]);
-                  ```
-                  to:
-                  ```rust
-                  let invalid_json = JSONNode::Array(vec![JSONNode::Number("256".to_string())]);
-                  ```
-              *   Change:
-                  ```rust
-                  let invalid_json_fract = JSONNode::Array(vec![JSONNode::Number(10.5)]);
-                  ```
-                  to:
-                  ```rust
-                  let invalid_json_fract = JSONNode::Array(vec![JSONNode::Number("10.5".to_string())]);
-                  ```
-
-          *   **Update comments in tests (optional but good practice):**
-              *   In `test_my_struct_serialization_deserialization`, the comment:
-                  ```
-                  // Expected JSON structure (BTreeMap for object means fields are sorted by key)
-                  // {
-                  //   "byte_buffer": [10.0, 20.0, 30.0],
-                  //   "field1": 42.0,
-                  //   "field2": "hello",
-                  //   "list_of_numbers": [1.0, 2.0, 3.0],
-                  //   "optional_field": true
-                  // }
-                  ```
-                  should reflect stringified numbers if it's meant to be a direct representation of `JSONNode` values (though actual JSON output would still be numbers):
-                  If the comment represents the `JSONNode` structure:
-                  `"field1": "42"`, `"list_of_numbers": ["1", "2", "3"]`, etc.
-                  If it represents the final JSON text, it would still be `42`, `1`, `2`, `3`. The current tests check the `JSONNode` structure, so updating the comment to reflect `JSONNode::Number(String)` values is more consistent with the test logic. For example:
-                  `"field1": JSONNode::Number("42".to_string())`
-                  The existing comments are more like the *conceptual* JSON. The key is that the `assert_eq!` lines are correct.
-
-              *   In `test_my_struct_optional_none`, the comment:
-                  `// { "byte_buffer": [], "field1": 1.0, "field2": "world", "list_of_numbers": [], "optional_field": null }`
-                  `field1: 1.0` would conceptually be `JSONNode::Number("1".to_string())`.
-
-              *   In `test_generic_struct_serialization`, the comment:
-                  `// "item_t": 123.0,`
-                  would conceptually be `JSONNode::Number("123".to_string())`.
-
-      These changes ensure that numbers are converted to strings for storage within `JSONNode` and parsed from strings during deserialization, thus preserving their full precision. The standard library's `to_string` and `parse` methods for numeric types are used, which handle various formats (integers, floats, scientific notation for floats if applicable) correctly.
+  - assistant: |
+      ```diff
+      diff --git a/src/json_serialization.rs b/src/json_serialization.rs
+      --- a/src/json_serialization.rs
+      +++ b/src/json_serialization.rs
+      @@ -12,9 +12,12 @@ use json_convertible_derive::JSONConvertible;
+       // --- JSONNode Enum ---
+       #[derive(Debug, Clone, PartialEq)]
+       pub enum JSONNode {
+      -    Null,
+      -    Bool(bool),
+      -    Number(f64),
+      +    Null,
+      +    Bool(bool),
+      +    Int(i128),
+      +    UInt(u128),
+      +    Float(f64),
+           String(String),
+           Array(Vec<JSONNode>),
+           Object(BTreeMap<String, JSONNode>),
+      @@ -54,36 +57,139 @@ impl<'a> JSONConvertible for &'a str {
+           Err("Cannot deserialize into &str, deserialize into String instead".to_string())
+       }
+       
+      -// --- Implementations for Primitives ---
+      -
+      -macro_rules! impl_json_for_number {
+      -    ($($t:ty),*) => {
+      -        $(
+      -            impl JSONConvertible for $t {
+      -                fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
+      -                fn from_json(node: JSONNode) -> Result<Self, String> {
+      -                    match node {
+      -                        JSONNode::Number(n) => {
+      -                            Ok(n as $t)
+      -                        }
+      -                        _ => Err(format!("Expected JSONNode::Number for {}", stringify!($t))),
+      -                    }
+      -                }
+      -            }
+      -        )*
+      -    };
+      -}
+      -
+      -impl_json_for_number!(usize, isize, u16, u32, u64, i8, i16, i32, i64, f32, f64);
+      -
+      -// Specific implementation for u8 to handle range/integer validation
+      -impl JSONConvertible for u8 {
+      -    fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
+      -    fn from_json(node: JSONNode) -> Result<Self, String> {
+      -        match node {
+      -            JSONNode::Number(n) => {
+      -                if n >= 0.0 && n <= 255.0 && n.fract() == 0.0 {
+      -                    Ok(n as u8)
+      -                } else {
+      -                    Err(format!("Number {} out of range or not an integer, cannot be converted to u8", n))
+      -                }
+      -            }
+      -            _ => Err("Expected JSONNode::Number for u8".to_string()),
+      -        }
+      -    }
+      -}
+      -
+      -impl JSONConvertible for u128 {
+      -    fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) } // Potential precision loss
+      -    fn from_json(node: JSONNode) -> Result<Self, String> {
+      -        match node {
+      -            JSONNode::Number(n) => Ok(n as u128), // Potential precision loss
+      -            _ => Err("Expected JSONNode::Number for u128".to_string()),
+      -        }
+      -    }
+      -}
+      -impl JSONConvertible for i128 {
+      -    fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) } // Potential precision loss
+      -    fn from_json(node: JSONNode) -> Result<Self, String> {
+      -        match node {
+      -            JSONNode::Number(n) => Ok(n as i128), // Potential precision loss
+      -            _ => Err("Expected JSONNode::Number for i128".to_string()),
+      -        }
+      -    }
+      -}
+      +// --- Implementations for numeric primitives without precision loss ---
+      +macro_rules! impl_json_for_signed {
+      +    ($($t:ty),*) => {
+      +        $(
+      +            impl JSONConvertible for $t {
+      +                fn to_json(&self) -> JSONNode { JSONNode::Int(*self as i128) }
+      +                fn from_json(node: JSONNode) -> Result<Self, String> {
+      +                    match node {
+      +                        JSONNode::Int(n)   => Ok(n as $t),
+      +                        JSONNode::UInt(u)  => Ok(u as $t),
+      +                        other => Err(format!("Expected integer for {}, got {:?}", stringify!($t), other)),
+      +                    }
+      +                }
+      +            }
+      +        )*
+      +    };
+      +}
+      +
+      +macro_rules! impl_json_for_unsigned {
+      +    ($($t:ty),*) => {
+      +        $(
+      +            impl JSONConvertible for $t {
+      +                fn to_json(&self) -> JSONNode { JSONNode::UInt(*self as u128) }
+      +                fn from_json(node: JSONNode) -> Result<Self, String> {
+      +                    match node {
+      +                        JSONNode::UInt(u) if u <= <$t>::MAX as u128 => Ok(u as $t),
+      +                        JSONNode::Int(n)  if n >= 0 &&
+      +                                            (n as u128) <= <$t>::MAX as u128 => Ok(n as $t),
+      +                        JSONNode::UInt(u) => Err(format!("Number {} out of range for {}", u, stringify!($t))),
+      +                        JSONNode::Int(n)  => Err(format!("Number {} out of range for {}", n, stringify!($t))),
+      +                        other => Err(format!("Expected integer for {}, got {:?}", stringify!($t), other)),
+      +                    }
+      +                }
+      +            }
+      +        )*
+      +    };
+      +}
+      +
+      +macro_rules! impl_json_for_float {
+      +    ($($t:ty),*) => {
+      +        $(
+      +            impl JSONConvertible for $t {
+      +                fn to_json(&self) -> JSONNode { JSONNode::Float(*self as f64) }
+      +                fn from_json(node: JSONNode) -> Result<Self, String> {
+      +                    match node {
+      +                        JSONNode::Float(f) => Ok(f as $t),
+      +                        JSONNode::Int(n)   => Ok(n as $t),
+      +                        JSONNode::UInt(u)  => Ok(u as $t),
+      +                        other => Err(format!("Expected float for {}, got {:?}", stringify!($t), other)),
+      +                    }
+      +                }
+      +            }
+      +        )*
+      +    };
+      +}
+      +
+      +// Signed integers
+      +impl_json_for_signed!(i8, i16, i32, i64, isize, i128);
+      +// Unsigned integers
+      +impl_json_for_unsigned!(u8, u16, u32, u64, usize, u128);
+      +// Floating-point types
+      +impl_json_for_float!(f32, f64);
+       
+       impl JSONConvertible for String {
+           fn to_json(&self) -> JSONNode { JSONNode::String(self.clone()) }
+      @@ -293,17 +419,17 @@ mod tests {
+               if let JSONNode::Object(obj) = &json_node {
+      -            assert_eq!(obj.get("field1"), Some(&JSONNode::Number(42.0)));
+      +            assert_eq!(obj.get("field1"), Some(&JSONNode::Int(42)));
+                   assert_eq!(obj.get("field2"), Some(&JSONNode::String("hello".to_string())));
+                   assert_eq!(obj.get("optional_field"), Some(&JSONNode::Bool(true)));
+                   if let Some(JSONNode::Array(arr)) = obj.get("list_of_numbers") {
+      -                 assert_eq!(arr, &vec![JSONNode::Number(1.0), JSONNode::Number(2.0), JSONNode::Number(3.0)]);
+      +                 assert_eq!(arr, &vec![JSONNode::UInt(1), JSONNode::UInt(2), JSONNode::UInt(3)]);
+                   } else {
+                       panic!("list_of_numbers not found or not an array");
+                   }
+                   if let Some(JSONNode::Array(arr)) = obj.get("byte_buffer") {
+      -                 assert_eq!(arr, &vec![JSONNode::Number(10.0), JSONNode::Number(20.0), JSONNode::Number(30.0)]);
+      +                 assert_eq!(arr, &vec![JSONNode::UInt(10), JSONNode::UInt(20), JSONNode::UInt(30)]);
+                   } else {
+                       panic!("byte_buffer not found or not an array");
+                   }
+      @@ -438,12 +564,12 @@ mod tests {
+                           JSONNode::Array(pair1) => {
+                               assert_eq!(pair1[0], JSONNode::String("a_key".to_string()));
+      -                        assert_eq!(pair1[1], JSONNode::Number(10.0));
+      +                        assert_eq!(pair1[1], JSONNode::Int(10));
+                           }
+                           _ => panic!("Expected array for pair"),
+                       }
+                       // Check second pair
+                       match &pairs[1] {
+                           JSONNode::Array(pair2) => {
+                               assert_eq!(pair2[0], JSONNode::String("b_key".to_string()));
+      -                                assert_eq!(pair2[1], JSONNode::Number(20.0));
+      +                                assert_eq!(pair2[1], JSONNode::Int(20));
+                           }
+                           _ => panic!("Expected array for pair"),
+                       }
+      @@ -507,17 +633,17 @@ mod tests {
+           #[test]
+           fn test_vec_u8_specialization() {
+               let data: Vec<u8> = vec![1, 2, 255];
+               let json_node = data.to_json();
+               // Expected: [1, 2, 255]
+               match json_node {
+                   JSONNode::Array(ref nums) => {
+      -                assert_eq!(nums[0], JSONNode::Number(1.0));
+      -                assert_eq!(nums[1], JSONNode::Number(2.0));
+      -                assert_eq!(nums[2], JSONNode::Number(255.0));
+      +                assert_eq!(nums[0], JSONNode::UInt(1));
+      +                assert_eq!(nums[1], JSONNode::UInt(2));
+      +                assert_eq!(nums[2], JSONNode::UInt(255));
+                   }
+                   _ => panic!("Expected JSONNode::Array for Vec<u8>"),
+               }
+               let deserialized: Vec<u8> = Vec::from_json(json_node).unwrap();
+               assert_eq!(data, deserialized);
+       
+               // Test invalid u8 from integer
+      -        let invalid_json = JSONNode::Array(vec![JSONNode::Number(256.0)]);
+      +        let invalid_json = JSONNode::Array(vec![JSONNode::UInt(256)]);
+               assert!(Vec::<u8>::from_json(invalid_json).is_err());
+      -        let invalid_json_fract = JSONNode::Array(vec![JSONNode::Number(10.5)]);
+      +        let invalid_json_fract = JSONNode::Array(vec![JSONNode::Float(10.5)]);
+               assert!(Vec::<u8>::from_json(invalid_json_fract).is_err());
+           }
+       }
+      ```
     metadata:
   - user: |
-      Using model 'gemini/gemini-2.5-flash-preview-04-17' for code completion.
+      Git apply result:
+      Found 1 diff block(s) to process using custom patcher.
 
-      --- LLM Code Generation Attempt 1/5 ---
-      Parsed actions JSON: [
-        {
-          "action": "replace",
-          "filepath": "src/json_serialization.rs"
+      --- Processing Diff Block 1 ---
+      Identified target file: src/json_serialization.rs
+      Applying patch to 'src/json_serialization.rs' using custom patcher...
+      Error applying patch to src/json_serialization.rs:
+      Hunk #2 (header: @@ -54,36 +57,139 @@ impl<'a> JSONConvertible for &'a str {) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+          Err("Cannot deserialize into &str, deserialize into String instead".to_string())
+      }
+
+      // --- Implementations for Primitives ---
+
+      macro_rules! impl_json_for_number {
+          ($($t:ty),*) => {
+              $(
+                  impl JSONConvertible for $t {
+                      fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
+                      fn from_json(node: JSONNode) -> Result<Self, String> {
+                          match node {
+                              JSONNode::Number(n) => {
+                                  Ok(n as $t)
+                              }
+                              _ => Err(format!("Expected JSONNode::Number for {}", stringify!($t))),
+                          }
+                      }
+                  }
+              )*
+          };
+      }
+
+      impl_json_for_number!(usize, isize, u16, u32, u64, i8, i16, i32, i64, f32, f64);
+
+      // Specific implementation for u8 to handle range/integer validation
+      impl JSONConvertible for u8 {
+          fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Number(n) => {
+                      if n >= 0.0 && n <= 255.0 && n.fract() == 0.0 {
+                          Ok(n as u8)
+                      } else {
+                          Err(format!("Number {} out of range or not an integer, cannot be converted to u8", n))
+                      }
+                  }
+                  _ => Err("Expected JSONNode::Number for u8".to_string()),
+              }
+          }
+      }
+
+      impl JSONConvertible for u128 {
+          fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) } // Potential precision loss
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Number(n) => Ok(n as u128), // Potential precision loss
+                  _ => Err("Expected JSONNode::Number for u128".to_string()),
+              }
+          }
+      }
+      impl JSONConvertible for i128 {
+          fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) } // Potential precision loss
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Number(n) => Ok(n as i128), // Potential precision loss
+                  _ => Err("Expected JSONNode::Number for i128".to_string()),
+              }
+          }
+      }
+
+      impl JSONConvertible for String {
+          fn to_json(&self) -> JSONNode { JSONNode::String(self.clone()) }
+      --- Expected Context (from patch, after normalization): ---
+      Err("Cannot deserialize into &str, deserialize into String instead".to_string())
+      }
+
+
+
+      macro_rules! impl_json_for_number {
+      ($($t:ty),*) => {
+      $(
+      impl JSONConvertible for $t {
+      fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
+      fn from_json(node: JSONNode) -> Result<Self, String> {
+      match node {
+      JSONNode::Number(n) => {
+      Ok(n as $t)
+      }
+      _ => Err(format!("Expected JSONNode::Number for {}", stringify!($t))),
+      }
+      }
+      }
+      )*
+      };
+      }
+
+      impl_json_for_number!(usize, isize, u16, u32, u64, i8, i16, i32, i64, f32, f64);
+
+
+      impl JSONConvertible for u8 {
+      fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
+      fn from_json(node: JSONNode) -> Result<Self, String> {
+      match node {
+      JSONNode::Number(n) => {
+      if n >= 0.0 && n <= 255.0 && n.fract() == 0.0 {
+      Ok(n as u8)
+      } else {
+      Err(format!("Number {} out of range or not an integer, cannot be converted to u8", n))
+      }
+      }
+      _ => Err("Expected JSONNode::Number for u8".to_string()),
+      }
+      }
+      }
+
+      impl JSONConvertible for u128 {
+      fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
+      fn from_json(node: JSONNode) -> Result<Self, String> {
+      match node {
+      JSONNode::Number(n) => Ok(n as u128),
+      _ => Err("Expected JSONNode::Number for u128".to_string()),
+      }
+      }
+      }
+      impl JSONConvertible for i128 {
+      fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
+      fn from_json(node: JSONNode) -> Result<Self, String> {
+      match node {
+      JSONNode::Number(n) => Ok(n as i128),
+      _ => Err("Expected JSONNode::Number for i128".to_string()),
+      }
+      }
+      }
+
+      impl JSONConvertible for String {
+      fn to_json(&self) -> JSONNode { JSONNode::String(self.clone()) }
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 45 with ratio 0.95 (60/63 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      - Err("Cannot deserialize into &str, deserialize into String instead".to_string())
+      + _ => Err("Expected JSONNode::Bool for bool".to_string()),
         }
-      ]
-      Found 1 code blocks with filepaths in attempt 1.
-      Received code for required file: src/json_serialization.rs
-      All required file contents received or no content needed.
-
-      --- Applying Changes ---
-      Successfully replaced file: src/json_serialization.rs
+      - 
+      - 
+      + }
+      + }
+        
+        macro_rules! impl_json_for_number {
+        ($($t:ty),*) => {
+        $(
+        impl JSONConvertible for $t {
+        fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
+        fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+        JSONNode::Number(n) => {
+        Ok(n as $t)
+        }
+        _ => Err(format!("Expected JSONNode::Number for {}", stringify!($t))),
+        }
+        }
+        }
+        )*
+        };
+        }
+        
+        impl_json_for_number!(usize, isize, u16, u32, u64, i8, i16, i32, i64, f32, f64);
+        
+        
+        impl JSONConvertible for u8 {
+        fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
+        fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+        JSONNode::Number(n) => {
+        if n >= 0.0 && n <= 255.0 && n.fract() == 0.0 {
+        Ok(n as u8)
+        } else {
+        Err(format!("Number {} out of range or not an integer, cannot be converted to u8", n))
+        }
+        }
+        _ => Err("Expected JSONNode::Number for u8".to_string()),
+        }
+        }
+        }
+        
+        impl JSONConvertible for u128 {
+        fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
+        fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+        JSONNode::Number(n) => Ok(n as u128),
+        _ => Err("Expected JSONNode::Number for u128".to_string()),
+        }
+        }
+        }
+        impl JSONConvertible for i128 {
+        fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
+        fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+        JSONNode::Number(n) => Ok(n as i128),
+        _ => Err("Expected JSONNode::Number for i128".to_string()),
+        }
+        }
+        }
+        
+        impl JSONConvertible for String {
+        fn to_json(&self) -> JSONNode { JSONNode::String(self.clone()) }
+      Problematic diff content:
+      ---
+      diff --git a/src/json_serialization.rs b/src/json_serialization.rs
+      --- a/src/json_serialization.rs
+      +++ b/src/json_serialization.rs
+      @@ -12,9 +12,12 @@ use json_convertible_derive::JSONConvertible;
+       // --- JSONNode Enum ---
+       #[derive(Debug, Clone, PartialEq)]
+       pub enum JSONNode {
+      -    Null,
+      -    Bool(bool),
+      -    Number(f64),
+      +    Null,
+      +    Bool(bool),
+      +    Int(i128),
+      +    UInt(u128),
+      +    Float(f64),
+           String(String),
+           Array(Vec<JSONNode>),
+           Object(BTreeMap<String, JSONNode>),
+      @@ -54,36 +57,139 @@ impl<'a> JSONConvertible for &'a str {
+           Err("Cannot deserialize into &str, deserialize into String instead".to_string())
+       }
+       
+      -// --- Implementations for Primitives ---
+      -
+      -macro_rules! impl_json_for_number {
+      -    ($($t:ty),*) => {
+      -        $(
+      -            impl JSONConvertible for $t {
+      -                fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
+      -                fn from_json(node: JSONNode) -> Result<Self, String> {
+      -                    match node {
+      -                        JSONNode::Number(n) => {
+      -                            Ok(n as $t)
+      -                        }
+      -                        _ => Err(format!("Expected JSONNode::Number for {}", stringify!($t))),
+      -                    }
+      -                }
+      -            }
+      -        )*
+      -    };
+      -}
+      -
+      -impl_json_for_number!(usize, isize, u16, u32, u64, i8, i16, i32, i64, f32, f64);
+      -
+      -// Specific implementation for u8 to handle range/integer validation
+      -impl JSONConvertible for u8 {
+      -    fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
+      -    fn from_json(node: JSONNode) -> Result<Self, String> {
+      -        match node {
+      -            JSONNode::Number(n) => {
+      -                if n >= 0.0 && n <= 255.0 && n.fract() == 0.0 {
+      -                    Ok(n as u8)
+      -                } else {
+      -                    Err(format!("Number {} out of range or not an integer, cannot be converted to u8", n))
+      -                }
+      -            }
+      -            _ => Err("Expected JSONNode::Number for u8".to_string()),
+      -        }
+      -    }
+      -}
+      -
+      -impl JSONConvertible for u128 {
+      -    fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) } // Potential precision loss
+      -    fn from_json(node: JSONNode) -> Result<Self, String> {
+      -        match node {
+      -            JSONNode::Number(n) => Ok(n as u128), // Potential precision loss
+      -            _ => Err("Expected JSONNode::Number for u128".to_string()),
+      -        }
+      -    }
+      -}
+      -impl JSONConvertible for i128 {
+      -    fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) } // Potential precision loss
+      -    fn from_json(node: JSONNode) -> Result<Self, String> {
+      -        match node {
+      -            JSONNode::Number(n) => Ok(n as i128), // Potential precision loss
+      -            _ => Err("Expected JSONNode::Number for i128".to_string()),
+      -        }
+      -    }
+      -}
+      +// --- Implementations for numeric primitives without precision loss ---
+      +macro_rules! impl_json_for_signed {
+      +    ($($t:ty),*) => {
+      +        $(
+      +            impl JSONConvertible for $t {
+      +                fn to_json(&self) -> JSONNode { JSONNode::Int(*self as i128) }
+      +                fn from_json(node: JSONNode) -> Result<Self, String> {
+      +                    match node {
+      +                        JSONNode::Int(n)   => Ok(n as $t),
+      +                        JSONNode::UInt(u)  => Ok(u as $t),
+      +                        other => Err(format!("Expected integer for {}, got {:?}", stringify!($t), other)),
+      +                    }
+      +                }
+      +            }
+      +        )*
+      +    };
+      +}
+      +
+      +macro_rules! impl_json_for_unsigned {
+      +    ($($t:ty),*) => {
+      +        $(
+      +            impl JSONConvertible for $t {
+      +                fn to_json(&self) -> JSONNode { JSONNode::UInt(*self as u128) }
+      +                fn from_json(node: JSONNode) -> Result<Self, String> {
+      +                    match node {
+      +                        JSONNode::UInt(u) if u <= <$t>::MAX as u128 => Ok(u as $t),
+      +                        JSONNode::Int(n)  if n >= 0 &&
+      +                                            (n as u128) <= <$t>::MAX as u128 => Ok(n as $t),
+      +                        JSONNode::UInt(u) => Err(format!("Number {} out of range for {}", u, stringify!($t))),
+      +                        JSONNode::Int(n)  => Err(format!("Number {} out of range for {}", n, stringify!($t))),
+      +                        other => Err(format!("Expected integer for {}, got {:?}", stringify!($t), other)),
+      +                    }
+      +                }
+      +            }
+      +        )*
+      +    };
+      +}
+      +
+      +macro_rules! impl_json_for_float {
+      +    ($($t:ty),*) => {
+      +        $(
+      +            impl JSONConvertible for $t {
+      +                fn to_json(&self) -> JSONNode { JSONNode::Float(*self as f64) }
+      +                fn from_json(node: JSONNode) -> Result<Self, String> {
+      +                    match node {
+      +                        JSONNode::Float(f) => Ok(f as $t),
+      +                        JSONNode::Int(n)   => Ok(n as $t),
+      +                        JSONNode::UInt(u)  => Ok(u as $t),
+      +                        other => Err(format!("Expected float for {}, got {:?}", stringify!($t), other)),
+      +                    }
+      +                }
+      +            }
+      +        )*
+      +    };
+      +}
+      +
+      +// Signed integers
+      +impl_json_for_signed!(i8, i16, i32, i64, isize, i128);
+      +// Unsigned integers
+      +impl_json_for_unsigned!(u8, u16, u32, u64, usize, u128);
+      +// Floating-point types
+      +impl_json_for_float!(f32, f64);
+       
+       impl JSONConvertible for String {
+           fn to_json(&self) -> JSONNode { JSONNode::String(self.clone()) }
+      @@ -293,17 +419,17 @@ mod tests {
+               if let JSONNode::Object(obj) = &json_node {
+      -            assert_eq!(obj.get("field1"), Some(&JSONNode::Number(42.0)));
+      +            assert_eq!(obj.get("field1"), Some(&JSONNode::Int(42)));
+                   assert_eq!(obj.get("field2"), Some(&JSONNode::String("hello".to_string())));
+                   assert_eq!(obj.get("optional_field"), Some(&JSONNode::Bool(true)));
+                   if let Some(JSONNode::Array(arr)) = obj.get("list_of_numbers") {
+      -                 assert_eq!(arr, &vec![JSONNode::Number(1.0), JSONNode::Number(2.0), JSONNode::Number(3.0)]);
+      +                 assert_eq!(arr, &vec![JSONNode::UInt(1), JSONNode::UInt(2), JSONNode::UInt(3)]);
+                   } else {
+                       panic!("list_of_numbers not found or not an array");
+                   }
+                   if let Some(JSONNode::Array(arr)) = obj.get("byte_buffer") {
+      -                 assert_eq!(arr, &vec![JSONNode::Number(10.0), JSONNode::Number(20.0), JSONNode::Number(30.0)]);
+      +                 assert_eq!(arr, &vec![JSONNode::UInt(10), JSONNode::UInt(20), JSONNode::UInt(30)]);
+                   } else {
+                       panic!("byte_buffer not found or not an array");
+                   }
+      @@ -438,12 +564,12 @@ mod tests {
+                           JSONNode::Array(pair1) => {
+                               assert_eq!(pair1[0], JSONNode::String("a_key".to_string()));
+      -                        assert_eq!(pair1[1], JSONNode::Number(10.0));
+      +                        assert_eq!(pair1[1], JSONNode::Int(10));
+                           }
+                           _ => panic!("Expected array for pair"),
+                       }
+                       // Check second pair
+                       match &pairs[1] {
+                           JSONNode::Array(pair2) => {
+                               assert_eq!(pair2[0], JSONNode::String("b_key".to_string()));
+      -                                assert_eq!(pair2[1], JSONNode::Number(20.0));
+      +                                assert_eq!(pair2[1], JSONNode::Int(20));
+                           }
+                           _ => panic!("Expected array for pair"),
+                       }
+      @@ -507,17 +633,17 @@ mod tests {
+           #[test]
+           fn test_vec_u8_specialization() {
+               let data: Vec<u8> = vec![1, 2, 255];
+               let json_node = data.to_json();
+               // Expected: [1, 2, 255]
+               match json_node {
+                   JSONNode::Array(ref nums) => {
+      -                assert_eq!(nums[0], JSONNode::Number(1.0));
+      -                assert_eq!(nums[1], JSONNode::Number(2.0));
+      -                assert_eq!(nums[2], JSONNode::Number(255.0));
+      +                assert_eq!(nums[0], JSONNode::UInt(1));
+      +                assert_eq!(nums[1], JSONNode::UInt(2));
+      +                assert_eq!(nums[2], JSONNode::UInt(255));
+                   }
+                   _ => panic!("Expected JSONNode::Array for Vec<u8>"),
+               }
+               let deserialized: Vec<u8> = Vec::from_json(json_node).unwrap();
+               assert_eq!(data, deserialized);
+       
+               // Test invalid u8 from integer
+      -        let invalid_json = JSONNode::Array(vec![JSONNode::Number(256.0)]);
+      +        let invalid_json = JSONNode::Array(vec![JSONNode::UInt(256)]);
+               assert!(Vec::<u8>::from_json(invalid_json).is_err());
+      -        let invalid_json_fract = JSONNode::Array(vec![JSONNode::Number(10.5)]);
+      +        let invalid_json_fract = JSONNode::Array(vec![JSONNode::Float(10.5)]);
+               assert!(Vec::<u8>::from_json(invalid_json_fract).is_err());
+           }
+       }
+      ---
+    metadata:
+  - user: There was an error applying the git patch. Please review the errors above
+      and provide a corrected patch or instructions.
     metadata:
 ...

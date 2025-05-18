@@ -4,9 +4,7 @@ use range_set_blaze::RangeSetBlaze; // Import RangeSetBlaze
 use std::convert::TryInto;
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator; // Needed for collect into BTreeSet in tests
-use std::ops::{
-    BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Index, IndexMut, Sub, SubAssign,
-};
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Index, IndexMut, RangeInclusive, Sub, SubAssign};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 
 // --- The Hybrid Bitset Struct ---
@@ -19,41 +17,49 @@ pub struct HybridBitset {
 impl JSONConvertible for HybridBitset {
     fn to_json(&self) -> JSONNode {
         // Serialize as an array of [start, end] inclusive ranges
-        let ranges_json: Vec<JSONNode> = self.inner.ranges().map(|range_inclusive| {
-            JSONNode::Array(vec![
-                JSONNode::Number(*range_inclusive.start() as f64),
-                JSONNode::Number(*range_inclusive.end() as f64),
-            ])
+        let ranges_vec: Vec<Vec<usize>> = self.inner.ranges().map(|range_inclusive| {
+            vec![*range_inclusive.start(), *range_inclusive.end()]
         }).collect();
-        JSONNode::Array(ranges_json)
+        ranges_vec.to_json()
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Array(arr) => {
-                let mut ranges = Vec::new();
-                for range_node in arr {
-                    match range_node {
-                        JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
-                            let end_node = pair_vec.pop().unwrap();
-                            let start_node = pair_vec.pop().unwrap();
-                            let start = match start_node {
-                                JSONNode::Number(n) => n as usize,
-                                _ => return Err("Expected number for range start".to_string()),
-                            };
-                            let end = match end_node {
-                                JSONNode::Number(n) => n as usize,
-                                _ => return Err("Expected number for range end".to_string()),
-                            };
-                            ranges.push(start..=end);
-                        }
-                        _ => return Err("Expected 2-element array for HybridBitset range".to_string()),
-                    }
-                }
-                Ok(HybridBitset { inner: RangeSetBlaze::from_iter(ranges) })
+    //     match node {
+    //         JSONNode::Array(arr) => {
+    //             let mut ranges = Vec::new();
+    //             for range_node in arr {
+    //                 match range_node {
+    //                     JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
+    //                         let end_node = pair_vec.pop().unwrap();
+    //                         let start_node = pair_vec.pop().unwrap();
+    //                         let start = match start_node {
+    //                             JSONNode::Number(n) => n,
+    //                             _ => return Err("Expected number for range start".to_string()),
+    //                         };
+    //                         let end = match end_node {
+    //                             JSONNode::Number(n) => n,
+    //                             _ => return Err("Expected number for range end".to_string()),
+    //                         };
+    //                         ranges.push(start..=end);
+    //                     }
+    //                     _ => return Err("Expected 2-element array for HybridBitset range".to_string()),
+    //                 }
+    //             }
+    //             Ok(HybridBitset { inner: RangeSetBlaze::from_iter(ranges) })
+    //         }
+    //         _ => Err("Expected JSONNode::Array for HybridBitset".to_string()),
+    //     }
+        let ranges_vec: Vec<Vec<usize>> = Vec::from_json(node)?;
+        let mut ranges = Vec::new();
+        for mut range_vec in ranges_vec {
+            if range_vec.len() != 2 {
+                return Err(format!("Expected 2-element array for HybridBitset range, got {:?}", range_vec));
             }
-            _ => Err("Expected JSONNode::Array for HybridBitset".to_string()),
+            let end = range_vec.pop().unwrap();
+            let start = range_vec.pop().unwrap();
+            ranges.push(start..=end);
         }
+        Ok(HybridBitset { inner: RangeSetBlaze::from_iter(ranges) })
     }
 }
 

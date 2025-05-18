@@ -542,12 +542,12 @@ mod tests {
         let json_u128 = large_u128.to_json();
 
         match json_i128 {
-            JSONNode::Number(s) => assert_eq!(s, large_i128.to_string()),
+            JSONNode::Number(ref s) => assert_eq!(*s, large_i128.to_string()),
             _ => panic!("Expected JSONNode::Number(String) for i128"),
         }
 
         match json_u128 {
-            JSONNode::Number(s) => assert_eq!(s, large_u128.to_string()),
+            JSONNode::Number(ref s) => assert_eq!(*s, large_u128.to_string()),
             _ => panic!("Expected JSONNode::Number(String) for u128"),
         }
 
