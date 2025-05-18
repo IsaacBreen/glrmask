@@ -922,24 +922,19 @@ impl<'a> GrammarConstraintState<'a> {
         };
 
         // Convert original LLMTokenID to internal LLMTokenID for the closure
-        let internal_llm_id_val_opt = self.parent.original_id_to_internal(llm_token_id); // Renamed internal_llm_id_val to internal_llm_id_val_opt
+        let internal_llm_id_val = self.parent.original_id_to_internal(llm_token_id).unwrap().0;
 
         let closure = |content: &ParseStateNodeContent<LLMTokenInfo>| -> Option<(ParseStateNodeContent<LLMTokenInfo>, bool)> {
-            if let Some(internal_llm_id) = internal_llm_id_val_opt { // Check if conversion was successful
-                if content.t.active.contains(internal_llm_id.0) { // .active is internal, compare with internal ID
-                    if content.t.intersection == all_true_set {
-                        Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, false))
-                    } else {
-                        Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, true))
-                    }
+            if content.t.active.contains(internal_llm_id_val) { // .active is internal, compare with internal ID
+                if content.t.intersection == all_true_set {
+                    Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, false))
                 } else {
-                    None // Original token ID not active
+                    Some((ParseStateNodeContent { state_id: content.state_id, t: all_true_token_info.clone() }, true))
                 }
-            } else {
-                None // Original token ID not found in mapping, so it cannot be active
+            } else { // Original token ID not found in mapping, so it cannot be active
+                None
             }
         };
-
 
         let mut memo = HashMap::new();
         self.state.retain(|_tokenizer_state_id, glr_state| {
@@ -1104,26 +1099,12 @@ impl<'a> GrammarConstraintState<'a> {
         }
         let mut i = 0;
         let simplified_roots = simplify_gss_forest(&roots);
-        if simplified_roots.len() == roots.len() { // Ensure simplified_roots has enough elements
-            for (_tokenizer_state_id, glr_state) in self.state.iter_mut() { // Renamed tokenizer_state_id
-                for active_state in glr_state.active_states.values_mut() {
-                    active_state.stack = simplified_roots[i].clone();
-                    i += 1;
-                }
+        for (tokenizer_state_id, glr_state) in self.state.iter_mut() {
+            for active_state in glr_state.active_states.values_mut() {
+                active_state.stack = simplified_roots[i].clone();
+                i += 1;
             }
-        } else if !roots.is_empty() && simplified_roots.is_empty() {
-            // This case means all roots were pruned, so clear active_states
-            self.state.clear();
-        } else if !simplified_roots.is_empty() && roots.len() != simplified_roots.len() {
-             // This case is unexpected if simplify_gss_forest is supposed to return one root per input root
-             // or handle merging in a way that the count might change but still be assignable.
-             // For now, if counts don't match and simplified_roots is not empty, we might be in an inconsistent state.
-             // One option is to clear and rebuild, or panic.
-             // Let's clear for now, as it implies a significant structural change.
-             crate::debug!(1, "Warning: GSS simplification resulted in a different number of roots. Original: {}, Simplified: {}. Clearing active states.", roots.len(), simplified_roots.len());
-             self.state.clear();
         }
-
 
         // Print each GSS
         for (tokenizer_state_id, glr_state) in self.state.iter() {

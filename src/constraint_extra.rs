@@ -61,14 +61,9 @@ fn dump_precompute_trie_recursive(
     visited: &mut HashSet<*const PrecomputeNode>, // Changed to *const PrecomputeNode
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>
 ) {
-    // To get a raw pointer to the PrecomputeNode data inside the Mutex for visited tracking:
-    let node_data_ptr_for_visited_check = {
-        let guard = node_arc.lock().expect("Mutex poisoned during dump (getting ptr for visited check)");
-        &*guard as *const PrecomputeNode
-    };
-
-    if !visited.insert(node_data_ptr_for_visited_check) {
-        println!("{}-> Ref {:p} (already printed via data ptr {:p})", indent, Arc::as_ptr(node_arc), node_data_ptr_for_visited_check);
+    let node_ptr_val = node_ptr(node_arc);
+    if !visited.insert(node_ptr_val) {
+        println!("{}-> Ref {:p} (already printed)", indent, node_ptr_val);
         return;
     }
 
@@ -101,7 +96,7 @@ fn dump_precompute_trie_recursive(
                     indent,
                     edge_key.map(|grammar_token_id| grammar_token_id.0),
                     format_bv_indices(edge_val_bv, original_internal_bimap), // Pass original_internal_bimap
-                    Arc::as_ptr(child_wrapper_arc.as_arc()) // Use as_arc() to get the Arc and then its pointer
+                    node_ptr(child_wrapper_arc.as_arc()) // Use as_arc() to get the Arc
                 );
                 // Recurse
                 dump_precompute_trie_recursive(child_wrapper_arc.as_arc(), new_indent.clone(), visited, original_internal_bimap); // Pass original_internal_bimap

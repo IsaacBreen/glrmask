@@ -139,17 +139,17 @@ impl<T: Eq + Ord> IntoIterator for FrozenSet<T> {
 }
 
 impl<T: Eq + Ord> FrozenSet<T> {
-    pub fn iter(&self) -> Iter<'_, T> { // Added lifetime '_, T
+    pub fn iter(&self) -> Iter<T> {
         Iter {
             inner: self.inner.iter(),
         }
     }
 
-    // pub fn into_iter(self) -> IntoIter<T> { // This conflicts with the trait impl
-    //     IntoIter {
-    //         inner: self.inner.into_iter(),
-    //     }
-    // }
+    pub fn into_iter(self) -> IntoIter<T> {
+        IntoIter {
+            inner: self.inner.into_iter(),
+        }
+    }
 }
 
 

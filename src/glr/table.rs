@@ -210,15 +210,13 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
         let splits = split_on_dot(&closure);
         let mut row = BTreeMap::new();
 
-        for (symbol, items_for_symbol) in splits { // Renamed items to items_for_symbol
-            if symbol.is_none() { // Skip if symbol is None (reduce items)
+        for (symbol, items) in splits {
+            if symbol.is_none() {
                 continue;
             }
-            let goto_set = compute_goto(&items_for_symbol); // Use items_for_symbol
+            let goto_set = compute_goto(&items);
             row.insert(symbol.clone(), goto_set.clone());
-            if !transitions.contains_key(&goto_set) && !worklist.contains(&goto_set) { // Avoid redundant work
-                worklist.push_back(goto_set);
-            }
+            worklist.push_back(goto_set);
         }
 
         transitions.insert(items.clone(), row);
@@ -333,7 +331,7 @@ fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Resu
     stage_4_table
 }
 
-fn stage_5(stage_4_table: Stage4Table, _productions: &[Production]) -> Stage5Result { // productions not used
+fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
     // todo: remove this
     stage_4_table
 }
@@ -349,30 +347,30 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
         }
 
         for (terminal, mut production_ids) in row.reduces {
-            if let Some(existing) = shifts_and_reduces.remove(&terminal) { // Use remove to take ownership
+            if let Some(mut existing) = shifts_and_reduces.remove(&terminal) {
                 match existing {
                     Stage6ShiftsAndReduces::Shift(shift_set) => {
-                        shifts_and_reduces.insert(terminal.clone(), Stage6ShiftsAndReduces::Split { // Clone terminal
+                        shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
                             shift: Some(shift_set.clone()),
                             reduces: production_ids.clone(),
                         });
                     }
                     Stage6ShiftsAndReduces::Reduce(existing_production_id) => {
                         production_ids.insert(existing_production_id);
-                        shifts_and_reduces.insert(terminal.clone(), Stage6ShiftsAndReduces::Split { // Clone terminal
+                        shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
                             shift: None,
                             reduces: production_ids,
                         });
                     }
                     Stage6ShiftsAndReduces::Split { shift, mut reduces } => {
                         reduces.extend(production_ids.into_iter());
-                        shifts_and_reduces.insert(terminal.clone(), Stage6ShiftsAndReduces::Split { shift, reduces }); // Clone terminal
+                        shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift, reduces });
                     }
                 }
             } else {
                 // If there's only one production ID, we can optimize by storing it directly
                 if production_ids.len() == 1 {
-                    shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Reduce(*production_ids.iter().next().unwrap())); // Deref and clone
+                    shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Reduce(production_ids.iter().next().unwrap().clone()));
                 } else {
                     shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift: None, reduces: production_ids });
                 }
@@ -391,30 +389,25 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
     stage_6_table
 }
 
-fn stage_7(stage_6_table: Stage6Table, productions: &[Production], _start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result { // start_production_id not used
+fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
     let mut item_set_map = BiBTreeMap::new();
     let mut next_state_id = 0;
 
-    // Pre-populate item_set_map to ensure all referenced item sets get an ID
-    let mut all_item_sets: BTreeSet<BTreeSet<Item>> = BTreeSet::new();
-    for (item_set, row) in &stage_6_table {
-        all_item_sets.insert(item_set.clone());
-        for action in row.shifts_and_reduces.values() {
-            if let Stage6ShiftsAndReduces::Shift(target_set) = action {
-                all_item_sets.insert(target_set.clone());
-            } else if let Stage6ShiftsAndReduces::Split { shift: Some(target_set), .. } = action {
-                 all_item_sets.insert(target_set.clone());
-            }
-        }
-        for target_set in row.gotos.values() {
-            all_item_sets.insert(target_set.clone());
-        }
-    }
-    for item_set in all_item_sets {
-        item_set_map.insert(item_set, StateID(next_state_id));
-        next_state_id += 1;
-    }
+    let mut terminals = BTreeSet::new();
+    let mut non_terminals = BTreeSet::new();
 
+    for (item_set, row) in &stage_6_table {
+        item_set_map.insert(item_set.clone(), StateID(next_state_id));
+        next_state_id += 1;
+
+        for t in row.shifts_and_reduces.keys() {
+            terminals.insert(t.clone());
+        }
+
+        for nt in row.gotos.keys() {
+            non_terminals.insert(nt.clone());
+        }
+    }
 
     let mut stage_7_table = BTreeMap::new();
 
@@ -422,6 +415,13 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], _start_produc
         let state_id = *item_set_map.get_by_left(&item_set).unwrap();
         let mut shifts_and_reduces = BTreeMap::new();
         let mut gotos = BTreeMap::new();
+
+        // Determine if this state is an accepting state
+        let is_accepting_state = item_set.iter().any(|item| {
+            item.production == productions[start_production_id] && item.dot_position == item.production.rhs.len()
+        });
+
+
 
         for (terminal, action) in row.shifts_and_reduces {
             let terminal_id = *terminal_map.get_by_left(&terminal).expect(format!("{:?} not found in terminal map {:?}", terminal, terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
@@ -439,11 +439,11 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], _start_produc
                 Stage6ShiftsAndReduces::Split { shift, reduces } => {
                     let shift_state_id = shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
                     let mut len_to_nt_to_production_id: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
-                    for production_id_val in reduces { // Renamed to avoid conflict
-                        let production = productions.get(production_id_val.0).unwrap();
+                    for production_id in reduces {
+                        let production = productions.get(production_id.0).unwrap();
                         let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
                         let len = production.rhs.len();
-                        len_to_nt_to_production_id.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id_val);
+                        len_to_nt_to_production_id.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id);
                     }
                     Stage7ShiftsAndReduces::Split { shift: shift_state_id, reduces: len_to_nt_to_production_id }
                 }
@@ -461,18 +461,15 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], _start_produc
     }
 
     let start_item = Item {
-        production: productions[0].clone(), // Assuming start_production_id is 0 for this context
+        production: productions[start_production_id].clone(),
         dot_position: 0,
     };
-    let start_closure = compute_closure(&BTreeSet::from([start_item]), productions);
-    let start_state_id = *item_set_map.get_by_left(&start_closure)
-        .expect("Start state closure not found in item_set_map");
-
+    let start_state_id = *item_set_map.get_by_left(&BTreeSet::from([start_item])).unwrap();
 
     (stage_7_table, item_set_map, start_state_id)
 }
 
-pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
+pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
     let original_productions = productions.to_vec();
 
     crate::debug!(2, "Removing productions with undefined non-terminals");
@@ -483,25 +480,25 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
 
     crate::debug!(2, "Stage 1");
     let stage_1_table = stage_1(&productions, start_production_id);
-    crate::debug!(6, "{:?}", &stage_1_table);
+    crate::debug!(6, &stage_1_table);
     crate::debug!(2, "Stage 2");
     let stage_2_table = stage_2(stage_1_table, &productions);
-    crate::debug!(6, "{:?}", &stage_2_table);
+    crate::debug!(6, &stage_2_table);
     crate::debug!(2, "Stage 3");
     let stage_3_table = stage_3(stage_2_table, &productions);
-    crate::debug!(6, "{:?}", &stage_3_table);
+    crate::debug!(6, &stage_3_table);
     crate::debug!(2, "Stage 4");
     let stage_4_table = stage_4(stage_3_table, &productions);
-    crate::debug!(6, "{:?}", &stage_4_table);
+    crate::debug!(6, &stage_4_table);
     crate::debug!(2, "Stage 5");
     let stage_5_table = stage_5(stage_4_table, &productions);
-    crate::debug!(6, "{:?}", &stage_5_table);
+    crate::debug!(6, &stage_5_table);
     crate::debug!(2, "Stage 6");
     let stage_6_table = stage_6(stage_5_table);
-    crate::debug!(6, "{:?}", &stage_6_table);
+    crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
     let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
-    crate::debug!(6, "{:?}", &stage_7_table);
+    crate::debug!(6, &stage_7_table);
     crate::debug!(2, "Done generating GLR parser");
 
     GLRParser::new(stage_7_table, original_productions, terminal_map, non_terminal_map, item_set_map, start_state_id)
@@ -545,14 +542,7 @@ pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerm
             non_terminal_map.insert(p.lhs.clone(), NonTerminalID(next_non_terminal_id));
             next_non_terminal_id += 1;
         }
-        for symbol in &p.rhs { // Also add non-terminals from RHS if not already present
-            if let Symbol::NonTerminal(nt) = symbol {
-                if !non_terminal_map.contains_left(nt) {
-                    non_terminal_map.insert(nt.clone(), NonTerminalID(next_non_terminal_id));
-                    next_non_terminal_id += 1;
-                }
-            }
-        }
     }
     non_terminal_map
 }
+

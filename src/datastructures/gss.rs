@@ -242,16 +242,16 @@ impl<T> GSSNode<T> {
         T: Clone,
     {
         let mut result = Vec::new();
-        // let mut stack: Vec<T> = Vec::new(); // Unused
+        let mut stack: Vec<T> = Vec::new();
         // For flatten on &self, we need to Arc self to put on stack if it's a root of a path.
         // However, flatten explores predecessors which are already Arcs.
         // The initial call path starts from `self`.
 
         // To handle the initial `self` correctly without Arcing it unnecessarily if it's never a predecessor itself:
-        // let initial_path = vec![self.value.clone()]; // Unused
+        let mut initial_path = vec![self.value.clone()];
 
         if self.predecessors.is_empty() {
-            result.push(vec![self.value.clone()]); // Path for a root node
+            result.push(initial_path);
         } else {
             // Each predecessor_arc starts a new exploration from that point.
             // The path passed down should be the path *to* that predecessor.
@@ -259,25 +259,19 @@ impl<T> GSSNode<T> {
             // Let's use a structure that tracks the GSSNode reference and current path.
             // (node_ref, path_to_node_ref_value)
             let mut q: VecDeque<(&GSSNode<T>, Vec<T>)> = VecDeque::new();
-            // For the initial call on `self`, the path leading to it is empty.
-            // The path will be built by prepending current node's value.
             q.push_back((self, Vec::new()));
 
-            while let Some((current_node, path_so_far)) = q.pop_front() { // Renamed current_path_values
-                let mut new_path = vec![current_node.value.clone()]; // Start new path with current value
-                new_path.extend(path_so_far); // Prepend current value to path from successor
-
+            while let Some((current_node, mut current_path_values)) = q.pop_front() {
+                current_path_values.push(current_node.value.clone());
                 if current_node.predecessors.is_empty() {
-                    result.push(new_path); // This is a full path from a leaf up to `self`
+                    // Path is built in reverse, then reversed at the end. Or build forward.
+                    // Let's build forward.
+                    result.push(current_path_values);
                 } else {
                     for pred_arc in &current_node.predecessors {
-                        q.push_back((pred_arc.as_ref(), new_path.clone()));
+                        q.push_back((pred_arc.as_ref(), current_path_values.clone()));
                     }
                 }
-            }
-            // Paths are built in reverse (leaf to root), so reverse them at the end.
-            for path in &mut result {
-                path.reverse();
             }
         }
         result

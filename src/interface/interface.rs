@@ -276,9 +276,7 @@ impl Grammar {
         // Return a clone or reference if stored
         // Note: This currently regenerates the parser. If self.glr_parser is already stored,
         // perhaps return self.glr_parser.clone() instead?
-        // For now, let's assume it's okay to regenerate or that it's cheap enough.
-        // If glr_parser is already stored, this should be: self.glr_parser.clone()
-        self.glr_parser.clone() // Assuming GLRParser is Clone
+        generate_glr_parser(&self.productions, self.start_production_id)
     }
 }
 
@@ -429,9 +427,9 @@ impl Grammar {
                     let nt = NonTerminal(choice_nt_name.clone());
                     // all_names is updated by generate_unique_indexed_name
 
-                    for expr_val in exprs { // Renamed expr to expr_val
+                    for expr in exprs {
                         let rhs = convert_expr(
-                            expr_val, // Use expr_val
+                            expr,
                             &choice_nt_name, // Pass the new NT name as the base for its children
                             productions,
                             // literal_map, // if used // Remove this line
@@ -527,12 +525,12 @@ impl Grammar {
         let mut terminal_string_to_expr = BTreeMap::new();
 
         // Process each rule definition
-        for (name, expr_val) in tqdm!(exprs.iter()) { // Renamed expr to expr_val
+        for (name, expr) in tqdm!(exprs.iter()) {
             let lhs = NonTerminal(name.clone());
             let lhs_name_str = &name; // This is the top-level rule name, e.g., "S"
 
             // Optimization: If the top-level expression is a Choice, create multiple productions directly.
-            if let GrammarExpr::Choice(choices) = expr_val { // Use expr_val
+            if let GrammarExpr::Choice(choices) = expr {
                 for choice_expr in choices {
                     let rhs = convert_expr(
                         choice_expr,
@@ -551,7 +549,7 @@ impl Grammar {
             } else {
                 // Otherwise, convert the expression as usual and create a single production.
                 let rhs = convert_expr(
-                    expr_val, // Use expr_val
+                    expr,
                     lhs_name_str, // Pass current rule's name as base
                     &mut productions,
                     // &mut literal_map, // if used // Remove this line
@@ -571,14 +569,14 @@ impl Grammar {
         let mut sorted_terminals: Vec<_> = terminal_string_to_expr.iter().collect();
         sorted_terminals.sort_by_key(|(name, _)| terminal_name_to_group_id.get_by_left(*name).unwrap());
 
-        for (name, expr_val) in sorted_terminals { // Renamed expr to expr_val
+        for (name, expr) in sorted_terminals {
              // Use the group ID assigned during convert_expr
             let group_id = *terminal_name_to_group_id.get_by_left(name).unwrap();
             // Ensure we add the expr to the tokenizer_exprs_vec at the correct index (group_id)
              while tokenizer_exprs_vec.len() <= group_id {
-                 tokenizer_exprs_vec.push(greedy_group(Expr::Epsilon)); // Fill with a non-matching default
+                 tokenizer_exprs_vec.push(greedy_group(Expr::Epsilon));
              }
-            tokenizer_exprs_vec[group_id] = greedy_group(expr_val.clone()); // Use expr_val
+            tokenizer_exprs_vec[group_id] = greedy_group(expr.clone());
         }
 
 
@@ -601,7 +599,7 @@ impl Grammar {
 }
 
 impl GrammarConstraint {
-    pub fn from_grammar(grammar: Grammar, llm_tokens: LLMTokenMap, _eof_llm_token_id: usize, max_llm_token_id: usize) -> Self { // _eof_llm_token_id not used
+    pub fn from_grammar(grammar: Grammar, llm_tokens: LLMTokenMap, eof_llm_token_id: usize, max_llm_token_id: usize) -> Self {
         GrammarConstraint::new(grammar.tokenizer, grammar.glr_parser, llm_tokens, grammar.terminal_name_to_group_id, max_llm_token_id)
     }
 }
@@ -618,7 +616,6 @@ pub struct IncrementalParser<'a> {
     // Maps current tokenizer state IDs to the GLR parser states reachable at that point.
     pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>>,
 }
-// IncrementalParser is a runtime state, likely not for direct serialization.
 
 impl<'a> IncrementalParser<'a> {
     /// Creates a new incremental parser initialized to the start state.
@@ -632,15 +629,15 @@ impl<'a> IncrementalParser<'a> {
     /// Processes a chunk of input bytes, updating the internal state.
     pub fn feed(&mut self, bytes: &[u8]) {
         crate::debug!(3, "Processing input bytes: {:?} with {} active tokenizer states", bytes, self.state.len());
-        let mut next_glr_states_by_tokenizer_state: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>> = BTreeMap::new(); // Renamed next_states
-        let mut work_queue: BTreeMap<(usize, TokenizerStateID), GLRParserState<'a, ()>> = BTreeMap::new(); // Renamed queue to work_queue
+        let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>> = BTreeMap::new();
+        let mut queue: BTreeMap<(usize, TokenizerStateID), GLRParserState<'a, ()>> = BTreeMap::new();
 
-        // Initialize the work_queue with the current state
+        // Initialize the queue with the current state
         for (tokenizer_state_id, glr_state) in std::mem::take(&mut self.state) {
-            work_queue.insert((0, tokenizer_state_id), glr_state);
+            queue.insert((0, tokenizer_state_id), glr_state);
         }
 
-        while let Some(((position, current_tokenizer_state_id), current_glr_state)) = work_queue.pop_first() {
+        while let Some(((position, current_tokenizer_state_id), current_glr_state)) = queue.pop_first() {
             // Execute the tokenizer from the current state with the new bytes
             let results: ExecuteResult = self
                 .grammar
@@ -649,45 +646,50 @@ impl<'a> IncrementalParser<'a> {
 
             crate::debug!(4, "Processing position {} in state {}. Matches: {}", position, current_tokenizer_state_id.0, results.matches.len());
             // Handle full token matches
-            for token_match in results.matches { // Renamed token to token_match
-                crate::debug!(4, "Found match for token {:?} ({}) with width {}", token_match.id, self.grammar.terminal_name_to_group_id.get_by_right(&token_match.id).map(|s|s.as_str()).unwrap_or("UNKNOWN"), token_match.width); // Added map for name
-                let grammar_token_id = TerminalID(token_match.id); // Assuming GroupID maps directly to TerminalID
-                let mut next_glr_state_after_match = current_glr_state.clone(); // Clone before stepping // Renamed next_glr_state
-                next_glr_state_after_match.step(grammar_token_id); // Use next_glr_state_after_match
+            for token in results.matches {
+                crate::debug!(4, "Found match for token {:?} ({}) with width {}", token.id, self.grammar.terminal_name_to_group_id.get_by_right(&token.id).unwrap(), token.width);
+                let grammar_token_id = TerminalID(token.id); // Assuming GroupID maps directly to TerminalID
+                let mut next_glr_state = current_glr_state.clone(); // Clone before stepping
+                next_glr_state.step(grammar_token_id);
 
-                if next_glr_state_after_match.is_ok() { // Use next_glr_state_after_match
-                    let match_end_position = position + token_match.width; // Renamed token to token_match
-                    if match_end_position == bytes.len() {
-                        // Reached the end of the input, so this is a clean match for this path
-                        // The tokenizer state for the *next* chunk would be initial.
-                        let next_chunk_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
-                        next_glr_states_by_tokenizer_state.entry(next_chunk_tokenizer_state_id) // Use next_glr_states_by_tokenizer_state
-                            .and_modify(|existing_state| existing_state.merge_with(next_glr_state_after_match.clone())) // Use next_glr_state_after_match
-                            .or_insert_with(|| next_glr_state_after_match.clone()); // Use next_glr_state_after_match
+                if next_glr_state.is_ok() {
+                    if position + token.width == bytes.len() {
+                        // Reached the end of the input, so this is a clean match
+                        let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
+                        next_states.entry(next_tokenizer_state_id)
+                            .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
+                            .or_insert(next_glr_state.clone()); // Carry over the *original* GLR state
                     } else {
-                        // After a full match, the tokenizer resets to its initial state for the *next token within this chunk*.
-                        let next_token_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
-                        work_queue.entry((match_end_position, next_token_tokenizer_state_id)) // Use work_queue
-                            .and_modify(|existing_state| existing_state.merge_with(next_glr_state_after_match.clone())) // Use next_glr_state_after_match
-                            .or_insert(next_glr_state_after_match); // Use next_glr_state_after_match
+                        // After a full match, the tokenizer resets to its initial state
+                        let next_tokenizer_state_id = self.grammar.tokenizer.initial_state_id();
+                        queue.entry((position + token.width, next_tokenizer_state_id))
+                            .and_modify(|existing_state| existing_state.merge_with(next_glr_state.clone()))
+                            .or_insert(next_glr_state);
                     }
                 }
             }
 
-            // Handle partial matches (tokenizer ended mid-token, but could still form a token if more input arrives)
-            if let Some(end_state_id_val) = results.end_state { // Renamed end_state_id
-                // This GLR state (current_glr_state) is carried forward, associated with the new tokenizer state (end_state_id_val).
-                // No GLR step happens here because no full grammar token was consumed.
-                let next_tokenizer_state_id_for_partial = TokenizerStateID(end_state_id_val); // Renamed next_tokenizer_state_id
-                next_glr_states_by_tokenizer_state.entry(next_tokenizer_state_id_for_partial) // Use next_glr_states_by_tokenizer_state, next_tokenizer_state_id_for_partial
-                    .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
-                    .or_insert_with(|| current_glr_state.clone());
+            // Handle partial matches (tokenizer ended mid-token)
+            if let Some(end_state_id) = results.end_state {
+                // Ensure at least one possible final token parses
+                // TODO: no need to do this here unless it's needed in is_valid. Don't want to do it in is_valid because it's expensive.
+                //  Would be better to put this in a lazily-initialized field in each entry in self.states, and compute it only when is_valid is called.
+                let possible_final_grammar_tokens: Vec<_> = self.grammar.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id));
+                for possible_final_grammar_token in possible_final_grammar_tokens {
+                    let mut final_glr_state = current_glr_state.clone(); // Clone before stepping
+                    final_glr_state.step(possible_final_grammar_token);
+                    if final_glr_state.is_ok() {
+                        let next_tokenizer_state_id = TokenizerStateID(end_state_id);
+                        next_states.entry(next_tokenizer_state_id)
+                            .and_modify(|existing_state| existing_state.merge_with(current_glr_state.clone()))
+                            .or_insert(current_glr_state.clone()); // Carry over the *original* GLR state
+                    }
+                }
             }
         }
 
-        self.state = next_glr_states_by_tokenizer_state; // Use next_glr_states_by_tokenizer_state
+        self.state = next_states;
     }
-
 
     /// Checks if the current state is valid (i.e., there's at least one active parse path).
     pub fn is_valid(&self) -> bool {
@@ -709,15 +711,13 @@ mod tests {
     use crate::datastructures::hybrid_bitset::HybridBitset;
 
     fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> HybridBitset {
-        let mut bitvec = HybridBitset::new(); // Changed from BitVec
-        // HybridBitset doesn't need explicit capacity setting like BitVec for `ones` or direct insertion.
-        // It grows as needed. The `ones` method takes a length for the universe.
+        let mut bitvec = BitVec::new();
+        bitvec.resize(capacity, false);
         for value in values {
-            bitvec.insert(value); // Use insert for HybridBitset
+            bitvec.set(value, true);
         }
-        bitvec
+        bitvec.into()
     }
-
 
     #[ignore]
     #[test]
@@ -767,7 +767,7 @@ mod tests {
         let llm_tokens: Vec<Vec<u8>> = vec![b"i".to_vec(), b"+".to_vec(), b"*".to_vec(), b"(".to_vec(), b")".to_vec(), b"(i".to_vec(), b"+i".to_vec()];
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let eof_llm_token_id = llm_tokens.len();
-        let max_llm_token_id = llm_tokens.len() -1; // Max ID is len - 1
+        let max_llm_token_id = llm_tokens.len();
         let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
         let mut grammar_constraint_state = grammar_constraint.init();
 
@@ -784,7 +784,7 @@ mod tests {
         // Get the mask.
         // The valid LLM tokens initially are ["i", "(", "(i"].
         let mask = grammar_constraint_state.get_mask();
-        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len(), llm_token_vec!(b"i", b"(", b"(i")); // Capacity is len
+        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"i", b"(", b"(i"));
         assert_eq!(mask, expected_mask);
 
         // Simulate generating from a LLM with the grammar constraint.
@@ -807,7 +807,7 @@ mod tests {
         state.step_with_llm_token_sequence(&prefill_tokens);
         let mask = state.get_mask();
          // After "(i+i*i", expecting '+', '*', ')', or '+i'
-        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len(), llm_token_vec!(b"+", b"*", b")", b"+i")); // Capacity is len
+        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"+", b"*", b")", b"+i"));
         assert_eq!(mask, expected_mask);
 
 
@@ -820,9 +820,9 @@ mod tests {
         // After "(i+i*i)", we are in a state where we expect ')'. Committing ')' reduces F -> (E).
         // After that, we are left with E + F, which expects '+' or '*'.
         // Plus EOF.
-        let mut expected_mask = bitvec_with_capacity_and_values(llm_tokens.len(), llm_token_vec!(b"+", b"*", b"+i")); // Capacity is len
+        let mut expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"+", b"*", b"+i"));
         // Add the EOF token
-        expected_mask.insert(eof_llm_token_id); // Use insert for HybridBitset
+        expected_mask.set(llm_tokens.len(), true);
         assert_eq!(mask, expected_mask);
     }
 
@@ -848,7 +848,7 @@ mod tests {
         let llm_tokens: Vec<Vec<u8>> = vec![b"a".to_vec(), b"b".to_vec()];
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let eof_llm_token_id = llm_tokens.len();
-        let max_llm_token_id = llm_tokens.len() -1; // Max ID is len - 1
+        let max_llm_token_id = llm_tokens.len();
         let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
         let mut grammar_constraint_state = grammar_constraint.init();
 
@@ -864,7 +864,7 @@ mod tests {
 
         // Get the mask.
         let mask = grammar_constraint_state.get_mask();
-        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len(), llm_token_vec!(b"a")); // Capacity is len
+        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"a"));
         assert_eq!(mask, expected_mask);
 
         // Commit "a"
@@ -873,7 +873,7 @@ mod tests {
 
         // Get the mask.
         let mask = grammar_constraint_state.get_mask();
-        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len(), llm_token_vec!(b"b")); // Capacity is len
+        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"b"));
         assert_eq!(mask, expected_mask);
     }
 
@@ -895,7 +895,7 @@ mod tests {
         let llm_tokens: Vec<Vec<u8>> = vec![b"a".to_vec()];
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let eof_llm_token_id = llm_tokens.len();
-        let max_llm_token_id = llm_tokens.len() -1; // max_llm_token_id should be tokens.len() - 1 for HybridBitset
+        let max_llm_token_id = llm_tokens.len(); // max_llm_token_id should be tokens.len() for HybridBitset
         let grammar_constraint = GrammarConstraint::from_grammar(grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
         let mut grammar_constraint_state = grammar_constraint.init();
 
@@ -913,7 +913,7 @@ mod tests {
         // Get the mask.
         grammar_constraint_state.step_with_all_llm_tokens();
         let mask = grammar_constraint_state.get_mask();
-        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len(), llm_token_vec!(b"a")); // Capacity is len
+        let expected_mask = bitvec_with_capacity_and_values(llm_tokens.len() + 1, llm_token_vec!(b"a"));
         assert_eq!(mask, expected_mask);
 
         // Commit "a"
@@ -971,10 +971,10 @@ mod tests {
         dbg!(&tokenizer);
 
         let llm_tokens: Vec<Vec<u8>> = (0..2).map(|i| format!("abcdefghijk{}", i).as_bytes().to_vec()).collect();
-        // let llm_tokens_slices: Vec<&[u8]> = llm_tokens.iter().map(|token| &token[..]).collect(); // Unused
+        let llm_tokens_slices: Vec<&[u8]> = llm_tokens.iter().map(|token| &token[..]).collect();
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
-        // let eof_llm_token_id = llm_tokens.len(); // Unused
-        let max_llm_token_id = llm_tokens.len() -1; // Max ID is len - 1
+        let eof_llm_token_id = llm_tokens.len();
+        let max_llm_token_id = llm_tokens.len();
 
         let mut token_name_map = BiBTreeMap::new();
         token_name_map.insert("ignore".to_string(), 0);
@@ -987,11 +987,11 @@ mod tests {
         token_name_map.insert("name".to_string(), 7);
 
 
-        let _precomputed = GrammarConstraint::precompute( // Renamed precomputed
+        let precomputed = GrammarConstraint::precompute(
             &tokenizer,
-            &llm_token_map, // Pass original map, precompute handles internal mapping
+            &llm_token_map,
             &token_name_map,
-            max_llm_token_id, // Pass max *original* ID
+            max_llm_token_id,
         );
         // print_precomputed(&precomputed);
         println!("Done precomputing");
@@ -1000,4 +1000,3 @@ mod tests {
 
 
 }
-
