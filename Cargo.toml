@@ -19,8 +19,6 @@ range-set-blaze = { version = "0.1.16", default-features = false, features = ["a
 
 # Add the derive macro crate
 json_convertible_derive = { path = "json_convertible_derive" }
-bigdecimal = "0.4.8"
-num-traits = "0.2.19"
 
 [dev-dependencies]
 reqwest = { version = "0.12.15", features = ["blocking", "json"] }
