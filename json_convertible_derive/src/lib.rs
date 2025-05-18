@@ -8,41 +8,34 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields};
 pub fn json_convertible_derive(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
     let name = &ast.ident;
-    let generics = &ast.generics;
 
-    let (impl_generics, ty_generics, original_where_clause) = generics.split_for_impl();
+    let mut new_generics = ast.generics.clone(); // Clone original generics to modify them
+    let where_clause = new_generics.make_where_clause(); // Get or create a mutable WhereClause
 
     // Add `T: crate::json_serialization::JSONConvertible` bound for each type parameter T
-    let mut new_where_clause = original_where_clause.cloned().unwrap_or_else(|| {
-        // If no original where clause, create one
-        syn::parse_quote!(where)
-    });
-    // Ensure the where clause doesn't end with a comma if it was empty before adding predicates
-    if !new_where_clause.predicates.is_empty() && !new_where_clause.predicates.trailing_punct() {
-         new_where_clause.predicates.push_punct(Default::default());
-    }
+    // from the original generics.
+    let original_type_params = ast.generics.type_params().collect::<Vec<_>>();
+    if !original_type_params.is_empty() {
+        // If there are new bounds to add, and if the existing predicates
+        // (from original generics, now in `where_clause.predicates`)
+        // are not empty and don't already end with a comma, add one.
+        if !where_clause.predicates.is_empty() && !where_clause.predicates.trailing_punct() {
+            where_clause.predicates.push_punct(syn::token::Comma::default());
+        }
 
-    for param in generics.type_params() {
-        let ident = &param.ident;
-        new_where_clause
-            .predicates
-            .push(syn::parse_quote!(#ident: crate::json_serialization::JSONConvertible));
-        // Add trailing comma for the next predicate if any
-        new_where_clause.predicates.push_punct(Default::default());
-    }
-    // Remove trailing comma if it's the last thing
-    if new_where_clause.predicates.trailing_punct() && !new_where_clause.predicates.is_empty() {
-        let mut new_punctuated = syn::punctuated::Punctuated::new();
-        let pairs = new_where_clause.predicates.clone().into_pairs().collect::<Vec<_>>();
-        for (i, pair) in pairs.into_iter().enumerate() {
-            new_punctuated.push_value(pair.into_value());
-            // Add comma if not the last element
-            if i < new_where_clause.predicates.len() -1 {
-                 new_punctuated.push_punct(Default::default());
+        for (i, param) in original_type_params.iter().enumerate() {
+            let ident = &param.ident;
+            where_clause.predicates.push_value(syn::parse_quote!(#ident: crate::json_serialization::JSONConvertible));
+            // Add a comma if this is not the last new predicate being added.
+            if i < original_type_params.len() - 1 {
+                where_clause.predicates.push_punct(syn::token::Comma::default());
             }
         }
-        new_where_clause.predicates = new_punctuated;
     }
+
+    // Get the components for the impl block from the modified generics.
+    // The `impl_generics` will now include the fully formed where clause.
+    let (impl_generics, ty_generics, _ /* where_clause is now part of impl_generics */) = new_generics.split_for_impl();
 
 
     let gen = match &ast.data {
@@ -72,7 +65,7 @@ pub fn json_convertible_derive(input: TokenStream) -> TokenStream {
                 });
 
                 quote! {
-                    impl #impl_generics crate::json_serialization::JSONConvertible for #name #ty_generics #new_where_clause {
+                    impl #impl_generics crate::json_serialization::JSONConvertible for #name #ty_generics {
                         fn to_json(&self) -> crate::json_serialization::JSONNode {
                             let mut obj = std::collections::BTreeMap::new();
                             #(#to_json_fields)*
@@ -108,7 +101,7 @@ pub fn json_convertible_derive(input: TokenStream) -> TokenStream {
             Fields::Unit => {
                 // Unit structs serialize to an empty JSON object
                 quote! {
-                    impl #impl_generics crate::json_serialization::JSONConvertible for #name #ty_generics #new_where_clause {
+                    impl #impl_generics crate::json_serialization::JSONConvertible for #name #ty_generics {
                         fn to_json(&self) -> crate::json_serialization::JSONNode {
                             crate::json_serialization::JSONNode::Object(std::collections::BTreeMap::new())
                         }

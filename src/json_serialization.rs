@@ -63,7 +63,24 @@ macro_rules! impl_json_for_number {
     };
 }
 
-impl_json_for_number!(usize, isize, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64);
+impl_json_for_number!(usize, isize, u16, u32, u64, i8, i16, i32, i64, f32, f64);
+
+// Specific implementation for u8 to handle range/integer validation
+impl JSONConvertible for u8 {
+    fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Number(n) => {
+                if n >= 0.0 && n <= 255.0 && n.fract() == 0.0 {
+                    Ok(n as u8)
+                } else {
+                    Err(format!("Number {} out of range or not an integer, cannot be converted to u8", n))
+                }
+            }
+            _ => Err("Expected JSONNode::Number for u8".to_string()),
+        }
+    }
+}
 
 impl JSONConvertible for u128 {
     fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) } // Potential precision loss
@@ -128,33 +145,6 @@ impl<T: JSONConvertible> JSONConvertible for Vec<T> {
         match node {
             JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
             _ => Err("Expected JSONNode::Array for Vec<T>".to_string()),
-        }
-    }
-}
-
-// Specialization for Vec<u8> (overwrites the generic Vec<T> for T=u8)
-// Note: This relies on Rust's specialization picking the more specific impl.
-// The generic `impl<T: JSONConvertible> for Vec<T>` and this specific `impl for Vec<u8>`
-// can coexist because `u8` implements `JSONConvertible`.
-impl JSONConvertible for Vec<u8> {
-    fn to_json(&self) -> JSONNode {
-        JSONNode::Array(self.iter().map(|byte| JSONNode::Number(*byte as f64)).collect())
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Array(arr) => arr.into_iter().map(|n_node| {
-                match n_node {
-                    JSONNode::Number(n) => {
-                        if n >= 0.0 && n <= 255.0 && n.fract() == 0.0 {
-                            Ok(n as u8)
-                        } else {
-                            Err(format!("Number {} cannot be safely converted to u8", n))
-                        }
-                    }
-                    _ => Err("Expected JSONNode::Number for byte in Vec<u8>".to_string()),
-                }
-            }).collect(),
-            _ => Err("Expected JSONNode::Array for Vec<u8>".to_string()),
         }
     }
 }
@@ -295,9 +285,9 @@ where
 struct MyStruct {
     field1: i32,
     field2: String,
-    optional_field: Option<bool>,
-    list_of_numbers: Vec<u32>, // Uses generic Vec<T>
-    byte_buffer: Vec<u8>,      // Uses specialized Vec<u8>
+    optional_field: Option::<bool>,
+    list_of_numbers: Vec::<u32>, // Uses generic Vec<T>
+    byte_buffer: Vec::<u8>,      // Uses specialized Vec<u8> (handled by generic Vec + specific u8)
 }
 
 // Example generic struct using the derive
@@ -322,7 +312,7 @@ struct MyUnitStruct;
 #[derive(Debug, Clone, PartialEq, JSONConvertible)]
 pub struct GrammarConstraint {
     pub rule_name: String,
-    pub max_depth: Option<u32>,
+    pub max_depth: Option::<u32>,
     // Example of a field that is another derived type
     // pub sub_constraint: Option<MyStruct>, // This would also work
 }
