@@ -292,7 +292,7 @@ struct MyStruct {
 
 // Example generic struct using the derive
 #[derive(Debug, Clone, PartialEq, JSONConvertible)]
-struct GenericStruct<T, U> {
+struct GenericStruct<T: JSONConvertible, U: JSONConvertible> {
     item_t: T,
     item_u: U,
     description: String,
