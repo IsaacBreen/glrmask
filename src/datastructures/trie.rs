@@ -35,7 +35,7 @@ impl Error for CycleDetectedError {}
 /// EK: type of the edge key (must be Ord).
 /// EV: type of the edge value.
 /// T: type of the value stored within the node.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Trie<EK: Ord, EV, T> {
     pub value: T,
     /// Stores a map from EdgeKey to (a map from ChildArc (wrapped) to EdgeValue).
@@ -636,7 +636,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     }
 }
 
-/// Helper to get the raw pointer to the Trie data from an Arc<Mutex<Trie>>.
+// Helper to get the raw pointer to the Trie data from an Arc<Mutex<Trie>>.
 /// Panics if the mutex is poisoned. Returns None if lock fails (WouldBlock).
 /// **Use with caution:** Only use when you know a failed lock means the current thread holds it.
 /// Consider using `Arc::as_ptr` for identity checks instead if possible.
@@ -665,6 +665,143 @@ pub(crate) fn try_get_node_data_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK
 pub(crate) fn node_ptr<EK: Ord, EV, T>(node_arc: &Arc<Mutex<Trie<EK, EV, T>>>) -> *const Trie<EK, EV, T> {
     let guard = node_arc.lock().expect("Mutex poisoned or lock failed when getting node pointer");
     &*guard as *const _
+}
+
+// Add this impl block for the recursive comparison helper
+impl<EK, EV, T> Trie<EK, EV, T>
+where
+    EK: Ord, // Ord implies PartialEq + Eq
+    EV: PartialEq + Clone,
+    T: PartialEq,
+{
+    /// Recursively compares two Trie nodes wrapped in Arcs for equality.
+    ///
+    /// - `self_arc`, `other_arc`: The Arcs pointing to the Trie nodes to compare.
+    /// - `comparison_cache`: Tracks pairs of (self_node_ptr, other_node_ptr) and their comparison result (bool).
+    ///   This cache is crucial for:
+    ///     1. Efficiency: Avoid re-comparing already processed pairs.
+    ///     2. Cycle Handling: Prevents infinite recursion by pre-emptively marking a pair as true
+    ///        and updating to false only if a mismatch is found.
+    ///     3. Topology: Ensures that if NodeA in self maps to NodeX in other, this mapping is consistent.
+    fn compare_arcs_recursive(
+        self_arc: &Arc<Mutex<Trie<EK, EV, T>>>,
+        other_arc: &Arc<Mutex<Trie<EK, EV, T>>>,
+        comparison_cache: &mut HashMap<(*const Mutex<Self>, *const Mutex<Self>), bool>,
+    ) -> bool {
+        let self_ptr = Arc::as_ptr(self_arc);
+        let other_ptr = Arc::as_ptr(other_arc);
+
+        // If both Arcs point to the exact same Mutex instance, they are definitionally equal in this context.
+        if self_ptr == other_ptr {
+            return true;
+        }
+
+        // Check cache for prior comparison result of this specific pair.
+        // The key order (self_ptr, other_ptr) matters.
+        if let Some(&cached_result) = comparison_cache.get(&(self_ptr, other_ptr)) {
+            return cached_result;
+        }
+
+        // Pre-emptively mark this pair as true in the cache.
+        // If a cycle is encountered leading back to this pair, this 'true' will be returned,
+        // assuming consistency unless a mismatch is found later down the path.
+        // If any subsequent comparison fails, this cache entry will be updated to false.
+        comparison_cache.insert((self_ptr, other_ptr), true);
+
+        // Attempt to lock both nodes. If locking fails (e.g., poisoned mutex, or would block
+        // in a more complex scenario not expected here), treat them as unequal for safety.
+        let self_node_guard = match self_arc.try_lock() {
+            Ok(g) => g,
+            Err(_) => {
+                comparison_cache.insert((self_ptr, other_ptr), false); // Update cache to reflect failure
+                return false;
+            }
+        };
+        let other_node_guard = match other_arc.try_lock() {
+            Ok(g) => g,
+            Err(_) => {
+                comparison_cache.insert((self_ptr, other_ptr), false); // Update cache
+                return false;
+            }
+        };
+        
+        // Dereference guards to get &Trie
+        let self_node = &*self_node_guard;
+        let other_node = &*other_node_guard;
+
+
+        // 1. Compare non-recursive fields: value and max_depth.
+        if self_node.value != other_node.value || self_node.max_depth != other_node.max_depth {
+            comparison_cache.insert((self_ptr, other_ptr), false); // Update cache
+            return false;
+        }
+
+        // 2. Compare children structure (number of distinct edge keys).
+        if self_node.children.len() != other_node.children.len() {
+            comparison_cache.insert((self_ptr, other_ptr), false); // Update cache
+            return false;
+        }
+
+        // 3. Compare children for each edge key.
+        for (self_ek, self_dest_map) in &self_node.children {
+            match other_node.children.get(self_ek) {
+                None => { // Edge key present in self but not in other.
+                    comparison_cache.insert((self_ptr, other_ptr), false); // Update cache
+                    return false;
+                }
+                Some(other_dest_map) => {
+                    // Number of destinations for this edge key must match.
+                    if self_dest_map.len() != other_dest_map.len() {
+                        comparison_cache.insert((self_ptr, other_ptr), false); // Update cache
+                        return false;
+                    }
+
+                    // Collect (Arc<Mutex<Trie>>, EV) pairs for detailed comparison.
+                    // EV needs to be Clone for this collection strategy.
+                    let self_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = self_dest_map
+                        .iter()
+                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
+                        .collect();
+                    
+                    let mut other_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = other_dest_map
+                        .iter()
+                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
+                        .collect();
+
+
+                    // For each child in self_child_pairs, find a matching child in other_child_pairs.
+                    // A match requires equal edge values (EV) and recursively equal Trie nodes.
+                    'self_pair_loop: for (s_arc, s_ev) in &self_child_pairs {
+                        let mut found_match_for_current_self_pair = false;
+                        for i in 0..other_child_pairs.len() { // Iterate indices to allow removal
+                            if s_ev == &other_child_pairs[i].1 { // Compare EV (s_ev is &EV, other_child_pairs[i].1 is EV)
+                                // Edge values match, now recursively compare the pointed-to Trie nodes.
+                                // Clone o_arc for the recursive call to avoid borrow issues if remove() happens.
+                                let o_arc_for_recursion = other_child_pairs[i].0.clone();
+                                if Trie::compare_arcs_recursive(s_arc, &o_arc_for_recursion, comparison_cache) {
+                                    other_child_pairs.remove(i); // Match found, remove from other_list.
+                                    found_match_for_current_self_pair = true;
+                                    break; // Found match for current s_arc, move to next s_arc.
+                                }
+                                // If recursive compare is false, this o_arc is not a match. Continue inner loop.
+                            }
+                        }
+                        if !found_match_for_current_self_pair {
+                            // No match found in other_child_pairs for the current s_arc/s_ev.
+                            comparison_cache.insert((self_ptr, other_ptr), false); // Update cache
+                            return false;
+                        }
+                    }
+                    // If all self_child_pairs found matches, other_child_pairs should be empty
+                    // (due to initial length check and removals). No explicit check needed here.
+                }
+            }
+        }
+        
+        // If all checks passed, the initial `true` assumption in the cache was correct.
+        // The cache entry (self_ptr, other_ptr) remains true.
+        true
+    }
 }
 
 
@@ -762,6 +899,94 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             }
         }
     }
+}
+
+// Implement PartialEq for Trie
+impl<EK, EV, T> PartialEq for Trie<EK, EV, T>
+where
+    EK: Ord, // Ord implies PartialEq + Eq, needed for BTreeMap keys and get
+    EV: PartialEq + Clone, // PartialEq for EV comparison, Clone for collecting pairs
+    T: PartialEq, // For self.value == other.value
+{
+    fn eq(&self, other: &Self) -> bool {
+        // 1. Compare non-recursive fields: value and max_depth.
+        if self.value != other.value || self.max_depth != other.max_depth {
+            return false;
+        }
+
+        // 2. Compare children structure (number of distinct edge keys).
+        if self.children.len() != other.children.len() {
+            return false;
+        }
+        
+        // Initialize cache for recursive calls on child Arcs.
+        // This cache is passed down through all recursive calls originating from this top-level eq.
+        // Type alias for pointer to Mutex<Trie<...>> for clarity.
+        type NodeMutexPtr<EKK, EVV, TT> = *const Mutex<Trie<EKK, EVV, TT>>;
+        let mut comparison_cache: HashMap<(NodeMutexPtr<EK, EV, T>, NodeMutexPtr<EK, EV, T>), bool> = HashMap::new();
+
+
+        // 3. Compare children for each edge key.
+        for (self_ek, self_dest_map) in &self.children {
+            match other.children.get(self_ek) {
+                None => { // Edge key present in self but not in other.
+                    return false;
+                }
+                Some(other_dest_map) => {
+                    // Number of destinations for this edge key must match.
+                    if self_dest_map.len() != other_dest_map.len() {
+                        return false;
+                    }
+
+                    // Collect (Arc<Mutex<Trie>>, EV) pairs for detailed comparison.
+                    let self_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = self_dest_map
+                        .iter()
+                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
+                        .collect();
+                    
+                    let mut other_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = other_dest_map
+                        .iter()
+                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
+                        .collect();
+
+
+                    // For each child in self_child_pairs, find a matching child in other_child_pairs.
+                    // A match requires equal edge values (EV) and recursively equal Trie nodes.
+                    'self_pair_loop: for (s_arc, s_ev) in &self_child_pairs {
+                        let mut found_match_for_current_self_pair = false;
+                        for i in 0..other_child_pairs.len() { // Iterate indices to allow removal
+                            if s_ev == &other_child_pairs[i].1 { // Compare EV
+                                // Edge values match, now recursively compare the pointed-to Trie nodes.
+                                let o_arc_for_recursion = other_child_pairs[i].0.clone();
+                                if Trie::compare_arcs_recursive(s_arc, &o_arc_for_recursion, &mut comparison_cache) {
+                                    other_child_pairs.remove(i); // Match found.
+                                    found_match_for_current_self_pair = true;
+                                    break; // Found match for current s_arc, move to next s_arc.
+                                }
+                            }
+                        }
+                        if !found_match_for_current_self_pair {
+                            // No match found for the current s_arc/s_ev.
+                            return false;
+                        }
+                    }
+                    // If all self_child_pairs found matches, other_child_pairs should be empty.
+                }
+            }
+        }
+        
+        // All checks passed.
+        true
+    }
+}
+
+// Implement Eq for Trie
+impl<EK, EV, T> Eq for Trie<EK, EV, T>
+where
+    EK: Ord, // Ord implies Eq
+    EV: Eq + Clone, // EV also needs to be Eq
+    T: Eq,         // T also needs to be Eq
+{
 }
 
 
@@ -1036,7 +1261,7 @@ impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
     /// struct NodeValue { /* ... */ }
     ///
     /// // Example merge function for edge values (e.g., HybridBitset)
-    /// fn merge_bitset_union(existing: &HybridBitset, new: HybridBitset) { // Note the &mut and move
+    /// fn merge_bitset_union(existing: &mut HybridBitset, new: HybridBitset) { // Note the &mut and move
     ///     *existing |= new; // Use reference for the OR operation
     /// }
     ///
