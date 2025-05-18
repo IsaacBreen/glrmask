@@ -87,7 +87,7 @@ where
                     }
                 };
                 dest_map_json_array.push(JSONNode::Array(vec![
-                    (child_idx as f64).to_json(), // Child index
+                    child_idx.to_json(), // Child index
                     edge_val.to_json(),          // Edge value
                 ]));
             }
@@ -129,7 +129,7 @@ where
                         }
                     };
                     dest_map_json_array_bfs.push(JSONNode::Array(vec![
-                        (child_idx as f64).to_json(),
+                        child_idx.to_json(),
                         edge_val.to_json(),
                     ]));
                 }
@@ -146,7 +146,7 @@ where
 
         JSONNode::Object(StdMap::from_iter(vec![
             ("nodes".to_string(), JSONNode::Array(nodes_json_list)),
-            ("root_idx".to_string(), (root_idx as f64).to_json()),
+            ("root_idx".to_string(), root_idx.to_json()),
         ]))
     }
 
