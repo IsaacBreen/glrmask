@@ -48,7 +48,7 @@ pub struct Trie<EK: Ord, EV, T> {
 
 impl<EK, EV, T> JSONConvertible for Trie<EK, EV, T>
 where
-    EK: Ord + Clone + JSONConvertible,
+    EK: Ord + Clone + JSONConvertible + Debug,
     EV: Clone + JSONConvertible,
     T: Clone + JSONConvertible,
 {
