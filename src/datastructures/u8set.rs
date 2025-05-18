@@ -1,6 +1,6 @@
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
+use std::collections::BTreeMap;
 
 
 #[derive(Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
@@ -12,19 +12,30 @@ pub struct U8Set {
 // Manual impl for U8Set (could be derived)
 impl JSONConvertible for U8Set {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("x".to_string(), self.x.to_json());
-        obj.insert("y".to_string(), self.y.to_json());
+        let mut obj = BTreeMap::new();
+        // Split into four u64 fields to avoid overflow
+        let x0 = self.x as u64;
+        let x1 = (self.x >> 64) as u64;
+        let y0 = self.y as u64;
+        let y1 = (self.y >> 64) as u64;
+        obj.insert("x0".to_string(), x0.to_json());
+        obj.insert("x1".to_string(), x1.to_json());
+        obj.insert("y0".to_string(), y0.to_json());
+        obj.insert("y1".to_string(), y1.to_json());
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let x = obj.remove("x").ok_or_else(|| "Missing field x for U8Set".to_string())
-                           .and_then(u128::from_json)?;
-                let y = obj.remove("y").ok_or_else(|| "Missing field y for U8Set".to_string())
-                           .and_then(u128::from_json)?;
-                Ok(U8Set { x, y })
+                let x0 = obj.remove("x0").ok_or_else(|| "Missing field x0 for U8Set".to_string())
+                           .and_then(u64::from_json)?;
+                let x1 = obj.remove("x1").ok_or_else(|| "Missing field x1 for U8Set".to_string())
+                           .and_then(u64::from_json)?;
+                let y0 = obj.remove("y0").ok_or_else(|| "Missing field y0 for U8Set".to_string())
+                           .and_then(u64::from_json)?;
+                let y1 = obj.remove("y1").ok_or_else(|| "Missing field y1 for U8Set".to_string())
+                           .and_then(u64::from_json)?;
+                Ok(U8Set { x: (x0 as u128) | ((x1 as u128) << 64), y: (y0 as u128) | ((y1 as u128) << 64) })
             }
             _ => Err("Expected JSONNode::Object for U8Set".to_string()),
         }
