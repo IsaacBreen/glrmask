@@ -6,15 +6,14 @@ use std::sync::{Arc, Mutex, TryLockError, MutexGuard};
 use std::sync::atomic::{AtomicUsize, Ordering}; // Added for tests
 use std::cmp::Reverse;          // min-heap helper
 use std::collections::BinaryHeap;
+use std::hash::{Hash, Hasher}; // Added for Hash implementation
 use std::cell::RefCell; // Not strictly needed with the chosen direct BFS approach in to_json, but good to keep in mind for context-passing alternatives.
 
 
 use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
 use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use std::collections::BTreeMap as StdMap;
-use std::hash::{Hash, Hasher};
-// Added for derive macro pattern
+use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
 
 
 /// Error type indicating that a cycle was detected during an operation
@@ -991,39 +990,256 @@ where
 {
 }
 
-
-impl<EK, EV, T> PartialOrd for Trie<EK, EV, T>
-where
-    EK: Ord + Clone,
-    EV: PartialOrd + Clone,
-    T: PartialOrd,
-{
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        todo!()
-    }
-}
-
+// Implement Ord for Trie
 impl<EK, EV, T> Ord for Trie<EK, EV, T>
 where
-    EK: Ord + Clone,
-    EV: Ord + Clone,
-    T: Ord,
+    EK: Ord,
+    EV: Ord, // EV needs to be Ord for canonical sorting of children
+    T: Ord,  // T needs to be Ord for comparing values
 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        todo!()
+        // Cache for compare_arcs_ord.
+        // Key: (min_ptr, max_ptr) to ensure canonical key for pairs.
+        // Value: Ordering of (node_at_min_ptr vs node_at_max_ptr).
+        type NodeMutexPtr<EKK, EVV, TT> = *const Mutex<Trie<EKK, EVV, TT>>;
+        let mut comparison_cache: HashMap<(NodeMutexPtr<EK, EV, T>, NodeMutexPtr<EK, EV, T>), std::cmp::Ordering> = HashMap::new();
+        
+        // Initial comparison starts with the &Trie instances themselves.
+        Trie::compare_tries_ord(self, other, &mut comparison_cache)
     }
 }
 
-impl<EK, EV, T> Hash for Trie<EK, EV, T>
+impl<EK, EV, T> Trie<EK, EV, T>
 where
-    EK: Ord + Clone,
-    EV: Ord + Clone,
+    EK: Ord,
+    EV: Ord,
     T: Ord,
 {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        todo!()
+    /// Helper function to compare two &Trie instances.
+    fn compare_tries_ord(
+        node1: &Trie<EK, EV, T>,
+        node2: &Trie<EK, EV, T>,
+        cache: &mut HashMap<(*const Mutex<Trie<EK, EV, T>>, *const Mutex<Trie<EK, EV, T>>), std::cmp::Ordering>,
+    ) -> std::cmp::Ordering {
+        // 1. Compare non-recursive fields: value and max_depth.
+        match node1.value.cmp(&node2.value) {
+            std::cmp::Ordering::Equal => {}
+            other => return other,
+        }
+        match node1.max_depth.cmp(&node2.max_depth) {
+            std::cmp::Ordering::Equal => {}
+            other => return other,
+        }
+
+        // 2. Compare children structure (number of distinct edge keys).
+        match node1.children.len().cmp(&node2.children.len()) {
+            std::cmp::Ordering::Equal => {}
+            other => return other,
+        }
+
+        // 3. Compare children for each edge key.
+        // Iterate through edge keys in sorted order (guaranteed by BTreeMap).
+        let mut self_children_iter = node1.children.iter();
+        let mut other_children_iter = node2.children.iter();
+
+        loop {
+            match (self_children_iter.next(), other_children_iter.next()) {
+                (Some((s_ek, s_dest_map)), Some((o_ek, o_dest_map))) => {
+                    match s_ek.cmp(o_ek) {
+                        std::cmp::Ordering::Equal => {}
+                        other => return other,
+                    }
+
+                    // Edge keys are equal, compare destination maps (number of children for this EK).
+                    match s_dest_map.len().cmp(&o_dest_map.len()) {
+                        std::cmp::Ordering::Equal => {}
+                        other => return other,
+                    }
+
+                    // Collect (Arc, EV) pairs for canonical sorting and comparison.
+                    let mut s_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = s_dest_map
+                        .iter()
+                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
+                        .collect();
+                    
+                    let mut o_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = o_dest_map
+                        .iter()
+                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
+                        .collect();
+
+                    // Sort pairs canonically: by EV, then by recursively comparing Arcs.
+                    s_pairs.sort_unstable_by(|(arc_a, ev_a), (arc_b, ev_b)| {
+                        ev_a.cmp(ev_b).then_with(|| Self::compare_arcs_ord(arc_a, arc_b, cache))
+                    });
+                    o_pairs.sort_unstable_by(|(arc_a, ev_a), (arc_b, ev_b)| {
+                        ev_a.cmp(ev_b).then_with(|| Self::compare_arcs_ord(arc_a, arc_b, cache))
+                    });
+                    
+                    // Lexicographically compare the sorted lists of pairs.
+                    for (s_pair, o_pair) in s_pairs.iter().zip(o_pairs.iter()) {
+                        let (s_arc, s_ev) = s_pair;
+                        let (o_arc, o_ev) = o_pair;
+
+                        match s_ev.cmp(o_ev) {
+                            std::cmp::Ordering::Equal => {}
+                            other => return other,
+                        }
+                        // EV's are equal, compare Arcs.
+                        // This call primarily relies on cache for already sorted items,
+                        // but correctly handles the comparison if needed.
+                        match Self::compare_arcs_ord(s_arc, o_arc, cache) {
+                            std::cmp::Ordering::Equal => {}
+                            other => return other,
+                        }
+                    }
+                }
+                (None, None) => break, // Both iterators exhausted, all compared equal so far.
+                (Some(_), None) => return std::cmp::Ordering::Greater, // self has more edge keys.
+                (None, Some(_)) => return std::cmp::Ordering::Less,    // other has more edge keys.
+            }
+        }
+        std::cmp::Ordering::Equal // All checks passed.
+    }
+
+    /// Helper function to compare two Arcs pointing to Trie nodes. Handles cycles using a cache.
+    fn compare_arcs_ord(
+        arc1: &Arc<Mutex<Trie<EK, EV, T>>>,
+        arc2: &Arc<Mutex<Trie<EK, EV, T>>>,
+        cache: &mut HashMap<(*const Mutex<Trie<EK, EV, T>>, *const Mutex<Trie<EK, EV, T>>), std::cmp::Ordering>,
+    ) -> std::cmp::Ordering {
+        let ptr1 = Arc::as_ptr(arc1);
+        let ptr2 = Arc::as_ptr(arc2);
+
+        if ptr1 == ptr2 { return std::cmp::Ordering::Equal; }
+
+        // Ensure canonical cache key: (min_ptr, max_ptr).
+        let (key_ptr1, key_ptr2) = if ptr1 < ptr2 { (ptr1, ptr2) } else { (ptr2, ptr1) };
+        let reverse_result = ptr1 > ptr2; // True if the order of ptr1,ptr2 was swapped for the key.
+
+        if let Some(cached_ord) = cache.get(&(key_ptr1, key_ptr2)) {
+            return if reverse_result { cached_ord.reverse() } else { *cached_ord };
+        }
+
+        // Pre-emptively mark as Equal in cache to handle cycles.
+        // If a cycle leads back here, Equal will be returned, assuming consistency unless a difference is found.
+        cache.insert((key_ptr1, key_ptr2), std::cmp::Ordering::Equal);
+
+        let guard1 = arc1.lock().expect("Mutex poisoned during Ord comparison");
+        let guard2 = arc2.lock().expect("Mutex poisoned during Ord comparison");
+        
+        let result = Self::compare_tries_ord(&*guard1, &*guard2, cache);
+        
+        drop(guard1);
+        drop(guard2);
+
+        // Update cache with the definitive result.
+        // If result is Equal, the pre-emptive entry was correct. Otherwise, update.
+        if result != std::cmp::Ordering::Equal {
+             cache.insert((key_ptr1, key_ptr2), if reverse_result { result.reverse() } else { result });
+        }
+        
+        if reverse_result { result.reverse() } else { result }
     }
 }
+
+// Implement PartialOrd for Trie
+impl<EK, EV, T> PartialOrd for Trie<EK, EV, T>
+where
+    EK: Ord,
+    EV: Ord,
+    T: Ord,
+{
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+// Implement Hash for Trie
+impl<EK, EV, T> Hash for Trie<EK, EV, T>
+where
+    EK: Ord + Hash, // Ord for BTreeMap iteration, Hash for hashing EK
+    EV: PartialEq + Clone + Hash, // From PartialEq, add Hash for EV
+    T: PartialEq + Hash,    // From PartialEq, add Hash for T
+{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Cache to handle cycles and shared nodes during hashing.
+        // Maps node pointer to a marker (e.g., depth) to break cycles.
+        let mut recursion_marker: HashMap<*const Mutex<Trie<EK, EV, T>>, usize> = HashMap::new();
+        Self::hash_trie_recursive(self, state, &mut recursion_marker, 0);
+    }
+}
+
+impl<EK, EV, T> Trie<EK, EV, T>
+where
+    EK: Ord + Hash,
+    EV: PartialEq + Clone + Hash,
+    T: PartialEq + Hash,
+{
+    /// Helper function to hash a &Trie instance.
+    fn hash_trie_recursive<S: Hasher>(
+        node: &Trie<EK, EV, T>,
+        state: &mut S,
+        recursion_marker: &mut HashMap<*const Mutex<Trie<EK, EV, T>>, usize>,
+        current_depth: usize,
+    ) {
+        // Hash non-recursive fields.
+        node.value.hash(state);
+        node.max_depth.hash(state);
+
+        // Hash children.
+        // Iterate edge keys in sorted order (BTreeMap).
+        node.children.len().hash(state);
+        for (ek, dest_map) in &node.children {
+            ek.hash(state);
+            
+            // For the destinations under this edge key, their order due to ArcPtrWrapper (pointers)
+            // is not canonical. To be consistent with PartialEq (which treats them as a multiset),
+            // we hash each (Arc, EV) pair, collect these hashes, sort them, and then hash the sorted list.
+            dest_map.len().hash(state);
+            let mut pair_hashes = Vec::with_capacity(dest_map.len());
+
+            for (apw, ev) in dest_map { // Iterates in ArcPtrWrapper order
+                let child_arc = apw.as_arc();
+                // Create a temporary hasher for the (EV, Arc_content) pair.
+                let mut pair_hasher = std::collections::hash_map::DefaultHasher::new();
+                ev.hash(&mut pair_hasher);
+                Self::hash_arc_recursive(child_arc, &mut pair_hasher, recursion_marker, current_depth);
+                pair_hashes.push(pair_hasher.finish());
+            }
+
+            pair_hashes.sort_unstable(); // Sort the hashes of the (EV, Arc_content) pairs.
+            for h in pair_hashes {
+                h.hash(state);
+            }
+        }
+    }
+
+    /// Helper function to hash an Arc<Mutex<Trie>>. Handles cycles.
+    fn hash_arc_recursive<S: Hasher>(
+        arc: &Arc<Mutex<Trie<EK, EV, T>>>,
+        state: &mut S,
+        recursion_marker: &mut HashMap<*const Mutex<Trie<EK, EV, T>>, usize>,
+        current_depth: usize,
+    ) {
+        let ptr = Arc::as_ptr(arc);
+
+        if let Some(visited_depth) = recursion_marker.get(&ptr) {
+            // Node already visited in this hashing traversal. Hash pointer and depth to break cycle.
+            ptr.hash(state);
+            visited_depth.hash(state); // Include depth to distinguish different cycle points/sharing levels
+            return;
+        }
+
+        recursion_marker.insert(ptr, current_depth);
+
+        let guard = arc.lock().expect("Mutex poisoned during Hash operation");
+        Self::hash_trie_recursive(&*guard, state, recursion_marker, current_depth + 1);
+        drop(guard);
+
+        recursion_marker.remove(&ptr); // Backtrack: remove from current recursion path.
+    }
+}
+
 
 /// A helper struct to facilitate inserting an edge into a Trie,
 /// trying multiple potential destinations and optionally creating a new node.
