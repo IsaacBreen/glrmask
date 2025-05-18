@@ -56,7 +56,7 @@ enum Stage6ShiftsAndReduces {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stage7ShiftsAndReduces {
     Shift(StateID),
     Reduce { production_id: ProductionID, nonterminal_id: NonTerminalID, len: usize },
@@ -125,7 +125,7 @@ impl JSONConvertible for Stage7ShiftsAndReduces {
 }
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stage7Row {
     pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
     pub gotos: BTreeMap<NonTerminalID, StateID>,

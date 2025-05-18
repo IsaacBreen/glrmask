@@ -71,7 +71,7 @@ impl JSONConvertible for StopReason {
 
 
 // TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GLRParser {
     pub stage_7_table: Stage7Table,
     pub productions: Vec<Production>,

@@ -34,7 +34,7 @@ impl Error for CycleDetectedError {}
 /// EK: type of the edge key (must be Ord).
 /// EV: type of the edge value.
 /// T: type of the value stored within the node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trie<EK: Ord, EV, T> {
     pub value: T,
     /// Stores a map from EdgeKey to (a map from ChildArc (wrapped) to EdgeValue).

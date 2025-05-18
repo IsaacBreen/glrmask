@@ -111,7 +111,7 @@ impl MergeAndIntersect for LLMTokenInfo {
 // -----------------------------------------------------------------------------
 // Pre-computation node values
 // -----------------------------------------------------------------------------
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct PrecomputedFinalizer {
     pub content: BTreeMap<TokenizerStateID, LLMTokenBV>,
 }
@@ -144,7 +144,7 @@ impl PrecomputedFinalizer {
     }
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct PrecomputedNodeContents {
     finalizers: BTreeMap<GrammarTokenID, PrecomputedFinalizer>,
     pub clean_end: Option<LLMTokenBV>,
@@ -213,7 +213,7 @@ pub type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode>;
 // -----------------------------------------------------------------------------
 // GrammarConstraint – public facing object
 // -----------------------------------------------------------------------------
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrammarConstraint {
     pub(crate) tokenizer:        Regex,
     pub(crate) parser:           GLRParser,
