@@ -56,7 +56,7 @@ pub fn json_convertible_derive(input: TokenStream) -> TokenStream {
                     quote! {
                         let #field_name = obj.remove(#field_name_str)
                             .ok_or_else(|| format!("Missing field '{}' for struct {}", #field_name_str, stringify!(#name)))
-                            .and_then(|json_value| #field_ty::from_json(json_value, cache))?;
+                            .and_then(#field_ty::from_json)?;
                     }
                 });
 
@@ -72,7 +72,7 @@ pub fn json_convertible_derive(input: TokenStream) -> TokenStream {
                             crate::json_serialization::JSONNode::Object(obj)
                         }
 
-                        fn from_json(node: crate::json_serialization::JSONNode, cache: &mut crate::json_serialization::DeserializationCache) -> Result<Self, String> {
+                        fn from_json(node: crate::json_serialization::JSONNode) -> Result<Self, String> {
                             match node {
                                 crate::json_serialization::JSONNode::Object(mut obj) => {
                                     #(#from_json_fields)*
@@ -106,7 +106,7 @@ pub fn json_convertible_derive(input: TokenStream) -> TokenStream {
                             crate::json_serialization::JSONNode::Object(std::collections::BTreeMap::new())
                         }
 
-                        fn from_json(node: crate::json_serialization::JSONNode, _cache: &mut crate::json_serialization::DeserializationCache) -> Result<Self, String> {
+                        fn from_json(node: crate::json_serialization::JSONNode) -> Result<Self, String> {
                             match node {
                                 crate::json_serialization::JSONNode::Object(obj) if obj.is_empty() => Ok(Self),
                                 crate::json_serialization::JSONNode::Object(_) => Err(format!("Expected empty JSONNode::Object for unit struct {}, got one with fields.", stringify!(#name))),
@@ -135,4 +135,3 @@ pub fn json_convertible_derive(input: TokenStream) -> TokenStream {
 
     gen.into()
 }
-
