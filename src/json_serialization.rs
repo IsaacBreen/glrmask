@@ -278,50 +278,32 @@ where
     }
 }
 
-// --- Structs using the derive macro ---
-
-// Example struct using the derive
-#[derive(Debug, Clone, PartialEq, JSONConvertible)]
-struct MyStruct {
-    field1: i32,
-    field2: String,
-    optional_field: Option::<bool>,
-    list_of_numbers: Vec::<u32>, // Uses generic Vec<T>
-    byte_buffer: Vec::<u8>,      // Uses specialized Vec<u8> (handled by generic Vec + specific u8)
-}
-
-// Example generic struct using the derive
-#[derive(Debug, Clone, PartialEq, JSONConvertible)]
-struct GenericStruct<T: JSONConvertible, U: JSONConvertible> {
-    item_t: T,
-    item_u: U,
-    description: String,
-}
-
-// Example unit struct using the derive
-#[derive(Debug, Clone, PartialEq, JSONConvertible)]
-struct MyUnitStruct;
-
-
-// --- GrammarConstraint (and other custom types) ---
-// Define GrammarConstraint and use the derive macro.
-// If GrammarConstraint were in another file (e.g., src/constraint.rs),
-// you would do `use crate::constraint::GrammarConstraint;`
-// and ensure GrammarConstraint itself derives JSONConvertible or implements it manually.
-
-#[derive(Debug, Clone, PartialEq, JSONConvertible)]
-pub struct GrammarConstraint {
-    pub rule_name: String,
-    pub max_depth: Option::<u32>,
-    // Example of a field that is another derived type
-    // pub sub_constraint: Option<MyStruct>, // This would also work
-}
-
-
 // --- Tests (optional, but good for verifying) ---
 #[cfg(test)]
 mod tests {
     use super::*; // Imports JSONNode, JSONConvertible, MyStruct, etc.
+
+    // Example struct using the derive
+    #[derive(Debug, Clone, PartialEq, JSONConvertible)]
+    struct MyStruct {
+        field1: i32,
+        field2: String,
+        optional_field: Option::<bool>,
+        list_of_numbers: Vec::<u32>, // Uses generic Vec<T>
+        byte_buffer: Vec::<u8>,      // Uses specialized Vec<u8> (handled by generic Vec + specific u8)
+    }
+
+    // Example generic struct using the derive
+    #[derive(Debug, Clone, PartialEq, JSONConvertible)]
+    struct GenericStruct<T: JSONConvertible, U: JSONConvertible> {
+        item_t: T,
+        item_u: U,
+        description: String,
+    }
+
+    // Example unit struct using the derive
+    #[derive(Debug, Clone, PartialEq, JSONConvertible)]
+    struct MyUnitStruct;
 
     #[test]
     fn test_my_struct_serialization_deserialization() {
@@ -424,18 +406,6 @@ mod tests {
         let json_node = original.to_json();
         assert_eq!(json_node, JSONNode::Object(BTreeMap::new()));
         let deserialized = MyUnitStruct::from_json(json_node).expect("Deserialization failed");
-        assert_eq!(original, deserialized);
-    }
-
-    #[test]
-    fn test_grammar_constraint_serialization() {
-        let original = GrammarConstraint {
-            rule_name: "main_rule".to_string(),
-            max_depth: Some(10),
-        };
-        let json_node = original.to_json();
-        // { "max_depth": 10.0, "rule_name": "main_rule" }
-        let deserialized = GrammarConstraint::from_json(json_node).expect("Deserialization failed");
         assert_eq!(original, deserialized);
     }
 
