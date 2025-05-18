@@ -994,7 +994,7 @@ where
 impl<EK, EV, T> Ord for Trie<EK, EV, T>
 where
     EK: Ord,
-    EV: Ord, // EV needs to be Ord for canonical sorting of children
+    EV: Ord + Clone, // EV needs to be Ord for canonical sorting of children
     T: Ord,  // T needs to be Ord for comparing values
 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
@@ -1012,7 +1012,7 @@ where
 impl<EK, EV, T> Trie<EK, EV, T>
 where
     EK: Ord,
-    EV: Ord,
+    EV: Ord + Clone,
     T: Ord,
 {
     /// Helper function to compare two &Trie instances.
@@ -1146,7 +1146,7 @@ where
 impl<EK, EV, T> PartialOrd for Trie<EK, EV, T>
 where
     EK: Ord,
-    EV: Ord,
+    EV: Ord + Clone,
     T: Ord,
 {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
