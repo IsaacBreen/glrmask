@@ -384,7 +384,10 @@ impl GrammarConstraint {
         // 2.  Run the DFS over the vocabulary prefix tree.
         helper.run_dfs();
 
-        // 3.  Collect statistics & finish progress-bar.
+        // 3. Merge nodes.
+        helper.merge_nodes();
+
+        // 4.  Collect statistics & finish progress-bar.
         helper.finish(token_name_map)
     }
 
@@ -525,6 +528,11 @@ impl<'r> Precomputer<'r> {
         self.dfs(&self.vocab.root, assoc);
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish_with_message("Precomputation complete");
+    }
+
+    fn merge_nodes(&mut self) {
+        // Merge equal nodes.
+        let mut unique: BTreeSet<_> = self.roots.values().map(|r| r.lock().unwrap().clone()).collect();
     }
 
     // -------------------------------------------------------------------------
