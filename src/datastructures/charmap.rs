@@ -17,37 +17,109 @@ pub struct TrieMap<T> {
     u8set: U8Set,
 }
 
+// Helper function to format u8 keys.
+// It displays printable ASCII characters as char literals (e.g., 'A'),
+// and other byte values as numbers.
+fn format_u8_key(val: u8, f: &mut Formatter<'_>) -> fmt::Result {
+    if val >= 0x20 && val <= 0x7E { // Standard printable ASCII range
+        // Use char's Debug impl, which handles escapes like '\'' correctly
+        Debug::fmt(&(val as char), f)
+    } else {
+        // Fall back to u8's Debug impl (numeric) for non-printable characters
+        Debug::fmt(&val, f)
+    }
+}
+
+// Helper enum to represent single keys or ranges for Debug output.
+// This allows formatting like 'A' or 'A'..'Z'.
+enum KeyDisplay {
+    Single(u8),
+    Range(u8, u8),
+}
+
+impl Debug for KeyDisplay {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match *self {
+            KeyDisplay::Single(k) => format_u8_key(k, f),
+            KeyDisplay::Range(start, end) => {
+                format_u8_key(start, f)?;
+                f.write_str("..")?;
+                format_u8_key(end, f)
+            }
+        }
+    }
+}
+
 impl<T: Debug> Debug for TrieMap<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        // ───── `debug_struct` lets us build something that looks like
-        // TrieMap { len: 3, entries: {65: "A", 66: "B", 255: "🎉"}, transitions: {65: [1]} }
         let mut ds = f.debug_struct("TrieMap");
 
-        // A small helper that formats only the present key/value pairs.
-        struct Entries<'a, T>(&'a TrieMap<T>);
-        impl<'a, T: Debug> Debug for Entries<'a, T> {
+        // Helper struct for formatting entries with range compression.
+        // Generic V is used to avoid conflict with the outer T.
+        struct Entries<'a, V: Debug>(&'a TrieMap<V>);
+        impl<'a, V: Debug> Debug for Entries<'a, V> {
             fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-                let mut map = f.debug_map();
-                for (k, v) in self.0.iter() {
-                    map.entry(&k, v);
+                let mut map_formatter = f.debug_map();
+                let trie_map = self.0; // This is &'a TrieMap<V>
+
+                let mut i = 0;
+                while i < CHARMAP_SIZE {
+                    // Check data[i] for a value
+                    if let Some(current_val_box) = &trie_map.data[i] {
+                        let start_key = i as u8;
+                        let current_val_ref = current_val_box.as_ref(); // This is &V
+
+                        // Scan forward to find the end of the run with the same value.
+                        // "Same value" is determined by pointer equality (std::ptr::eq).
+                        let mut end_key = start_key;
+                        let mut j = i + 1;
+                        while j < CHARMAP_SIZE {
+                            if let Some(next_val_box) = &trie_map.data[j] {
+                                let next_val_ref = next_val_box.as_ref(); // This is &V
+                                if std::ptr::eq(current_val_ref, next_val_ref) {
+                                    end_key = j as u8;
+                                } else {
+                                    // Value changed (or different Box for same logical value)
+                                    break; 
+                                }
+                            } else {
+                                // Gap (None), run ends
+                                break; 
+                            }
+                            j += 1;
+                        }
+
+                        // Format the key as a single key or a range
+                        let key_display = if start_key == end_key {
+                            KeyDisplay::Single(start_key)
+                        } else {
+                            KeyDisplay::Range(start_key, end_key)
+                        };
+                        map_formatter.entry(&key_display, current_val_ref);
+
+                        // Advance i to the position after the processed range
+                        i = (end_key as usize) + 1; 
+                    } else {
+                        // No value at data[i], advance to the next key
+                        i += 1; 
+                    }
                 }
-                map.finish()
+                map_formatter.finish()
             }
         }
 
-        // Another helper that prints only the non-empty transition lists
-        // (you can drop this block if you do not care about the `children`
-        // field in the debug view).
+        // Helper for formatting transitions (keys also use KeyDisplay for consistency).
         struct Transitions<'a>(&'a [Vec<usize>]);
         impl<'a> Debug for Transitions<'a> {
             fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-                let mut map = f.debug_map();
+                let mut map_formatter = f.debug_map();
                 for (idx, list) in self.0.iter().enumerate() {
                     if !list.is_empty() {
-                        map.entry(&idx, list);
+                        // idx is uaranteed to be 0..CHARMAP_SIZE-1
+                        map_formatter.entry(&KeyDisplay::Single(idx as u8), list);
                     }
                 }
-                map.finish()
+                map_formatter.finish()
             }
         }
 
