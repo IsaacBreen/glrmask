@@ -219,6 +219,10 @@ fn test_constraint_expression() {
     // let mask = state.get_mask();
     // assert_eq!(mask, HybridBitset::from_iter(vec![1, 2, 5, 6, 3])); // Expect '+', '*', '(', '(i', '+i'
 
+    // Test Serialization/Deserialization
+    let json = constraint.to_json();
+    let constraint_from_json = GrammarConstraint::from_json(json).unwrap();
+    assert_eq!(constraint, constraint_from_json);
 }
 
 #[test]
@@ -529,9 +533,4 @@ fn test_hideous_ambiguity() {
         println!("{}. Stepping with LLM token ID {}", i, a_id);
         constraint_state.step_with_all_llm_tokens();
     }
-    
-    // Test Serialization/Deserialization
-    let json = constraint.to_json();
-    let constraint_from_json = GrammarConstraint::from_json(json).unwrap();
-    assert_eq!(constraint, constraint_from_json);
 }
