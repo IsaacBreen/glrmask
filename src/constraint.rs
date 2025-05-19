@@ -533,6 +533,7 @@ impl<'r> Precomputer<'r> {
     fn merge_nodes(&mut self) {
         // Merge equal nodes.
         let mut unique: HashMap<PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = self.roots.values().map(|r| (r.lock().unwrap().clone(), r.clone())).collect();
+        println!("Unique nodes: {:?}", unique.len());
 
         for (tokenizer_state_id, root) in &mut self.roots {
             let new_root = unique.get(&root.lock().unwrap().clone()).unwrap().clone();
