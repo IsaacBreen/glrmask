@@ -13,7 +13,7 @@ import pegen.grammar
 import pegen.grammar_parser
 import pegen.tokenizer # type: ignore
 import torch # type: ignore
-from _sep1 import PyRegexExpr as Regex, PyGrammar, PyGrammarExpr as ge, PyGrammarConstraint, PyGrammarConstraintState
+from _sep1 import PyRegexExpr as Regex, PyCompiledGrammar, PyGrammarExpr as ge, PyGrammarConstraint, PyGrammarConstraintState # Changed PyGrammar to PyCompiledGrammar
 from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
@@ -177,7 +177,7 @@ def define_tokens() -> list[tuple[str, Any]]:
 #     assert len(tokens) == len(set(tokens.keys()))
 #     return [(name, ge.regex(expr)) for name, expr in tokens.items()]
 
-def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
+def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyCompiledGrammar: # Changed PyGrammar to PyCompiledGrammar
     memo = {}
     exprs: list[tuple[str, Any]] = []
 
@@ -236,7 +236,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyGrammar:
     tokens = define_tokens()
     exprs.extend(tokens)
 
-    return PyGrammar(exprs)
+    return PyCompiledGrammar(exprs) # Changed PyGrammar to PyCompiledGrammar
 
 def define_python_grammar():
     with Path(__file__).parent / "python.gram" as f:
@@ -399,13 +399,19 @@ if __name__ == "__main__":
 #     # TODO: delete this
 #     # Define a dummy grammar that only accepts "hello=world"
 #     exprs = [("S", ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))]))]
-#     grammar = PyGrammar(exprs)
+#     grammar = PyCompiledGrammar(exprs) # Changed PyGrammar to PyCompiledGrammar
 #     grammar.print()
 
 #     print("Initializing parser...")
 #     parser = grammar.glr_parser()
 #     parser.print()
-    grammar.glr_parser().print()
+    # Accessing glr_parser directly from PyCompiledGrammar might not be exposed.
+    # If you need to print it, you'd typically do it via the Rust `Debug` impl,
+    # which `grammar.print()` already does for the whole `PyCompiledGrammar`.
+    # If a separate `PyGLRParser` object with its own print was intended,
+    # `PyCompiledGrammar` would need a method to return it.
+    # For now, `grammar.print()` includes GLR parser info.
+    # grammar.glr_parser().print() # This line would error if glr_parser() doesn't return a printable PyGLRParser
 
     print("Initializing grammar constraint...")
     grammar_constraint = PyGrammarConstraint(grammar, llm_token_to_id, max(llm_token_to_id.values()))
