@@ -1,26 +1,19 @@
 use sep1::tokenizer::LLMTokenID;
-use sep1::finite_automata::{
-    Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group,
-    groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation,
-    eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq, Regex
-};
-// use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal}; // Not directly used by Py* types
+use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq};
+use sep1::finite_automata::Regex;
+use pyo3::prelude::*;
+use pyo3::types::{PyDict};
+use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use sep1::glr::parser::{GLRParser, GLRParserState};
-// use sep1::glr::table::{generate_glr_parser, StateID, TerminalID}; // Not directly used by Py* types
-use sep1::interface::{
-    CompiledGrammar, GrammarExpr, IncrementalParser, // Updated to CompiledGrammar
-    choice as grammar_choice, literal as grammar_literal, optional as grammar_optional,
-    regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref,
-    sequence as grammar_sequence, eat_any_fast
-};
+use sep1::glr::table::{generate_glr_parser, StateID, TerminalID};
+use sep1::interface::{CompiledGrammar, GrammarExpr, choice as grammar_choice, literal as grammar_literal, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence, eat_any_fast};
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
 use std::collections::{BTreeMap, BTreeSet};
 use bimap::BiBTreeMap;
 use std::sync::Arc;
 use ouroboros::self_referencing;
-use pyo3::prelude::*;
-use pyo3::types::PyDict;
 use numpy::{IntoPyArray, PyArray1, ToPyArray};
+use sep1::interface::IncrementalParser;
 use sep1::json_serialization::{JSONConvertible, JSONNode};
 
 #[pyclass(name = "GrammarExpr")]
@@ -69,7 +62,7 @@ impl PyGrammarExpr {
     #[staticmethod]
     fn regex(regex: PyRegexExpr) -> Self {
         Self {
-            inner: grammar_regex(regex.inner),
+            inner: grammar_regex(regex.inner)
         }
     }
 
@@ -103,7 +96,7 @@ impl PyRegexExpr {
     pub fn eat_any() -> Self {
         Self { inner: eat_any_fast() }
     }
-    
+
     #[staticmethod]
     fn rep(expr: PyRegexExpr) -> Self {
         Self { inner: rep(expr.inner) }
@@ -119,12 +112,10 @@ impl PyRegexExpr {
         Self { inner: opt(expr.inner) }
     }
 
-    // prec returns ExprGroup, so PyRegexGroup
     #[staticmethod]
     fn prec(precedence: isize, expr: PyRegexExpr) -> PyRegexGroup {
         PyRegexGroup { inner: prec(precedence, expr.inner) }
     }
-
 
     #[staticmethod]
     fn eps() -> Self {
@@ -191,34 +182,39 @@ pub struct PyRegex {
     inner: Regex,
 }
 
-// No specific methods for PyRegex for now, it's mostly a container.
+#[pymethods]
+impl PyRegex {
+    // Python methods for PyRegex if needed
+}
+
 
 #[pyclass(name = "CompiledGrammar")]
 #[derive(Clone)]
 pub struct PyCompiledGrammar {
-    inner: Arc<CompiledGrammar>, // Arc to allow cheap cloning for PyGrammarConstraintStateWrapper
+    inner: CompiledGrammar,
 }
 
 #[pymethods]
 impl PyCompiledGrammar {
     #[new]
     fn new(exprs: Vec<(String, PyGrammarExpr)>) -> PyResult<Self> {
-        let rust_exprs = exprs.into_iter().map(|(s, e)| (s, e.inner)).collect();
-        let compiled_grammar = CompiledGrammar::from_exprs(rust_exprs)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-        Ok(Self { inner: Arc::new(compiled_grammar) })
+        let inner_exprs = exprs.into_iter().map(|(s, e)| (s, e.inner)).collect();
+        let compiled_grammar = CompiledGrammar::from_exprs(inner_exprs)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to compile grammar: {}", e)))?;
+        Ok(Self { inner: compiled_grammar })
     }
 
-    fn glr_parser(&self) -> PyGLRParser {
-        // GLRParser is Clone, so we can clone it from the Arc'd CompiledGrammar
-        PyGLRParser { inner: self.inner.glr_parser.clone() }
-    }
+    // If direct access to GLRParser is needed in Python, expose it.
+    // fn glr_parser(&self) -> PyGLRParser {
+    //     PyGLRParser { inner: self.inner.glr_parser().clone() } // Clone if GLRParser is Clone
+    // }
 
     fn print(&self) {
-        // CompiledGrammar has a Debug impl
+        // The Debug impl for CompiledGrammar is quite verbose.
+        // Consider a more Python-friendly summary or selective printing.
         println!("{:?}", self.inner);
     }
-    
+
     fn to_json_string(&self) -> PyResult<String> {
         Ok(self.inner.to_json().to_json_string())
     }
@@ -229,23 +225,23 @@ impl PyCompiledGrammar {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse JSON string to JSONNode: {}", e)))?;
         let grammar = CompiledGrammar::from_json(json_node)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to deserialize CompiledGrammar from JSONNode: {}", e)))?;
-        Ok(PyCompiledGrammar { inner: Arc::new(grammar) })
+        Ok(PyCompiledGrammar { inner: grammar })
     }
 }
 
-#[pyclass(name = "GLRParser")]
-#[derive(Clone)]
-pub struct PyGLRParser {
-    inner: GLRParser,
-}
-
-#[pymethods]
-impl PyGLRParser {
-    fn print(&self) {
-        // GLRParser has a Display impl
-        println!("{}", self.inner);
-    }
-}
+// PyGLRParser might not be needed if not directly manipulated from Python,
+// as it's part of CompiledGrammar.
+// #[pyclass]
+// #[derive(Clone)]
+// pub struct PyGLRParser {
+//     inner: GLRParser,
+// }
+// #[pymethods]
+// impl PyGLRParser {
+//     fn print(&self) {
+//         println!("{}", self.inner)
+//     }
+// }
 
 #[pyclass(name = "GrammarConstraint")]
 #[derive(Clone)]
@@ -256,52 +252,38 @@ pub struct PyGrammarConstraint {
 #[pymethods]
 impl PyGrammarConstraint {
     #[new]
-    fn new(
-        py_grammar: PyCompiledGrammar, // Takes PyCompiledGrammar
-        token_to_id: &Bound<'_, PyDict>,
-        max_llm_token_id: usize, // This should be the number of LLM tokens (exclusive of EOF)
-                                 // Or, the max ID if they are not contiguous.
-                                 // GrammarConstraint expects it as capacity for bitsets.
-    ) -> PyResult<Self> {
+    fn new(py: Python, grammar: PyCompiledGrammar, token_to_id: &Bound<'_, PyDict>, max_llm_token_id: usize) -> PyResult<Self> {
         let mut llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = BiBTreeMap::new();
         for (key, value) in token_to_id.iter() {
-            let token_bytes = key.extract::<&[u8]>()?;
+            let token = key.extract::<&[u8]>()?;
             let id = value.extract::<usize>()?;
-            llm_token_map.insert(token_bytes.to_vec(), LLMTokenID(id));
+            llm_token_map.insert(token.to_vec(), LLMTokenID(id));
         }
 
         // GrammarConstraint::from_compiled_grammar expects an owned CompiledGrammar.
-        // PyCompiledGrammar holds an Arc<CompiledGrammar>. We can clone the Arc
-        // and then deref to get CompiledGrammar if from_compiled_grammar needs ownership.
-        // Or, if from_compiled_grammar can take Arc<CompiledGrammar> or &CompiledGrammar, that's better.
-        // Current from_compiled_grammar takes owned CompiledGrammar.
-        // Let's assume CompiledGrammar is cloneable and clone from the Arc.
-        let owned_compiled_grammar = (*py_grammar.inner).clone();
-        
-        // The eof_llm_token_id is often max_llm_token_id itself if max_llm_token_id is num_tokens.
-        // Or max_llm_token_id + 1 if max_llm_token_id is highest actual token_id.
-        // GrammarConstraint uses max_llm_token_id for bitset sizing.
-        // Let's assume max_llm_token_id is the capacity needed for tokens [0..max_llm_token_id-1]
-        // and EOF is at max_llm_token_id.
-        let eof_token_id_for_constraint = max_llm_token_id;
-
-
+        // PyCompiledGrammar holds an owned CompiledGrammar, so we clone it.
+        // The _eof_llm_token_id is not directly used by GrammarConstraint::new,
+        // but it's part of the conceptual model for token ranges.
+        // We can pass max_llm_token_id + 1 or a dedicated EOF marker if needed by constraint logic.
+        // For now, the Rust API for GrammarConstraint::new doesn't take eof_llm_token_id.
+        // The old from_grammar took it, but new from_compiled_grammar doesn't.
+        // Let's assume eof handling is implicit or managed by GrammarConstraintState.
         let constraint = GrammarConstraint::from_compiled_grammar(
-            owned_compiled_grammar,
+            grammar.inner.clone(), // Clone the CompiledGrammar
             llm_token_map,
-            eof_token_id_for_constraint, // Pass an appropriate EOF ID
-            max_llm_token_id,      // This is capacity for bitsets [0...max_llm_token_id]
+            0, // Placeholder for eof_llm_token_id, as current from_compiled_grammar doesn't take it
+            max_llm_token_id,
         );
 
         Ok(Self { inner: Arc::new(constraint) })
     }
 
     fn print(&self) {
-        // GrammarConstraint doesn't have a direct print method for all its internals.
-        // Could print some summary or rely on its JSON serialization.
-        println!("PyGrammarConstraint (details via to_json_string or specific accessors if added)");
+        // Printing GrammarConstraint can be complex.
+        // Consider what information is useful to expose.
+        println!("PyGrammarConstraint (details not implemented for print)");
     }
-    
+
     fn to_json_string(&self) -> PyResult<String> {
         Ok(self.inner.to_json().to_json_string())
     }
@@ -315,6 +297,7 @@ impl PyGrammarConstraint {
         Ok(Self { inner: Arc::new(constraint) })
     }
 }
+
 
 #[self_referencing]
 struct PyGrammarConstraintStateWrapper {
@@ -342,7 +325,7 @@ impl PyGrammarConstraintState {
                     Ok::<_, PyErr>(state)
                 },
             }
-            .try_build()?,
+            .try_build()?
         })
     }
 
@@ -353,7 +336,7 @@ impl PyGrammarConstraintState {
     }
 
     fn commit(&mut self, llm_token_id: usize) {
-        // println!("Committing token {} to grammar constraint state", llm_token_id);
+        // println!("Committing token {} to grammar constraint state", llm_token_id); // Debug
         self.inner.with_inner_mut(|state| {
             state.commit(LLMTokenID(llm_token_id));
             state.step_with_all_llm_tokens();
@@ -363,7 +346,7 @@ impl PyGrammarConstraintState {
 
 #[self_referencing]
 struct PyIncrementalParserWrapper {
-    grammar: PyCompiledGrammar, // Owns PyCompiledGrammar (which holds Arc<CompiledGrammar>)
+    grammar: PyCompiledGrammar, // Owns the PyCompiledGrammar (which owns CompiledGrammar)
     #[borrows(grammar)]
     #[covariant]
     parser: IncrementalParser<'this>,
@@ -381,15 +364,8 @@ impl PyIncrementalParser {
         Ok(PyIncrementalParser {
             inner: PyIncrementalParserWrapperTryBuilder {
                 grammar, // PyCompiledGrammar is moved in
-                parser_builder: |g: &PyCompiledGrammar| {
-                    // IncrementalParser::new expects &'a CompiledGrammar.
-                    // g.inner is Arc<CompiledGrammar>. We need a stable reference.
-                    // Ouroboros handles this by making 'this refer to `grammar` field.
-                    // So, we can borrow from g.inner.
-                    Ok::<_, PyErr>(IncrementalParser::new(&g.inner))
-                },
-            }
-            .try_build()?,
+                parser_builder: |g: &PyCompiledGrammar| Ok::<_, PyErr>(IncrementalParser::new(&g.inner)),
+            }.try_build()?
         })
     }
 
@@ -408,9 +384,9 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRegexExpr>()?;
     m.add_class::<PyRegexGroup>()?;
     m.add_class::<PyRegexGroups>()?;
-    m.add_class::<PyRegex>()?; // Added PyRegex
-    m.add_class::<PyGLRParser>()?; // Added PyGLRParser
-    m.add_class::<PyCompiledGrammar>()?; // Renamed from PyGrammar
+    m.add_class::<PyRegex>()?;
+    m.add_class::<PyCompiledGrammar>()?;
+    // m.add_class::<PyGLRParser>()?; // Not exposed directly for now
     m.add_class::<PyGrammarConstraint>()?;
     m.add_class::<PyGrammarConstraintState>()?;
     m.add_class::<PyIncrementalParser>()?;
