@@ -80,7 +80,7 @@ impl VocabPrefixTreeNode {
         self.children.iter()
     }
 
-    /// Returns a bitset representing the set of token IDs reachable from this node.
+    /// Returns a bitset representing the set of token IDs reachable from this node (including the token this node itself represents).
     pub fn reachable_token_ids(&self) -> &HybridBitset {
         &self.reachable_token_ids
     }

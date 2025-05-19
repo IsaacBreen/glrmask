@@ -503,8 +503,8 @@ impl<'r> Precomputer<'r> {
         }
     }
 
-    fn possible_matches(&self, vocab_node_for_cache_key: &VocabPrefixTreeNode, tokenizer_state_id: TokenizerStateID) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
-        let cache_key_ptr = vocab_node_for_cache_key as *const VocabPrefixTreeNode;
+    fn possible_matches(&self, vocab_node: &VocabPrefixTreeNode, tokenizer_state_id: TokenizerStateID) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
+        let cache_key_ptr = vocab_node as *const VocabPrefixTreeNode;
 
         // Cache lookup (read-only borrow first)
         if let Some(cached_for_vocab_node) = self.possible_matches.borrow().get(&cache_key_ptr) {
@@ -516,53 +516,28 @@ impl<'r> Precomputer<'r> {
         // If not in cache, compute:
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
 
-        // Ensure tokenizer_state_id.0 is a valid index for dfa.states
-        if tokenizer_state_id.0 >= self.tokenizer.dfa.states.len() {
-            // This case should ideally not happen if tokenizer_state_id is always valid.
-            // Log a warning and return an empty map.
-            crate::debug!(
-                1,
-                "Warning: tokenizer_state_id {} out of bounds for DFA states (len {}). Returning empty map for possible_matches.",
-                tokenizer_state_id.0,
-                self.tokenizer.dfa.states.len()
-            );
-            return result_map;
-        }
-        let dfa_state = &self.tokenizer.dfa.states[tokenizer_state_id.0];
-
-        // dfa_state.group_id_to_u8set is a BTreeMap<GroupID, U8Set>.
-        // GroupID is an alias for usize, which corresponds to GrammarTokenID.0.
-        for (grammar_token_group_id, first_bytes_u8set) in &dfa_state.group_id_to_u8set {
-            let grammar_token_id = GrammarTokenID(*grammar_token_group_id);
-            let mut matching_llm_ids_for_this_grammar_token = LLMTokenBV::new();
-
-            // Iterate through the children of the main vocabulary root (self.vocab.root).
-            // self.vocab is the VocabPrefixTree.
-            for (edge_label, child_vocab_node) in self.vocab.root.iter_children() {
-                if !edge_label.is_empty() {
-                    let first_byte_of_edge = edge_label[0];
-                    if first_bytes_u8set.contains(first_byte_of_edge) {
-                        // If the first byte of an LLM token's prefix matches one of the
-                        // allowed first bytes for the current grammar_token_id,
-                        // then all LLM tokens reachable via this prefix are candidates.
-                        // child_vocab_node.reachable_token_ids() returns a &HybridBitset
-                        // containing internal LLMTokenIDs.
-                        matching_llm_ids_for_this_grammar_token |= child_vocab_node.reachable_token_ids();
+        // Recursively call on children and merge their results.
+        for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
+            let exec_result = self.tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
+            for token in &exec_result.matches {
+                let grammar_token_id = GrammarTokenID(token.id);
+                let applicable_tokens = child_vocab_arc.reachable_token_ids();
+                *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::new) |= applicable_tokens;
+            }
+            if let Some(final_state_val) = exec_result.end_state {
+                // No point in continuing if all possible future matches are for tokens that we've already matched.
+                let matches_possible_from_tokenizer_state: BTreeSet<_> = self.tokenizer.tokens_accessible_from_state(TokenizerStateID(final_state_val)).into_iter().collect();
+                let matches_here: BTreeSet<_> = exec_result.matches.iter().map(|m| GrammarTokenID(m.id)).collect();
+                let possible_new_matches = &matches_possible_from_tokenizer_state - &matches_here;
+                if !possible_new_matches.is_empty() {
+                    // We have a new match, so we need to continue.
+                    let next_results = self.possible_matches(child_vocab_arc, TokenizerStateID(final_state_val));
+                    for (token, bv) in next_results {
+                        *result_map.entry(token).or_insert_with(LLMTokenBV::new) |= bv;
                     }
                 }
             }
-
-            if !matching_llm_ids_for_this_grammar_token.is_empty() {
-                result_map.insert(grammar_token_id, matching_llm_ids_for_this_grammar_token);
-            }
         }
-
-        // Store the computed result in the cache (mutable borrow).
-        self.possible_matches
-            .borrow_mut() // Get mutable borrow of the RefCell content
-            .entry(cache_key_ptr)
-            .or_default()
-            .insert(tokenizer_state_id, result_map.clone());
 
         result_map
     }
