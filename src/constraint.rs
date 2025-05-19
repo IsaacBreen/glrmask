@@ -446,6 +446,7 @@ struct Precomputer<'r> {
     tokenizer:        &'r Regex,
     vocab:            VocabPrefixTree,
     roots:            BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>,
+    possible_matches: BTreeMap<*const VocabPrefixTreeNode, BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>>,
     all_llm_tokens:   HybridBitset,
     merge_threshold:  usize,
     pb:               ProgressBar,
