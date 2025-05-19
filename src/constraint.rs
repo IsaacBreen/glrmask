@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::BitOr;
 use std::sync::{Arc, Mutex};
-use std::cell::RefCell;
+use std::cell::RefCell; // Added this line
 
 use bimap::BiBTreeMap;
 use bitvec::prelude::*;
@@ -25,8 +25,8 @@ use crate::glr::parser::{
 };
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
-use crate::json_serialization::{JSONConvertible, JSONNode};
-use std::collections::BTreeMap as StdMap;
+use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
 
 
 pub type LLMTokenBV = HybridBitset;
@@ -370,8 +370,8 @@ impl GrammarConstraint {
     pub fn precompute(
         tokenizer:        &Regex,
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, // Renamed
+        token_name_map:   &BiBTreeMap<String, usize>,
         internal_max_llm_token: usize,                       // Number of internal tokens
-        merge_threshold:  usize,
     ) -> Precomputed {
         // 1.  Kick off a helper object that contains all large mutable state.
         let mut helper = Precomputer::new(
@@ -450,9 +450,6 @@ struct Precomputer<'r> {
     merge_threshold:  usize,
     pb:               ProgressBar,
     stats:            PrecomputeStats,
-    // Add these two fields:
-    all_llm_token_data: Vec<(Vec<u8>, LLMTokenID)>,
-    possible_matches_cache: RefCell<BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>>,
 }
 
 impl<'r> Precomputer<'r> {
@@ -471,28 +468,6 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Building vocab prefix tree");
         let vocab = VocabPrefixTree::build(&tokens);
         crate::debug!(2, "Done building vocab prefix tree");
-
-        // Add this block to populate all_llm_token_data:
-        let mut all_llm_token_data_collected = Vec::new();
-        fn collect_tokens_recursive(
-            node: &VocabPrefixTreeNode,
-            list: &mut Vec<(Vec<u8>, LLMTokenID)>,
-        ) {
-            // Every node in the VocabPrefixTree represents a valid token.
-            // node.prefix() gives the full byte sequence for that token.
-            // node.token_id() gives its (internal) ID.
-            list.push((node.prefix().to_vec(), LLMTokenID(node.token_id())));
-            for child_node in node.children().values() {
-                collect_tokens_recursive(child_node, list);
-            }
-        }
-        // The vocab.root itself might be a token (e.g., empty string) or a conventional root.
-        // The collect_tokens_recursive helper will add it if its prefix/id is meaningful.
-        // If vocab.root is the conventional (ID 0, empty prefix) and not an explicit empty token,
-        // it will be added. If it's not supposed to be processed by tokenizer,
-        // tokenizer.execute_from_state(&[], ...) should handle it (e.g. match nothing or specific epsilons).
-        collect_tokens_recursive(&vocab.root, &mut all_llm_token_data_collected);
-
 
         // -- Root nodes (one per tokenizer state) -----------------------------------------
         let mut roots = BTreeMap::new();
@@ -517,62 +492,19 @@ impl<'r> Precomputer<'r> {
 
         Self {
             tokenizer,
-            vocab, // vocab is moved here
+            vocab,
             roots,
             all_llm_tokens: HybridBitset::ones(internal_max_llm_token + 1),
             merge_threshold,
             pb,
             stats: PrecomputeStats::default(),
-            // Initialize the new fields:
-            all_llm_token_data: all_llm_token_data_collected,
-            possible_matches_cache: RefCell::new(BTreeMap::new()),
         }
     }
 
-    // Replace the existing possible_matches method with this:
-    fn possible_matches(
-        &self,
-        current_tokenizer_state_id: TokenizerStateID,
-    ) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
-        // Check cache first
-        if let Some(cached_result) = self
-            .possible_matches_cache
-            .borrow()
-            .get(&current_tokenizer_state_id)
-        {
-            return cached_result.clone();
-        }
-
-        let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
-
-        // Iterate over all LLM tokens (byte sequence, internal ID)
-        // self.all_llm_token_data contains (Vec<u8>, LLMTokenID where .0 is internal_id)
-        for (llm_token_bytes, internal_llm_id) in &self.all_llm_token_data {
-            // Simulate the tokenizer with these bytes from the current_tokenizer_state_id
-            let exec_result = self
-                .tokenizer
-                .execute_from_state(llm_token_bytes, current_tokenizer_state_id);
-
-            // Check which grammar tokens were matched by consuming this *entire* LLM token
-            for m_info in &exec_result.matches {
-                // m_info.width is the number of bytes consumed from llm_token_bytes
-                // to match m_info.id (GrammarTokenID)
-                if m_info.width == llm_token_bytes.len() {
-                    let grammar_token_id = GrammarTokenID(m_info.id);
-                    result_map
-                        .entry(grammar_token_id)
-                        .or_default()
-                        .insert(internal_llm_id.0); // internal_llm_id.0 is the usize internal ID
-                }
-            }
-        }
-
-        // Store in cache before returning
-        self.possible_matches_cache
-            .borrow_mut()
-            .insert(current_tokenizer_state_id, result_map.clone());
-
-        result_map
+    fn possible_matches(&self, _vocab_node: &VocabPrefixTreeNode, tokenizer_state_id: TokenizerStateID) -> BTreeMap<GrammarTokenID, LLMTokenBV> { // Parameters named with _ to suppress warnings
+        // Tells us which LLM tokens could match (starting from the vocab node) the specified grammar token.
+        // TODO: Implement this. Ensure it's cached.
+        todo!()
     }
 
     // -------------------------------------------------------------------------
@@ -748,7 +680,7 @@ impl<'r> Precomputer<'r> {
                 crate::debug!(4, "Executed tokenizer from state {:?} on suffix {:?}. Results: {:?}", state_before.0, String::from_utf8_lossy(suffix), exec_result);
 
                 let possible_future_matches: BTreeMap<GrammarTokenID, LLMTokenBV> = exec_result.end_state.map_or_else(BTreeMap::new, |end_state_id| {
-                    self.possible_matches(TokenizerStateID(end_state_id)) // Updated call
+                    self.possible_matches(&self.vocab.root, TokenizerStateID(end_state_id))
                 });
 
                 // -------------------------------------------------------------
@@ -767,7 +699,7 @@ impl<'r> Precomputer<'r> {
                             src.as_arc().clone(),
                             grammar_tok,
                             edge_tokens.clone(),
-                            LLMTokenID(child_vocab_of_segment.token_id()), // Pass LLMTokenID (internal)
+                            child_vocab_of_segment.token_id(),
                             match_end_offset,
                             segment_bytes.len(),
                             &mut queue,
@@ -817,7 +749,7 @@ impl<'r> Precomputer<'r> {
         source_arc: Arc<Mutex<PrecomputeNode>>,
         grammar_tok: GrammarTokenID,
         edge_tokens: LLMTokenBV,
-        final_llm_token_id_at_child_vocab: LLMTokenID, // This is internal ID (changed type)
+        final_llm_token_id_at_child_vocab: usize, // This is internal ID
         match_end_offset_in_segment: usize,
         segment_len: usize,
         queue: &mut BTreeMap<
@@ -905,7 +837,7 @@ impl<'r> Precomputer<'r> {
             g.value
                 .clean_end
                 .get_or_insert_with(HybridBitset::new)
-                .insert(final_llm_token_id_at_child_vocab.0); // Use .0 for usize internal ID
+                .insert(final_llm_token_id_at_child_vocab); // final_llm_token_id_at_child_vocab is internal
         } else {
             queue
                 .entry(match_end_offset_in_segment)
@@ -1231,3 +1163,4 @@ impl<'a> GrammarConstraintState<'a> {
         }
     }
 }
+
