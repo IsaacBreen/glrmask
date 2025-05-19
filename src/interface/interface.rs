@@ -1017,7 +1017,7 @@ mod tests {
         grammar_constraint_state.step_with_all_llm_tokens();
 
         let mask = grammar_constraint_state.get_mask();
-        let mut expected_mask = HybridBitset::new_with_capacity(max_llm_token_id + 1);
+        let mut expected_mask = HybridBitset::new();
         expected_mask.set(eof_llm_token_id, true); // Only EOF is allowed
         assert_eq!(mask, expected_mask);
     }

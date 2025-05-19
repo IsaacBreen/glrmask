@@ -114,7 +114,7 @@ mod tests {
             // println!("Current mask: {:?}", state.get_mask().iter_ones().collect::<Vec<_>>());
             assert!(
                 state.get_mask().contains(token_id.0),
-                "Token ID {} not in mask. Mask: {:?}", token_id.0, state.get_mask().iter_ones().collect::<Vec<_>>()
+                "Token ID {} not in mask. Mask: {:?}", token_id.0, state.get_mask().iter_bools().collect::<Vec<_>>()
             );
             // println!("Committing token ID: {}", token_id.0);
             state.commit(token_id);
@@ -131,13 +131,13 @@ mod tests {
             assert!(
                 final_mask.contains(i),
                 "Expected digit '{}' (LLM Token ID {}) to be allowed. Mask: {:?}",
-                (b'0' + i as u8) as char, i, final_mask.iter_ones().collect::<Vec<_>>()
+                (b'0' + i as u8) as char, i, final_mask.iter_bools().collect::<Vec<_>>()
             );
         }
         assert!(
             !final_mask.contains(plus_token_id), // LLM Token ID for '+'
             "Expected '+' (LLM Token ID {}) to be disallowed. Mask: {:?}",
-            plus_token_id, final_mask.iter_ones().collect::<Vec<_>>()
+            plus_token_id, final_mask.iter_bools().collect::<Vec<_>>()
         );
         // EOF is not explicitly checked here unless it's part of the grammar logic for completion.
         // The current grammar S -> NUM + NUM + NUM does not explicitly end.
