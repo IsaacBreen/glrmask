@@ -566,12 +566,14 @@ impl<'r> Precomputer<'r> {
         self.dfs(&self.vocab.root, assoc);
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish_with_message("Precomputation complete");
+        crate::debug!(2, "Precomputation complete");
     }
 
     fn merge_nodes(&mut self) {
         // Merge equal nodes.
+        crate::debug!(2, "Merging nodes");
         let mut unique: HashMap<PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = self.roots.values().map(|r| (r.lock().unwrap().clone(), r.clone())).collect();
-        println!("Unique nodes: {:?}", unique.len());
+        crate::debug!(2, "Unique nodes: {:?}", unique.len());
 
         for (tokenizer_state_id, root) in &mut self.roots {
             let new_root = unique.get(&root.lock().unwrap().clone()).unwrap().clone();
