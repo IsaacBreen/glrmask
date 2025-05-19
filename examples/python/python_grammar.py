@@ -111,8 +111,8 @@ def define_tokens() -> list[tuple[str, Any]]:
     ignore = ge.optional(ge.regex(rep(choice([
         eat_u8(ord(" ")),
         # TODO: delete this?
-        eat_u8(ord("\n")),
-        seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]),
+#         eat_u8(ord("\n")),
+#         seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]),
     ]))))
     tokens["IGNORE"] = ignore
 #     # TODO: delete this
@@ -370,12 +370,12 @@ if __name__ == "__main__":
 #     # Exclude tokens where any character appears more than once
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(set(k)) == len(k)}
     # Exclude tokens that have any letter other than 'a'
-    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isalpha() and c != 'a' for c in k)}
+#     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isalpha() and c != 'a' for c in k)}
     # Exclude tokens that have any digit other than '1'
     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isdigit() and c != '1' for c in k)}
     # Exclude any non-alphanumeric non-whitespace character
-    # Allow only alphanumeric, whitespace, and '#'
-    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if all(c.isalnum() or c.isspace() or c == '#' for c in k)}
+    # Allow only alphanumeric, whitespace
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if all(c.isalnum() or c.isspace() for c in k)}
     # Exclude tokens that have any character other than ...
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c not in 'a1# ' for c in k)}
 
