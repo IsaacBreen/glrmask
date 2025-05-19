@@ -372,7 +372,7 @@ if __name__ == "__main__":
     # Exclude tokens that have any digit other than '1'
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isdigit() and c != '1' for c in k)}
     # Exclude tokens that have any character other than ...
-    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c not in 'a1#' for c in k)}
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c not in 'a1# ' for c in k)}
 
     print("Tokenizer vocab:")
     for token, id in sorted(tokenizer_vocab.items(), key=lambda x: x[0]):
