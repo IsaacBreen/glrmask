@@ -51,8 +51,8 @@ def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Regex:
         else:
             raise ValueError(f"Invalid string literal: {value}")
 #         # TODO: delete this
-#         return ge.literal(value.encode())
-        return ge.literal("1".encode())
+        return ge.literal(value.encode())
+#         return ge.literal("1".encode())
     elif isinstance(item, pegen.grammar.Opt):
         return ge.optional(pegen_to_sep1_regex(item.node, memo))
     elif isinstance(item, pegen.grammar.Gather):
@@ -108,16 +108,16 @@ def define_tokens() -> list[tuple[str, Any]]:
 
     # TODO: Use eg eat("a") instead of eat_u8(ord("a")). It's a bit more readable.
 
-#     ignore = ge.optional(ge.regex(rep(choice([
-#         eat_u8(ord(" ")),
-#         # TODO: delete this?
-#         eat_u8(ord("\n")),
-#         seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]),
-#     ]))))
-#     tokens["IGNORE"] = ignore
+    ignore = ge.optional(ge.regex(rep(choice([
+        eat_u8(ord(" ")),
+        # TODO: delete this?
+        eat_u8(ord("\n")),
+        seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]),
+    ]))))
+    tokens["IGNORE"] = ignore
 #     # TODO: delete this
 #     tokens["IGNORE"] = eps()
-    tokens["IGNORE"] = ge.optional(ge.regex(eat(" ")))
+#     tokens["IGNORE"] = ge.optional(ge.regex(eat(" ")))
 
     # TODO: uncomment this
     digit = eat_range('0', '9')
@@ -138,41 +138,43 @@ def define_tokens() -> list[tuple[str, Any]]:
         digit,
     ])
 
-#     tokens["NAME"] = seq([name_start, rep(name_middle)])
-#     tokens["NUMBER"] = choice([
-#         rep(digit),
-#         seq([rep(digit), eat_u8(ord(".")), rep(digit)]),
-#     ])
+    tokens["NAME"] = seq([name_start, rep(name_middle)])
+    tokens["NUMBER"] = choice([
+        rep(digit),
+        seq([rep(digit), eat_u8(ord(".")), rep(digit)]),
+    ])
 #     # TODO: delete this
-    tokens["NAME"] = eps()
-    tokens["NUMBER"] = eps()
-#     tokens["NAME"] = eat("a")
-#     tokens["NUMBER"] = rep(eat("1"))
-    tokens["NEWLINE"] = eps()
-    tokens["INDENT"] = eps()
-    tokens["DEDENT"] = eps()
-#     tokens["STRING"] = choice([
-#         seq([eat_u8(ord('"')), rep(choice([eat_u8_negation(ord('"')), eat('\"')])), eat_u8(ord('"'))]),
-#         seq([eat_u8(ord("'")), rep(choice([eat_u8_negation(ord("'")), eat('\'')])), eat_u8(ord("'"))]),
-#     ])
-#     tokens["FSTRING_START"] = choice([
-#         eat('"""'),
-#         eat("'''"),
-#     ])
-#     tokens["FSTRING_END"] = choice([
-#         eat('"""'),
-#         eat("'''"),
-#     ])
-    tokens["STRING"] = eps()
-    tokens["FSTRING_START"] = eps()
-    tokens["FSTRING_END"] = eps()
-#     tokens["FSTRING_MIDDLE"] = rep(choice([
-#         eat_u8_negation(ord("{")),
-#         eat("{{"),
-#     ]))
-    # TODO: delete this
+#     tokens["NAME"] = eps()
+#     tokens["NUMBER"] = eps()
+# #     tokens["NAME"] = eat("a")
+# #     tokens["NUMBER"] = rep(eat("1"))
+#     tokens["NEWLINE"] = eps()
+#     tokens["INDENT"] = eps()
+#     tokens["DEDENT"] = eps()
+
+    tokens["STRING"] = choice([
+        seq([eat_u8(ord('"')), rep(choice([eat_u8_negation(ord('"')), eat('\"')])), eat_u8(ord('"'))]),
+        seq([eat_u8(ord("'")), rep(choice([eat_u8_negation(ord("'")), eat('\'')])), eat_u8(ord("'"))]),
+    ])
+    tokens["FSTRING_START"] = choice([
+        eat('"""'),
+        eat("'''"),
+    ])
+    tokens["FSTRING_END"] = choice([
+        eat('"""'),
+        eat("'''"),
+    ])
+    tokens["FSTRING_MIDDLE"] = rep(choice([
+        eat_u8_negation(ord("{")),
+        eat("{{"),
+    ]))
+#     # TODO: delete this
+#     tokens["STRING"] = eps()
+#     tokens["FSTRING_START"] = eps()
+#     tokens["FSTRING_END"] = eps()
 #     tokens["FSTRING_MIDDLE"] = rep(Regex.eat_any())
 #     tokens["FSTRING_MIDDLE"] = eps()
+
     tokens["TYPE_COMMENT"] = eps()
     tokens["ENDMARKER"] = eps()
     return [regex(expr, name) for name, expr in tokens.items()]
@@ -233,8 +235,8 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
             rhs = ge.choice([])
         else:
             rhs = pegen_to_sep1_regex(rule.rhs, memo)
-       # TODO: uncomment this
-        exprs.append((rule.name, rhs))
+#        # TODO: uncomment this
+#         exprs.append((rule.name, rhs))
 
 
     tokens = define_tokens()
