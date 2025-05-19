@@ -732,17 +732,19 @@ impl<'r> Precomputer<'r> {
                     // Apply greediness: If a future match is possible, don't match now.
                     let edge_tokens = active_tokens - tokens_with_future_match;
 
-                    for src in &merged_src_set { // Use merged_src_set
-                        self.insert_edge(
-                            src.as_arc().clone(),
-                            grammar_tok,
-                            edge_tokens.clone(),
-                            child_vocab_of_segment.token_id(),
-                            match_end_offset,
-                            segment_bytes.len(),
-                            &mut queue,
-                            &mut next_level
-                        );
+                    if !edge_tokens.is_empty() {
+                        for src in &merged_src_set {
+                            self.insert_edge(
+                                src.as_arc().clone(),
+                                grammar_tok,
+                                edge_tokens.clone(),
+                                child_vocab_of_segment.token_id(),
+                                match_end_offset,
+                                segment_bytes.len(),
+                                &mut queue,
+                                &mut next_level
+                            );
+                        }
                     }
                 }
 
