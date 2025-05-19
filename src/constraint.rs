@@ -493,12 +493,12 @@ impl<'r> Precomputer<'r> {
 
         Self {
             tokenizer,
-            vocab, // vocab is already initialized earlier in the method
-            roots, // roots is already initialized earlier in the method
+            vocab,
+            roots,
             possible_matches: RefCell::new(BTreeMap::new()),
             all_llm_tokens: HybridBitset::ones(internal_max_llm_token + 1),
             merge_threshold,
-            pb, // pb is already initialized earlier in the method
+            pb,
             stats: PrecomputeStats::default(),
         }
     }
@@ -566,7 +566,392 @@ impl<'r> Precomputer<'r> {
 
         result_map
     }
-    // ... (rest of Precomputer impl) ...
+
+    // -------------------------------------------------------------------------
+    // Public driver
+    // -------------------------------------------------------------------------
+    fn run_dfs(&mut self) {
+        // Entry associations: every tokenizer state starts at the vocab root.
+        let mut assoc: BTreeMap<
+            TokenizerStateID,
+            BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+        > = BTreeMap::new();
+
+        for (sid, arc) in &self.roots {
+            assoc
+                .entry(*sid)
+                .or_default()
+                .insert(ArcPtrWrapper::new(arc.clone()));
+        }
+
+        crate::debug!(2, "Starting precompute DFS");
+        self.dfs(&self.vocab.root, assoc);
+        crate::debug!(2, "Finished precompute DFS");
+        self.pb.finish_with_message("Precomputation complete");
+    }
+
+    fn merge_nodes(&mut self) {
+        // Merge equal nodes.
+        let mut unique: HashMap<PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = self.roots.values().map(|r| (r.lock().unwrap().clone(), r.clone())).collect();
+        println!("Unique nodes: {:?}", unique.len());
+
+        for (tokenizer_state_id, root) in &mut self.roots {
+            let new_root = unique.get(&root.lock().unwrap().clone()).unwrap().clone();
+            *root = new_root;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Finalise: stats, cycle check, unwrap Arcs -> Precomputed
+    // -------------------------------------------------------------------------
+    fn finish(mut self, token_name_map: &BiBTreeMap<String, usize>) -> Precomputed {
+        // Cycle check
+        crate::debug!(2, "Checking for cycles in precomputed graph…");
+        for (sid, root) in &self.roots {
+            if PrecomputeNode::has_any_cycle(root.clone()) {
+                panic!(
+                    "Cycle detected in precomputed graph for tokenizer_state_id {:?}",
+                    sid
+                );
+            }
+        }
+
+        // Stats
+        calculate_final_stats(&self.roots, &mut self.stats);
+        print_precompute_stats(&self.stats, token_name_map);
+
+        // Turn Arc<Mutex<…>> roots into plain PrecomputeNode roots.
+        let mut out = Precomputed::new();
+        let mut clones = 0;
+
+        for (sid, arc) in self.roots {
+            match Arc::try_unwrap(arc) {
+                Ok(mutex) => out.insert(
+                    sid,
+                    mutex.into_inner().expect("Mutex poisoned during unwrap"),
+                ),
+                Err(arc_val) => { // Renamed arc to arc_val
+                    clones += 1;
+                    out.insert(sid, arc_val.lock().unwrap().clone()) // Use arc_val
+                }
+            };
+        }
+
+        if clones > 0 {
+            crate::debug!(
+                4,
+                "Warning: {} precomputed root(s) had multiple owners; cloned.",
+                clones
+            );
+        }
+        out
+    }
+
+    // -------------------------------------------------------------------------
+    // DEPTH-FIRST SEARCH -------------------------------------------------------
+    // -------------------------------------------------------------------------
+    fn dfs(
+        &self,
+        vocab_node: &VocabPrefixTreeNode,
+        assoc_by_state: BTreeMap<
+            TokenizerStateID,
+            BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+        >,
+    ) {
+        self.pb.inc(1);
+
+        // Merge policy per tokenizer state
+        let mut effective: BTreeMap<
+            TokenizerStateID,
+            BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+        > = BTreeMap::new();
+
+        for (sid, set) in assoc_by_state {
+            let merged = self.merge_handles(&set);
+            if !merged.is_empty() {
+                effective.insert(sid, merged);
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // Explore each outgoing byte segment
+        // ---------------------------------------------------------------------
+        for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
+            let child_vocab_ref = &*child_vocab_arc;
+            crate::debug!(
+                3,
+                "Segment '{}' -> prefix '{}'",
+                String::from_utf8_lossy(segment_bytes),
+                String::from_utf8_lossy(child_vocab_ref.prefix())
+            );
+
+            self.process_segment(segment_bytes, child_vocab_ref, &effective);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // A single byte segment of the vocab prefix tree
+    // -------------------------------------------------------------------------
+    fn process_segment(
+        &self,
+        segment_bytes: &[u8],
+        child_vocab_of_segment: &VocabPrefixTreeNode,
+        sources_per_state: &BTreeMap<
+            TokenizerStateID,
+            BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+        >,
+    ) {
+        // Maps used while consuming the segment byte-by-byte.
+        let mut next_level: BTreeMap<
+            TokenizerStateID,
+            BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+        > = BTreeMap::new();
+
+        let mut queue: BTreeMap<
+            usize,
+            BTreeMap<TokenizerStateID, BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
+        > = BTreeMap::new();
+
+        // Seed queue with offset 0.
+        for (sid, set) in sources_per_state {
+            queue
+                .entry(0)
+                .or_default()
+                .entry(*sid)
+                .or_default()
+                .extend(set.iter().cloned());
+        }
+
+        while let Some((offset, map_at_offset)) = queue.pop_first() {
+            for (state_before, src_set) in map_at_offset {
+                if src_set.is_empty() {
+                    continue;
+                }
+
+                let merged_src_set = self.merge_handles(&src_set); // Renamed src_set to merged_src_set
+                if merged_src_set.is_empty() { // Use merged_src_set
+                    continue;
+                }
+
+                let suffix      = &segment_bytes[offset..];
+                let exec_result = self
+                    .tokenizer
+                    .execute_from_state(suffix, state_before);
+                crate::debug!(4, "Executed tokenizer from state {:?} on suffix {:?}. Results: {:?}", state_before.0, String::from_utf8_lossy(suffix), exec_result);
+
+                let possible_future_matches: BTreeMap<GrammarTokenID, LLMTokenBV> = exec_result.end_state.map_or_else(BTreeMap::new, |end_state_id| {
+                    self.possible_matches(&self.vocab.root, TokenizerStateID(end_state_id))
+                });
+
+                // -------------------------------------------------------------
+                // Matches inside suffix
+                // -------------------------------------------------------------
+                for m in &exec_result.matches {
+                    let grammar_tok = GrammarTokenID(m.id);
+                    let match_end_offset = offset + m.width;
+                    let active_tokens = child_vocab_of_segment.reachable_token_ids().clone();
+                    let tokens_with_future_match = possible_future_matches.get(&grammar_tok).cloned().unwrap_or_default();
+                    // Apply greediness: If a future match is possible, don't match now.
+                    let edge_tokens = active_tokens - tokens_with_future_match;
+
+                    for src in &merged_src_set { // Use merged_src_set
+                        self.insert_edge(
+                            src.as_arc().clone(),
+                            grammar_tok,
+                            edge_tokens.clone(),
+                            child_vocab_of_segment.token_id(),
+                            match_end_offset,
+                            segment_bytes.len(),
+                            &mut queue,
+                            &mut next_level
+                        );
+                    }
+                }
+
+                // -------------------------------------------------------------
+                // Final tokenizer state after reading entire suffix
+                // -------------------------------------------------------------
+                if let Some(final_state_val) = exec_result.end_state {
+                    let final_sid = TokenizerStateID(final_state_val);
+                    for src in &merged_src_set { // Use merged_src_set
+                        // propagate association for next DFS level
+                        next_level
+                            .entry(final_sid)
+                            .or_default()
+                            .insert(src.clone());
+
+                        // push possible finalizers
+                        let mut guard = src.as_arc().lock().unwrap();
+                        for gtid in self
+                            .tokenizer
+                            .tokens_accessible_from_state(final_sid)
+                        {
+                            crate::debug!(4, "Pushing finalizer info for token {:?} in state {:?}", gtid.0, final_sid.0);
+                            guard.value.push_finalizer_info(
+                                gtid,
+                                LLMTokenID(child_vocab_of_segment.token_id()), // This is internal ID
+                                final_sid,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Recurse into the child vocab node.
+        self.dfs(child_vocab_of_segment, next_level);
+    }
+
+    // Insert or merge an edge out of `source_arc`.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_edge(
+        &self,
+        source_arc: Arc<Mutex<PrecomputeNode>>,
+        grammar_tok: GrammarTokenID,
+        edge_tokens: LLMTokenBV,
+        final_llm_token_id_at_child_vocab: usize, // This is internal ID
+        match_end_offset_in_segment: usize,
+        segment_len: usize,
+        queue: &mut BTreeMap<
+            usize,
+            BTreeMap<TokenizerStateID, BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
+        >,
+        next_level: &mut BTreeMap<
+            TokenizerStateID,
+            BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+        >,
+    ) {
+        let mut inserter = EdgeInserter::new(
+            source_arc.clone(),
+            Some(grammar_tok),
+            edge_tokens.clone(), // Clone for inserter
+            |existing: &mut HybridBitset, new_bv_ref: HybridBitset| *existing |= new_bv_ref,
+        );
+
+        // First try existing children
+        inserter = inserter.try_children();
+
+        // gather potential targets
+        let mut pot: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+
+        let gather_set = |set: &BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+                          pot_val: &mut Vec<Arc<Mutex<PrecomputeNode>>>| { // Renamed pot to pot_val
+            pot_val.extend( // Use pot_val
+                set.iter()
+                    .map(|h| h.as_arc().clone()),
+            );
+        };
+
+        if match_end_offset_in_segment < segment_len {
+            if let Some(map_at_offset) = queue.get(&match_end_offset_in_segment) {
+                for set_of_nodes_at_offset_and_any_state in map_at_offset.values() {
+                    gather_set(set_of_nodes_at_offset_and_any_state, &mut pot);
+                }
+            }
+        } else {
+             for set_of_nodes_at_next_level_any_state in next_level.values() {
+                gather_set(set_of_nodes_at_next_level_any_state, &mut pot);
+            }
+        }
+
+        inserter = inserter.try_destinations(&pot);
+
+        // As last resort – children of current key
+        if inserter.clone_into_option().is_none() {
+            let mut extra = Vec::new();
+            {
+                let guard = source_arc.lock().unwrap();
+                if let Some(dest_map) =
+                    guard.children().get(&Some(grammar_tok))
+                {
+                    for child_wrap in dest_map.keys() {
+                         extra.push(child_wrap.as_arc().clone());
+                    }
+                }
+            }
+            inserter = inserter.try_destinations(&extra);
+        }
+
+        let target = inserter
+            .else_create_destination_with_value(PrecomputedNodeContents::default())
+            .unwrap();
+
+        // Add this block to update the target node's active set
+        {
+            let mut guard = target.lock().unwrap();
+            guard.value.active |= &edge_tokens;
+        }
+
+
+        let handle = ArcPtrWrapper::new(target.clone());
+
+        if match_end_offset_in_segment == segment_len {
+            crate::debug!(4, "Marking clean end for child vocab node {:p} representing LLM token {:?}", handle.as_ref(), final_llm_token_id_at_child_vocab);
+            next_level
+                .entry(TokenizerStateID(0)) // Default tokenizer state for clean ends
+                .or_default()
+                .insert(handle);
+
+            // mark clean_end
+            let mut g = target.lock().unwrap();
+            g.value
+                .clean_end
+                .get_or_insert_with(HybridBitset::new)
+                .insert(final_llm_token_id_at_child_vocab); // final_llm_token_id_at_child_vocab is internal
+        } else {
+            queue
+                .entry(match_end_offset_in_segment)
+                .or_default()
+                .entry(TokenizerStateID(0)) // Default tokenizer state for intermediate segment matches
+                .or_default()
+                .insert(handle);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Merge logic (union vs fresh node)
+    // -------------------------------------------------------------------------
+    fn merge_handles(
+        &self,
+        set: &BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+    ) -> BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> {
+        if set.len() <= self.merge_threshold {
+            return set.clone();
+        }
+
+        let merged_node_arc = Arc::new(Mutex::new(PrecomputeNode::new( // Renamed merged to merged_node_arc
+            PrecomputedNodeContents::default(),
+        )));
+
+        for child_wrapper in set { // Renamed child to child_wrapper
+            let edge_tokens_for_merge = self.all_llm_tokens.clone();
+            let mut inserter = EdgeInserter::new(
+                child_wrapper.as_arc().clone(), // Source of the edge
+                None::<GrammarTokenID>,   // Key for the edge (epsilon)
+                edge_tokens_for_merge.clone(), // Data for the edge
+                |existing_edge_data: &mut HybridBitset, new_edge_data| *existing_edge_data |= new_edge_data,
+            );
+
+            // Try to reuse an existing child of `child_wrapper.as_arc()`
+            inserter = inserter.try_children();
+
+            // If no suitable existing child was found, make the new `merged_node_arc` the destination
+            if inserter.clone_into_option().is_none() {
+                inserter = inserter.try_destination(merged_node_arc.clone()); // Use merged_node_arc
+            }
+
+            // Now, `inserter.clone_into_option()` should contain Some(destination_node).
+            // Update the `active` field of this destination_node.
+            if let Some(destination_node_arc) = inserter.clone_into_option() {
+                let mut guard = destination_node_arc.lock().unwrap();
+                guard.value.active |= &edge_tokens_for_merge;
+            }
+        }
+
+        let mut out = BTreeSet::new();
+        out.insert(ArcPtrWrapper::new(merged_node_arc)); // Use merged_node_arc
+        out
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -838,3 +1223,4 @@ impl<'a> GrammarConstraintState<'a> {
         }
     }
 }
+
