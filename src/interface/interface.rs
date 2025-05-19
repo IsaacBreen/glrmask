@@ -554,8 +554,8 @@ impl Debug for CompiledGrammar {
         //     writeln!(f, "      {:?}: {:?}", expr, group_id)?;
         // }
 
-        writeln!(f, "  Tokenizer (States: {})", self.tokenizer.states.len())?;
-        writeln!(f, "  GLR Parser (States: {})", self.glr_parser.states.len())?;
+        writeln!(f, "  Tokenizer (States: {})", self.tokenizer.dfa.states.len())?;
+        writeln!(f, "  GLR Parser (States: {})", self.glr_parser.stage_7_table.len())?;
         Ok(())
     }
 }
@@ -811,7 +811,7 @@ mod tests {
         grammar_constraint_state.step_with_all_llm_tokens();
 
         let mask = grammar_constraint_state.get_mask();
-        let mut expected_mask = HybridBitset::new_with_capacity(max_llm_token_id + 1); // Empty mask initially
+        let mut expected_mask = HybridBitset::new(); // Empty mask initially
         // After "a", only EOF is possible if the grammar is just "a".
         // The step_with_all_llm_tokens will populate based on what the grammar can accept next.
         // If "a" completes the rule "E", and "start' -> E" is the only path, then EOF is expected.
