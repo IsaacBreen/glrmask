@@ -572,7 +572,7 @@ impl<'r> Precomputer<'r> {
     fn merge_nodes(&mut self) {
         // Merge equal nodes.
         crate::debug!(2, "Merging nodes");
-        let mut unique: HashMap<PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = self.roots.values().map(|r| (r.lock().unwrap().clone(), r.clone())).collect();
+        let mut unique: BTreeMap<PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = self.roots.values().map(|r| (r.lock().unwrap().clone(), r.clone())).collect();
         crate::debug!(2, "Unique nodes: {:?}", unique.len());
 
         for (tokenizer_state_id, root) in &mut self.roots {
