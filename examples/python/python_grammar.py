@@ -386,9 +386,9 @@ if __name__ == "__main__":
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if all(c==' ' for c in k)}
 
     # Really just using these three rn (19 May 2025)
-    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(k) <= 2}
-    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isdigit() and c != '1' for c in k)}
-    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if all(c==' ' for c in k)}
+#     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(k) <= 2}
+#     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isdigit() and c != '1' for c in k)}
+#     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if all(c==' ' for c in k)}
 
 
     # Exclude tokens that have any character other than ...
