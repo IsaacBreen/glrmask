@@ -539,6 +539,9 @@ impl<'r> Precomputer<'r> {
             }
         }
 
+        // Cache it.
+        self.possible_matches.borrow_mut().insert(tokenizer_state_id, result_map.clone());
+
         result_map
     }
 
