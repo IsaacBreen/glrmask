@@ -115,7 +115,7 @@ def define_tokens() -> list[tuple[str, Any]]:
         seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]),
     ]))))
     tokens["IGNORE"] = ignore
-    # TODO: delete this
+#     # TODO: delete this
 #     tokens["IGNORE"] = eps()
 
     # TODO: uncomment this
@@ -371,8 +371,8 @@ if __name__ == "__main__":
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isalpha() and c != 'a' for c in k)}
     # Exclude tokens that have any digit other than '1'
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c.isdigit() and c != '1' for c in k)}
-    # Exclude tokens that have any character other than 'a' or '1'
-    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c not in 'a1' for c in k)}
+    # Exclude tokens that have any character other than ...
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c not in 'a1 ' for c in k)}
 
     print("Tokenizer vocab:")
     for token, id in sorted(tokenizer_vocab.items(), key=lambda x: x[0]):
