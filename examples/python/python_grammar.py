@@ -378,7 +378,8 @@ if __name__ == "__main__":
     # Exclude any non-alphanumeric non-whitespace character
     # Allow only ...
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if all(c.isalnum() or c==' ' for c in k)}
-    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if all(c.isalpha() or c==' ' for c in k)}
+#     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if all(c.isalpha() or c==' ' for c in k)}
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if all(c in 'a ') for c in k}
 
     # Exclude tokens that have any character other than ...
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c not in 'a1# ' for c in k)}
