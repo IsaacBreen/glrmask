@@ -492,12 +492,12 @@ impl Debug for CompiledGrammar {
         writeln!(
             f,
             "  Tokenizer: {{...}} (States: {})",
-            self.tokenizer.states.len()
+            self.tokenizer.dfa.states.len()
         )?;
         writeln!(
             f,
             "  GLR Parser: {{...}} (States: {})",
-            self.glr_parser.states.len()
+            self.glr_parser.stage_7_table.len()
         )?;
         Ok(())
     }
@@ -757,7 +757,7 @@ impl<'a> IncrementalParser<'a> {
                 let mut any_valid_final_path = false;
                 for possible_final_grammar_token_group_id in possible_final_grammar_tokens {
                     // possible_final_grammar_token_group_id is a GroupID from tokenizer
-                    let parser_terminal_id = ParserTerminalID(possible_final_grammar_token_group_id);
+                    let parser_terminal_id = ParserTerminalID(possible_final_grammar_token_group_id.0);
                     let mut final_glr_state = current_glr_state.clone();
                     final_glr_state.step(parser_terminal_id);
                     if final_glr_state.is_ok() {
