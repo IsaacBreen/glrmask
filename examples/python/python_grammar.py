@@ -235,8 +235,8 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
             rhs = ge.choice([])
         else:
             rhs = pegen_to_sep1_regex(rule.rhs, memo)
-#        # TODO: uncomment this
-#         exprs.append((rule.name, rhs))
+       # TODO: uncomment this
+        exprs.append((rule.name, rhs))
 
 
     tokens = define_tokens()
