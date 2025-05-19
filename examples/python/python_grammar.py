@@ -144,9 +144,9 @@ def define_tokens() -> list[tuple[str, Any]]:
 #         seq([rep(digit), eat_u8(ord(".")), rep(digit)]),
 #     ])
 #     # TODO: delete this
-#     tokens["NAME"] = eps()
-    tokens["NAME"] = eat("a")
+    tokens["NAME"] = eps()
     tokens["NUMBER"] = eps()
+#     tokens["NAME"] = eat("a")
 #     tokens["NUMBER"] = rep(eat("1"))
     tokens["NEWLINE"] = eps()
     tokens["INDENT"] = eps()
