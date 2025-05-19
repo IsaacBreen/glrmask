@@ -13,7 +13,7 @@ import pegen.grammar
 import pegen.grammar_parser
 import pegen.tokenizer # type: ignore
 import torch # type: ignore
-from _sep1 import PyRegexExpr as Regex, PyCompiledGrammar, PyGrammarExpr as ge, PyGrammarConstraint, PyGrammarConstraintState # Changed PyGrammar to PyCompiledGrammar
+from _sep1 import RegexExpr as Regex,  CompiledGrammar,  GrammarExpr as ge,  GrammarConstraint,  GrammarConstraintState
 from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
