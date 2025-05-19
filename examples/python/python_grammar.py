@@ -52,7 +52,7 @@ def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Regex:
             raise ValueError(f"Invalid string literal: {value}")
 #         # TODO: delete this
 #         return ge.literal(value.encode())
-        return ge.literal("2".encode())
+        return ge.literal("1".encode())
     elif isinstance(item, pegen.grammar.Opt):
         return ge.optional(pegen_to_sep1_regex(item.node, memo))
     elif isinstance(item, pegen.grammar.Gather):
@@ -137,13 +137,16 @@ def define_tokens() -> list[tuple[str, Any]]:
         digit,
     ])
 
-    tokens["NAME"] = seq([name_start, rep(name_middle)])
+#     tokens["NAME"] = seq([name_start, rep(name_middle)])
+#     tokens["NUMBER"] = choice([
+#         rep(digit),
+#         seq([rep(digit), eat_u8(ord(".")), rep(digit)]),
+#     ])
 #     # TODO: delete this
 #     tokens["NAME"] = eps()
-    tokens["NUMBER"] = choice([
-        rep(digit),
-        seq([rep(digit), eat_u8(ord(".")), rep(digit)]),
-    ])
+#     tokens["NUMBER"] = eps()
+    tokens["NAME"] = rep(eat("a"))
+    tokens["NUMBER"] = rep(eat("1"))
     tokens["NEWLINE"] = eps()
     tokens["INDENT"] = eps()
     tokens["DEDENT"] = eps()
