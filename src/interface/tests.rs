@@ -1,13 +1,3 @@
-// This file is for tests that might be specific to the interface module
-// but don't fit directly into interface.rs, or for larger integration tests
-// using the interface components.
-
-// The tests previously in `src/interface/interface.rs` under `#[cfg(test)] mod tests`
-// have been moved into `src/interface/interface.rs` itself as per standard practice
-// for module-level tests.
-
-// This file can contain other tests. For example, tests for `IncrementalParser`
-// were already here.
 
 #[cfg(test)]
 mod tests {
