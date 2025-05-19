@@ -446,7 +446,6 @@ struct Precomputer<'r> {
     tokenizer:        &'r Regex,
     vocab:            VocabPrefixTree,
     roots:            BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>,
-    // MODIFIED: Change the type of possible_matches to use RefCell.
     possible_matches: RefCell<BTreeMap<*const VocabPrefixTreeNode, BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>>>,
     all_llm_tokens:   HybridBitset,
     merge_threshold:  usize,
@@ -496,7 +495,6 @@ impl<'r> Precomputer<'r> {
             tokenizer,
             vocab, // vocab is already initialized earlier in the method
             roots, // roots is already initialized earlier in the method
-            // MODIFIED: Initialize possible_matches with RefCell::new.
             possible_matches: RefCell::new(BTreeMap::new()),
             all_llm_tokens: HybridBitset::ones(internal_max_llm_token + 1),
             merge_threshold,
@@ -505,32 +503,27 @@ impl<'r> Precomputer<'r> {
         }
     }
 
-    // REPLACED: This is the new implementation for possible_matches.
-    // The _vocab_node parameter is renamed to vocab_node_for_cache_key.
     fn possible_matches(&self, vocab_node_for_cache_key: &VocabPrefixTreeNode, tokenizer_state_id: TokenizerStateID) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
         let cache_key_ptr = vocab_node_for_cache_key as *const VocabPrefixTreeNode;
 
         // Cache lookup (read-only borrow first)
-        { // Scope for the read borrow
-            let cache = self.possible_matches.borrow();
-            if let Some(cached_for_vocab_node) = cache.get(&cache_key_ptr) {
-                if let Some(cached_result) = cached_for_vocab_node.get(&tokenizer_state_id) {
-                    return cached_result.clone();
-                }
+        if let Some(cached_for_vocab_node) = self.possible_matches.borrow().get(&cache_key_ptr) {
+            if let Some(cached_result) = cached_for_vocab_node.get(&tokenizer_state_id) {
+                return cached_result.clone();
             }
-        } // Read-only borrow is released here.
+        }
 
         // If not in cache, compute:
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
-        
+
         // Ensure tokenizer_state_id.0 is a valid index for dfa.states
         if tokenizer_state_id.0 >= self.tokenizer.dfa.states.len() {
             // This case should ideally not happen if tokenizer_state_id is always valid.
             // Log a warning and return an empty map.
             crate::debug!(
-                1, 
-                "Warning: tokenizer_state_id {} out of bounds for DFA states (len {}). Returning empty map for possible_matches.", 
-                tokenizer_state_id.0, 
+                1,
+                "Warning: tokenizer_state_id {} out of bounds for DFA states (len {}). Returning empty map for possible_matches.",
+                tokenizer_state_id.0,
                 self.tokenizer.dfa.states.len()
             );
             return result_map;
