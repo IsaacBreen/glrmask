@@ -117,7 +117,7 @@ def define_tokens() -> list[tuple[str, Any]]:
 #     tokens["IGNORE"] = ignore
 #     # TODO: delete this
 #     tokens["IGNORE"] = eps()
-    tokens["IGNORE"] = ge.optional(eat(" "))
+    tokens["IGNORE"] = ge.optional(ge.regex(eat(" ")))
 
     # TODO: uncomment this
     digit = eat_range('0', '9')
