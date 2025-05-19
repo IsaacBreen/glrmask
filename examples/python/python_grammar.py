@@ -386,7 +386,7 @@ if __name__ == "__main__":
 
     print("Tokenizer vocab:")
     for token, id in sorted(tokenizer_vocab.items(), key=lambda x: x[0]):
-        print(f"  {token}: {id}")
+        print(f"  {token!r}: {id}")
 
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
