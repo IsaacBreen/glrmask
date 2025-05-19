@@ -367,7 +367,7 @@ if __name__ == "__main__":
 
     # Exclude tokens of length more than 3
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(k) <= 2}
-    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(k) <= 10}
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(k) <= 20}
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(k) <= 80}
 #     # Exclude tokens where any character appears more than once
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(set(k)) == len(k)}
