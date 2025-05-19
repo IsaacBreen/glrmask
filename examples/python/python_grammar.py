@@ -177,7 +177,7 @@ def define_tokens() -> list[tuple[str, Any]]:
 #     assert len(tokens) == len(set(tokens.keys()))
 #     return [(name, ge.regex(expr)) for name, expr in tokens.items()]
 
-def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyCompiledGrammar: # Changed PyGrammar to PyCompiledGrammar
+def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # Changed Grammar to CompiledGrammar
     memo = {}
     exprs: list[tuple[str, Any]] = []
 
@@ -236,7 +236,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> PyCompiledGrammar: 
     tokens = define_tokens()
     exprs.extend(tokens)
 
-    return PyCompiledGrammar(exprs) # Changed PyGrammar to PyCompiledGrammar
+    return CompiledGrammar(exprs) # Changed Grammar to CompiledGrammar
 
 def define_python_grammar():
     with Path(__file__).parent / "python.gram" as f:
@@ -320,7 +320,7 @@ def generate_text(model, tokenizer, grammar_processor, pre_input_text, input_tex
     return tokenizer.decode(output[0], skip_special_tokens=True)
 
 if __name__ == "__main__":
-    from _sep1 import PyIncrementalParser # Import here after module is built
+    from _sep1 import IncrementalParser # Import here after module is built
     model_name = "Qwen/Qwen2.5-Coder-0.5B"
 #     model_name = "gpt2"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -399,22 +399,22 @@ if __name__ == "__main__":
 #     # TODO: delete this
 #     # Define a dummy grammar that only accepts "hello=world"
 #     exprs = [("S", ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))]))]
-#     grammar = PyCompiledGrammar(exprs) # Changed PyGrammar to PyCompiledGrammar
+#     grammar = CompiledGrammar(exprs) # Changed Grammar to CompiledGrammar
 #     grammar.print()
 
 #     print("Initializing parser...")
 #     parser = grammar.glr_parser()
 #     parser.print()
-    # Accessing glr_parser directly from PyCompiledGrammar might not be exposed.
+    # Accessing glr_parser directly from CompiledGrammar might not be exposed.
     # If you need to print it, you'd typically do it via the Rust `Debug` impl,
-    # which `grammar.print()` already does for the whole `PyCompiledGrammar`.
-    # If a separate `PyGLRParser` object with its own print was intended,
-    # `PyCompiledGrammar` would need a method to return it.
+    # which `grammar.print()` already does for the whole `CompiledGrammar`.
+    # If a separate `GLRParser` object with its own print was intended,
+    # `CompiledGrammar` would need a method to return it.
     # For now, `grammar.print()` includes GLR parser info.
-    # grammar.glr_parser().print() # This line would error if glr_parser() doesn't return a printable PyGLRParser
+    # grammar.glr_parser().print() # This line would error if glr_parser() doesn't return a printable GLRParser
 
     print("Initializing grammar constraint...")
-    grammar_constraint = PyGrammarConstraint(grammar, llm_token_to_id, max(llm_token_to_id.values()))
+    grammar_constraint = GrammarConstraint(grammar, llm_token_to_id, max(llm_token_to_id.values()))
 
     # Serialize to JSON string
     print("Serializing grammar constraint to JSON...")
@@ -429,7 +429,7 @@ if __name__ == "__main__":
 
     # Deserialize from JSON string
     print("Deserializing grammar constraint from JSON...")
-    grammar_constraint_from_json = PyGrammarConstraint.from_json_string(json_string)
+    grammar_constraint_from_json = GrammarConstraint.from_json_string(json_string)
     print("Grammar constraint deserialized successfully.")
 
     # Use the deserialized constraint for subsequent operations
@@ -438,7 +438,7 @@ if __name__ == "__main__":
     # grammar_constraint_to_use = grammar_constraint
 
     print("Initializing grammar constraint state...")
-    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint_to_use)
+    grammar_constraint_state = GrammarConstraintState(grammar_constraint_to_use)
     print("Initializing grammar processor...")
     grammar_processor = GrammarConstrainedLogitsProcessor(grammar_constraint_state, llm_token_to_id)
 
@@ -465,14 +465,14 @@ if __name__ == "__main__":
         expected_next_token = id_to_llm_token[grammar_constraint_state.llm_token_map[expected_next_token]]
 
     # DEMO: Incremental Parser
-    parser_state = PyIncrementalParser(grammar) # Use the imported class
+    parser_state = IncrementalParser(grammar) # Use the imported class
     print(f"Initial valid: {parser_state.is_valid()}")
     parser_state.feed(input_text.encode("utf-8"))
     print(f"After '{input_text}': valid={parser_state.is_valid()}")
     print("--- End Incremental Parser Demo ---")
 
     # DEMO: Get the mask
-    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint_to_use)
+    grammar_constraint_state = GrammarConstraintState(grammar_constraint_to_use)
 
     tokens = tokenizer.encode(input_text, return_tensors="pt")
     tokens: list[int] = tokens.tolist()[0]
@@ -506,7 +506,7 @@ if __name__ == "__main__":
         assert expected_next_token in mask_tokens, f"Expected '{expected_next_token}' in mask"
 
     # DEMO: Generate text.
-    grammar_constraint_state = PyGrammarConstraintState(grammar_constraint_to_use)
+    grammar_constraint_state = GrammarConstraintState(grammar_constraint_to_use)
     # The line below this one already uses grammar_constraint_state, so it's fine:
     # output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
     # However, grammar_processor was initialized with the *original* grammar_constraint_state.
