@@ -332,6 +332,8 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     tokenizer_vocab = tokenizer.get_vocab()
+    # Ensure there are no spaces ' ' before we replace 'Ġ' with ' '
+    assert not any(c == ' ' for c in tokenizer_vocab.keys())
     tokenizer_vocab = {k.replace("Ġ", " "): v for k, v in tokenizer_vocab.items()}
 
 #     # TODO: delete this
