@@ -432,13 +432,14 @@ impl GrammarDefinition {
         let mut expr_groups_vec: Vec<ExprGroup> = vec![greedy_group(Expr::Epsilon); max_group_id + 1];
 
         for (expr, group_id) in &self.terminal_expr_to_group_id {
-            // Ensure the vector is large enough (should be due to max_group_id initialization)
-            if *group_id >= expr_groups_vec.len() {
-                 // This case should ideally not happen if group_ids are dense and 0-indexed.
-                 // If it can, resizing logic might be needed, but let's assume correct group_id assignment.
-                 expr_groups_vec.resize(*group_id + 1, greedy_group(Expr::Epsilon));
+            // Ensure the group_id is valid for the vector. This should hold if IDs are contiguous.
+            if *group_id < expr_groups_vec.len() {
+                 expr_groups_vec[*group_id] = greedy_group(expr.clone());
+            } else {
+                // This case should ideally not happen if group IDs are assigned contiguously starting from 0.
+                // Handle error or resize vector if necessary. For now, log a warning.
+                debug!(0, "Warning: Group ID {} is out of bounds for tokenizer expressions vector (len {}). Terminal {:?} might be missing.", group_id, expr_groups_vec.len(), expr);
             }
-            expr_groups_vec[*group_id] = greedy_group(expr.clone());
         }
         expr_groups_vec
     }
