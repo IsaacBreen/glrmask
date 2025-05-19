@@ -293,6 +293,16 @@ impl BitXor for &HybridBitset {
     }
 }
 
+impl Sub for HybridBitset {
+    type Output = HybridBitset;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        HybridBitset {
+            inner: &self.inner - &rhs.inner,
+        }
+    }
+}
+
 impl Sub for &HybridBitset {
     type Output = HybridBitset;
 

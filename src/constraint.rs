@@ -501,7 +501,7 @@ impl<'r> Precomputer<'r> {
         }
     }
 
-    fn definitely_matches(&self, _vocab_node: &VocabPrefixTreeNode, _tokenizer_state_id: TokenizerStateID) -> BTreeMap<GrammarTokenID, LLMTokenBV> { // Parameters named with _ to suppress warnings
+    fn possible_matches(&self, _vocab_node: &VocabPrefixTreeNode, tokenizer_state_id: TokenizerStateID) -> BTreeMap<GrammarTokenID, LLMTokenBV> { // Parameters named with _ to suppress warnings
         // Tells us which LLM tokens could match (starting from the vocab node) the specified grammar token.
         // TODO: Implement this. Ensure it's cached.
         todo!()
@@ -679,14 +679,20 @@ impl<'r> Precomputer<'r> {
                     .execute_from_state(suffix, state_before);
                 crate::debug!(4, "Executed tokenizer from state {:?} on suffix {:?}. Results: {:?}", state_before.0, String::from_utf8_lossy(suffix), exec_result);
 
+                let possible_future_matches: BTreeMap<GrammarTokenID, LLMTokenBV> = exec_result.end_state.map_or_else(BTreeMap::new, |end_state_id| {
+                    self.possible_matches(&self.vocab.root, TokenizerStateID(end_state_id))
+                });
+
                 // -------------------------------------------------------------
                 // Matches inside suffix
                 // -------------------------------------------------------------
                 for m in &exec_result.matches {
                     let grammar_tok = GrammarTokenID(m.id);
                     let match_end_offset = offset + m.width;
-                    let edge_tokens = child_vocab_of_segment.reachable_token_ids().clone();
-
+                    let active_tokens = child_vocab_of_segment.reachable_token_ids().clone();
+                    let tokens_with_future_match = possible_future_matches.get(&grammar_tok).cloned().unwrap_or_default();
+                    // Apply greediness: If a future match is possible, don't match now.
+                    let edge_tokens = active_tokens - tokens_with_future_match;
 
                     for src in &merged_src_set { // Use merged_src_set
                         self.insert_edge(
