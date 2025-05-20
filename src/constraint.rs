@@ -585,7 +585,7 @@ impl<'r> Precomputer<'r> {
                 .or_insert_with(|| root.clone());
             *new_root = root.clone();
         }
-        pb1.finish_with_message(&format!("Collected {} unique nodes", unique.len()));
+        pb1.finish_with_message(format!("Collected {} unique nodes", unique.len()));
 
         // Second pass: rewrite each root to its unique representative.
         crate::debug!(2, "Merging nodes: second pass rewriting roots");
