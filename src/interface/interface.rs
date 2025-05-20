@@ -556,7 +556,7 @@ impl Debug for CompiledGrammar {
         // }
 
         writeln!(f, "  Tokenizer (States: {})", self.tokenizer.dfa.states.len())?;
-        writeln!(f, "  GLR Parser (States: {})", self.glr_parser.stage_7_table.len())?;
+        writeln!(f, "  GLR Parser (States: {}): {:?}", self.glr_parser.stage_7_table.len(), &self.glr_parser.stage_7_table)?;
         Ok(())
     }
 }
