@@ -251,7 +251,7 @@ impl Display for GLRParser {
                             write!(f, " •")?;
                         }
                         match symbol {
-                            Symbol::Terminal(terminal) => write!(f, " {:?}", terminal.0),
+                            Symbol::Terminal(terminal) => write!(f, " {}", terminal.0),
                             Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
                         }?;
                     }

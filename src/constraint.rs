@@ -1219,7 +1219,7 @@ impl<'a> GrammarConstraintState<'a> {
                     .get_by_right(&gtid.0)
                     .map(|s| s.as_str())
                     .unwrap_or("<Unknown Name>");
-                println!("  Token \"{}\" (ID: {}): {} calls", token_name, gtid.0, count);
+                println!("  Token {} (ID: {}): {} calls", token_name, gtid.0, count);
             }
             println!("--------------------------------------------------------------------------");
         } else {
