@@ -398,8 +398,11 @@ if __name__ == "__main__":
     # Exclude tokens that have any character other than ...
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c not in 'a1# ' for c in k)}
 
-    print("Tokenizer vocab:")
-    for token, id in sorted(tokenizer_vocab.items(), key=lambda x: x[0]):
+    if len(tokenizer_vocab) <= 1000:
+        print("Tokenizer vocab:")
+    else:
+        print("Tokenizer vocab (first 1000):")
+    for token, id in list(sorted(tokenizer_vocab.items(), key=lambda x: x[0]))[:1000]:
         print(f"  {token!r}: {id}")
 
     # Map the remaining tokens to their proper IDs.
