@@ -212,7 +212,7 @@ impl PyCompiledGrammar {
     fn print(&self) {
         // The Debug impl for CompiledGrammar is quite verbose.
         // Consider a more Python-friendly summary or selective printing.
-        println!("{:?}", self.inner);
+        println!("{}", self.inner);
     }
 
     fn to_json_string(&self) -> PyResult<String> {

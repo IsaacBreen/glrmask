@@ -13,7 +13,7 @@ use crate::types::TerminalID as GrammarTokenID; // May not be used directly here
 use bimap::BiBTreeMap;
 use kdam::tqdm;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 use std::collections::BTreeMap as StdMap;
 
@@ -522,7 +522,7 @@ impl CompiledGrammar {
     pub fn glr_parser(&self) -> &GLRParser { &self.glr_parser }
 }
 
-impl Debug for CompiledGrammar {
+impl Display for CompiledGrammar {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "CompiledGrammar:")?;
         writeln!(f, "  Definition (Arc<GrammarDefinition>):")?;
@@ -556,7 +556,7 @@ impl Debug for CompiledGrammar {
         // }
 
         writeln!(f, "  Tokenizer (States: {})", self.tokenizer.dfa.states.len())?;
-        writeln!(f, "  GLR Parser (States: {}): {:?}", self.glr_parser.stage_7_table.len(), &self.glr_parser.stage_7_table)?;
+        writeln!(f, "  GLR Parser (States: {}): {:?}", self.glr_parser.stage_7_table.len(), &self.glr_parser)?;
         Ok(())
     }
 }
@@ -686,7 +686,7 @@ mod tests {
         ];
 
         let compiled_grammar = CompiledGrammar::from_exprs(exprs.clone()).expect("Failed to compile grammar");
-        debug!(2, "{:?}", &compiled_grammar);
+        debug!(2, "{}", &compiled_grammar);
 
         // let parser = compiled_grammar.glr_parser(); // Accessor returns &GLRParser
         // debug!(2, "{:?}", parser); // GLRParser Debug can be verbose
