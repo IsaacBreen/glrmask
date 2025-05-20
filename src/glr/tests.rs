@@ -1,9 +1,10 @@
+use std::collections::BTreeSet;
 use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, GLRParserState};
 use crate::glr::table::{generate_glr_parser, TerminalID};
 use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals}; // Import the analyze module
 use bimap::BiBTreeMap;
-
+use crate::glr::items::{compute_closure, Item};
 // --- Helper Functions for Tests ---
 
 fn create_simple_parser() -> GLRParser {
@@ -52,6 +53,59 @@ fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
                 .copied()
         })
         .collect()
+}
+
+
+#[test]
+fn test_closure_with_nullable_nonterminal() {
+    // Grammar:
+    // S ::= A 'x'
+    // A ::= 'y'
+    // A ::= ε  (nullable)
+    let productions = vec![
+        prod("S", vec![nt("A"), t("x")]),
+        prod("A", vec![nt("y")]),
+        prod("A", vec![]), // Epsilon production for A
+    ];
+
+    // Initial item: S ::= . A 'x'
+    let initial_item = Item {
+        production: productions[0].clone(), // S ::= A 'x'
+        dot_position: 0,
+    };
+    let initial_set = BTreeSet::from([initial_item.clone()]);
+
+    let closure_set = compute_closure(&initial_set, &productions);
+
+    // Expected closure:
+    // S ::= . A 'x'
+    // A ::= . 'y'
+    // A ::= .       (representing A ::= . ε)
+    let expected_item_s_ax = initial_item; // S ::= . A 'x'
+    let expected_item_a_y = Item {
+        production: productions[1].clone(), // A ::= 'y'
+        dot_position: 0,
+    };
+    let expected_item_a_eps = Item {
+        production: productions[2].clone(), // A ::= ε
+        dot_position: 0,
+    };
+
+    let mut expected_closure = BTreeSet::new();
+    expected_closure.insert(expected_item_s_ax);
+    expected_closure.insert(expected_item_a_y);
+    expected_closure.insert(expected_item_a_eps);
+
+    assert_eq!(closure_set.len(), 3, "Closure should contain 3 items");
+    assert_eq!(closure_set, expected_closure, "Closure set did not match expected LR(0) closure for nullable non-terminal");
+
+    // Explicitly check that "S ::= A . 'x'" is NOT in the closure,
+    // as this is handled by GOTO, not by LR(0) closure.
+    let item_s_a_dot_x = Item {
+        production: productions[0].clone(), // S ::= A 'x'
+        dot_position: 1, // Dot after A
+    };
+    assert!(!closure_set.contains(&item_s_a_dot_x), "LR(0) closure should not advance dot over nullable non-terminal directly");
 }
 
 // --- Tests for Full Parser Generation and Parsing ---
