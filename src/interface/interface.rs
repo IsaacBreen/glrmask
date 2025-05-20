@@ -193,6 +193,7 @@ impl GrammarDefinition {
     ) -> String {
         match String::from_utf8(bytes.to_vec()) {
             Ok(s) if !s.is_empty() && !s.contains('[') && !s.contains(']') && !s.contains('\"') => {
+                let s = format!("\"{}\"", s.escape_debug().to_string());
                 if !all_names.contains(&s) {
                     all_names.insert(s.clone());
                     s
@@ -204,7 +205,7 @@ impl GrammarDefinition {
             _ => {
                 // Not a "simple" string or UTF-8 conversion failed.
                 // Use b"..."[idx] naming scheme.
-                let base_name = format!("b\"{}\"", String::from_utf8_lossy(bytes).escape_debug().to_string());
+                let base_name = format!("\"{}\"", String::from_utf8_lossy(bytes).escape_debug().to_string());
                 Self::generate_unique_indexed_name(&base_name, counters, all_names)
             }
         }
