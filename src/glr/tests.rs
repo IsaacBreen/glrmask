@@ -622,6 +622,8 @@ fn test_nullable_nonterminal_before_terminal() {
     let eof_token_id = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
     let c_token_id = *parser.terminal_map.get_by_left(&Terminal("c".to_string())).unwrap();
     let d_token_id = *parser.terminal_map.get_by_left(&Terminal("d".to_string())).unwrap();
+    
+    println!("Parser: {}", parser);
 
     // Test case 1: B -> 'd', so A -> 'd' 'c'
     // Input: "dc$"

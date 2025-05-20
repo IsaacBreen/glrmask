@@ -266,6 +266,7 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
 
 fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
     let follow_sets = compute_follow_sets(productions);
+    crate::debug!(3, "Follow sets: {:?}", follow_sets);
 
     let mut stage_3_table = BTreeMap::new();
 
