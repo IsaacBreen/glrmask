@@ -957,14 +957,14 @@ local_system:
                       let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
                       match action {
                           Stage7ShiftsAndReduces::Shift(next_state_id) => {
-                              writeln!(f, "      - {:?} -> Shift {}", terminal.0, next_state_id.0)?;
+                              writeln!(f, "      - {} -> Shift {}", terminal.0, next_state_id.0)?;
                           }
                           Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
                               let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-                              writeln!(f, "      - {:?} -> Reduce {} (len {})", terminal.0, nt_name.0, len)?;
+                              writeln!(f, "      - {} -> Reduce {} (len {})", terminal.0, nt_name.0, len)?;
                           }
                           Stage7ShiftsAndReduces::Split { shift, reduces } => {
-                              writeln!(f, "      - {:?} -> Conflict:", terminal.0)?;
+                              writeln!(f, "      - {} -> Conflict:", terminal.0)?;
                               if let Some(shift_state) = shift {
                                   writeln!(f, "        - Shift {}", shift_state.0)?;
                               }
@@ -3369,14 +3369,14 @@ local_system:
                       let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
                       match action {
                           Stage7ShiftsAndReduces::Shift(next_state_id) => {
-                              writeln!(f, "      - {:?} -> Shift {}", terminal.0, next_state_id.0)?;
+                              writeln!(f, "      - {} -> Shift {}", terminal.0, next_state_id.0)?;
                           }
                           Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
                               let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-                              writeln!(f, "      - {:?} -> Reduce {} (len {})", terminal.0, nt_name.0, len)?;
+                              writeln!(f, "      - {} -> Reduce {} (len {})", terminal.0, nt_name.0, len)?;
                           }
                           Stage7ShiftsAndReduces::Split { shift, reduces } => {
-                              writeln!(f, "      - {:?} -> Conflict:", terminal.0)?;
+                              writeln!(f, "      - {} -> Conflict:", terminal.0)?;
                               if let Some(shift_state) = shift {
                                   writeln!(f, "        - Shift {}", shift_state.0)?;
                               }
@@ -4833,7 +4833,7 @@ local_system:
       // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
       //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
 system:
   message: |2
 
@@ -4849,7 +4849,6 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - copy-all/paste
     - copy-one/paste
   code_completion_model:
     - gemini/gemini-2.5-flash-preview-04-17
@@ -5825,14 +5824,14 @@ messages:
                       let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
                       match action {
                           Stage7ShiftsAndReduces::Shift(next_state_id) => {
-                              writeln!(f, "      - {:?} -> Shift {}", terminal.0, next_state_id.0)?;
+                              writeln!(f, "      - {} -> Shift {}", terminal.0, next_state_id.0)?;
                           }
                           Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
                               let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-                              writeln!(f, "      - {:?} -> Reduce {} (len {})", terminal.0, nt_name.0, len)?;
+                              writeln!(f, "      - {} -> Reduce {} (len {})", terminal.0, nt_name.0, len)?;
                           }
                           Stage7ShiftsAndReduces::Split { shift, reduces } => {
-                              writeln!(f, "      - {:?} -> Conflict:", terminal.0)?;
+                              writeln!(f, "      - {} -> Conflict:", terminal.0)?;
                               if let Some(shift_state) = shift {
                                   writeln!(f, "        - Shift {}", shift_state.0)?;
                               }
@@ -7321,6 +7320,138 @@ messages:
       B ::= .
       i.e. without the A ::= B . 'c' item.
       Does this code handle it properly?
-      Is there a test that tests this?
+      What happens when we compile this grammar? Will the parse table be correct?
+      Add a test for this grammar (unless one already exists).
+    metadata:
+  - assistant: |-
+      The `compute_closure` function you've provided is a standard LR(0) closure algorithm. It works as follows:
+      1.  It initializes the closure set with the initial set of items.
+      2.  For any item in the closure of the form `X ::= α . Y β` (where `Y` is a non-terminal), it adds all items `Y ::= . γ` (for every production `Y ::= γ`) to the closure.
+      3.  This process repeats until no new items can be added.
+
+      This algorithm does *not* directly add an item like `A ::= B . 'c'` to the closure of `{ A ::= . B 'c' }` just because `B` is nullable. Instead, the nullability of `B` is handled by the fact that if `B ::= ε` is a production, then the item `B ::= .` (representing `B` derives empty) will be added to the closure of `{ A ::= . B 'c' }`.
+
+      Here's how the system handles your example:
+
+      **Grammar:**
+      1.  `A ::= B 'c'`
+      2.  `B ::= 'd'`
+      3.  `B ::= ε` (empty)
+
+      **Initial Item:** `A ::= . B 'c'`
+
+      **`compute_closure({ A ::= . B 'c' })` will produce:**
+      *   `A ::= . B 'c'` (the initial item)
+      *   `B ::= . 'd'` (added because of `A ::= . B 'c'` and production `B ::= 'd'`)
+      *   `B ::= .` (added because of `A ::= . B 'c'` and production `B ::= ε`)
+
+      This set is correct for an LR(0) state. The item `B ::= .` indicates that a reduction by the rule `B ::= ε` is possible in this state if the lookahead token is in `FOLLOW(B)`.
+
+      **How `A ::= B . 'c'` comes into play:**
+
+      The item `A ::= B . 'c'` will form the kernel of a *different* state, reached via a `GOTO` transition.
+      *   If the parser is in the state described above (let's call it State X) and it processes the non-terminal `B`, it will transition to a new state, State Y.
+      *   The kernel of State Y will be `GOTO(State X, B) = { A ::= B . 'c' }`.
+      *   The closure of this kernel, `compute_closure({ A ::= B . 'c' })`, would simply be `{ A ::= B . 'c' }` because the symbol after the dot (`'c'`) is a terminal.
+
+      **The role of `B` being nullable:**
+
+      Because `B` is nullable (due to `B ::= ε`), the item `B ::= .` is in State X. This means:
+      *   If the current input token is in `FOLLOW(B)` (which would include `'c'` from the rule `A ::= B 'c'`), the parser can perform a reduce action using `B ::= ε`.
+      *   When this reduction happens:
+          1.  No input tokens are consumed.
+          2.  The parser effectively "recognizes" a `B`.
+          3.  It then consults the GOTO table for the state it was in *before* seeing `B` (which is State X in this scenario) and the non-terminal `B`. This is `GOTO(State X, B)`, which leads to State Y.
+          4.  The parser transitions to State Y. The current input token is still `'c'`.
+          5.  In State Y, the active item is `A ::= B . 'c'`. The parser sees the input `'c'` and performs a shift action.
+
+      **Conclusion on `compute_closure` and table correctness:**
+
+      *   The `compute_closure` function is behaving correctly according to standard LR(0) item set construction.
+      *   The nullability of `B` is correctly handled by including `B ::= .` in the closure, which enables the `B ::= ε` reduction.
+      *   The overall GLR parsing mechanism (table generation using FIRST/FOLLOW sets for reductions, and the runtime execution of shift/reduce actions) is designed to correctly handle these sequences. The parse table generated by the subsequent stages (`stage_2` through `stage_7`) should be correct.
+
+      The item `A ::= B . 'c'` is not "missed"; it appears in the state reached *after* `B` has been processed (either by shifting a terminal that derives `B`, or by reducing `B ::= ε`).
+
+      To confirm this, let's add a test case for this grammar.
+
+      **Instructions to add the test:**
+
+      Open the file `src/glr/tests.rs`.
+      Add the following new test function, for example, after `test_expression_parse_table_generation_and_parse()` or near other grammar-specific tests.
+
+      ```rust
+      #[test]
+      fn test_nullable_nonterminal_before_terminal() {
+          // Grammar:
+          // S' ::= A $
+          // A  ::= B 'c'
+          // B  ::= 'd'
+          // B  ::=  (* epsilon *)
+          let productions = vec![
+              prod("S'", vec![nt("A"), t("$")]), // Start rule
+              prod("A", vec![nt("B"), t("c")]),
+              prod("B", vec![t("d")]),
+              prod("B", vec![]), // Epsilon production for B
+          ];
+
+          // Validation should pass for this grammar
+          assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
+
+          let parser = generate_glr_parser(&productions, 0);
+          let eof_token_id = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+          let c_token_id = *parser.terminal_map.get_by_left(&Terminal("c".to_string())).unwrap();
+          let d_token_id = *parser.terminal_map.get_by_left(&Terminal("d".to_string())).unwrap();
+
+          // Test case 1: B -> 'd', so A -> 'd' 'c'
+          // Input: "dc$"
+          let tokens_dc = vec![d_token_id, c_token_id];
+          let mut state_dc: GLRParserState<'_, ()> = parser.init_glr_parser();
+          state_dc.parse(&tokens_dc);
+          state_dc.step(eof_token_id);
+          assert!(state_dc.is_ok(), "Parse failed for input 'dc$' (expected A -> d c)");
+
+          // Test case 2: B -> epsilon, so A -> 'c'
+          // Input: "c$"
+          let tokens_c = vec![c_token_id];
+          let mut state_c: GLRParserState<'_, ()> = parser.init_glr_parser();
+          state_c.parse(&tokens_c);
+          state_c.step(eof_token_id);
+          assert!(state_c.is_ok(), "Parse failed for input 'c$' (expected A -> epsilon c)");
+
+          // Test case 3: Invalid input "d$" (missing 'c')
+          let tokens_d_fail = vec![d_token_id];
+          let mut state_d_fail: GLRParserState<'_, ()> = parser.init_glr_parser();
+          state_d_fail.parse(&tokens_d_fail);
+          state_d_fail.step(eof_token_id);
+          assert!(!state_d_fail.is_ok(), "Parse succeeded for invalid input 'd$'");
+          
+          // Test case 4: Invalid input "$" (A cannot be fully empty)
+          let tokens_empty_fail = vec![];
+          let mut state_empty_fail: GLRParserState<'_, ()> = parser.init_glr_parser();
+          state_empty_fail.parse(&tokens_empty_fail);
+          state_empty_fail.step(eof_token_id);
+          assert!(!state_empty_fail.is_ok(), "Parse succeeded for invalid input '$'");
+      }
+      ```
+
+      This test defines the grammar, generates the parser, and then checks two valid inputs ("dc$" and "c$") and two invalid inputs. Successful parsing of "c$" demonstrates that the parser correctly handles the case where `B` derives epsilon, allowing `A ::= B 'c'` to effectively become `A ::= 'c'`. This implicitly confirms that the state containing `A ::= B . 'c'` is reachable and functions correctly after `B` is reduced to epsilon.
+    metadata:
+  - user: |
+      Using model 'gemini/gemini-2.5-flash-preview-04-17' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/glr/tests.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/glr/tests.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/glr/tests.rs
     metadata:
 ...

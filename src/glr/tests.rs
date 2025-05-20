@@ -534,8 +534,11 @@ fn test_hidden_left_recursion() {
 
     // Validation should fail due to left-nullable left recursion
     assert!(analyze::validate(&productions).is_err(), "Validation should fail for left-nullable left recursion");
-    return;
-    
+    // This test case is currently redundant because validation fails before parser generation.
+    // It is kept here to document the grammar type but will not be run successfully
+    // until the validation logic is adjusted or skipped for testing purposes.
+    // If validation is ever removed or changed to allow this, uncomment the rest:
+    /*
     let parser = generate_glr_parser(&productions, 0); // This will fail due to left-nullable left recursion
     println!("Parser: {}", parser);
     let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
@@ -556,6 +559,7 @@ fn test_hidden_left_recursion() {
         state.step(eof);
         assert_eq!(state.is_ok(), expected_match, "Parse check failed for hidden left recursion input: '{}'", input);
     }
+    */
 }
 
 #[test]
@@ -595,6 +599,59 @@ fn test_hidden_right_recursion() {
         state.step(eof);
         assert_eq!(state.is_ok(), expected_match, "Parse check failed for hidden right recursion input: '{}'", input);
     }
+}
+
+#[test]
+fn test_nullable_nonterminal_before_terminal() {
+    // Grammar:
+    // S' ::= A $
+    // A  ::= B 'c'
+    // B  ::= 'd'
+    // B  ::=  (* epsilon *)
+    let productions = vec![
+        prod("S'", vec![nt("A"), t("$")]), // Start rule
+        prod("A", vec![nt("B"), t("c")]),
+        prod("B", vec![t("d")]),
+        prod("B", vec![]), // Epsilon production for B
+    ];
+
+    // Validation should pass for this grammar
+    assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
+
+    let parser = generate_glr_parser(&productions, 0);
+    let eof_token_id = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+    let c_token_id = *parser.terminal_map.get_by_left(&Terminal("c".to_string())).unwrap();
+    let d_token_id = *parser.terminal_map.get_by_left(&Terminal("d".to_string())).unwrap();
+
+    // Test case 1: B -> 'd', so A -> 'd' 'c'
+    // Input: "dc$"
+    let tokens_dc = vec![d_token_id, c_token_id];
+    let mut state_dc: GLRParserState<'_, ()> = parser.init_glr_parser();
+    state_dc.parse(&tokens_dc);
+    state_dc.step(eof_token_id);
+    assert!(state_dc.is_ok(), "Parse failed for input 'dc$' (expected A -> d c)");
+
+    // Test case 2: B -> epsilon, so A -> 'c'
+    // Input: "c$"
+    let tokens_c = vec![c_token_id];
+    let mut state_c: GLRParserState<'_, ()> = parser.init_glr_parser();
+    state_c.parse(&tokens_c);
+    state_c.step(eof_token_id);
+    assert!(state_c.is_ok(), "Parse failed for input 'c$' (expected A -> epsilon c)");
+
+    // Test case 3: Invalid input "d$" (missing 'c')
+    let tokens_d_fail = vec![d_token_id];
+    let mut state_d_fail: GLRParserState<'_, ()> = parser.init_glr_parser();
+    state_d_fail.parse(&tokens_d_fail);
+    state_d_fail.step(eof_token_id);
+    assert!(!state_d_fail.is_ok(), "Parse succeeded for invalid input 'd$'");
+
+    // Test case 4: Invalid input "$" (A cannot be fully empty)
+    let tokens_empty_fail = vec![];
+    let mut state_empty_fail: GLRParserState<'_, ()> = parser.init_glr_parser();
+    state_empty_fail.parse(&tokens_empty_fail);
+    state_empty_fail.step(eof_token_id);
+    assert!(!state_empty_fail.is_ok(), "Parse succeeded for invalid input '$'");
 }
 
 // --- Notes on Limitations Not Easily Tested Here ---
