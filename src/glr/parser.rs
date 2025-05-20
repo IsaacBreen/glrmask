@@ -268,14 +268,14 @@ impl Display for GLRParser {
                 let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
                 match action {
                     Stage7ShiftsAndReduces::Shift(next_state_id) => {
-                        writeln!(f, "      - {:?} -> Shift {}", terminal.0, next_state_id.0)?;
+                        writeln!(f, "      - {} -> Shift {}", terminal.0, next_state_id.0)?;
                     }
                     Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
                         let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-                        writeln!(f, "      - {:?} -> Reduce {} (len {})", terminal.0, nt_name.0, len)?;
+                        writeln!(f, "      - {} -> Reduce {} (len {})", terminal.0, nt_name.0, len)?;
                     }
                     Stage7ShiftsAndReduces::Split { shift, reduces } => {
-                        writeln!(f, "      - {:?} -> Conflict:", terminal.0)?;
+                        writeln!(f, "      - {} -> Conflict:", terminal.0)?;
                         if let Some(shift_state) = shift {
                             writeln!(f, "        - Shift {}", shift_state.0)?;
                         }
