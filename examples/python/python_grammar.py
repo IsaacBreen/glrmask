@@ -228,7 +228,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
 #     exprs.append(("NUM", ge.regex(Regex.seq([digit, digit, digit]))))
 #     exprs.append(("file", ge.sequence([ge.ref("NUM"), ge.regex(eat("+")), ge.ref("NUM"), ge.regex(eat("+")), ge.ref("NUM")])))
 
-    exprs.append(("file", ge.sequence([ge.optional(ge.ref("IGNORE")), ge.literal("def")])))
+    exprs.append(("file", ge.sequence([ge.optional(ge.ref("IGNORE")), ge.literal("def".encode())])))
 
     for rule in grammar.rules.values():
         memo[rule.name] = ge.ref(rule.name)
