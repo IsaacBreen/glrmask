@@ -570,21 +570,37 @@ impl<'r> Precomputer<'r> {
     }
 
     fn merge_nodes(&mut self) {
-        // Merge equal nodes.
-        crate::debug!(2, "Merging nodes");
-        // let mut unique: BTreeMap<PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = self.roots.values().map(|r| (r.lock().unwrap().clone(), r.clone())).collect();
+        // Merge equal nodes (first pass: collect unique representatives).
+        crate::debug!(2, "Merging nodes: first collecting unique roots");
+        let total = self.roots.len() as u64;
+        let pb1 = ProgressBar::new(total);
+        pb1.set_style(self.pb.style().clone());
+
         let mut unique = BTreeMap::new();
         for (tokenizer_state_id, root) in &self.roots {
+            pb1.inc(1);
             crate::debug!(4, "Processing root {:?}", tokenizer_state_id);
-            let new_root = unique.entry(root.lock().unwrap().clone()).or_insert_with(|| root.clone());
+            let new_root = unique
+                .entry(root.lock().unwrap().clone())
+                .or_insert_with(|| root.clone());
             *new_root = root.clone();
         }
-        crate::debug!(2, "Unique nodes: {:?}", unique.len());
+        pb1.finish_with_message(&format!("Collected {} unique nodes", unique.len()));
 
-        for (tokenizer_state_id, root) in &mut self.roots {
-            let new_root = unique.get(&root.lock().unwrap().clone()).unwrap().clone();
+        // Second pass: rewrite each root to its unique representative.
+        crate::debug!(2, "Merging nodes: second pass rewriting roots");
+        let pb2 = ProgressBar::new(total);
+        pb2.set_style(self.pb.style().clone());
+
+        for (_tokenizer_state_id, root) in &mut self.roots {
+            pb2.inc(1);
+            let new_root = unique
+                .get(&root.lock().unwrap().clone())
+                .unwrap()
+                .clone();
             *root = new_root;
         }
+        pb2.finish_with_message("Rewritten all roots to unique representatives");
     }
 
     // -------------------------------------------------------------------------
