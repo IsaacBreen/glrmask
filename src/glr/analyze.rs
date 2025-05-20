@@ -128,7 +128,7 @@ pub fn validate(productions: &[Production]) -> Result<(), String> {
 
     // --- Check 2: Length-1 Recursion ---
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
-    crate::debug!(3, "Nullable non-terminals: {:?}", nullable_nonterminals.iter().map(|nt| &nt.0).collect::<Vec<_>>());
+    crate::debug!(2, "Nullable non-terminals: {:?}", nullable_nonterminals.iter().map(|nt| &nt.0).collect::<Vec<_>>());
 
     // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B exists.
     let mut unit_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
