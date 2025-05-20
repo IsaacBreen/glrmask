@@ -546,7 +546,7 @@ impl Display for CompiledGrammar {
         let mut terminals_sorted: Vec<_> = self.definition.terminal_name_to_group_id.iter().collect();
         terminals_sorted.sort_by_key(|&(_, group_id)| group_id);
         for (name, group_id) in terminals_sorted {
-            writeln!(f, "      {:?}: {:?}", name, group_id)?;
+            writeln!(f, "      {}: {:?}", name, group_id)?;
         }
         // Optionally, list terminal_expr_to_group_id if useful for debugging
         // writeln!(f, "    Terminal Expressions (Expr to GroupID, {}):", self.definition.terminal_expr_to_group_id.len())?;
