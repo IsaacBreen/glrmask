@@ -79,9 +79,14 @@ fn test_closure_with_nullable_nonterminal() {
 
     // Expected closure:
     // S ::= . A 'x'
+    // S ::= A . 'x'
     // A ::= . 'y'
     // A ::= .       (representing A ::= . ε)
     let expected_item_s_ax = initial_item; // S ::= . A 'x'
+    let expected_item_s_a_dot_x = Item {
+        production: productions[0].clone(), // S ::= A 'x'
+        dot_position: 1, // Dot after A
+    };
     let expected_item_a_y = Item {
         production: productions[1].clone(), // A ::= 'y'
         dot_position: 0,
@@ -93,6 +98,7 @@ fn test_closure_with_nullable_nonterminal() {
 
     let mut expected_closure = BTreeSet::new();
     expected_closure.insert(expected_item_s_ax);
+    expected_closure.insert(expected_item_s_a_dot_x);
     expected_closure.insert(expected_item_a_y);
     expected_closure.insert(expected_item_a_eps);
 
