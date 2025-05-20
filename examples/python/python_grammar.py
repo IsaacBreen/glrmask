@@ -443,6 +443,36 @@ if __name__ == "__main__":
     # For now, `grammar.print()` includes GLR parser info.
     # grammar.glr_parser().print() # This line would error if glr_parser() doesn't return a printable GLRParser
 
+
+#     pre_input_text = ""
+#     input_text = "i^10=i*"
+#     input_text = "5*6 + 7*2 = 5+5+5+"
+#     input_text = "123+456+"
+#     expected_next_token = "789"
+
+#     pre_input_text = ""
+#     input_text = "hello="
+#     expected_next_token = "world"
+
+    pre_input_text = ""
+    input_text = 'def'
+#     input_text = 'def'
+#     input_text = 'NAME'
+    expected_next_token = ""
+
+    if expected_next_token:
+        expected_next_token = id_to_llm_token[grammar_constraint_state.llm_token_map[expected_next_token]]
+
+    # DEMO: Incremental Parser
+    parser_state = IncrementalParser(grammar) # Use the imported class
+    print(f"Initial valid: {parser_state.is_valid()}")
+    assert parser_state.is_valid()
+    parser_state.feed(input_text.encode("utf-8"))
+    print(f"After '{input_text}': valid={parser_state.is_valid()}")
+    assert parser_state.is_valid()
+    print("--- End Incremental Parser Demo ---")
+
+
     print("Initializing grammar constraint...")
     grammar_constraint = GrammarConstraint(grammar, llm_token_to_id, max(llm_token_to_id.values()))
 
@@ -475,33 +505,6 @@ if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(model_name)
 
     print("Generating text...")
-#     pre_input_text = ""
-#     input_text = "i^10=i*"
-#     input_text = "5*6 + 7*2 = 5+5+5+"
-#     input_text = "123+456+"
-#     expected_next_token = "789"
-
-#     pre_input_text = ""
-#     input_text = "hello="
-#     expected_next_token = "world"
-
-    pre_input_text = ""
-    input_text = 'def'
-#     input_text = 'def'
-#     input_text = 'NAME'
-    expected_next_token = ""
-
-    if expected_next_token:
-        expected_next_token = id_to_llm_token[grammar_constraint_state.llm_token_map[expected_next_token]]
-
-    # DEMO: Incremental Parser
-    parser_state = IncrementalParser(grammar) # Use the imported class
-    print(f"Initial valid: {parser_state.is_valid()}")
-    assert parser_state.is_valid()
-    parser_state.feed(input_text.encode("utf-8"))
-    print(f"After '{input_text}': valid={parser_state.is_valid()}")
-    assert parser_state.is_valid()
-    print("--- End Incremental Parser Demo ---")
 
     # DEMO: Get the mask
     grammar_constraint_state = GrammarConstraintState(grammar_constraint_to_use)
