@@ -51,7 +51,7 @@ def pegen_to_sep1_regex(item: pegen.grammar.BaseGrammar, memo: dict) -> Regex:
         else:
             raise ValueError(f"Invalid string literal: {value}")
 #         # TODO: delete this
-        return ge.literal(value.encode())
+        return regex(ge.literal(value.encode()))
 #         return ge.literal("1".encode())
     elif isinstance(item, pegen.grammar.Opt):
         return ge.optional(pegen_to_sep1_regex(item.node, memo))
@@ -188,7 +188,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
     exprs: list[tuple[str, Any]] = []
 
     # Make sure the start production is first
-    exprs.append(("start'''", ge.ref("file")))
+#     exprs.append(("start'''", ge.ref("file")))
 
 #     # TODO: delete this
 #     choice = Regex.choice
@@ -228,6 +228,8 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
 #     exprs.append(("NUM", ge.regex(Regex.seq([digit, digit, digit]))))
 #     exprs.append(("file", ge.sequence([ge.ref("NUM"), ge.regex(eat("+")), ge.ref("NUM"), ge.regex(eat("+")), ge.ref("NUM")])))
 
+    exprs.append(("file", ge.sequence([ge.optional(ge.ref("IGNORE")), ge.literal("def")])))
+
     for rule in grammar.rules.values():
         memo[rule.name] = ge.ref(rule.name)
         if not rule_name_is_valid(rule.name):
@@ -236,7 +238,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
         else:
             rhs = pegen_to_sep1_regex(rule.rhs, memo)
        # TODO: uncomment this
-        exprs.append((rule.name, rhs))
+#         exprs.append((rule.name, rhs))
 
 
     tokens = define_tokens()
