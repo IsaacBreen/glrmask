@@ -164,6 +164,8 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
             except Exception:
                 token_str = str(token_bytes)
 
+            print(f"Committing Token: {token_str!r} (ID: {token_id})")
+
             # Time the commit operation
             timeit(self.grammar_constraint_state.commit)(token_id)
 
@@ -202,8 +204,6 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
             )))
             print(f"Mask Info: Allowed First Chars: {textwrap.shorten(''.join(first_chars), width=100)!r}")
             print("-" * 30) # Separator for readability
-            print(f"Committing Token: {token_str!r} (ID: {token_id})")
-
 
         self.seen_input_ids = current_input_ids
 
