@@ -137,14 +137,8 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
 
         mask_tokens_str: List[str] = []
         for mid in mask_ids:
-            tok_bytes = self.id_to_llm_token.get(mid)
-            if tok_bytes:
-                try:
-                    mask_tokens_str.append(tok_bytes.decode('utf-8', errors='replace'))
-                except Exception:
-                    mask_tokens_str.append(str(tok_bytes) + " (undecodable)")
-            else: # Should not happen if id_to_llm_token covers all relevant IDs
-                mask_tokens_str.append(f"ID_{mid}_unknown_token")
+            tok_bytes = llm_token_id_to_token[mid]
+            mask_tokens_str.append(tok_bytes.decode('utf-8'))
 
         print(f"Mask Info: Allowed IDs Count: {len(mask_ids)}")
         print(f"Mask Info: Allowed IDs (sample): {textwrap.shorten(str(mask_ids.tolist()), width=120)}")
@@ -152,7 +146,7 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
 
         # Extract and print first characters of allowed tokens for a quick glance
         first_chars = sorted(list(set(
-            t_str[0] for t_str in mask_tokens_str if t_str and not t_str.endswith("(undecodable)") and len(t_str) > 0
+            t_str[0] for t_str in mask_tokens_str if t_str and not t_str.endswith("(undecodable)")
         )))
         print(f"Mask Info: Allowed First Chars: {textwrap.shorten(''.join(first_chars), width=100)!r}")
         print("-" * 30) # Separator for readability
@@ -185,14 +179,8 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
 
             mask_tokens_str: List[str] = []
             for mid in mask_ids:
-                tok_bytes = self.id_to_llm_token.get(mid)
-                if tok_bytes:
-                    try:
-                        mask_tokens_str.append(tok_bytes.decode('utf-8', errors='replace'))
-                    except Exception:
-                        mask_tokens_str.append(str(tok_bytes) + " (undecodable)")
-                else: # Should not happen if id_to_llm_token covers all relevant IDs
-                    mask_tokens_str.append(f"ID_{mid}_unknown_token")
+                tok_bytes = llm_token_id_to_token[mid]
+                mask_tokens_str.append(tok_bytes.decode('utf-8'))
 
             print(f"Mask Info: Allowed IDs Count: {len(mask_ids)}")
             print(f"Mask Info: Allowed IDs (sample): {textwrap.shorten(str(mask_ids.tolist()), width=120)}")
@@ -200,7 +188,7 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
 
             # Extract and print first characters of allowed tokens for a quick glance
             first_chars = sorted(list(set(
-                t_str[0] for t_str in mask_tokens_str if t_str and not t_str.endswith("(undecodable)") and len(t_str) > 0
+                t_str[0] for t_str in mask_tokens_str if t_str and not t_str.endswith("(undecodable)")
             )))
             print(f"Mask Info: Allowed First Chars: {textwrap.shorten(''.join(first_chars), width=100)!r}")
             print("-" * 30) # Separator for readability
@@ -357,14 +345,8 @@ if __name__ == "__main__":
 
     mask_tokens_str: List[str] = []
     for mid in mask_ids:
-        tok_bytes = llm_token_id_to_token.get(mid)
-        if tok_bytes:
-            try:
-                mask_tokens_str.append(tok_bytes.decode('utf-8', errors='replace'))
-            except Exception:
-                mask_tokens_str.append(str(tok_bytes) + " (undecodable)")
-        else: # Should not happen if id_to_llm_token covers all relevant IDs
-            mask_tokens_str.append(f"ID_{mid}_unknown_token")
+        tok_bytes = llm_token_id_to_token[mid]
+        mask_tokens_str.append(tok_bytes.decode('utf-8'))
 
     print(f"Mask Info: Allowed IDs Count: {len(mask_ids)}")
     print(f"Mask Info: Allowed IDs (sample): {textwrap.shorten(str(mask_ids.tolist()), width=120)}")
@@ -372,7 +354,7 @@ if __name__ == "__main__":
 
     # Extract and print first characters of allowed tokens for a quick glance
     first_chars = sorted(list(set(
-        t_str[0] for t_str in mask_tokens_str if t_str and not t_str.endswith("(undecodable)") and len(t_str) > 0
+        t_str[0] for t_str in mask_tokens_str if t_str and not t_str.endswith("(undecodable)")
     )))
     print(f"Mask Info: Allowed First Chars: {textwrap.shorten(''.join(first_chars), width=100)!r}")
     print("-" * 30) # Separator for readability
