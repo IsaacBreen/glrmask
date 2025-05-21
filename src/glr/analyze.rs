@@ -271,11 +271,11 @@ pub fn remove_productions_with_undefined_nonterminals(initial_productions: &[Pro
             break;
         }
         crate::debug!(2, "Removing {} productions with undefined non-terminals.", removed_productions.len());
-        crate::debug!(2, "Missing non-terminals:");
-        let all_rhs_nonterminals: BTreeSet<NonTerminal> = current_productions.iter().flat_map(|prod| prod.rhs.iter().filter_map(|symbol| match symbol {
+        let all_rhs_nonterminals: BTreeSet<NonTerminal> = removed_productions.iter().flat_map(|prod| prod.rhs.iter().filter_map(|symbol| match symbol {
             Symbol::NonTerminal(nt) => Some(nt.clone()),
             _ => None,
         })).collect();
+        crate::debug!(2, "Missing non-terminals ({}) in productions:", all_rhs_nonterminals.len());
         for nt in all_rhs_nonterminals.difference(&defined_lhs_nonterminals) {
             crate::debug!(2, "  {}", nt.0);
         }
