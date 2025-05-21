@@ -261,16 +261,19 @@ pub fn remove_productions_with_undefined_nonterminals(initial_productions: &[Pro
                 Symbol::NonTerminal(nt) => defined_lhs_nonterminals.contains(nt),
             });
             if keep {
-                kept_productions.push(prod.clone());
+                kept_productions.push(prod);
             } else {
-                removed_productions.push(prod.clone());
+                removed_productions.push(prod);
             }
         }
+        current_productions = kept_productions;
         if removed_productions.is_empty() {
             break;
         }
-        current_productions = kept_productions;
-        crate::debug!(2, "Removing {} productions with undefined non-terminals", removed_productions.len());
+        crate::debug!(2, "Removing {} productions with undefined non-terminals:", removed_productions.len());
+        for prod in removed_productions {
+            crate::debug!(2, "  {}", prod);
+        }
     }
 
     current_productions
