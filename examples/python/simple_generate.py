@@ -9,7 +9,8 @@ import numpy as np
 import torch
 # Ensure you have the _sep1 module available in your PYTHONPATH or current directory
 from _sep1 import (CompiledGrammar, GrammarConstraint,
-                   GrammarConstraintState, GrammarExpr as ge, RegexExpr as Regex)
+                   GrammarConstraintState, GrammarExpr as ge, RegexExpr as Regex,
+                   IncrementalParser)
 from transformers import (AutoModelForCausalLM, AutoTokenizer, LogitsProcessor)
 
 # --- Helper Functions ---
@@ -274,7 +275,20 @@ if __name__ == "__main__":
     print("Grammar: Compiled successfully. Rules defined:")
     for i, (name, _) in enumerate(grammar_rules):
         print(f"  Rule {i}: {name}")
-    # compiled_grammar.print() # This can be very verbose; uncomment for deep debugging
+    compiled_grammar.print() # This can be very verbose; uncomment for deep debugging
+
+    # DEMO: Incremental Parser
+    input_text = "the apple"
+    parser_state = IncrementalParser(compiled_grammar) # Use the imported class
+    print(f"Initial valid: {parser_state.is_valid()}")
+    assert parser_state.is_valid()
+    parser_state.feed(input_text.encode("utf-8"))
+    print(f"After '{input_text}': valid={parser_state.is_valid()}")
+    assert parser_state.is_valid()
+    print("--- End Incremental Parser Demo ---")
+
+    # Test the tokenizer
+    tokenizer.decode(test_text_tokens)
 
     print("\nInitializing GrammarConstraint...")
     # max_token_id_val must be the highest token ID used by the tokenizer.
