@@ -306,24 +306,8 @@ mod tests {
         let lit = |s: &str| crate::interface::literal(s.as_bytes().to_vec());
 
         // Define GrammarExprs for non-terminals
-        let expr_A = choice(vec![
-            lit("a"),
-            lit("the"),
-            lit("apple"),
-            lit("banana"),
-            lit("person"),
-        ]);
-
-        let expr_B = choice(vec![
-            lit("eats"),
-            lit("likes"),
-            lit("is"),
-            lit("tasty"),
-            lit("red"),
-            lit("happy"),
-            lit("."),
-            lit("and"),
-        ]);
+        let expr_A = lit("the");
+        let expr_B = lit("eats");
 
         let expr_start = sequence(vec![
             crate::interface::r#ref("A"),
