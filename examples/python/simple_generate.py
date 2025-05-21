@@ -41,15 +41,17 @@ def define_fruit_grammar_rules() -> List[Tuple[str, Any]]:
 
     # IGNORE rule: optional spaces. This rule itself is not wrapped by IGNORE.
     # It allows zero or more spaces.
-    rules.append(("IGNORE", ge.regex(Regex.rep(Regex.eat_u8(ord(' '))))))
+    rules.append(("IGNORE", ge.optional(ge.regex(Regex.rep(Regex.eat_u8(ord(' ')))))))
 
     # Helper to create a "lexical" rule: a choice of literal strings,
     # each implicitly preceded by consuming the IGNORE rule.
     def make_lexical_rule(name: str, choices: List[str]) -> Tuple[str, Any]:
-        return (name, ge.sequence([
-            ge.ref("IGNORE"), # Consume optional leading spaces
-            ge.choice([ge.literal(s.encode('utf-8')) for s in choices])
-        ]))
+        sequents = []
+        for s in choices:
+            sequents.append(ge.ref("IGNORE"))
+            sequents.append(ge.literal(s.encode('utf-8')))
+        return (name, ge.sequence(sequents))
+
 
     # Lexical rules (tokens of our grammar)
     rules.append(make_lexical_rule("Det", ["a", "the"]))
