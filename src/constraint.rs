@@ -565,7 +565,7 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Starting precompute DFS");
         crate::debug!(2, "Roots for each tokenizer state:");
         for (sid, root) in &self.roots {
-            crate::debug!(2, "  {}: {}", sid.0, root.value.to_json().to_json_string());
+            crate::debug!(2, "  {}: {:p}", sid.0, root);
         }
         self.dfs(&self.vocab.root, assoc);
         crate::debug!(2, "Finished precompute DFS");
