@@ -253,7 +253,7 @@ if __name__ == "__main__":
     # These need to be converted to standard spaces ' ' for matching grammar literals.
     raw_tokenizer_vocab = tokenizer.get_vocab()
     processed_tokenizer_vocab: Dict[str, int] = {
-        k.replace(" ", " "): v  # Replace Qwen's space char U+2581 with standard space ' '
+        k.replace("Ġ", " "): v  # Replace Qwen's space char U+2581 with standard space ' '
         for k, v in raw_tokenizer_vocab.items()
     }
 
@@ -350,7 +350,7 @@ if __name__ == "__main__":
 
     # Example 1: Start with "the " and let the model complete.
     pre_prompt = ""
-    constrained_prompt = "the"
+    constrained_prompt = "the apple"
 
     # Example 2: Start completely empty (model generates from the absolute beginning of the grammar).
     # pre_prompt = ""
