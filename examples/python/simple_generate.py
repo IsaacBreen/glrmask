@@ -69,7 +69,7 @@ def define_fruit_grammar_rules() -> List[Tuple[str, Any]]:
 #     return rules
 
     # Lexical rules (tokens of our grammar)
-    rules.append(make_lexical_rule("Det", [b"a", b"the"]))
+    rules.append(make_lexical_rule("Det", [b"a", b"an", b"the"]))
     rules.append(make_lexical_rule("Noun", [b"apple", b"banana", b"person"]))
     rules.append(make_lexical_rule("Verb", [b"eats", b"likes", b"is"]))
     rules.append(make_lexical_rule("Adj", [b"tasty", b"red", b"happy"]))
@@ -380,7 +380,7 @@ if __name__ == "__main__":
 
     # Example 1: Start with "the " and let the model complete.
     pre_prompt = ""
-    constrained_prompt = "the apple"
+    constrained_prompt = "a person eats a banana and an apple"
 
     # Example 2: Start completely empty (model generates from the absolute beginning of the grammar).
     # pre_prompt = ""
