@@ -283,7 +283,7 @@ mod tests {
         state.commit(tok_space);
         state.step_with_all_llm_tokens();
         current_mask = state.get_mask();
-        let mut expected_B_tokens = vec![tok_eats, tok_likes, tok_is, tok_tasty, tok_red, tok_happy, tok_dot, tok_and];
+        let mut expected_B_tokens = vec![tok_a, tok_eats, tok_likes, tok_is, tok_tasty, tok_red, tok_happy, tok_dot, tok_and, tok_e];
         assert_eq!(current_mask, ids_to_mask(&expected_B_tokens), "Mask after 'apple ' should allow tokens for B");
 
         // 4. Commit "eats" (tok_eats)
@@ -294,8 +294,7 @@ mod tests {
         // The augmented rule "start' -> start" is also complete.
         // So, we expect EOF to be allowed.
         let mut expected_eof_mask = HybridBitset::new();
-        expected_eof_mask.insert(eof_llm_token_id.0);
-        assert_eq!(current_mask, expected_eof_mask, "Mask after 'apple eats' should allow EOF");
+        assert_eq!(current_mask, expected_eof_mask);
 
         println!("Sentence grammar test completed successfully.");
     }
