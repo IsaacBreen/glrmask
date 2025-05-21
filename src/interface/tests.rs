@@ -161,10 +161,10 @@ mod tests {
         // Define GrammarExprs for non-terminals
         let expr_A = choice(vec![
             lit("a"),
-            lit("th"),
-            lit("appl"),
+            lit("the"),
+            lit("apple"),
             lit("banana"),
-            lit("prson"),
+            lit("person"),
         ]);
 
         let expr_IGNORE = lit(" ");
@@ -217,10 +217,10 @@ mod tests {
 
         // Tokens for rule A
         let tok_a = add_token("a");
-        let tok_the = add_token("th");
-        let tok_apple = add_token("appl");
+        let tok_the = add_token("the");
+        let tok_apple = add_token("apple");
         let tok_banana = add_token("banana");
-        let tok_person = add_token("prson");
+        let tok_person = add_token("person");
 
         // Token for rule IGNORE
         let tok_space = add_token(" ");
