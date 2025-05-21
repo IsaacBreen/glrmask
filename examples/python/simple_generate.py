@@ -54,8 +54,8 @@ def define_fruit_grammar_rules() -> List[Tuple[str, Any]]:
 
 #     rules.append(("sentences", ge.sequence([ge.ref("sentence"), ge.repeat(ge.regex(Regex.eat_u8(ord('\n')))), ge.ref("sentence")])))
 #     rules.append(make_lexical_rule("sentences", ["the", "apple", "is", "a", "person"]))
-#     rules.append(("sentences", ge.literal("the apple is a person".encode())))
-    return [("start", ge.literal("the apple is a person".encode()))]
+    rules.append(("sentences", ge.literal(b"the apple is a person")))
+    return [("start", ge.literal(b"the apple is a person"))]
 
     # IGNORE rule: optional spaces. This rule itself is not wrapped by IGNORE.
     # It allows zero or more spaces.
