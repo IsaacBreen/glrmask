@@ -385,7 +385,7 @@ impl GrammarConstraint {
         helper.run_dfs();
 
         // 3. Merge nodes.
-        helper.merge_nodes();
+        // helper.merge_nodes();
 
         // 4.  Collect statistics & finish progress-bar.
         helper.finish(token_name_map)
@@ -563,6 +563,10 @@ impl<'r> Precomputer<'r> {
         }
 
         crate::debug!(2, "Starting precompute DFS");
+        crate::debug!(2, "Roots for each tokenizer state:");
+        for (sid, root) in &self.roots {
+            crate::debug!(2, "  {}: {}", sid.0, root.value.to_json().to_json_string());
+        }
         self.dfs(&self.vocab.root, assoc);
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish_with_message("Precomputation complete");
