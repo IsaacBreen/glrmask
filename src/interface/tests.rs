@@ -306,8 +306,8 @@ mod tests {
         let lit = |s: &str| crate::interface::literal(s.as_bytes().to_vec());
 
         // Define GrammarExprs for non-terminals
-        let expr_A = lit("ae");
-        let expr_B = lit("eb");
+        let expr_A = lit("ab");
+        let expr_B = lit("bc");
 
         let expr_start = sequence(vec![
             crate::interface::r#ref("A"),
@@ -343,7 +343,9 @@ mod tests {
         };
 
         // Tokens
-        let tok_e = add_token("e");
+        let tok_a = add_token("a");
+        let tok_b = add_token("b");
+        let tok_c = add_token("c");
 
         // Determine max_original_llm_token_id for GrammarConstraint
         // If next_llm_id_val is N, actual IDs are 0 to N-1.
@@ -375,8 +377,7 @@ mod tests {
         state.step_with_all_llm_tokens();
 
         // 1. Initial mask: Expect tokens for rule A
-        // let mut expected_A_tokens = vec![tok_a, tok_the, tok_apple, tok_banana, tok_person];
-        let mut expected_A_tokens = vec![];
+        let mut expected_A_tokens = vec![tok_a];
         let mut current_mask = state.get_mask();
         assert_eq!(current_mask, ids_to_mask(&expected_A_tokens), "Initial mask should allow tokens for A");
     }
