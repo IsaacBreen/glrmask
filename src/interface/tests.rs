@@ -235,6 +235,9 @@ mod tests {
         let tok_dot = add_token(".");
         let tok_and = add_token("and");
 
+        let tok_e = add_token("e");
+        let tok_eth = add_token("eth");
+
         // Determine max_original_llm_token_id for GrammarConstraint
         // If next_llm_id_val is N, actual IDs are 0 to N-1.
         let max_original_llm_token_id = if next_llm_id_val == 0 { 0 } else { next_llm_id_val - 1 };
