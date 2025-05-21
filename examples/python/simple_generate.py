@@ -142,13 +142,13 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
 
         print(f"Mask Info: Allowed IDs Count: {len(mask_ids)}")
         print(f"Mask Info: Allowed IDs (sample): {textwrap.shorten(str(mask_ids.tolist()), width=120)}")
-        print(f"Mask Info: Allowed Tokens (sample): {textwrap.shorten(str(mask_tokens_str), width=200)}")
+        print(f"Mask Info: Allowed Tokens (sample): {mask_tokens_str[:100]}")
 
         # Extract and print first characters of allowed tokens for a quick glance
         first_chars = sorted(list(set(
             t_str[0] for t_str in mask_tokens_str if t_str and not t_str.endswith("(undecodable)")
         )))
-        print(f"Mask Info: Allowed First Chars: {textwrap.shorten(''.join(first_chars), width=100)!r}")
+        print(f"Mask Info: Allowed First Chars: {''.join(first_chars)}")
         print("-" * 30) # Separator for readability
 
         for token_id in new_token_ids:
@@ -184,13 +184,13 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
 
             print(f"Mask Info: Allowed IDs Count: {len(mask_ids)}")
             print(f"Mask Info: Allowed IDs (sample): {textwrap.shorten(str(mask_ids.tolist()), width=120)}")
-            print(f"Mask Info: Allowed Tokens (sample): {textwrap.shorten(str(mask_tokens_str), width=200)}")
+            print(f"Mask Info: Allowed Tokens (sample): {mask_tokens_str[:100]}")
 
             # Extract and print first characters of allowed tokens for a quick glance
             first_chars = sorted(list(set(
                 t_str[0] for t_str in mask_tokens_str if t_str and not t_str.endswith("(undecodable)")
             )))
-            print(f"Mask Info: Allowed First Chars: {textwrap.shorten(''.join(first_chars), width=100)!r}")
+            print(f"Mask Info: Allowed First Chars: {''.join(first_chars)}")
             print("-" * 30) # Separator for readability
 
         self.seen_input_ids = current_input_ids
@@ -350,13 +350,13 @@ if __name__ == "__main__":
 
     print(f"Mask Info: Allowed IDs Count: {len(mask_ids)}")
     print(f"Mask Info: Allowed IDs (sample): {textwrap.shorten(str(mask_ids.tolist()), width=120)}")
-    print(f"Mask Info: Allowed Tokens (sample): {textwrap.shorten(str(mask_tokens_str), width=200)}")
+    print(f"Mask Info: Allowed Tokens (sample): {mask_tokens_str[:100]}")
 
     # Extract and print first characters of allowed tokens for a quick glance
     first_chars = sorted(list(set(
         t_str[0] for t_str in mask_tokens_str if t_str and not t_str.endswith("(undecodable)")
     )))
-    print(f"Mask Info: Allowed First Chars: {textwrap.shorten(''.join(first_chars), width=100)!r}")
+    print(f"Mask Info: Allowed First Chars: {''.join(first_chars)}")
     print("-" * 30) # Separator for readability
 
 
