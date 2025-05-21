@@ -35,6 +35,20 @@ def timeit(func):
 def define_fruit_grammar_rules() -> List[Tuple[str, Any]]:
     """Defines the rules for a simple fruit-based natural language grammar."""
 
+    # Helper to create a "lexical" rule: a choice of literal strings,
+    # each implicitly preceded by consuming the IGNORE rule.
+    def make_lexical_rule(name: str, choices: List[str]) -> Tuple[str, Any]:
+        return (name, ge.choice([ge.literal(s.encode('utf-8')) for s in choices]))
+
+    def sep(sequents: List[Any], sep: Any = ge.ref("IGNORE")) -> Any:
+        sep_sequents = []
+        sep_sequents.append(sequents[0])
+        for s in sequents[1:]:
+            sep_sequents.append(sep)
+            sep_sequents.append(s)
+        return ge.sequence(sep_sequents)
+
+
     # The first rule in the list is taken as the start rule by CompiledGrammar
     rules: List[Tuple[str, Any]] = [("start_rule", ge.ref("sentences"))]
 
@@ -43,16 +57,6 @@ def define_fruit_grammar_rules() -> List[Tuple[str, Any]]:
     # IGNORE rule: optional spaces. This rule itself is not wrapped by IGNORE.
     # It allows zero or more spaces.
     rules.append(("IGNORE", ge.optional(ge.regex(Regex.rep(Regex.eat_u8(ord(' ')))))))
-
-    # Helper to create a "lexical" rule: a choice of literal strings,
-    # each implicitly preceded by consuming the IGNORE rule.
-    def make_lexical_rule(name: str, choices: List[str]) -> Tuple[str, Any]:
-        sequents = []
-        for s in choices:
-            sequents.append(ge.ref("IGNORE"))
-            sequents.append(ge.literal(s.encode('utf-8')))
-        return (name, ge.sequence(sequents))
-
 
     # Lexical rules (tokens of our grammar)
     rules.append(make_lexical_rule("Det", ["a", "the"]))
@@ -67,20 +71,20 @@ def define_fruit_grammar_rules() -> List[Tuple[str, Any]]:
     # e.g., "the apple", "person"
     # Components (Det, Noun) already handle their own leading IGNORE.
     rules.append(("NP", ge.choice([
-        ge.sequence([ge.ref("Det"), ge.ref("Noun")]),
+        sep([ge.ref("Det"), ge.ref("Noun")]),
         ge.ref("Noun")
     ])))
 
     # A VP (Verb Phrase) is a Verb followed by an NP, or a Verb followed by an Adjective.
     # e.g., "eats the apple", "is tasty"
     rules.append(("VP", ge.choice([
-        ge.sequence([ge.ref("Verb"), ge.ref("NP")]),
-        ge.sequence([ge.ref("Verb"), ge.ref("Adj")])
+        sep([ge.ref("Verb"), ge.ref("NP")]),
+        sep([ge.ref("Verb"), ge.ref("Adj")])
     ])))
 
     # A 'phrase' is an NP followed by a VP.
     # e.g., "the person eats an apple"
-    rules.append(("phrase", ge.sequence([
+    rules.append(("phrase", sep([
         ge.ref("NP"), ge.ref("VP")
     ])))
 
@@ -88,8 +92,8 @@ def define_fruit_grammar_rules() -> List[Tuple[str, Any]]:
     # OR a phrase followed by 'And' and another sentence (recursion).
     # e.g., "a person is happy.", "an apple is red and a banana is tasty."
     rules.append(("sentence", ge.choice([
-        ge.sequence([ge.ref("phrase"), ge.ref("Period")]),
-        ge.sequence([ge.ref("phrase"), ge.ref("And"), ge.ref("sentence")])
+        sep([ge.ref("phrase"), ge.ref("Period")]),
+        sep([ge.ref("phrase"), ge.ref("And"), ge.ref("sentence")])
     ])))
 
     return rules
@@ -278,7 +282,7 @@ if __name__ == "__main__":
     compiled_grammar.print() # This can be very verbose; uncomment for deep debugging
 
     # DEMO: Incremental Parser
-    input_text = "the apple"
+    input_text = "a person"
     parser_state = IncrementalParser(compiled_grammar) # Use the imported class
     print(f"Initial valid: {parser_state.is_valid()}")
     assert parser_state.is_valid()
