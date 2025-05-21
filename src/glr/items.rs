@@ -1,7 +1,9 @@
 use crate::glr::grammar::{Production, Symbol};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
+use std::collections::BTreeMap as StdMap;
+use std::fmt::{Display, Formatter};
+// Added for derive macro pattern
 
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -32,6 +34,22 @@ impl JSONConvertible for Item {
     }
 }
 
+impl Display for Item {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        // Display the production and dot position
+        write!(f, "{} ->", self.production.lhs.0)?;
+        for (i, symbol) in self.production.rhs.iter().enumerate() {
+            if i == self.dot_position {
+                write!(f, " •")?;
+            }
+            match symbol {
+                Symbol::Terminal(terminal) => write!(f, " {}", terminal.0)?,
+                Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
+            }
+        }
+        Ok(())
+    }
+}
 
 pub fn compute_closure(items: &BTreeSet<Item>, productions: &[Production]) -> BTreeSet<Item> {
     // crate::debug!(3, "Computing closure");

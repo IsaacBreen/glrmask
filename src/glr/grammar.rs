@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
+use std::collections::BTreeMap as StdMap;
+use std::fmt::{Display, Formatter};
+// Added for derive macro pattern
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[derive(Hash)]
@@ -91,6 +93,18 @@ impl JSONConvertible for Production {
     }
 }
 
+impl Display for Production {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ->", self.lhs.0)?;
+        for symbol in &self.rhs {
+            match symbol {
+                Symbol::Terminal(terminal) => write!(f, " {}", terminal.0)?,
+                Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
+            }
+        }
+        Ok(())
+    }
+}
 
 pub fn nt(name: &str) -> Symbol {
     Symbol::NonTerminal(NonTerminal(name.to_string()))

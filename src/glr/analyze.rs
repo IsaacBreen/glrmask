@@ -272,7 +272,7 @@ pub fn remove_productions_with_undefined_nonterminals(initial_productions: &[Pro
         }
         crate::debug!(2, "Removing {} productions with undefined non-terminals:", removed_productions.len());
         for prod in removed_productions {
-            crate::debug!(2, "  {:?}", prod);
+            crate::debug!(2, "  {}", prod);
         }
     }
 
