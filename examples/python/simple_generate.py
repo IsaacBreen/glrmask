@@ -309,7 +309,7 @@ if __name__ == "__main__":
     compiled_grammar.print() # This can be very verbose; uncomment for deep debugging
 
     # DEMO: Incremental Parser
-    input_text = "a person"
+    input_text = "the apple"
     parser_state = IncrementalParser(compiled_grammar) # Use the imported class
     print(f"Initial valid: {parser_state.is_valid()}")
     assert parser_state.is_valid()
