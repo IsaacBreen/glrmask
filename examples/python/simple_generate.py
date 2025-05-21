@@ -305,11 +305,7 @@ if __name__ == "__main__":
 
     # Example 1: Start with "the " and let the model complete.
     pre_prompt = ""
-    constrained_prompt = "the" # Note the trailing space, often helpful.
-                                 # The 'Noun' rule expects IGNORE then the noun.
-                                 # If "the" is a token and " apple" is a token,
-                                 # "the" then " apple" works.
-                                 # If "the " is a token, that also works.
+    constrained_prompt = "the"
 
     # Example 2: Start completely empty (model generates from the absolute beginning of the grammar).
     # pre_prompt = ""
