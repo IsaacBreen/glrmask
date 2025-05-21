@@ -306,8 +306,8 @@ mod tests {
         let lit = |s: &str| crate::interface::literal(s.as_bytes().to_vec());
 
         // Define GrammarExprs for non-terminals
-        let expr_A = lit("the");
-        let expr_B = lit("eats");
+        let expr_A = lit("ae");
+        let expr_B = lit("eb");
 
         let expr_start = sequence(vec![
             crate::interface::r#ref("A"),
@@ -344,7 +344,6 @@ mod tests {
 
         // Tokens
         let tok_e = add_token("e");
-        let tok_eth = add_token("eth");
 
         // Determine max_original_llm_token_id for GrammarConstraint
         // If next_llm_id_val is N, actual IDs are 0 to N-1.
