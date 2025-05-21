@@ -211,24 +211,24 @@ impl GrammarDefinition {
         }
     }
 
-    /// Converts a `GrammarExpr` into a sequence of `Symbol`s, creating new productions as needed.
+    /// Converts a `GrammarExpr` into a sequence of `Symbol`s and a list of newly created `Production`s.
     fn convert_grammar_expr_to_symbols(
         expr: &GrammarExpr,
         current_rule_name_or_path: &str,
-        productions: &mut Vec<Production>,
+        // productions: &mut Vec<Production>, // This is now returned
         terminal_name_to_group_id: &mut BiBTreeMap<String, usize>,
         terminal_expr_to_group_id: &mut BiBTreeMap<Expr, usize>,
         next_terminal_group_id: &mut usize,
         per_base_counters: &mut HashMap<String, usize>,
         all_names: &mut HashSet<String>,
-    ) -> Vec<Symbol> {
+    ) -> (Vec<Symbol>, Vec<Production>) { // Return symbols and new productions
         match expr {
             GrammarExpr::Literal(bytes) => {
                 let regex_expr = Expr::U8Seq(bytes.clone());
                 if let Some(group_id) = terminal_expr_to_group_id.get_by_left(&regex_expr) {
                     let terminal_name = terminal_name_to_group_id.get_by_right(group_id)
                         .expect("Internal error: group_id has no name for literal's regex_expr").clone();
-                    vec![Symbol::Terminal(Terminal(terminal_name))]
+                    (vec![Symbol::Terminal(Terminal(terminal_name))], Vec::new()) // Return symbols and empty productions
                 } else {
                     let terminal_name = Self::generate_unique_indexed_name_for_literal(
                         bytes,
@@ -239,14 +239,14 @@ impl GrammarDefinition {
                     terminal_name_to_group_id.insert(terminal_name.clone(), group_id);
                     terminal_expr_to_group_id.insert(regex_expr.clone(), group_id);
                     *next_terminal_group_id += 1;
-                    vec![Symbol::Terminal(Terminal(terminal_name))]
+                    (vec![Symbol::Terminal(Terminal(terminal_name))], Vec::new()) // Return symbols and empty productions
                 }
             }
             GrammarExpr::RegexExpr(regex_expr) => {
                 if let Some(group_id) = terminal_expr_to_group_id.get_by_left(regex_expr) {
                     let terminal_name = terminal_name_to_group_id.get_by_right(group_id)
                         .expect("Internal error: group_id has no name for regex_expr").clone();
-                    vec![Symbol::Terminal(Terminal(terminal_name))]
+                    (vec![Symbol::Terminal(Terminal(terminal_name))], Vec::new()) // Return symbols and empty productions
                 } else {
                     let terminal_name = Self::generate_unique_indexed_name(
                         current_rule_name_or_path,
@@ -257,27 +257,31 @@ impl GrammarDefinition {
                     terminal_name_to_group_id.insert(terminal_name.clone(), group_id);
                     terminal_expr_to_group_id.insert(regex_expr.clone(), group_id);
                     *next_terminal_group_id += 1;
-                    vec![Symbol::Terminal(Terminal(terminal_name))]
+                    (vec![Symbol::Terminal(Terminal(terminal_name))], Vec::new()) // Return symbols and empty productions
                 }
             }
             GrammarExpr::Ref(name) => {
-                vec![Symbol::NonTerminal(NonTerminal(name.clone()))]
+                (vec![Symbol::NonTerminal(NonTerminal(name.clone()))], Vec::new()) // Return symbols and empty productions
             }
-            GrammarExpr::Sequence(exprs) => exprs
-                .iter()
-                .flat_map(|e| {
-                    Self::convert_grammar_expr_to_symbols(
+            GrammarExpr::Sequence(exprs) => {
+                let mut combined_symbols = Vec::new();
+                let mut combined_productions = Vec::new();
+                for e in exprs {
+                    let (symbols, new_productions) = Self::convert_grammar_expr_to_symbols(
                         e,
                         current_rule_name_or_path,
-                        productions,
+                        // productions, // No longer passed
                         terminal_name_to_group_id,
                         terminal_expr_to_group_id,
                         next_terminal_group_id,
                         per_base_counters,
                         all_names,
-                    )
-                })
-                .collect(),
+                    );
+                    combined_symbols.extend(symbols);
+                    combined_productions.extend(new_productions);
+                }
+                (combined_symbols, combined_productions) // Return combined symbols and productions
+            }
             GrammarExpr::Choice(exprs) => {
                 let choice_nt_name = Self::generate_unique_indexed_name(
                     current_rule_name_or_path,
@@ -286,35 +290,43 @@ impl GrammarDefinition {
                 );
                 let nt = NonTerminal(choice_nt_name.clone());
 
+                let mut choice_defining_productions = Vec::new();
+                let mut children_productions_from_arms = Vec::new();
+
                 for expr_choice_item in exprs {
-                    let rhs = Self::convert_grammar_expr_to_symbols(
+                    let (rhs_symbols_for_arm, productions_from_arm_processing) = Self::convert_grammar_expr_to_symbols(
                         expr_choice_item,
                         &choice_nt_name, // Children named relative to this new NT
-                        productions,
+                        // productions, // No longer passed
                         terminal_name_to_group_id,
                         terminal_expr_to_group_id,
                         next_terminal_group_id,
                         per_base_counters,
                         all_names,
                     );
-                    productions.push(Production {
+                    choice_defining_productions.push(Production {
                         lhs: nt.clone(),
-                        rhs,
+                        rhs: rhs_symbols_for_arm,
                     });
+                    children_productions_from_arms.extend(productions_from_arm_processing);
                 }
-                vec![Symbol::NonTerminal(nt)]
+
+                let mut all_new_productions = choice_defining_productions;
+                all_new_productions.extend(children_productions_from_arms);
+
+                (vec![Symbol::NonTerminal(nt)], all_new_productions) // Return the new NT and all generated productions
             }
             GrammarExpr::Optional(expr_box) => {
                 Self::convert_grammar_expr_to_symbols(
                     &GrammarExpr::Choice(vec![*expr_box.clone(), GrammarExpr::Sequence(vec![])]),
                     current_rule_name_or_path,
-                    productions,
+                    // productions, // No longer passed
                     terminal_name_to_group_id,
                     terminal_expr_to_group_id,
                     next_terminal_group_id,
                     per_base_counters,
                     all_names,
-                )
+                ) // Return symbols and productions from the equivalent Choice
             }
             GrammarExpr::Repeat(expr_box) => {
                 let repeat_nt_name = Self::generate_unique_indexed_name(
@@ -324,10 +336,10 @@ impl GrammarDefinition {
                 );
                 let nt = NonTerminal(repeat_nt_name.clone());
 
-                let expr_symbols = Self::convert_grammar_expr_to_symbols(
+                let (expr_symbols, productions_from_expr_box) = Self::convert_grammar_expr_to_symbols(
                     expr_box,
                     &repeat_nt_name, // Children named relative to this new NT
-                    productions,
+                    // productions, // No longer passed
                     terminal_name_to_group_id,
                     terminal_expr_to_group_id,
                     next_terminal_group_id,
@@ -335,21 +347,26 @@ impl GrammarDefinition {
                     all_names,
                 );
 
+                let mut current_level_productions = Vec::new();
                 if !expr_symbols.is_empty() {
-                    productions.push(Production {
+                    current_level_productions.push(Production {
                         lhs: nt.clone(),
                         rhs: {
-                            let mut r = expr_symbols;
+                            let mut r = expr_symbols; // These are symbols from expr_box
                             r.push(Symbol::NonTerminal(nt.clone()));
                             r
                         },
                     });
                 }
-                productions.push(Production {
+                current_level_productions.push(Production {
                     lhs: nt.clone(),
                     rhs: vec![], // Epsilon production for zero-or-more
                 });
-                vec![Symbol::NonTerminal(nt)]
+
+                let mut all_new_productions = current_level_productions;
+                all_new_productions.extend(productions_from_expr_box);
+
+                (vec![Symbol::NonTerminal(nt)], all_new_productions) // Return the new NT and all generated productions
             }
         }
     }
@@ -388,30 +405,32 @@ impl GrammarDefinition {
 
             if let GrammarExpr::Choice(choices) = expr {
                 for choice_expr in choices {
-                    let rhs = Self::convert_grammar_expr_to_symbols(
+                    let (rhs_symbols_for_arm, new_productions_for_arm) = Self::convert_grammar_expr_to_symbols(
                         choice_expr,
                         lhs_name_str,
-                        &mut productions,
+                        // &mut productions, // Removed
                         &mut terminal_name_to_group_id,
                         &mut terminal_expr_to_group_id,
                         &mut next_terminal_group_id,
                         &mut per_base_counters,
                         &mut all_names,
                     );
-                    productions.push(Production { lhs: lhs.clone(), rhs });
+                    productions.push(Production { lhs: lhs.clone(), rhs: rhs_symbols_for_arm });
+                    productions.extend(new_productions_for_arm); // Extend with productions from the arm's processing
                 }
             } else {
-                let rhs = Self::convert_grammar_expr_to_symbols(
+                let (rhs_symbols, new_productions_for_rhs) = Self::convert_grammar_expr_to_symbols(
                     expr,
                     lhs_name_str,
-                    &mut productions,
+                    // &mut productions, // Removed
                     &mut terminal_name_to_group_id,
                     &mut terminal_expr_to_group_id,
                     &mut next_terminal_group_id,
                     &mut per_base_counters,
                     &mut all_names,
                 );
-                productions.push(Production { lhs, rhs });
+                productions.push(Production { lhs, rhs: rhs_symbols });
+                productions.extend(new_productions_for_rhs); // Extend with productions from processing the rhs
             }
         }
 
@@ -428,7 +447,7 @@ impl GrammarDefinition {
         if self.terminal_expr_to_group_id.is_empty() {
             return Vec::new();
         }
-        
+
         let max_group_id = *self.terminal_expr_to_group_id.iter().map(|(_, id)| id).max().unwrap_or(&0);
         let mut expr_groups_vec: Vec<ExprGroup> = vec![greedy_group(Expr::Epsilon); max_group_id + 1];
 
@@ -469,7 +488,7 @@ impl JSONConvertible for CompiledGrammar {
                 let definition_node = obj.remove("definition")
                     .ok_or_else(|| "Missing field definition for CompiledGrammar".to_string())?;
                 let definition = Arc::new(GrammarDefinition::from_json(definition_node)?);
-                
+
                 let tokenizer_node = obj.remove("tokenizer")
                     .ok_or_else(|| "Missing field tokenizer for CompiledGrammar".to_string())?;
                 let tokenizer = Regex::from_json(tokenizer_node)?;
@@ -477,7 +496,7 @@ impl JSONConvertible for CompiledGrammar {
                 let glr_parser_node = obj.remove("glr_parser")
                     .ok_or_else(|| "Missing field glr_parser for CompiledGrammar".to_string())?;
                 let glr_parser = GLRParser::from_json(glr_parser_node)?;
-                
+
                 Ok(CompiledGrammar {
                     definition,
                     tokenizer,
@@ -696,7 +715,7 @@ mod tests {
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let eof_llm_token_id = llm_tokens.len();
         let max_llm_token_id = llm_tokens.len(); // For HybridBitset capacity
-        
+
         let grammar_constraint = GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
         let mut grammar_constraint_state = grammar_constraint.init();
         grammar_constraint_state.step_with_all_llm_tokens();
