@@ -152,9 +152,156 @@ mod tests {
 
         println!("Final mask check passed.");
     }
-
+    
     #[test]
     fn test_sentence_grammar_from_prompt() {
+        // Helper to create GrammarExpr::Literal from string
+        let lit = |s: &str| crate::interface::literal(s.as_bytes().to_vec());
+
+        // Define GrammarExprs for non-terminals
+        let expr_A = choice(vec![
+            lit("a"),
+            lit("the"),
+            lit("apple"),
+            lit("banana"),
+            lit("person"),
+        ]);
+
+        let expr_IGNORE = lit(" ");
+
+        let expr_B = choice(vec![
+            lit("eats"),
+            lit("likes"),
+            lit("is"),
+            lit("tasty"),
+            lit("red"),
+            lit("happy"),
+            lit("."),
+            lit("and"),
+        ]);
+
+        let expr_start = sequence(vec![
+            crate::interface::r#ref("A"),
+            crate::interface::r#ref("IGNORE"),
+            crate::interface::r#ref("B"),
+        ]);
+
+        // Grammar definition for CompiledGrammar
+        let grammar_exprs = vec![
+            ("start".to_string(), expr_start),
+            ("A".to_string(), expr_A),
+            ("IGNORE".to_string(), expr_IGNORE),
+            ("B".to_string(), expr_B),
+        ];
+
+        println!("Building grammar for sentence test...");
+        let compiled_grammar = CompiledGrammar::from_exprs(grammar_exprs).expect("Failed to compile sentence grammar");
+        // println!("{}", compiled_grammar); // For debugging grammar structure
+
+        // Setup LLMTokenMap
+        let mut llm_token_map = bimap::BiBTreeMap::new();
+        let mut next_llm_id_val = 0;
+
+        // Helper closure to add tokens to the map and return their ID
+        let mut add_token = |s: &str| {
+            let token_bytes = s.as_bytes().to_vec();
+            // Ensure no duplicate token strings mapping to different IDs for this test
+            if let Some(existing_id) = llm_token_map.get_by_left(&token_bytes) {
+                return *existing_id;
+            }
+            let id = LLMTokenID(next_llm_id_val);
+            llm_token_map.insert(token_bytes, id);
+            next_llm_id_val += 1;
+            id
+        };
+
+        // Tokens for rule A
+        let tok_a = add_token("a");
+        let tok_the = add_token("the");
+        let tok_apple = add_token("apple");
+        let tok_banana = add_token("banana");
+        let tok_person = add_token("person");
+
+        // Token for rule IGNORE
+        let tok_space = add_token(" ");
+
+        // Tokens for rule B
+        let tok_eats = add_token("eats");
+        let tok_likes = add_token("likes");
+        let tok_is = add_token("is");
+        let tok_tasty = add_token("tasty");
+        let tok_red = add_token("red");
+        let tok_happy = add_token("happy");
+        let tok_dot = add_token(".");
+        let tok_and = add_token("and");
+
+        let tok_e = add_token("e");
+        let tok_eth = add_token("eth");
+
+        // Determine max_original_llm_token_id for GrammarConstraint
+        // If next_llm_id_val is N, actual IDs are 0 to N-1.
+        let max_original_llm_token_id = if next_llm_id_val == 0 { 0 } else { next_llm_id_val - 1 };
+
+        // Define a conceptual EOF token ID (not in llm_token_map for precomputation)
+        let eof_llm_token_id = LLMTokenID(next_llm_id_val);
+
+
+        // Helper to create expected HybridBitset mask
+        let ids_to_mask = |ids: &[LLMTokenID]| -> HybridBitset {
+            let mut bs = HybridBitset::new();
+            for id in ids {
+                bs.insert(id.0);
+            }
+            bs
+        };
+
+        println!("Creating constraint for sentence test...");
+        let grammar_constraint = GrammarConstraint::from_compiled_grammar(
+            compiled_grammar,
+            llm_token_map.clone(),
+            eof_llm_token_id.0, // Pass the usize value for the old eof_llm_token_id param
+            max_original_llm_token_id,
+        );
+
+        println!("Initializing state for sentence test...");
+        let mut state = grammar_constraint.init();
+        state.step_with_all_llm_tokens();
+
+        // 1. Initial mask: Expect tokens for rule A
+        let mut expected_A_tokens = vec![tok_a, tok_the, tok_apple, tok_banana, tok_person];
+        let mut current_mask = state.get_mask();
+        assert_eq!(current_mask, ids_to_mask(&expected_A_tokens), "Initial mask should allow tokens for A");
+
+        // 2. Commit "apple" (tok_apple)
+        state.commit(tok_apple);
+        state.step_with_all_llm_tokens();
+        current_mask = state.get_mask();
+        let expected_IGNORE_tokens = vec![tok_space];
+        assert_eq!(current_mask, ids_to_mask(&expected_IGNORE_tokens), "Mask after 'apple' should allow token for IGNORE (' ')");
+
+        // 3. Commit " " (tok_space)
+        state.commit(tok_space);
+        state.step_with_all_llm_tokens();
+        current_mask = state.get_mask();
+        let mut expected_B_tokens = vec![tok_eats, tok_likes, tok_is, tok_tasty, tok_red, tok_happy, tok_dot, tok_and];
+        assert_eq!(current_mask, ids_to_mask(&expected_B_tokens), "Mask after 'apple ' should allow tokens for B");
+
+        // 4. Commit "eats" (tok_eats)
+        state.commit(tok_eats);
+        state.step_with_all_llm_tokens();
+        current_mask = state.get_mask();
+        // After "apple eats", the rule "start -> A IGNORE B" is complete.
+        // The augmented rule "start' -> start" is also complete.
+        // So, we expect EOF to be allowed.
+        let mut expected_eof_mask = HybridBitset::new();
+        expected_eof_mask.insert(eof_llm_token_id.0);
+        assert_eq!(current_mask, expected_eof_mask, "Mask after 'apple eats' should allow EOF");
+
+        println!("Sentence grammar test completed successfully.");
+    }
+    
+    #[test]
+    fn test_sentence_grammar_from_prompt_simplified() {
         // Helper to create GrammarExpr::Literal from string
         let lit = |s: &str| crate::interface::literal(s.as_bytes().to_vec());
 
