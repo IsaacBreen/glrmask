@@ -385,7 +385,7 @@ impl GrammarConstraint {
         helper.run_dfs();
 
         // 3. Merge nodes.
-        // helper.merge_nodes();
+        helper.merge_nodes();
 
         // 4.  Collect statistics & finish progress-bar.
         helper.finish(token_name_map)
