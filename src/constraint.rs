@@ -763,6 +763,8 @@ impl<'r> Precomputer<'r> {
 
                     if !edge_tokens.is_empty() {
                         for src in &merged_src_set {
+                            let merged_src_nodes_ptr_strs = merged_src_set.iter().map(|node| format!("{:p}", Arc::as_ptr(node))).collect::<Vec<_>>().join(", ");
+                            crate::debug!(4, "Adding edge from {:p} to {:?} with edge tokens {:?}. Nodes are: {}", Arc::as_ptr(src), grammar_tok, edge_tokens, merged_src_nodes_ptr_strs);
                             self.insert_edge(
                                 src.as_arc().clone(),
                                 grammar_tok,
@@ -853,13 +855,13 @@ impl<'r> Precomputer<'r> {
 
         if match_end_offset_in_segment < segment_len {
             if let Some(map_at_offset) = queue.get(&match_end_offset_in_segment) {
-                for set_of_nodes_at_offset_and_any_state in map_at_offset.values() {
-                    gather_set(set_of_nodes_at_offset_and_any_state, &mut pot);
+                if let Some(set_of_nodes_at_offset_for_new_state) = map_at_offset.get(&TokenizerStateID(0)) {
+                    gather_set(set_of_nodes_at_offset_for_new_state, &mut pot);
                 }
             }
         } else {
-             for set_of_nodes_at_next_level_any_state in next_level.values() {
-                gather_set(set_of_nodes_at_next_level_any_state, &mut pot);
+            if let Some(set_of_nodes_at_next_level_for_new_state) = next_level.get(&TokenizerStateID(0)) {
+                gather_set(set_of_nodes_at_next_level_for_new_state, &mut pot);
             }
         }
 
