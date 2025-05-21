@@ -253,16 +253,23 @@ pub fn remove_productions_with_undefined_nonterminals(initial_productions: &[Pro
         for prod in &current_productions {
             defined_lhs_nonterminals.insert(prod.lhs.clone());
         }
-        let previous_productions_len = current_productions.len();
-        current_productions.retain(|prod| {
-            prod.rhs.iter().all(|symbol| match symbol {
+        let mut removed_productions = Vec::new();
+        let mut kept_productions = Vec::new();
+        for prod in current_productions {
+            let keep = prod.rhs.iter().all(|symbol| match symbol {
                 Symbol::Terminal(_) => true, // Terminals are always defined
                 Symbol::NonTerminal(nt) => defined_lhs_nonterminals.contains(nt),
-            })
-        });
-        if current_productions.len() == previous_productions_len {
+            });
+            if keep {
+                kept_productions.push(prod.clone());
+            } else {
+                removed_productions.push(prod.clone());
+            }
+        }
+        if removed_productions.is_empty() {
             break;
         }
+        crate::debug!(2, "Removing {} productions with undefined non-terminals", removed_productions.len());
     }
 
     current_productions
