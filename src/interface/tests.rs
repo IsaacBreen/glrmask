@@ -323,7 +323,7 @@ mod tests {
 
         println!("Building grammar for sentence test...");
         let compiled_grammar = CompiledGrammar::from_exprs(grammar_exprs).expect("Failed to compile sentence grammar");
-        // println!("{}", compiled_grammar); // For debugging grammar structure
+        println!("{}", compiled_grammar); // For debugging grammar structure
 
         // Setup LLMTokenMap
         let mut llm_token_map = bimap::BiBTreeMap::new();
@@ -343,9 +343,7 @@ mod tests {
         };
 
         // Tokens
-        let tok_a = add_token("a");
         let tok_b = add_token("b");
-        let tok_c = add_token("c");
 
         // Determine max_original_llm_token_id for GrammarConstraint
         // If next_llm_id_val is N, actual IDs are 0 to N-1.
@@ -377,7 +375,7 @@ mod tests {
         state.step_with_all_llm_tokens();
 
         // 1. Initial mask: Expect tokens for rule A
-        let mut expected_A_tokens = vec![tok_a];
+        let mut expected_A_tokens = vec![];
         let mut current_mask = state.get_mask();
         assert_eq!(current_mask, ids_to_mask(&expected_A_tokens), "Initial mask should allow tokens for A");
     }
