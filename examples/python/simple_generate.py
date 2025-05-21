@@ -52,7 +52,7 @@ def define_fruit_grammar_rules() -> List[Tuple[str, Any]]:
     # The first rule in the list is taken as the start rule by CompiledGrammar
     rules: List[Tuple[str, Any]] = [("start_rule", ge.ref("sentences"))]
 
-    rules.append(("sentences", ge.sequence([ge.ref("sentence"), ge.repeat(ge.literal(b"\n")), ge.ref("sentence")])))
+    rules.append(("sentences", ge.sequence([ge.ref("sentence"), ge.repeat(ge.sequence([ge.literal(b"\n"), ge.ref("sentence")]))])))
 #     rules.append(("sentences", ge.sequence([ge.literal(b"the"), ge.ref("IGNORE"), ge.literal(b"apple"), ge.ref("IGNORE"), ge.literal(b"is"), ge.ref("IGNORE"), ge.literal(b"a"), ge.ref("IGNORE"), ge.literal(b"person")])))
 #     rules.append(("sentences", ge.literal(b"the apple is a person")))
 #     return [("start", ge.literal(b"the apple is a person"))]
@@ -65,7 +65,7 @@ def define_fruit_grammar_rules() -> List[Tuple[str, Any]]:
     # Lexical rules (tokens of our grammar)
     rules.append(make_lexical_rule("Det", [b"a", b"th"]))
     rules.append(make_lexical_rule("Noun", [b"apple", b"banana", b"person"]))
-    rules.append(make_lexical_rule("Verb", [b"eats", b"likes", b"is"]))
+    rules.append(make_lexical_rule("Verb", [b"ats", b"likes", b"is"]))
     rules.append(make_lexical_rule("Adj", [b"tasty", b"red", b"happy"]))
     rules.append(make_lexical_rule("Period", [b"."]))
     rules.append(make_lexical_rule("And", [b"and"]))
