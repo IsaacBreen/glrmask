@@ -55,12 +55,18 @@ def define_fruit_grammar_rules() -> List[Tuple[str, Any]]:
     rules.append(("sentences", ge.sequence([ge.ref("sentence"), ge.repeat(ge.sequence([ge.literal(b"\n"), ge.ref("sentence")]))])))
 #     rules.append(("sentences", ge.sequence([ge.literal(b"the"), ge.ref("IGNORE"), ge.literal(b"apple"), ge.ref("IGNORE"), ge.literal(b"is"), ge.ref("IGNORE"), ge.literal(b"a"), ge.ref("IGNORE"), ge.literal(b"person")])))
 #     rules.append(("sentences", ge.literal(b"the apple is a person")))
-#     return [("start", ge.literal(b"the apple is a person"))]
+
 
     # IGNORE rule: optional spaces. This rule itself is not wrapped by IGNORE.
     # It allows zero or more spaces.
 #     rules.append(("IGNORE", ge.regex(Regex.rep(Regex.eat_u8(ord(' '))))))
     rules.append(("IGNORE", ge.literal(b" ")))
+
+    rules = [("start", sep([ge.ref("A"), ge.ref("B")]))]
+    rules.append(("IGNORE", ge.literal(b" ")))
+    rules.append(make_lexical_rule("A", [b"a", b"the", b"apple", b"banana", b"person"]))
+    rules.append(make_lexical_rule("B", [b"eats", b"likes", b"is", b"tasty", b"red", b"happy", b".", b"and", b"."]))
+    return rules
 
     # Lexical rules (tokens of our grammar)
     rules.append(make_lexical_rule("Det", [b"a", b"the"]))
