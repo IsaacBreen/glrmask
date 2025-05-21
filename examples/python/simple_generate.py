@@ -291,9 +291,6 @@ if __name__ == "__main__":
     assert parser_state.is_valid()
     print("--- End Incremental Parser Demo ---")
 
-    # Test the tokenizer
-    tokenizer.decode(test_text_tokens)
-
     print("\nInitializing GrammarConstraint...")
     # max_token_id_val must be the highest token ID used by the tokenizer.
     grammar_constraint = GrammarConstraint(compiled_grammar, llm_token_to_id, max_token_id_val)
