@@ -299,14 +299,6 @@ if __name__ == "__main__":
     # Print the initial mask
     mask = current_grammar_state.get_mask()
 
-    # Ensure mask has the same size as the vocab dimension in scores
-    vocab_size = scores.shape[-1]
-    if len(mask) < vocab_size:
-        padding = np.zeros(vocab_size - len(mask), dtype=bool)
-        mask = np.concatenate((mask, padding))
-    elif len(mask) > vocab_size:
-        mask = mask[:vocab_size]
-
     mask_ids = np.where(mask)[0]
 
     mask_tokens_str: List[str] = []
