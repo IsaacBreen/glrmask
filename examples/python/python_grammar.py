@@ -398,6 +398,8 @@ if __name__ == "__main__":
     # Exclude tokens that have any character other than ...
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if not any(c not in 'a1# ' for c in k)}
 
+    tokenizer_vocab = {"def": 0, " f": 1}
+
     if len(tokenizer_vocab) <= 1000:
         print("Tokenizer vocab:")
     else:
