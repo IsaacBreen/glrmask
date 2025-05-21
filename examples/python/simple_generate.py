@@ -257,6 +257,7 @@ if __name__ == "__main__":
         token_str.encode('utf-8'): token_id
         for token_str, token_id in processed_tokenizer_vocab.items()
     }
+    llm_token_id_to_token = {token_id: token_str for token_str, token_id in llm_token_to_id.items()}
 
     max_token_id_val = 0
     if llm_token_to_id: # Check if vocab is not empty
