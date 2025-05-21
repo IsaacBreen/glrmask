@@ -63,10 +63,10 @@ def define_fruit_grammar_rules() -> List[Tuple[str, Any]]:
     rules.append(("IGNORE", ge.literal(b" ")))
 
     # Lexical rules (tokens of our grammar)
-    rules.append(make_lexical_rule("Det", ["a", "the"]))
-    rules.append(make_lexical_rule("Noun", ["apple", "banana", "person"]))
-    rules.append(make_lexical_rule("Verb", ["eats", "likes", "is"]))
-    rules.append(make_lexical_rule("Adj", ["tasty", "red", "happy"]))
+    rules.append(make_lexical_rule("Det", ["a", "th"]))
+    rules.append(make_lexical_rule("Noun", ["appl", "banana", "prson"]))
+    rules.append(make_lexical_rule("Verb", ["ats", "liks", "is"]))
+    rules.append(make_lexical_rule("Adj", ["tasty", "rd", "happy"]))
     rules.append(make_lexical_rule("Period", ["."]))
     rules.append(make_lexical_rule("And", ["and"]))
 
