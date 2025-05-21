@@ -50,11 +50,12 @@ def define_fruit_grammar_rules() -> List[Tuple[str, Any]]:
 
 
     # The first rule in the list is taken as the start rule by CompiledGrammar
-    rules: List[Tuple[str, Any]] = [("start_rule", ge.ref("sentences"))]
+#     rules: List[Tuple[str, Any]] = [("start_rule", ge.ref("sentences"))]
 
 #     rules.append(("sentences", ge.sequence([ge.ref("sentence"), ge.repeat(ge.regex(Regex.eat_u8(ord('\n')))), ge.ref("sentence")])))
 #     rules.append(make_lexical_rule("sentences", ["the", "apple", "is", "a", "person"]))
-    rules.append(("sentences", ge.literal("the apple is a person")))
+#     rules.append(("sentences", ge.literal("the apple is a person".encode())))
+    return [("start", ge.literal("the apple is a person".encode()))]
 
     # IGNORE rule: optional spaces. This rule itself is not wrapped by IGNORE.
     # It allows zero or more spaces.
