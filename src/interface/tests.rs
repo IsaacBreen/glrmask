@@ -152,7 +152,7 @@ mod tests {
 
         println!("Final mask check passed.");
     }
-    
+
     #[test]
     fn test_sentence_grammar_from_prompt() {
         // Helper to create GrammarExpr::Literal from string
@@ -299,7 +299,7 @@ mod tests {
 
         println!("Sentence grammar test completed successfully.");
     }
-    
+
     #[test]
     fn test_sentence_grammar_from_prompt_simplified() {
         // Helper to create GrammarExpr::Literal from string
@@ -314,8 +314,6 @@ mod tests {
             lit("person"),
         ]);
 
-        let expr_IGNORE = lit(" ");
-
         let expr_B = choice(vec![
             lit("eats"),
             lit("likes"),
@@ -329,7 +327,6 @@ mod tests {
 
         let expr_start = sequence(vec![
             crate::interface::r#ref("A"),
-            crate::interface::r#ref("IGNORE"),
             crate::interface::r#ref("B"),
         ]);
 
@@ -337,7 +334,6 @@ mod tests {
         let grammar_exprs = vec![
             ("start".to_string(), expr_start),
             ("A".to_string(), expr_A),
-            ("IGNORE".to_string(), expr_IGNORE),
             ("B".to_string(), expr_B),
         ];
 
@@ -362,26 +358,7 @@ mod tests {
             id
         };
 
-        // Tokens for rule A
-        // let tok_a = add_token("a");
-        // let tok_the = add_token("the");
-        // let tok_apple = add_token("apple");
-        // let tok_banana = add_token("banana");
-        // let tok_person = add_token("person");
-
-        // // Token for rule IGNORE
-        // let tok_space = add_token(" ");
-
-        // // Tokens for rule B
-        // let tok_eats = add_token("eats");
-        // let tok_likes = add_token("likes");
-        // let tok_is = add_token("is");
-        // let tok_tasty = add_token("tasty");
-        // let tok_red = add_token("red");
-        // let tok_happy = add_token("happy");
-        // let tok_dot = add_token(".");
-        // let tok_and = add_token("and");
-
+        // Tokens
         let tok_e = add_token("e");
         let tok_eth = add_token("eth");
 
@@ -419,32 +396,5 @@ mod tests {
         let mut expected_A_tokens = vec![];
         let mut current_mask = state.get_mask();
         assert_eq!(current_mask, ids_to_mask(&expected_A_tokens), "Initial mask should allow tokens for A");
-
-        // // 2. Commit "apple" (tok_apple)
-        // state.commit(tok_apple);
-        // state.step_with_all_llm_tokens();
-        // current_mask = state.get_mask();
-        // let expected_IGNORE_tokens = vec![tok_space];
-        // assert_eq!(current_mask, ids_to_mask(&expected_IGNORE_tokens), "Mask after 'apple' should allow token for IGNORE (' ')");
-        //
-        // // 3. Commit " " (tok_space)
-        // state.commit(tok_space);
-        // state.step_with_all_llm_tokens();
-        // current_mask = state.get_mask();
-        // let mut expected_B_tokens = vec![tok_eats, tok_likes, tok_is, tok_tasty, tok_red, tok_happy, tok_dot, tok_and];
-        // assert_eq!(current_mask, ids_to_mask(&expected_B_tokens), "Mask after 'apple ' should allow tokens for B");
-        //
-        // // 4. Commit "eats" (tok_eats)
-        // state.commit(tok_eats);
-        // state.step_with_all_llm_tokens();
-        // current_mask = state.get_mask();
-        // // After "apple eats", the rule "start -> A IGNORE B" is complete.
-        // // The augmented rule "start' -> start" is also complete.
-        // // So, we expect EOF to be allowed.
-        // let mut expected_eof_mask = HybridBitset::new();
-        // expected_eof_mask.insert(eof_llm_token_id.0);
-        // assert_eq!(current_mask, expected_eof_mask, "Mask after 'apple eats' should allow EOF");
-        //
-        // println!("Sentence grammar test completed successfully.");
     }
 }
