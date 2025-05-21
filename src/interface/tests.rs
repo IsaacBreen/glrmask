@@ -196,7 +196,7 @@ mod tests {
 
         println!("Building grammar for sentence test...");
         let compiled_grammar = CompiledGrammar::from_exprs(grammar_exprs).expect("Failed to compile sentence grammar");
-        // println!("{}", compiled_grammar); // For debugging grammar structure
+        println!("{}", compiled_grammar); // For debugging grammar structure
 
         // Setup LLMTokenMap
         let mut llm_token_map = bimap::BiBTreeMap::new();
