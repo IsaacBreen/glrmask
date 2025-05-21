@@ -296,6 +296,43 @@ if __name__ == "__main__":
     current_grammar_state = GrammarConstraintState(active_grammar_constraint)
     grammar_logits_processor = GrammarConstrainedLogitsProcessor(current_grammar_state, llm_token_to_id)
 
+    # Print the initial mask
+    mask = grammar_constraint_state.get_mask()
+
+    # Ensure mask has the same size as the vocab dimension in scores
+    vocab_size = scores.shape[-1]
+    if len(mask) < vocab_size:
+        padding = np.zeros(vocab_size - len(mask), dtype=bool)
+        mask = np.concatenate((mask, padding))
+    elif len(mask) > vocab_size:
+        mask = mask[:vocab_size]
+
+    mask_ids = np.where(mask)[0]
+
+    mask_tokens_str: List[str] = []
+    for mid in mask_ids:
+        tok_bytes = llm_token_id_to_token.get(mid)
+        if tok_bytes:
+            try:
+                mask_tokens_str.append(tok_bytes.decode('utf-8', errors='replace'))
+            except Exception:
+                mask_tokens_str.append(str(tok_bytes) + " (undecodable)")
+        else: # Should not happen if id_to_llm_token covers all relevant IDs
+            mask_tokens_str.append(f"ID_{mid}_unknown_token")
+
+    print(f"Mask Info: Allowed IDs Count: {len(mask_ids)}")
+    print(f"Mask Info: Allowed IDs (sample): {textwrap.shorten(str(mask_ids.tolist()), width=120)}")
+    print(f"Mask Info: Allowed Tokens (sample): {textwrap.shorten(str(mask_tokens_str), width=200)}")
+
+    # Extract and print first characters of allowed tokens for a quick glance
+    first_chars = sorted(list(set(
+        t_str[0] for t_str in mask_tokens_str if t_str and not t_str.endswith("(undecodable)") and len(t_str) > 0
+    )))
+    print(f"Mask Info: Allowed First Chars: {textwrap.shorten(''.join(first_chars), width=100)!r}")
+    print("-" * 30) # Separator for readability
+
+
+
     # --- Perform Constrained Text Generation ---
     print("\n--- Starting Constrained Text Generation ---")
 
