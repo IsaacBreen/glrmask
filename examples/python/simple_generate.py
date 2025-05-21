@@ -297,7 +297,7 @@ if __name__ == "__main__":
     grammar_logits_processor = GrammarConstrainedLogitsProcessor(current_grammar_state, llm_token_to_id)
 
     # Print the initial mask
-    mask = grammar_constraint_state.get_mask()
+    mask = current_grammar_state.get_mask()
 
     # Ensure mask has the same size as the vocab dimension in scores
     vocab_size = scores.shape[-1]
