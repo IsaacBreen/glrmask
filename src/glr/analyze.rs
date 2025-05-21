@@ -247,30 +247,21 @@ pub fn validate(productions: &[Production]) -> Result<(), String> {
 /// especially if the grammar might contain references to non-terminals that have no rules.
 pub fn remove_productions_with_undefined_nonterminals(initial_productions: &[Production]) -> Vec<Production> {
     let mut current_productions = initial_productions.to_vec();
-    let mut changed = true;
 
-    while changed {
-        changed = false;
+    loop {
         let mut defined_lhs_nonterminals: BTreeSet<NonTerminal> = BTreeSet::new();
         for prod in &current_productions {
             defined_lhs_nonterminals.insert(prod.lhs.clone());
         }
-
-        let next_productions: Vec<Production> = current_productions.clone()
-            .into_iter()
-            .filter(|prod| {
-                prod.rhs.iter().all(|symbol| match symbol {
-                    Symbol::Terminal(_) => true, // Terminals are always defined
-                    Symbol::NonTerminal(nt) => defined_lhs_nonterminals.contains(nt),
-                })
+        let previous_productions_len = current_productions.len();
+        current_productions.retain(|prod| {
+            prod.rhs.iter().all(|symbol| match symbol {
+                Symbol::Terminal(_) => true, // Terminals are always defined
+                Symbol::NonTerminal(nt) => defined_lhs_nonterminals.contains(nt),
             })
-            .collect();
-
-        if next_productions.len() < current_productions.len() {
-            changed = true;
-            current_productions = next_productions;
-        } else {
-            current_productions = next_productions; // Keep the final list even if no change in last iteration
+        });
+        if current_productions.len() == previous_productions_len {
+            break;
         }
     }
 
