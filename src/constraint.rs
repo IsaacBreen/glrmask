@@ -1046,6 +1046,13 @@ impl<'a> GrammarConstraintState<'a> {
             });
             !glr_state.active_states.is_empty()
         });
+
+        crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
+        crate::debug!(4, "Committed llm_token_id {:?} to grammar constraint state", llm_token_id);
+        // Print each GSS
+        for (tokenizer_state_id, glr_state) in self.state.iter() {
+            glr_state.log_gss(format!("After committing llm_token_id {:?}, from tokenizer_state_id {:?}", llm_token_id, tokenizer_state_id).as_str(), GrammarTokenID(0));
+        }
     }
 
     pub fn step_with_llm_token_sequence(&mut self, llm_token_ids: &[LLMTokenID]) {
