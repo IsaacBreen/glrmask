@@ -270,7 +270,16 @@ pub fn remove_productions_with_undefined_nonterminals(initial_productions: &[Pro
         if removed_productions.is_empty() {
             break;
         }
-        crate::debug!(2, "Removing {} productions with undefined non-terminals:", removed_productions.len());
+        crate::debug!(2, "Removing {} productions with undefined non-terminals.", removed_productions.len());
+        crate::debug!(2, "Missing non-terminals:");
+        let all_rhs_nonterminals: BTreeSet<NonTerminal> = current_productions.iter().flat_map(|prod| prod.rhs.iter().filter_map(|symbol| match symbol {
+            Symbol::NonTerminal(nt) => Some(nt.clone()),
+            _ => None,
+        })).collect();
+        for nt in all_rhs_nonterminals.difference(&defined_lhs_nonterminals) {
+            crate::debug!(2, "  {}", nt.0);
+        }
+        crate::debug!(2, "Removed productions:");
         for prod in removed_productions {
             crate::debug!(2, "  {}", prod);
         }
