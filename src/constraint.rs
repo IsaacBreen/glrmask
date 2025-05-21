@@ -743,7 +743,8 @@ impl<'r> Precomputer<'r> {
                 let exec_result = self
                     .tokenizer
                     .execute_from_state(suffix, state_before);
-                crate::debug!(4, "Executed tokenizer from state {:?} on suffix {:?}. Results: {:?}", state_before.0, String::from_utf8_lossy(suffix), exec_result);
+                let src_nodes_ptr_strs = src_set.iter().map(|node| format!("{:p}", Arc::as_ptr(node))).collect::<Vec<_>>().join(", ");
+                crate::debug!(4, "Executed tokenizer from state {:?} on suffix {:?}. Results: {:?}. Nodes are: {}", state_before.0, String::from_utf8_lossy(suffix), exec_result, src_nodes_ptr_strs);
 
                 let possible_future_matches: BTreeMap<GrammarTokenID, LLMTokenBV> = exec_result.end_state.map_or_else(BTreeMap::new, |end_state_id| {
                     self.possible_matches(&self.vocab.root, TokenizerStateID(end_state_id))
