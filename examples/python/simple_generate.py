@@ -397,7 +397,7 @@ if __name__ == "__main__":
         grammar_logits_processor,
         pre_prompt_text=pre_prompt,
         constrained_prompt_text=constrained_prompt,
-        max_new_tokens=5  # Generate a short sequence
+        max_new_tokens=30  # Generate a short sequence
     )
 
     print("\n--- Generation Complete ---")
