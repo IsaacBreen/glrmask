@@ -35,9 +35,9 @@ def define_fruit_grammar_rules() -> List[Tuple[str, Any]]:
     """Defines the rules for a simple fruit-based natural language grammar."""
 
     # The first rule in the list is taken as the start rule by CompiledGrammar
-    start_rule_def = ("start_rule", ge.ref("sentence"))
+    rules: List[Tuple[str, Any]] = [("start_rule", ge.ref("sentences"))]
 
-    rules: List[Tuple[str, Any]] = [start_rule_def]
+    rules.append(("sentences", ge.sequence([ge.ref("sentence"), ge.repeat(ge.regex(Regex.eat_u8(ord('\n')))), ge.ref("sentence")])))
 
     # IGNORE rule: optional spaces. This rule itself is not wrapped by IGNORE.
     # It allows zero or more spaces.
