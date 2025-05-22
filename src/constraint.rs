@@ -725,7 +725,7 @@ impl<'r> Precomputer<'r> {
                 .or_default()
                 .entry(*sid)
                 .or_default()
-                .extend(set.iter().cloned());
+                .extend(set.clone());
         }
 
         while let Some((offset, map_at_offset)) = queue.pop_first() {
