@@ -231,7 +231,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
 
 #     exprs.append(("file", ge.sequence([ge.optional(ge.ref("IGNORE")), ge.literal("def".encode())])))
 
-    exprs = [("start", ge.sequence([ge.literal(b"def"), ge.literal(b" "), ge.literal(b"f")]))]
+    exprs = [("start", ge.sequence([ge.literal(b"def"), ge.regex(Regex.rep(Regex.eat_u8(ord(" ")))), ge.literal(b"f")]))]
 
     for rule in grammar.rules.values():
         memo[rule.name] = ge.ref(rule.name)
