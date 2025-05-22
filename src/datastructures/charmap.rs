@@ -10,10 +10,10 @@ const CHARMAP_SIZE: usize = 256;
 
 #[derive(Clone, Eq, PartialEq, PartialOrd, Ord)]
 pub struct TrieMap<T> {
-    data: Vec<Option<Box<T>>>,
+    data: [Option<Box<T>>; CHARMAP_SIZE],
     // TODO: what's the point of `children`? Is it for nondeterminism? If so, let's remove it.
-    children: Vec<Vec<usize>>, // This field is problematic for general JSON serialization if its meaning is tied to specific graph structures.
-                               // For now, we'll serialize it as is, but it might need context-specific handling.
+    children: [Vec<usize>; CHARMAP_SIZE], // This field is problematic for general JSON serialization if its meaning is tied to specific graph structures.
+                                   // For now, we'll serialize it as is, but it might need context-specific handling.
     u8set: U8Set,
 }
 
@@ -150,7 +150,7 @@ impl<T: JSONConvertible> JSONConvertible for TrieMap<T> {
 
         // Serialize children as is (array of arrays of numbers)
         // This might not be universally useful without context.
-        obj.insert("children_vectors".to_string(), self.children.to_json());
+        obj.insert("children_vectors".to_string(), JSONNode::Array(self.children.iter().map(|v| v.to_json()).collect()));
         obj.insert("u8set".to_string(), self.u8set.to_json());
         JSONNode::Object(obj)
     }
@@ -159,13 +159,13 @@ impl<T: JSONConvertible> JSONConvertible for TrieMap<T> {
         match node {
             JSONNode::Object(mut obj) => {
                 let data_node = obj.remove("data").ok_or_else(|| "Missing field data for TrieMap".to_string())?;
-                let mut data_vec: Vec<Option<Box<T>>> = std::iter::repeat_with(|| None).take(CHARMAP_SIZE).collect();
+                let mut data_arr: [Option<Box<T>>; CHARMAP_SIZE] = std::array::from_fn(|_| None);
                 match data_node {
                     JSONNode::Object(json_obj) => {
                         for (key_str, val_node) in json_obj {
                             let index = key_str.parse::<u8>().map_err(|e| format!("Invalid u8 key in TrieMap data: {}, err: {}", key_str, e))? as usize;
                             if index < CHARMAP_SIZE {
-                                data_vec[index] = Some(Box::new(T::from_json(val_node)?));
+                                data_arr[index] = Some(Box::new(T::from_json(val_node)?));
                             } else {
                                 return Err(format!("Index {} out of bounds for TrieMap data", index));
                             }
@@ -174,22 +174,17 @@ impl<T: JSONConvertible> JSONConvertible for TrieMap<T> {
                     _ => return Err("Expected JSONNode::Object for TrieMap data field".to_string()),
                 }
 
-                let children_vectors = obj.remove("children_vectors").ok_or_else(|| "Missing field children_vectors for TrieMap".to_string())
-                                          .and_then(Vec::<Vec<usize>>::from_json)?;
-                if children_vectors.len() != CHARMAP_SIZE && !children_vectors.is_empty() { // Allow empty if it was default
-                     // If it was default constructed, it might be empty. If serialized, it should be CHARMAP_SIZE.
-                     // This logic might need adjustment based on how default/empty TrieMaps are handled.
-                     // For now, if it's present and not empty, enforce size.
-                    // return Err(format!("TrieMap children_vectors field has incorrect length: {} (expected {})", children_vectors.len(), CHARMAP_SIZE));
-                }
-
+                let children_node = obj.remove("children_vectors").ok_or_else(|| "Missing field children_vectors for TrieMap".to_string())?;
+                let children_vec: Vec<Vec<usize>> = Vec::<Vec<usize>>::from_json(children_node)?;
+                let children_arr: [Vec<usize>; CHARMAP_SIZE] = children_vec.try_into()
+                    .map_err(|v_err: Vec<Vec<usize>>| format!("TrieMap children_vectors field has incorrect length: {} (expected {})", v_err.len(), CHARMAP_SIZE))?;
 
                 let u8set = obj.remove("u8set").ok_or_else(|| "Missing field u8set for TrieMap".to_string())
                                  .and_then(U8Set::from_json)?;
 
                 Ok(TrieMap {
-                    data: data_vec,
-                    children: children_vectors,
+                    data: data_arr,
+                    children: children_arr,
                     u8set,
                 })
             }
@@ -201,14 +196,9 @@ impl<T: JSONConvertible> JSONConvertible for TrieMap<T> {
 
 impl<T> TrieMap<T> {
     pub fn new() -> Self {
-        let mut data = Vec::with_capacity(CHARMAP_SIZE);
-        for _ in 0..CHARMAP_SIZE {
-            data.push(None);
-        }
-
         Self {
-            data,
-            children: vec![Vec::new(); CHARMAP_SIZE],
+            data: std::array::from_fn(|_| None),
+            children: std::array::from_fn(|_| Vec::new()),
             u8set: U8Set::none(),
         }
     }
