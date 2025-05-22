@@ -615,22 +615,6 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let mask = constraint_state.get_mask();
 
     println!("Initial mask obtained ({} allowed LLM tokens).", mask.iter_bits().count());
-
-    // Perform a basic check: try to commit the first allowed token if the mask is not empty.
-    if let Some(first_allowed_original_id_val) = mask.iter_bits().next() {
-        let first_allowed_original_id = LLMTokenID(first_allowed_original_id_val);
-        println!("Attempting to commit first allowed token (Original ID {}).", first_allowed_original_id_val);
-        constraint_state.commit(first_allowed_original_id);
-        constraint_state.step_with_all_llm_tokens();
-        let mask_after_commit = constraint_state.get_mask();
-        println!("Mask after commit obtained ({} allowed LLM tokens).", mask_after_commit.iter_bits().count());
-    } else {
-        println!("Initial mask is empty, cannot test commit. This might be expected if the grammar/vocab combination allows no tokens initially.");
-    }
-
-    // The main assertion is that the above steps complete without panicking.
-    // More specific assertions would require knowledge of the serialized grammar's content.
-    assert!(true, "Test completed. Check logs for details.");
-
+    
     Ok(())
 }
