@@ -413,23 +413,23 @@ mod tests {
         // - " " (tok_space_id): Consumes one space from <space>*. Remaining: <space>* "f"
         // - " f" (tok_f_space_id): Consumes the space from <space>* and "f" from literal("f").
         // The bug reported is that " f" is NOT in the mask.
-        let after_def_mask = state.get_mask();
+        let initial_mask = state.get_mask();
 
         // This assertion is expected to FAIL, revealing the bug.
         assert!(
-            after_def_mask.contains(tok_f_space_id.0),
+            initial_mask.contains(tok_f_space_id.0),
             "BUG REPLICATION: Initial mask should contain ' f' (ID {}), but it does not. Mask: {:?}",
             tok_f_space_id.0,
-            after_def_mask.iter_ones().collect::<Vec<_>>()
+            &initial_mask
         );
 
         // For completeness, also check for " " which should be present.
         // This assertion should ideally pass if the logic for single space tokens is correct.
         assert!(
-            after_def_mask.contains(tok_space_id.0),
+            initial_mask.contains(tok_space_id.0),
             "Initial mask should contain ' ' (ID {}). Mask: {:?}",
             tok_space_id.0,
-            after_def_mask.iter_ones().collect::<Vec<_>>()
+            &initial_mask
         );
     }
 }
