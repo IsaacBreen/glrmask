@@ -506,6 +506,10 @@ if __name__ == "__main__":
         yaml = YAML()
         yaml.indent(mapping=4, sequence=4, offset=2)
         yaml.dump(data, f)
+    # And nestedtext
+    with open("serialized_grammar_constraint.nt", "w") as f:
+        from nestedtext import dumps
+        f.write(dumps(data))
 
 
     # Deserialize from JSON string
