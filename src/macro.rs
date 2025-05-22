@@ -21,7 +21,7 @@ macro_rules! debug {
     ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {{
         // --- Configuration ---
         // Define the compile-time debug level (adjust as needed)
-        const MACRO_DEBUG_LEVEL: usize = 3;
+        const MACRO_DEBUG_LEVEL: usize = 5;
         // List of filenames (not full paths) to allow debug messages from.
         // If empty, all files are allowed (respecting MACRO_DEBUG_LEVEL).
         // Example: &["parser.rs", "constraint.rs"]
@@ -50,8 +50,9 @@ macro_rules! debug {
                     let now = Local::now(); // Timestamp removed for brevity, uncomment if needed
                     println!(
                         // Add file, line placeholders. Add timestamp placeholder if needed.
-                        concat!("[DEBUG {} {}] {}:{}: ", $fmt), // The complete format string
-                        now.format("%Y-%m-%d %H:%M:%S%.3f"), // Uncomment for timestamp
+                        // concat!("[DEBUG {} {}] {}:{}: ", $fmt), // The complete format string
+                        concat!("[DEBUG] {}] {}:{}: ", $fmt), // The complete format string
+                        // now.format("%Y-%m-%d %H:%M:%S%.3f"), // Uncomment for timestamp
                         $level,           // Argument for the first {} in the prefix
                         file!(),          // Argument for the second {} in the prefix
                         line!(),          // Argument for the third {} in the prefix
@@ -65,7 +66,7 @@ macro_rules! debug {
     ($level:expr, $msg:expr) => {{
         // --- Configuration ---
         // Define the compile-time debug level (adjust as needed)
-        const MACRO_DEBUG_LEVEL: usize = 3;
+        const MACRO_DEBUG_LEVEL: usize = 5;
         // List of filenames (not full paths) to allow debug messages from.
         // If empty, all files are allowed (respecting MACRO_DEBUG_LEVEL).
         // Example: &["parser.rs", "constraint.rs"]
@@ -94,8 +95,8 @@ macro_rules! debug {
                     let now = Local::now(); // Timestamp removed for brevity, uncomment if needed
                     println!(
                         // Add file, line placeholders. Add timestamp placeholder if needed.
-                        "[DEBUG {} {}] {}:{}: {:?}", // Format string for the expression variant
-                        now.format("%Y-%m-%d %H:%M:%S%.3f"), // Uncomment for timestamp
+                        "[DEBUG {}] {}:{}: {:?}", // Format string for the expression variant
+                        // now.format("%Y-%m-%d %H:%M:%S%.3f"), // Uncomment for timestamp
                         $level,           // Argument for the first {} in the prefix
                         file!(),          // Argument for the second {} in the prefix
                         line!(),          // Argument for the third {} in the prefix
