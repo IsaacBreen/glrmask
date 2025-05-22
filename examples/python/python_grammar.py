@@ -232,7 +232,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
 
 #     exprs.append(("file", ge.sequence([ge.optional(ge.ref("IGNORE")), ge.literal("def".encode())])))
 
-    exprs = [("start", ge.sequence([ge.literal(b"def"), ge.regex(Regex.rep(Regex.eat_u8(ord(" ")))), ge.literal(b"f")]))]
+    exprs = [("start", ge.sequence([ge.regex(Regex.rep(Regex.eat_u8(ord(" ")))), ge.literal(b"f")]))]
 
     for rule in grammar.rules.values():
         memo[rule.name] = ge.ref(rule.name)
@@ -407,7 +407,7 @@ if __name__ == "__main__":
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(k) == 1 or k in ["def", " f"]}
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if k in ["def", " f"] or k in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"}
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(k) <= 2 and all(c in " a" for c in k) or k in ["def", " f"]}
-    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if k in ["def", " f", " "]}
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if k in [" f", " "]}
 
     if len(tokenizer_vocab) <= 1000:
         print("Tokenizer vocab:")
@@ -469,7 +469,7 @@ if __name__ == "__main__":
 #     expected_next_token = "world"
 
     pre_input_text = ""
-    input_text = 'def f'
+    input_text = ' f'
 #     input_text = 'def'
 #     input_text = 'NAME'
     expected_next_token = ""
