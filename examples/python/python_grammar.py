@@ -402,7 +402,8 @@ if __name__ == "__main__":
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(k) <= 3}
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(k) == 1 or k in ["def", " f"]}
 #     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if k in ["def", " f"] or k in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"}
-    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(k) == 1 and k.isalpha() or k in ["def", " f"]}
+#     tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if len(k) <= 2 and all(c in " a" for c in k) or k in ["def", " f"]}
+    tokenizer_vocab = {k: v for k, v in tokenizer_vocab.items() if k in ["def", " f", " a"]}
 
     if len(tokenizer_vocab) <= 1000:
         print("Tokenizer vocab:")
