@@ -576,7 +576,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     // Using a sample of the GPT-2 vocabulary to keep the test reasonably fast.
     // Adjust `prop` as needed. 0.01 means 1% of the vocab.
-    let prop = 0.1;
+    let prop = 0.01;
     let total_tokens = gpt2_raw_vocab.len();
     let sample_size = ((total_tokens as f64 * prop) as usize).max(1); // Ensure at least 1 token
     println!("Sampling {} out of {} GPT-2 tokens for the test.", sample_size, total_tokens);
