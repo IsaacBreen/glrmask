@@ -274,6 +274,29 @@ impl<T: JSONConvertible> JSONConvertible for Vec<T> {
     }
 }
 
+// Generic array
+impl<T: JSONConvertible, const N: usize> JSONConvertible for [T; N] {
+    fn to_json(&self) -> JSONNode {
+        JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Array(arr) => {
+                let mut arr = arr;
+                if arr.len() != N {
+                    return Err(format!("Expected array of length {} but got array of length {}", N, arr.len()));
+                }
+                let mut out = [T::default(); N];
+                for (i, item) in arr.into_iter().enumerate() {
+                    out[i] = T::from_json(item)?;
+                }
+                Ok(out)
+            }
+            _ => Err("Expected JSONNode::Array for [T; N]".to_string()),
+        }
+    }
+}
+
 
 impl<T: JSONConvertible + Ord> JSONConvertible for BTreeSet<T> {
     fn to_json(&self) -> JSONNode {
