@@ -418,7 +418,7 @@ mod tests {
         // This assertion is expected to FAIL, revealing the bug.
         assert!(
             after_def_mask.contains(tok_f_space_id.0),
-            "BUG REPLICATION: Mask after 'def' should contain ' f' (ID {}), but it does not. Mask: {:?}",
+            "BUG REPLICATION: Initial mask should contain ' f' (ID {}), but it does not. Mask: {:?}",
             tok_f_space_id.0,
             after_def_mask.iter_ones().collect::<Vec<_>>()
         );
@@ -427,7 +427,7 @@ mod tests {
         // This assertion should ideally pass if the logic for single space tokens is correct.
         assert!(
             after_def_mask.contains(tok_space_id.0),
-            "Mask after 'def' should contain ' ' (ID {}). Mask: {:?}",
+            "Initial mask should contain ' ' (ID {}). Mask: {:?}",
             tok_space_id.0,
             after_def_mask.iter_ones().collect::<Vec<_>>()
         );
