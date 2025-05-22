@@ -148,9 +148,9 @@ impl HybridBitset {
     /// Returns an iterator over booleans, indicating for each index from 0
     /// up to the largest index present in the set (inclusive) whether it's set or not.
     /// If the set is empty, the iterator is empty.
-    pub fn iter_bools(&self) -> BoolIter<'_> {
+    pub fn iter_ones(&self) -> OnesIter<'_> {
         if self.is_empty() {
-            BoolIter {
+            OnesIter {
                 bitset: self,
                 current_idx: 1, // Start beyond max_idx_to_iterate to yield nothing
                 max_idx_to_iterate: 0,
@@ -158,7 +158,7 @@ impl HybridBitset {
         } else {
             // self.inner.last() is Option<usize>
             let max_val_in_set = self.inner.last().unwrap_or(0); // unwrap is safe due to is_empty check
-            BoolIter {
+            OnesIter {
                 bitset: self,
                 current_idx: 0,
                 max_idx_to_iterate: max_val_in_set,
@@ -221,13 +221,13 @@ impl IntoIterator for HybridBitset {
 }
 
 // --- Boolean Iterator ---
-pub struct BoolIter<'a> {
+pub struct OnesIter<'a> {
     bitset: &'a HybridBitset,
     current_idx: usize,
     max_idx_to_iterate: usize, // Inclusive
 }
 
-impl<'a> Iterator for BoolIter<'a> {
+impl<'a> Iterator for OnesIter<'a> {
     type Item = bool;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -250,7 +250,7 @@ impl<'a> Iterator for BoolIter<'a> {
     }
 }
 
-impl<'a> std::iter::ExactSizeIterator for BoolIter<'a> {}
+impl<'a> std::iter::ExactSizeIterator for OnesIter<'a> {}
 
 // Implement FromIterator for HybridBitset
 impl FromIterator<usize> for HybridBitset {
@@ -718,28 +718,28 @@ mod tests {
     }
 
     #[test]
-    fn test_iter_bools() {
+    fn test_iter_ones() {
         let empty_set = HybridBitset::new();
-        assert_eq!(empty_set.iter_bools().collect::<Vec<bool>>(), Vec::<bool>::new());
-        assert_eq!(empty_set.iter_bools().len(), 0);
+        assert_eq!(empty_set.iter_ones().collect::<Vec<bool>>(), Vec::<bool>::new());
+        assert_eq!(empty_set.iter_ones().len(), 0);
 
         let sparse_set = HybridBitset::from_iter(vec![1, 3]);
         let expected_sparse_bools = vec![false, true, false, true];
-        assert_eq!(sparse_set.iter_bools().collect::<Vec<bool>>(), expected_sparse_bools);
-        assert_eq!(sparse_set.iter_bools().len(), expected_sparse_bools.len());
+        assert_eq!(sparse_set.iter_ones().collect::<Vec<bool>>(), expected_sparse_bools);
+        assert_eq!(sparse_set.iter_ones().len(), expected_sparse_bools.len());
 
         // Test with a set that would have been dense
         let dense_like_set = HybridBitset::from_iter(vec![1,3]); // Max index 3
-        // RangeSetBlaze doesn't have an explicit dense conversion, iter_bools uses .last()
-        assert_eq!(dense_like_set.iter_bools().collect::<Vec<bool>>(), expected_sparse_bools);
-        assert_eq!(dense_like_set.iter_bools().len(), expected_sparse_bools.len());
+        // RangeSetBlaze doesn't have an explicit dense conversion, iter_ones uses .last()
+        assert_eq!(dense_like_set.iter_ones().collect::<Vec<bool>>(), expected_sparse_bools);
+        assert_eq!(dense_like_set.iter_ones().len(), expected_sparse_bools.len());
 
         let empty_set_from_non_empty = HybridBitset::from_iter(vec![5]);
         let _ = empty_set_from_non_empty.inner.last(); // just to use it
         let mut empty_set_cleared = HybridBitset::from_iter(vec![5]);
         empty_set_cleared.clear();
-        assert_eq!(empty_set_cleared.iter_bools().collect::<Vec<bool>>(), Vec::<bool>::new());
-        assert_eq!(empty_set_cleared.iter_bools().len(), 0);
+        assert_eq!(empty_set_cleared.iter_ones().collect::<Vec<bool>>(), Vec::<bool>::new());
+        assert_eq!(empty_set_cleared.iter_ones().len(), 0);
     }
 
     #[test]
