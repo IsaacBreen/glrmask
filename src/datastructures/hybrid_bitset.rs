@@ -413,7 +413,7 @@ impl Into<BitVec<usize, Lsb0>> for HybridBitset {
 
 impl From<BitVec<usize, Lsb0>> for HybridBitset {
     fn from(bitvec: BitVec<usize, Lsb0>) -> Self {
-        HybridBitset { inner: RangeSetBlaze::from_iter(bitvec.iter_ones()) }
+        HybridBitset { inner: RangeSetBlaze::from_iter(bitvec.iter_bits()) }
     }
 }
 

@@ -576,7 +576,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     // Using a sample of the GPT-2 vocabulary to keep the test reasonably fast.
     // Adjust `prop` as needed. 0.01 means 1% of the vocab.
-    let prop = 0.1;
+    let prop = 1.0;
     let total_tokens = gpt2_raw_vocab.len();
     let sample_size = ((total_tokens as f64 * prop) as usize).max(1); // Ensure at least 1 token
     println!("Sampling {} out of {} GPT-2 tokens for the test.", sample_size, total_tokens);
@@ -614,16 +614,16 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     constraint_state.step_with_all_llm_tokens();
     let mask = constraint_state.get_mask();
 
-    println!("Initial mask obtained ({} allowed LLM tokens).", mask.iter_ones().count());
+    println!("Initial mask obtained ({} allowed LLM tokens).", mask.iter_bits().count());
 
     // Perform a basic check: try to commit the first allowed token if the mask is not empty.
-    if let Some(first_allowed_original_id_val) = mask.iter_ones().next() {
+    if let Some(first_allowed_original_id_val) = mask.iter_bits().next() {
         let first_allowed_original_id = LLMTokenID(first_allowed_original_id_val);
         println!("Attempting to commit first allowed token (Original ID {}).", first_allowed_original_id_val);
         constraint_state.commit(first_allowed_original_id);
         constraint_state.step_with_all_llm_tokens();
         let mask_after_commit = constraint_state.get_mask();
-        println!("Mask after commit obtained ({} allowed LLM tokens).", mask_after_commit.iter_ones().count());
+        println!("Mask after commit obtained ({} allowed LLM tokens).", mask_after_commit.iter_bits().count());
     } else {
         println!("Initial mask is empty, cannot test commit. This might be expected if the grammar/vocab combination allows no tokens initially.");
     }
