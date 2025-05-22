@@ -747,9 +747,8 @@ impl<'r> Precomputer<'r> {
                 crate::debug!(4, "Executed tokenizer from state {:?} on suffix {:?}. Results: {:?}. Nodes are: {}", state_before.0, String::from_utf8_lossy(suffix), exec_result, merged_src_nodes_ptr_strs);
 
                 let possible_future_matches: BTreeMap<GrammarTokenID, LLMTokenBV> = exec_result.end_state.map_or_else(BTreeMap::new, |end_state_id| {
-                    self.possible_matches(&self.vocab.root, TokenizerStateID(end_state_id))
+                    self.possible_matches(&child_vocab_of_segment, TokenizerStateID(end_state_id))
                 });
-                dbg!(&possible_future_matches);
 
                 // -------------------------------------------------------------
                 // Matches inside suffix
