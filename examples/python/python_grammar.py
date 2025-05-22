@@ -501,26 +501,26 @@ if __name__ == "__main__":
     print("Initializing grammar constraint...")
     grammar_constraint = GrammarConstraint(grammar, llm_token_to_id, max(llm_token_to_id.values()))
 
-    # Serialize grammar constraint to JSON string
-    print("Serializing grammar constraint to JSON...")
-    json_string = grammar_constraint.to_json_string()
-    print(f"Serialized GrammarConstraint JSON (length: {len(json_string)}):")
-    # Indent it.
-    json_string = json.dumps(json.loads(json_string), indent=4)
-    # Optionally print a snippet or save to file if too long
-    # print(textwrap.shorten(json_string, width=200, placeholder="..."))
-    with open("serialized_grammar_constraint.json", "w") as f:
-        f.write(json_string)
-
-    # Deserialize from JSON string
-    print("Deserializing grammar constraint from JSON...")
-    grammar_constraint_from_json = GrammarConstraint.from_json_string(json_string)
-    print("Grammar constraint deserialized successfully.")
-
-    # Use the deserialized constraint for subsequent operations
-    grammar_constraint_to_use = grammar_constraint_from_json
-    # To test with the original, uncomment the line below and comment out the line above
-    # grammar_constraint_to_use = grammar_constraint
+#     # Serialize grammar constraint to JSON string
+#     print("Serializing grammar constraint to JSON...")
+#     json_string = grammar_constraint.to_json_string()
+#     print(f"Serialized GrammarConstraint JSON (length: {len(json_string)}):")
+#     # Indent it.
+#     json_string = json.dumps(json.loads(json_string), indent=4)
+#     # Optionally print a snippet or save to file if too long
+#     # print(textwrap.shorten(json_string, width=200, placeholder="..."))
+#     with open("serialized_grammar_constraint.json", "w") as f:
+#         f.write(json_string)
+#
+#     # Deserialize from JSON string
+#     print("Deserializing grammar constraint from JSON...")
+#     grammar_constraint_from_json = GrammarConstraint.from_json_string(json_string)
+#     print("Grammar constraint deserialized successfully.")
+#
+#     # Use the deserialized constraint for subsequent operations
+#     grammar_constraint_to_use = grammar_constraint_from_json
+#     # To test with the original, uncomment the line below and comment out the line above
+    grammar_constraint_to_use = grammar_constraint
 
     print("Initializing grammar constraint state...")
     grammar_constraint_state = GrammarConstraintState(grammar_constraint_to_use)
