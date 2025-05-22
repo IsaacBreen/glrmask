@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn test_python_reported_bug_def_rep_space_f() {
-        // 1. Define Grammar: start -> "def" <space>* "f"
+        // 1. Define Grammar: start -> "<space>* "f"
         let start_expr = sequence(vec![
             regex(rep(eat_u8(b' '))), // Represents one or more spaces matched by the tokenizer
             literal(b"f".to_vec()),
