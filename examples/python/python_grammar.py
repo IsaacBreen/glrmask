@@ -501,10 +501,11 @@ if __name__ == "__main__":
     with open("serialized_grammar_constraint.json", "w") as f:
         f.write(json_string)
     # Save as YAML as well
-    import ruamel.yaml
-    yaml = ruamel.yaml.YAML()
-    yaml.indent(mapping=4, sequence=4, offset=2)
-    yaml.dump(data, f)
+    with open("serialized_grammar_constraint.yaml", "w") as f:
+        from ruamel.yaml import YAML
+        yaml = YAML()
+        yaml.indent(mapping=4, sequence=4, offset=2)
+        yaml.dump(data, f)
 
 
     # Deserialize from JSON string
