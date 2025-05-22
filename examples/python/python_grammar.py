@@ -529,7 +529,6 @@ if __name__ == "__main__":
         print(f"Ensuring token {id_to_llm_token[token_id].decode()!r} (id: {token_id}) is in mask")
         mask = grammar_constraint_state.get_mask()
         print("Got mask")
-        print(f"Mask: {mask}")
         mask_ids = np.where(mask)[0].tolist()
         mask_tokens = [id_to_llm_token[id].decode() for id in mask_ids]
         print(f"Mask Token IDs: {textwrap.shorten(str(mask_ids), width=100)}")
