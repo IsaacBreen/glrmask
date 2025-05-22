@@ -9,6 +9,7 @@ use json_convertible_derive::JSONConvertible;
 // Add these lines for serde_json
 use serde_json::Value as SerdeValue;
 use serde_json::Map as SerdeMap; // BTreeMap<String, SerdeValue> is SerdeMap
+use std::convert::TryInto;
 
 // --- JSONNode Enum ---
 #[derive(Debug, Clone, PartialEq)]
@@ -277,22 +278,29 @@ impl<T: JSONConvertible> JSONConvertible for Vec<T> {
 // Generic array
 impl<T: JSONConvertible, const N: usize> JSONConvertible for [T; N] {
     fn to_json(&self) -> JSONNode {
+        // Convert array elements to JSONNode and wrap in a JSON array
         JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
     }
+
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Array(arr) => {
-                let mut arr = arr;
-                if arr.len() != N {
-                    return Err(format!("Expected array of length {} but got array of length {}", N, arr.len()));
-                }
-                let mut out = [T::default(); N];
-                for (i, item) in arr.into_iter().enumerate() {
-                    out[i] = T::from_json(item)?;
-                }
-                Ok(out)
+                // First convert each JSONNode into T, collecting into a Vec<T>
+                let vec: Vec<T> = arr
+                    .into_iter()
+                    .map(T::from_json)
+                    .collect::<Result<_, _>>()?;
+                // Then try to convert Vec<T> into [T; N]; error if length mismatch
+                vec.try_into()
+                    .map_err(|v: Vec<T>| {
+                        format!(
+                            "Expected array of length {} for [T; N], got length {}",
+                            N,
+                            v.len()
+                        )
+                    })
             }
-            _ => Err("Expected JSONNode::Array for [T; N]".to_string()),
+            _ => Err(format!("Expected JSONNode::Array for [T; {}]", N)),
         }
     }
 }
