@@ -439,6 +439,18 @@ if __name__ == "__main__":
     print("Defining grammar...")
     grammar = define_python_grammar()
     grammar.print()
+
+    # Serialize the compiled grammar to JSON string
+    print("Serializing compiled grammar to JSON...")
+    json_string = grammar.to_json_string()
+    print(f"Serialized CompiledGrammar JSON (length: {len(json_string)}):")
+    # Indent it.
+    json_string = json.dumps(json.loads(json_string), indent=4)
+    # Optionally print a snippet or save to file if too long
+    # print(textwrap.shorten(json_string, width=200, placeholder="..."))
+    with open("serialized_compiled_grammar.json", "w") as f:
+        f.write(json_string)
+
 #     # TODO: delete this
 #     # Define a dummy grammar that only accepts "hello=world"
 #     exprs = [("S", ge.sequence([ge.regex(eat("hello")), ge.regex(eat("=")), ge.regex(eat("world")), ge.regex(eat("$"))]))]
@@ -489,7 +501,7 @@ if __name__ == "__main__":
     print("Initializing grammar constraint...")
     grammar_constraint = GrammarConstraint(grammar, llm_token_to_id, max(llm_token_to_id.values()))
 
-    # Serialize to JSON string
+    # Serialize grammar constraint to JSON string
     print("Serializing grammar constraint to JSON...")
     json_string = grammar_constraint.to_json_string()
     print(f"Serialized GrammarConstraint JSON (length: {len(json_string)}):")
