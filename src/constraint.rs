@@ -378,7 +378,7 @@ impl GrammarConstraint {
             tokenizer,
             internal_llm_token_map,    // Use new parameter name
             internal_max_llm_token, // Use new parameter name
-            999999999999, // merge threshold
+            20, // merge threshold
         );
 
         // 2.  Run the DFS over the vocabulary prefix tree.
@@ -743,8 +743,8 @@ impl<'r> Precomputer<'r> {
                 let exec_result = self
                     .tokenizer
                     .execute_from_state(suffix, state_before);
-                let merged_src_nodes_ptr_strs = merged_src_set.iter().map(|node| format!("{:p}", Arc::as_ptr(node))).collect::<Vec<_>>().join(", ");
-                crate::debug!(4, "Executed tokenizer from state {:?} on suffix {:?}. Results: {:?}. Nodes are: {}", state_before.0, String::from_utf8_lossy(suffix), exec_result, merged_src_nodes_ptr_strs);
+                // let merged_src_nodes_ptr_strs = merged_src_set.iter().map(|node| format!("{:p}", Arc::as_ptr(node))).collect::<Vec<_>>().join(", ");
+                // crate::debug!(4, "Executed tokenizer from state {:?} on suffix {:?}. Results: {:?}. Nodes are: {}", state_before.0, String::from_utf8_lossy(suffix), exec_result, merged_src_nodes_ptr_strs);
 
                 let possible_future_matches: BTreeMap<GrammarTokenID, LLMTokenBV> = exec_result.end_state.map_or_else(BTreeMap::new, |end_state_id| {
                     self.possible_matches(&child_vocab_of_segment, TokenizerStateID(end_state_id))
@@ -763,8 +763,8 @@ impl<'r> Precomputer<'r> {
 
                     if !edge_tokens.is_empty() {
                         for src in &merged_src_set {
-                            let merged_src_nodes_ptr_strs = merged_src_set.iter().map(|node| format!("{:p}", Arc::as_ptr(node))).collect::<Vec<_>>().join(", ");
-                            crate::debug!(4, "Adding edge from {:p} to {:?} with edge tokens {:?}. Nodes are: {}", Arc::as_ptr(src), grammar_tok, edge_tokens, merged_src_nodes_ptr_strs);
+                            // let merged_src_nodes_ptr_strs = merged_src_set.iter().map(|node| format!("{:p}", Arc::as_ptr(node))).collect::<Vec<_>>().join(", ");
+                            // crate::debug!(4, "Adding edge from {:p} to {:?} with edge tokens {:?}. Nodes are: {}", Arc::as_ptr(src), grammar_tok, edge_tokens, merged_src_nodes_ptr_strs);
                             self.insert_edge(
                                 src.as_arc().clone(),
                                 grammar_tok,
