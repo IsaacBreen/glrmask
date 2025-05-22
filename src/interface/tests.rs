@@ -381,6 +381,7 @@ mod tests {
         let exprs = vec![("start".to_string(), start_expr)];
         let compiled_grammar = CompiledGrammar::from_exprs(exprs)
             .expect("Failed to compile grammar for bug replication test");
+        println!("Compiled Grammar: {}", compiled_grammar);
 
         // 2. Define LLM Token Map based on the Python example's problematic vocabulary
         let mut llm_token_map = BiBTreeMap::new();

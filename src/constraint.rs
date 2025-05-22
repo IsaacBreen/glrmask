@@ -749,6 +749,7 @@ impl<'r> Precomputer<'r> {
                 let possible_future_matches: BTreeMap<GrammarTokenID, LLMTokenBV> = exec_result.end_state.map_or_else(BTreeMap::new, |end_state_id| {
                     self.possible_matches(&self.vocab.root, TokenizerStateID(end_state_id))
                 });
+                dbg!(&possible_future_matches);
 
                 // -------------------------------------------------------------
                 // Matches inside suffix
