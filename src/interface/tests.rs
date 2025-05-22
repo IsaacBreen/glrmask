@@ -1,15 +1,11 @@
 #[cfg(test)]
 mod tests {
     use crate::constraint::{GrammarConstraint, GrammarConstraintState};
-    use crate::finite_automata::eat_u8;
-    use crate::interface::tokenizer_combinators::{
-        eat_u8_fast, eat_u8_range_fast, repeat1_fast,
-    };
+    use crate::finite_automata::{eat_u8, rep, Expr as RegexExpr};
+    use crate::interface::{choice, sequence, regex, literal, CompiledGrammar, IncrementalParser, GrammarExpr};
     use crate::tokenizer::LLMTokenID;
-    // Import new structs and renamed items
-    use crate::interface::{choice, sequence, regex, CompiledGrammar, IncrementalParser, GrammarExpr};
-    use crate::tokenizer::TokenizerStateID;
-    use crate::datastructures::hybrid_bitset::HybridBitset; // For test assertions
+    use crate::datastructures::hybrid_bitset::HybridBitset;
+    use bimap::BiBTreeMap; // Add this line
 
     #[test]
     fn test_incremental_parser_simple() {
@@ -55,9 +51,9 @@ mod tests {
 
     #[test]
     fn test_minimal_python_example_with_compiled_grammar() {
-        let digit_regex = eat_u8_range_fast(b'0', b'9');
-        let number_expr = regex(repeat1_fast(digit_regex)); // This is a GrammarExpr
-        let plus_expr = regex(eat_u8_fast(b'+'));   // This is a GrammarExpr
+        let digit_regex = crate::interface::tokenizer_combinators::eat_u8_range_fast(b'0', b'9');
+        let number_expr = regex(crate::interface::tokenizer_combinators::repeat1_fast(digit_regex)); // This is a GrammarExpr
+        let plus_expr = regex(crate::interface::tokenizer_combinators::eat_u8_fast(b'+'));   // This is a GrammarExpr
 
         let exprs = vec![(
             "S".to_string(),
@@ -140,10 +136,6 @@ mod tests {
         );
         // EOF is not explicitly checked here unless it's part of the grammar logic for completion.
         // The current grammar S -> NUM + NUM + NUM does not explicitly end.
-        // If the grammar was S -> NUM + NUM + NUM EOF_SYMBOL, then EOF would be expected.
-        // For now, we only check allowed continuations based on the grammar.
-        // If the sequence is complete according to the grammar, then EOF should be allowed by GrammarConstraint.
-        // The grammar S -> NUM + NUM + NUM is complete after the third NUM.
         // The input "123+456+" means we are expecting the third NUM.
         // So EOF should NOT be allowed yet.
         if final_mask.len() > eof_llm_token_id { // Check if eof_llm_token_id is a valid index
@@ -377,5 +369,85 @@ mod tests {
         let mut expected_A_tokens = vec![];
         let mut current_mask = state.get_mask();
         assert_eq!(current_mask, ids_to_mask(&expected_A_tokens), "Initial mask should allow tokens for A");
+    }
+
+    #[test]
+    fn test_python_reported_bug_def_rep_space_f() {
+        // 1. Define Grammar: start -> "def" <space>* "f"
+        let start_expr = sequence(vec![
+            literal(b"def".to_vec()),
+            regex(rep(eat_u8(b' '))), // Represents one or more spaces matched by the tokenizer
+            literal(b"f".to_vec()),
+        ]);
+        let exprs = vec![("start".to_string(), start_expr)];
+        let compiled_grammar = CompiledGrammar::from_exprs(exprs)
+            .expect("Failed to compile grammar for bug replication test");
+
+        // 2. Define LLM Token Map based on the Python example's problematic vocabulary
+        let mut llm_token_map = BiBTreeMap::new();
+        let tok_def_id = LLMTokenID(0);
+        let tok_space_id = LLMTokenID(1);    // Token for a single space " "
+        let tok_f_space_id = LLMTokenID(2); // Token for " f"
+
+        llm_token_map.insert(b"def".to_vec(), tok_def_id);
+        llm_token_map.insert(b" ".to_vec(), tok_space_id);
+        llm_token_map.insert(b" f".to_vec(), tok_f_space_id);
+
+        // max_original_llm_token_id is the highest ID value present in the map.
+        let max_original_llm_token_id = 2;
+        // _eof_llm_token_id parameter for from_compiled_grammar is a placeholder in current setup.
+        // Python binding passes 0.
+        let dummy_eof_placeholder = 0;
+
+        // 3. Create GrammarConstraint and State
+        let grammar_constraint = GrammarConstraint::from_compiled_grammar(
+            compiled_grammar,
+            llm_token_map.clone(),
+            dummy_eof_placeholder,
+            max_original_llm_token_id,
+        );
+        let mut state = grammar_constraint.init();
+        // In the Python example, step_with_all_llm_tokens() is called after init
+        // and after each commit. We replicate that behavior here.
+        state.step_with_all_llm_tokens();
+
+        // 4. Initial Mask Check (Sanity check)
+        // After init, we expect "def" to be the only allowed token.
+        let initial_mask = state.get_mask();
+        let mut expected_initial_mask = HybridBitset::new();
+        expected_initial_mask.insert(tok_def_id.0);
+        assert_eq!(
+            initial_mask, expected_initial_mask,
+            "Initial mask should only allow 'def' (ID {})", tok_def_id.0
+        );
+
+        // 5. Commit the "def" token
+        state.commit(tok_def_id);
+        state.step_with_all_llm_tokens(); // Replicate Python's behavior post-commit
+
+        // 6. Mask Check After "def" - This is where the bug is expected
+        // Grammar is now at: <space>* "f"
+        // Allowed LLM tokens should be:
+        // - " " (tok_space_id): Consumes one space from <space>*. Remaining: <space>* "f"
+        // - " f" (tok_f_space_id): Consumes the space from <space>* and "f" from literal("f").
+        // The bug reported is that " f" is NOT in the mask.
+        let after_def_mask = state.get_mask();
+
+        // This assertion is expected to FAIL, revealing the bug.
+        assert!(
+            after_def_mask.contains(tok_f_space_id.0),
+            "BUG REPLICATION: Mask after 'def' should contain ' f' (ID {}), but it does not. Mask: {:?}",
+            tok_f_space_id.0,
+            after_def_mask.iter_ones().collect::<Vec<_>>()
+        );
+
+        // For completeness, also check for " " which should be present.
+        // This assertion should ideally pass if the logic for single space tokens is correct.
+        assert!(
+            after_def_mask.contains(tok_space_id.0),
+            "Mask after 'def' should contain ' ' (ID {}). Mask: {:?}",
+            tok_space_id.0,
+            after_def_mask.iter_ones().collect::<Vec<_>>()
+        );
     }
 }
