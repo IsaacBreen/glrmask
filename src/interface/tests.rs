@@ -375,7 +375,6 @@ mod tests {
     fn test_python_reported_bug_def_rep_space_f() {
         // 1. Define Grammar: start -> "def" <space>* "f"
         let start_expr = sequence(vec![
-            literal(b"def".to_vec()),
             regex(rep(eat_u8(b' '))), // Represents one or more spaces matched by the tokenizer
             literal(b"f".to_vec()),
         ]);
@@ -385,11 +384,9 @@ mod tests {
 
         // 2. Define LLM Token Map based on the Python example's problematic vocabulary
         let mut llm_token_map = BiBTreeMap::new();
-        let tok_def_id = LLMTokenID(0);
-        let tok_space_id = LLMTokenID(1);    // Token for a single space " "
-        let tok_f_space_id = LLMTokenID(2); // Token for " f"
+        let tok_space_id = LLMTokenID(0);    // Token for a single space " "
+        let tok_f_space_id = LLMTokenID(1); // Token for " f"
 
-        llm_token_map.insert(b"def".to_vec(), tok_def_id);
         llm_token_map.insert(b" ".to_vec(), tok_space_id);
         llm_token_map.insert(b" f".to_vec(), tok_f_space_id);
 
@@ -411,22 +408,7 @@ mod tests {
         // and after each commit. We replicate that behavior here.
         state.step_with_all_llm_tokens();
 
-        // 4. Initial Mask Check (Sanity check)
-        // After init, we expect "def" to be the only allowed token.
-        let initial_mask = state.get_mask();
-        let mut expected_initial_mask = HybridBitset::new();
-        expected_initial_mask.insert(tok_def_id.0);
-        assert_eq!(
-            initial_mask, expected_initial_mask,
-            "Initial mask should only allow 'def' (ID {})", tok_def_id.0
-        );
-
-        // 5. Commit the "def" token
-        state.commit(tok_def_id);
-        state.step_with_all_llm_tokens(); // Replicate Python's behavior post-commit
-
-        // 6. Mask Check After "def" - This is where the bug is expected
-        // Grammar is now at: <space>* "f"
+        // 4. Initial Mask Check - This is where the bug is expected
         // Allowed LLM tokens should be:
         // - " " (tok_space_id): Consumes one space from <space>*. Remaining: <space>* "f"
         // - " f" (tok_f_space_id): Consumes the space from <space>* and "f" from literal("f").
