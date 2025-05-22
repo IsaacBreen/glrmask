@@ -495,11 +495,17 @@ if __name__ == "__main__":
     json_string = grammar_constraint.to_json_string()
     print(f"Serialized GrammarConstraint JSON (length: {len(json_string)}):")
     # Indent it.
-    json_string = jsonyx.dumps(json.loads(json_string), indent=4, indent_leaves=False)
-    # Optionally print a snippet or save to file if too long
-    # print(textwrap.shorten(json_string, width=200, placeholder="..."))
+    data = json.loads(json_string)
+    json_string = jsonyx.dumps(data, indent=4, indent_leaves=False)
+    # Save to file
     with open("serialized_grammar_constraint.json", "w") as f:
         f.write(json_string)
+    # Save as YAML as well
+    import ruamel.yaml
+    yaml = ruamel.yaml.YAML()
+    yaml.indent(mapping=4, sequence=4, offset=2)
+    yaml.dump(data, f)
+
 
     # Deserialize from JSON string
     print("Deserializing grammar constraint from JSON...")
