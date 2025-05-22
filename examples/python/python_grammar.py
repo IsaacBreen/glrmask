@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import jsonyx
 import textwrap
 import time
 import tokenize
@@ -494,7 +495,7 @@ if __name__ == "__main__":
     json_string = grammar_constraint.to_json_string()
     print(f"Serialized GrammarConstraint JSON (length: {len(json_string)}):")
     # Indent it.
-    json_string = json.dumps(json.loads(json_string), indent=4)
+    json_string = jsonyx.dumps(json.loads(json_string), indent=4, indent_leaves=False)
     # Optionally print a snippet or save to file if too long
     # print(textwrap.shorten(json_string, width=200, placeholder="..."))
     with open("serialized_grammar_constraint.json", "w") as f:
