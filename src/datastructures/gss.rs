@@ -24,6 +24,12 @@ pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + Partia
     // Optional: fn identity_for_intersection() -> Self; (if needed by generic logic)
 }
 
+impl PathAccumulator for () {
+    fn union(&self, _other: &Self) -> Self { () }
+    fn intersect(&self, _other: &Self) -> Self { () }
+    fn identity_for_union() -> Self { () }
+}
+
 // Helper function to compute a node's hash_key_cache.
 // This is used by both canonical and non-canonical node creation.
 fn compute_internal_hash_key<T: Hash, A: PathAccumulator>(value: &T, predecessors: &BTreeSet<Arc<GSSNode<T, A>>>) -> u64 {
@@ -424,7 +430,7 @@ pub trait GSSTrait<T: Clone + Hash, A: PathAccumulator> {
 }
 
 impl<T: Clone + Hash, A: PathAccumulator> GSSTrait<T, A> for GSSNode<T, A> {
-    type Peek<'a> = &'a T where T: 'a;
+    type Peek<'a> = &'a T where T: 'a, A: 'a;
 
     fn peek(&self) -> Self::Peek<'_> {
         &self.value
@@ -446,7 +452,7 @@ impl<T: Clone + Hash, A: PathAccumulator> GSSTrait<T, A> for GSSNode<T, A> {
 }
 
 impl<T: Clone + Hash, A: PathAccumulator> GSSTrait<T, A> for Arc<GSSNode<T, A>> {
-    type Peek<'a> = &'a T where T: 'a;
+    type Peek<'a> = &'a T where T: 'a, A: 'a;
 
     fn peek(&self) -> Self::Peek<'_> {
         &self.value
@@ -471,7 +477,7 @@ impl<T: Clone + Hash, A: PathAccumulator> GSSTrait<T, A> for Arc<GSSNode<T, A>> 
 }
 
 impl<T: Clone + Hash, A: PathAccumulator> GSSTrait<T, A> for Option<Arc<GSSNode<T, A>>> {
-    type Peek<'a> = Option<&'a T> where T: 'a;
+    type Peek<'a> = Option<&'a T> where T: 'a, A: 'a;
 
     fn peek(&self) -> Self::Peek<'_> {
         self.as_ref().map(|node_arc| node_arc.peek())
@@ -494,7 +500,7 @@ impl<T: Clone + Hash, A: PathAccumulator> GSSTrait<T, A> for Option<Arc<GSSNode<
 }
 
 impl<T: Clone + Hash, A: PathAccumulator> GSSTrait<T, A> for Option<GSSNode<T, A>> {
-    type Peek<'a> = Option<&'a T> where T: 'a;
+    type Peek<'a> = Option<&'a T> where T: 'a, A: 'a;
 
     fn peek(&self) -> Self::Peek<'_> {
         self.as_ref().map(|node| node.peek())

@@ -876,7 +876,7 @@ impl<'r> Precomputer<'r> {
             source_arc.clone(),
             Some(grammar_tok),
             edge_tokens.clone(), // Clone for inserter
-            |existing: &mut HybridBitset, new_bv_ref: &HybridBitset| *existing |= new_bv_ref,
+            |existing: &mut HybridBitset, new_bv_ref: HybridBitset| *existing |= new_bv_ref,
         );
 
         // First try existing children
@@ -980,7 +980,7 @@ impl<'r> Precomputer<'r> {
                 child_wrapper.as_arc().clone(), // Source of the edge
                 None::<GrammarTokenID>,   // Key for the edge (epsilon)
                 edge_tokens_for_merge.clone(), // Data for the edge
-                |existing_edge_data: &mut HybridBitset, new_edge_data: &HybridBitset| *existing_edge_data |= new_edge_data,
+                |existing_edge_data: &mut HybridBitset, new_edge_data: HybridBitset| *existing_edge_data |= new_edge_data,
             );
 
             // Try to reuse an existing child of `child_wrapper.as_arc()`
@@ -1283,7 +1283,7 @@ impl<'a> GrammarConstraintState<'a> {
 
                 // The return value of the finalizer callback determines if the node is kept.
                 // If any resulting states are produced, keep the node.
-                !self.state.is_empty() // This check is incorrect. It should check if resulting_states was empty before merging into self.state.
+                !self.state.is_empty(); // This check is incorrect. It should check if resulting_states was empty before merging into self.state.
                                         // However, the Trie::special_map finalizer callback keeps the node if the return value is true.
                                         // The intent here seems to be: keep the node if *any* paths from it are still valid.
                                         // A simple check on current_glr_parse_state after filtering would be better.

@@ -1,3 +1,4 @@
+use crate::datastructures::gss::print_gss_forest;
 use crate::datastructures::gss::{BulkMerge, gather_gss_stats, find_longest_path, PathAccumulator, simplify_gss_forest, prune_and_transform_recursive}; // Import PathAccumulator and prune_and_transform_recursive
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
