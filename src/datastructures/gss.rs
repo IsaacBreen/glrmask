@@ -203,7 +203,7 @@ impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + De
         let new_predecessors_mapped: BTreeSet<Arc<GSSNode<U, A>>> = self_arc.predecessors.iter()
             .map(|pred_arc_t_a| {
                 // Recursive call. The type U for value, A for accumulator is inferred.
-                GSSNode::<U, A>::map_canonical(pred_arc_t_a.clone(), f, cache_u)
+                GSSNode::<T, A>::map_canonical(pred_arc_t_a.clone(), f, cache_u)
             })
             .collect();
         // get_canonical will derive acc from the new predecessors' accs.
@@ -710,7 +710,7 @@ pub fn pop_and_apply_contextual_accumulator<T: Clone + Ord + Hash, A: PathAccumu
 
     for src_node_arc in source_nodes {
         for pred_arc in &src_node_arc.predecessors {
-            let pred_ptr = Arc::as_ptr(pred_arc.as_ref());
+            let pred_ptr = Arc::as_ptr(pred_arc);
             let entry = resultMap.entry(pred_ptr)
                                  .or_insert_with(|| (pred_arc.clone(), A::identity_for_union()));
             // Union the source node's accumulator into the accumulator for this predecessor
