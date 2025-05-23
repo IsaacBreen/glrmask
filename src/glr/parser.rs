@@ -1,4 +1,4 @@
-use crate::datastructures::gss::{print_gss_forest, BulkMerge, gather_gss_stats, find_longest_path};
+use crate::datastructures::gss::{BulkMerge, gather_gss_stats, find_longest_path, PathAccumulator, simplify_gss_forest, prune_and_transform_recursive}; // Import PathAccumulator and prune_and_transform_recursive
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
 use crate::glr::table::{
@@ -12,49 +12,56 @@ use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
 use std::sync::Arc;
 use crate::debug;
-use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
+use crate::json_serialization::{JSONConvertible, JSONNode};
+use std::collections::BTreeMap as StdMap;
 
 
-pub trait MergeAndIntersect: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
-    /// Merges the information represented by `self` and `other`.
-    fn merge(&self, other: &Self) -> Self;
-    /// Intersects the information represented by `self` and `other`.
-    fn intersect(&self, other: &Self) -> Self;
-}
-
-impl MergeAndIntersect for () {
-    fn merge(&self, _: &Self) -> Self { () }
-    fn intersect(&self, _: &Self) -> Self { () }
-}
+// Remove MergeAndIntersect trait definition
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ParseStateNodeContent<T: MergeAndIntersect> {
+pub struct ParseStateNodeContent { // No longer generic
     pub state_id: StateID,
-    pub t: T,
+    // Removed pub t: T,
 }
-// No JSONConvertible for ParseStateNodeContent<T> directly, as T is generic.
-// It would be needed if GSSNode<ParseStateNodeContent<T>> was serialized.
+// JSONConvertible for ParseStateNodeContent (now concrete type)
+impl JSONConvertible for ParseStateNodeContent {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("state_id".to_string(), self.state_id.to_json());
+        JSONNode::Object(obj)
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let state_id = obj.remove("state_id").ok_or_else(|| "Missing field state_id for ParseStateNodeContent".to_string())
+                                  .and_then(StateID::from_json)?;
+                Ok(ParseStateNodeContent { state_id })
+            }
+            _ => Err("Expected JSONNode::Object for ParseStateNodeContent".to_string()),
+        }
+    }
+}
+
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ParseState<T: MergeAndIntersect> {
-    pub stack: Arc<GSSNode<ParseStateNodeContent<T>>>,
+pub struct ParseState<A: PathAccumulator> { // Generic over Accumulator A
+    pub stack: Arc<GSSNode<ParseStateNodeContent, A>>,
 }
-// No JSONConvertible for ParseState<T> directly.
+// No JSONConvertible for ParseState<A> directly (depends on GSSNode).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StopReason {
     ActionNotFound,
     GotoNotFound,
 }
-// Manual impl for StopReason (enum)
+// Manual impl for StopReason (enum) - unchanged.
 impl JSONConvertible for StopReason {
     fn to_json(&self) -> JSONNode {
         let variant_name = match self {
             StopReason::ActionNotFound => "ActionNotFound",
             StopReason::GotoNotFound => "GotoNotFound",
         };
-        JSONNode::String(variant_name.to_string()) // Simple enum as string
+        JSONNode::String(variant_name.to_string())
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
@@ -142,12 +149,12 @@ impl GLRParser {
         }
     }
 
-    pub fn init_glr_parser<T: MergeAndIntersect + Default>(&self) -> GLRParserState<T> {
-        self.init_glr_parser_with_t(T::default())
+    pub fn init_glr_parser<A: PathAccumulator>(&self) -> GLRParserState<A> {
+        self.init_glr_parser_with_acc(A::default())
     }
 
-    pub fn init_glr_parser_with_t<T: MergeAndIntersect>(&self, t: T) -> GLRParserState<T> {
-        let initial_parse_state = self.init_parse_state_with_t(t);
+    pub fn init_glr_parser_with_acc<A: PathAccumulator>(&self, initial_acc: A) -> GLRParserState<A> {
+        let initial_parse_state = self.init_parse_state_with_acc(initial_acc);
         let mut active_states_map = BTreeMap::new();
         active_states_map.insert(initial_parse_state.key(), initial_parse_state);
         GLRParserState {
@@ -156,7 +163,7 @@ impl GLRParser {
             action_not_found_states: BTreeMap::new(),
         }
     }
-    pub fn init_glr_parser_from_parse_state<T: MergeAndIntersect>(&self, parse_state: ParseState<T>) -> GLRParserState<T> {
+    pub fn init_glr_parser_from_parse_state<A: PathAccumulator>(&self, parse_state: ParseState<A>) -> GLRParserState<A> {
         GLRParserState {
             parser: self,
             active_states: BTreeMap::from([(parse_state.key(), parse_state)]),
@@ -164,12 +171,13 @@ impl GLRParser {
         }
     }
 
-    pub fn init_glr_parser_from_parse_states<T: MergeAndIntersect>(
+    pub fn init_glr_parser_from_parse_states<A: PathAccumulator>(
         &self,
-        parse_states: Vec<ParseState<T>>,
-    ) -> GLRParserState<T> {
+        parse_states: Vec<ParseState<A>>,
+    ) -> GLRParserState<A> {
         let mut active_states_map = BTreeMap::new();
         for state in parse_states {
+            // Use insert_with with the new ParseState::merge logic
             active_states_map.insert_with(state.key(), state, |existing, new_s| existing.merge(new_s));
         }
         GLRParserState {
@@ -179,21 +187,21 @@ impl GLRParser {
         }
     }
 
-    pub fn init_parse_state<T: MergeAndIntersect + Default>(&self) -> ParseState<T> {
-        self.init_parse_state_with_t(T::default())
+    pub fn init_parse_state<A: PathAccumulator>(&self) -> ParseState<A> {
+        self.init_parse_state_with_acc(A::default())
     }
 
-    pub fn init_parse_state_with_t<T: MergeAndIntersect>(&self, t: T) -> ParseState<T> {
+    pub fn init_parse_state_with_acc<A: PathAccumulator>(&self, initial_acc: A) -> ParseState<A> {
         let initial_content = ParseStateNodeContent {
             state_id: self.start_state_id,
-            t,
         };
         ParseState {
-            stack: Arc::new(GSSNode::new(initial_content)),
+            // Use non-canonical GSSNode constructor, providing initial acc
+            stack: Arc::new(GSSNode::new(initial_content, initial_acc)),
         }
     }
 
-    pub fn parse<T: MergeAndIntersect + Default>(&self, input: &[TerminalID]) -> GLRParserState<T> {
+    pub fn parse<A: PathAccumulator + Default>(&self, input: &[TerminalID]) -> GLRParserState<A> {
         let mut state = self.init_glr_parser();
         state.parse(input);
         state
@@ -283,7 +291,7 @@ impl Display for GLRParser {
                             writeln!(f, "        - Reduce (len {}):", len)?;
                             for (nt_id, prod_ids) in nts {
                                 let nt = non_terminal_map.get_by_right(nt_id).unwrap();
-                                for prod_id_val in prod_ids { // Renamed prod_id
+                                for prod_id_val in prod_ids {
                                     let prod = self.productions.get(prod_id_val.0).unwrap();
                                     writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
                                 }
@@ -316,13 +324,13 @@ impl Display for GLRParser {
 }
 
 #[derive(Debug, Clone)]
-pub struct GLRParserState<'a, T: MergeAndIntersect> {
+pub struct GLRParserState<'a, A: PathAccumulator> { // Generic over Accumulator A
     pub parser: &'a GLRParser,
-    pub active_states: BTreeMap<ParseStateKey, ParseState<T>>,
-    pub action_not_found_states: BTreeMap<ParseStateKey, ParseState<T>>,
+    pub active_states: BTreeMap<ParseStateKey, ParseState<A>>,
+    pub action_not_found_states: BTreeMap<ParseStateKey, ParseState<A>>,
 }
 
-impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
+impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
     /* -------------------------------------------------
      * Helper utilities to make `step` compact and clear
      * ------------------------------------------------- */
@@ -330,35 +338,49 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
     /// Push a new state on `stack` and wrap it in a `ParseState`.
     fn push_state(
         &self,
-        stack: &Arc<GSSNode<ParseStateNodeContent<T>>>,
-        next_state: StateID,
-        t: T,
-    ) -> ParseState<T> {
-        let new_content = ParseStateNodeContent { state_id: next_state, t };
-        ParseState { stack: Arc::new(stack.push(new_content)) }
+        stack: &Arc<GSSNode<ParseStateNodeContent, A>>, // This is the parent stack Arc
+        next_state_id: StateID,
+        // The new node's acc will be inherited from stack.acc by stack.push()
+    ) -> ParseState<A> {
+        let new_content = ParseStateNodeContent { state_id: next_state_id };
+        // stack.push() is GSSTrait push for Arc<GSSNode<...>>
+        // It creates a new GSSNode instance whose `acc` is cloned from `stack.acc`.
+        let new_gss_node_instance = stack.push(new_content);
+        ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
     /// Pop `len` nodes, follow the goto on `nt`, and return the resulting stacks.
     fn pop_and_goto(
         &self,
-        stack: &Arc<GSSNode<ParseStateNodeContent<T>>>,
+        stack: &Arc<GSSNode<ParseStateNodeContent, A>>, // Node being reduced from
         len: usize,
         nt: NonTerminalID,
-        cur_t: &T,
-    ) -> Vec<Arc<GSSNode<ParseStateNodeContent<T>>>> {
-        let mut parents = stack.popn(len);        // 1. pop
-        parents.bulk_merge();
+        // cur_t: &T was &LLMTokenInfo, now it's stack.acc
+        // So, pass stack.acc as cur_acc_from_reducible_node
+    ) -> Vec<Arc<GSSNode<ParseStateNodeContent, A>>> { // Returns list of new stack tops
+        let cur_acc_from_reducible_node = &stack.acc; // Get it from the stack being reduced
+
+        let mut parents = stack.popn(len); // These are Arcs to nodes revealed after popping
+        parents.bulk_merge(); // bulk_merge needs to handle A correctly (unioning accs)
         let mut out = Vec::new();
 
-        for parent in parents {
-            let top = parent.peek();
-            let goto = self.parser.stage_7_table[&top.state_id].gotos[&nt];
-            let merged_t = top.t.intersect(cur_t);
-            crate::debug!(4, "  Goto from state {} to state {}", top.state_id.0, goto.0);
-            out.push(Arc::new(parent.push(ParseStateNodeContent {
-                state_id: goto,
-                t: merged_t,
-            })));
+        for parent_arc in parents { // parent_arc is Arc<GSSNode<ParseStateNodeContent, A>>
+            let top_of_parent_value = parent_arc.value.clone(); // This is ParseStateNodeContent { state_id }
+            let goto_state_id = self.parser.stage_7_table[&top_of_parent_value.state_id].gotos[&nt];
+
+            // Calculate acc for the new GOTO state's GSS node
+            // It's the parent's acc intersected with the accumulator from the node being reduced.
+            let new_acc_for_goto_child = parent_arc.acc().intersect(cur_acc_from_reducible_node); // Use parent_arc.acc()
+
+            let goto_node_content = ParseStateNodeContent { state_id: goto_state_id };
+
+            // Create the new GSSNode (child of parent_arc)
+            // parent_arc.push will give it parent_arc.acc by default (via new_with_predecessors)
+            let mut new_gss_node_arc = Arc::new(parent_arc.push(goto_node_content));
+            // Now, explicitly set its acc to the computed intersection
+            Arc::make_mut(&mut new_gss_node_arc).acc = new_acc_for_goto_child;
+
+            out.push(new_gss_node_arc);
         }
         out
     }
@@ -366,13 +388,12 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
     /// Debug helper so the main `step` body stays short.
     pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
         const MAX: usize = 30;
-        // const PANIC_THRESHOLD: usize = 30;
         const PANIC_THRESHOLD: usize = 10000;
-        // const PANIC_THRESHOLD: usize = usize::MAX;
+
         let roots: Vec<_> = self.active_states.values().map(|s| s.stack.clone()).collect();
         let stats = gather_gss_stats(&roots);
         crate::debug!(3, "{} - token {} ({:?}) - – active: {}, nodes: {:?}",
-                      phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0), self.active_states.len(), stats); // Added map(|t| &t.0)
+                      phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0), self.active_states.len(), stats);
 
         let make_msg = |print_full_forest, max_nodes_to_print| {
             if print_full_forest {
@@ -427,20 +448,21 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         self.log_gss("Step-start", token_id);
 
         let mut todo = std::mem::take(&mut self.active_states).into_values().collect::<Vec<_>>();
-        let mut next = BTreeMap::<ParseStateKey, ParseState<T>>::new();
-        let mut not_found = BTreeMap::<ParseStateKey, ParseState<T>>::new();
+        let mut next = BTreeMap::<ParseStateKey, ParseState<A>>::new();
+        let mut not_found = BTreeMap::<ParseStateKey, ParseState<A>>::new();
 
         /* ---------- core loop ---------- */
         while let Some(state) = todo.pop() { // Process states from the worklist
             let stack   = state.stack;
-            let top     = stack.peek();
+            let top     = stack.peek(); // top is &ParseStateNodeContent
             let row     = &self.parser.stage_7_table[&top.state_id];
 
             match row.shifts_and_reduces.get(&token_id) {
                 /* ------ 1. plain shift ------ */
                 Some(Stage7ShiftsAndReduces::Shift(to)) => {
                     crate::debug!(4, "Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
-                    let new_parse_state = self.push_state(&stack, *to, top.t.clone());
+                    // push_state should inherit acc from parent stack
+                    let new_parse_state = self.push_state(&stack, *to);
                     next.insert_with(new_parse_state.key(), new_parse_state, |existing, new_s| existing.merge(new_s));
                 }
 
@@ -448,9 +470,10 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                 Some(Stage7ShiftsAndReduces::Reduce{ nonterminal_id: nt,
                                                      len, .. }) => {
                     crate::debug!(4, "Reduce from state {} via token {} to nonterminal {}", top.state_id.0, token_id.0, nt.0);
-                    for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
+                    // pop_and_goto now handles acc intersection
+                    for s in self.pop_and_goto(&stack, *len, *nt) {
                         // Add to worklist for current step; merging happens when moving to `next`
-                        todo.push(ParseState { stack: s }); 
+                        todo.push(ParseState { stack: s });
                     }
                 }
 
@@ -460,14 +483,16 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
                     // optional shift part
                     if let Some(to) = shift {
                         crate::debug!(4, " Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
-                        let new_parse_state = self.push_state(&stack, *to, top.t.clone());
+                        // push_state should inherit acc from parent stack
+                        let new_parse_state = self.push_state(&stack, *to);
                         next.insert_with(new_parse_state.key(), new_parse_state, |existing, new_s| existing.merge(new_s));
                     }
                     // every reduce alternative
                     for (len, nts) in reduces {
                         crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top.state_id.0, token_id.0, nts);
                         for (nt, _prod_ids) in nts {        // we ignore prod-ids here
-                            for s in self.pop_and_goto(&stack, *len, *nt, &top.t) {
+                             // pop_and_goto now handles acc intersection
+                            for s in self.pop_and_goto(&stack, *len, *nt) {
                                 // Add to worklist for current step
                                 todo.push(ParseState { stack: s });
                             }
@@ -494,17 +519,14 @@ impl<'a, T: MergeAndIntersect + Debug> GLRParserState<'a, T> {
         crate::debug!(4, "----------------------------------------------------------------");
     }
 
-    /// Merging is now handled implicitly when states are added to `next` in the `step` method.
-    /// This method can be removed if no other part of the code relies on it explicitly.
-    /// For now, let's keep it as a no-op or ensure it's not called.
-    /// Given the new structure, explicit merging of `self.active_states` is no longer needed
-    /// as `BTreeMap::insert_with` handles it.
+    /// Merging is handled implicitly when states are added to `next` in the `step` method via `BTreeMap::insert_with`.
+    /// The `ParseState::merge` method performs the actual merge logic on the GSS stacks.
     pub fn merge_active_states(&mut self) {
         // This method is no longer necessary as merging is done on insertion.
         // crate::debug!(3, "merge_active_states called (now a no-op due to BTreeMap usage)");
     }
 
-    pub fn merge_with(&mut self, other: GLRParserState<T>) {
+    pub fn merge_with(&mut self, other: GLRParserState<A>) {
         assert!(std::ptr::eq(self.parser, other.parser));
         for (key, state) in other.active_states {
             self.active_states.insert_with(key, state, |existing, new_s| existing.merge(new_s));
@@ -525,7 +547,7 @@ pub struct ParseStateKey {
     // Removed action_stack
 }
 
-impl<T: MergeAndIntersect> ParseState<T> {
+impl<A: PathAccumulator> ParseState<A> { // Generic over Accumulator A
     pub fn key(&self) -> ParseStateKey {
         ParseStateKey {
             stack_state_id: self.stack.peek().state_id,
@@ -533,23 +555,28 @@ impl<T: MergeAndIntersect> ParseState<T> {
     }
 
     /// Merges `other` into `self`. Assumes `self.key() == other.key()`.
-    /// Merges the GSS structures and combines the `t` value at the top node using `MergeAndIntersect::merge`.
-    pub fn merge(&mut self, other: ParseState<T>) {
+    /// Merges the GSS structures and combines the `acc` value at the top node using `PathAccumulator::union`.
+    pub fn merge(&mut self, other: ParseState<A>) {
         assert_eq!(self.key(), other.key());
 
-        // Combine 't' values at the top node using 'or'
-        let self_content = self.stack.peek();
-        let other_content = other.stack.peek();
-        let combined_t = self_content.t.merge(&other_content.t);
+        // Combine 'acc' values at the top node using 'union'
+        let self_acc = self.stack.acc(); // Use acc() accessor
+        let other_acc = other.stack.acc(); // Use acc() accessor
+        let combined_acc = self_acc.union(other_acc);
 
         // Get mutable access to self.stack, potentially cloning if shared (Arc > 1)
         let mut mutable_stack = Arc::make_mut(&mut self.stack);
 
-        // Update the 't' value in the mutable top node's content
-        mutable_stack.value.t = combined_t;
+        // Update the 'acc' value in the mutable top node's content
+        mutable_stack.acc = combined_acc;
 
-        // Merge the parent structures using GSSNode's merge
-        mutable_stack.merge_unchecked(Arc::try_unwrap(other.stack).unwrap_or_else(|arc| (*arc).clone())); // Use try_unwrap or clone
+        // Merge the parent structures using GSSNode's merge_unchecked.
+        // merge_unchecked also unions the accs, which is redundant here.
+        // Assuming merge_unchecked is updated to only merge structure when acc is handled externally:
+        // mutable_stack.merge_structure_unchecked(Arc::try_unwrap(other.stack).unwrap_or_else(|arc| (*arc).clone()));
+        // If merge_unchecked *does* union accs, the above combined_acc calculation and assignment is still correct
+        // because it will union combined_acc with other.stack.acc, resulting in combined_acc | other.stack.acc = combined_acc | combined_acc = combined_acc.
+        mutable_stack.merge_unchecked(Arc::try_unwrap(other.stack).unwrap_or_else(|arc| (*arc).clone()));
     }
 }
 
