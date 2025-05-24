@@ -957,10 +957,10 @@ mod tests {
 
 
         // Test case 7: Input is "banana", exact match
-        assert_eq!(tree.find_longest_prefix_token(b("banana")), Some((20, &b("banana")[..])));
+        assert_eq!(tree.find_longest_prefix_token(&b("banana")), Some((20, &b("banana")[..])));
 
         // Test case 8: Input is "bananatart", "banana" is longest prefix
-        assert_eq!(tree.find_longest_prefix_token(b("bananatart")), Some((20, &b("banana")[..])));
+        assert_eq!(tree.find_longest_prefix_token(&b("bananatart")), Some((20, &b("banana")[..])));
 
         // Test case 9: Input is "b", no token starts with "b" other than "banana"
         // Since "" is a token, it should be returned.
