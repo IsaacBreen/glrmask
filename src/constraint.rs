@@ -108,19 +108,6 @@ impl PathAccumulator for LLMTokenInfo {
             intersection: &self.intersection & &other.intersection,
         }
     }
-     fn identity_for_union() -> Self {
-        // This should return active=empty, intersection=ALL_ONES.
-        // Requires capacity, which Default cannot take.
-        // Using Default::default() for HybridBitset yields empty sets for both.
-        // This is technically INCORRECT for the intersection field's identity for union.
-        // A proper fix would involve passing capacity or modifying HybridBitset/PathAccumulator trait.
-        // Proceeding with current Default() for HybridBitset as a placeholder.
-        // The actual identity for intersection field should be ALL_ONES.
-        Self {
-            active: Default::default(), // Empty set
-            intersection: Default::default(), // Empty set (Should be ALL_ONES)
-        }
-    }
 }
 
 
@@ -1287,3 +1274,4 @@ impl<'a> GrammarConstraintState<'a> {
         !self.state.is_empty()
     }
 }
+

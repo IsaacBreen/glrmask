@@ -19,15 +19,12 @@ pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + Partia
     fn union(&self, other: &Self) -> Self;
     /// Finds the commonality between two accumulators, typically representing an intersection.
     fn intersect(&self, other: &Self) -> Self;
-    /// Returns the identity element for the union operation (e.g., an empty set for OR, an all-ones set for AND).
-    fn identity_for_union() -> Self;
     // Optional: fn identity_for_intersection() -> Self; (if needed by generic logic)
 }
 
 impl PathAccumulator for () {
     fn union(&self, _other: &Self) -> Self { () }
     fn intersect(&self, _other: &Self) -> Self { () }
-    fn identity_for_union() -> Self { () }
 }
 
 // Helper function to compute a node's hash_key_cache.
@@ -78,10 +75,17 @@ impl<T: Hash, A: PathAccumulator> GSSNode<T, A> {
     }
 
     pub fn new_with_predecessors(value: T, predecessors: BTreeSet<Arc<Self>>) -> Self {
-        let mut unioned_acc = A::identity_for_union();
-        for pred_arc in &predecessors {
-            unioned_acc = unioned_acc.union(&pred_arc.acc);
-        }
+        let unioned_acc = if predecessors.is_empty() {
+            A::default()
+        } else {
+            let mut iter = predecessors.iter();
+            // .unwrap() is safe because predecessors is not empty in this branch.
+            let mut acc_val = iter.next().unwrap().acc.clone();
+            for pred_arc in iter {
+                acc_val = acc_val.union(&pred_arc.acc);
+            }
+            acc_val
+        };
         let hash_key_cache = compute_internal_hash_key::<T, A>(&value, &predecessors);
         Self {
             value,
@@ -102,10 +106,20 @@ impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + De
     ) -> Arc<Self> {
         let key_for_lookup = (value.clone(), predecessors.clone()); // Clones for lookup key
 
-        let mut current_context_unioned_acc = A::identity_for_union();
-        for pred_arc in &predecessors {
-            current_context_unioned_acc = current_context_unioned_acc.union(&pred_arc.acc);
-        }
+        let current_context_unioned_acc = if predecessors.is_empty() {
+            // If predecessors is empty, this implies a root node being formed structurally.
+            // The accumulator for such a node, when derived purely structurally without explicit
+            // initial accumulator (like in new_canonical), should be Default::default().
+            A::default()
+        } else {
+            let mut iter = predecessors.iter();
+            // .unwrap() is safe because predecessors is not empty in this branch.
+            let mut acc_val = iter.next().unwrap().acc.clone();
+            for pred_arc in iter {
+                acc_val = acc_val.union(&pred_arc.acc);
+            }
+            acc_val
+        };
 
         if let Some(entry_arc) = cache.get_mut(&key_for_lookup) {
             let new_potential_acc = entry_arc.acc.union(&current_context_unioned_acc);
@@ -544,8 +558,10 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator> BulkMerge<T, A> for Vec<Arc<GSSN
             }
 
             // Calculate the union of accumulators for all nodes in this group
-            let mut union_of_accs_in_group = A::identity_for_union();
-            for node_arc_in_group in &group_arcs {
+            let mut iter = group_arcs.iter();
+            // .unwrap() is safe because group_arcs is not empty here.
+            let mut union_of_accs_in_group = iter.next().unwrap().acc.clone();
+            for node_arc_in_group in iter {
                 union_of_accs_in_group = union_of_accs_in_group.union(&node_arc_in_group.acc);
             }
 
@@ -582,8 +598,10 @@ pub fn bulk_merge_canonical<T: Clone + Ord + Hash + Debug, A: PathAccumulator + 
         if group_arcs.is_empty() { continue; }
 
         // Calculate the union of accumulators for all nodes in this group
-        let mut union_of_accs_in_group = A::identity_for_union();
-        for node_arc_in_group in &group_arcs {
+        let mut iter = group_arcs.iter();
+        // .unwrap() is safe because group_arcs is not empty here.
+        let mut union_of_accs_in_group = iter.next().unwrap().acc.clone();
+        for node_arc_in_group in iter {
             union_of_accs_in_group = union_of_accs_in_group.union(&node_arc_in_group.acc);
         }
 
@@ -655,7 +673,7 @@ pub fn prune_and_transform_recursive_canonical<T: Clone + Ord + Hash + Debug, A:
                 new_predecessors = node_arc.predecessors.clone();
             };
             // Create a canonical node with the new value and (potentially transformed) predecessors.
-            // get_canonical sets acc based on predecessors AND unions if node exists.
+            // get_canonical will set acc based on these predecessors AND unions if node exists.
             // Then, we override acc with the specific acc from the closure.
             let new_node_arc = GSSNode::get_canonical(new_value.clone(), new_predecessors, cache);
             let mut temp_arc = new_node_arc.clone();
@@ -711,10 +729,10 @@ pub fn pop_and_apply_contextual_accumulator<T: Clone + Ord + Hash, A: PathAccumu
     for src_node_arc in source_nodes {
         for pred_arc in &src_node_arc.predecessors {
             let pred_ptr = Arc::as_ptr(pred_arc);
-            let entry = resultMap.entry(pred_ptr)
-                                 .or_insert_with(|| (pred_arc.clone(), A::identity_for_union()));
-            // Union the source node's accumulator into the accumulator for this predecessor
-            entry.1 = entry.1.union(&src_node_arc.acc);
+            let acc_from_source = src_node_arc.acc.clone();
+            resultMap.entry(pred_ptr)
+                .and_modify(|e| { e.1 = e.1.union(&acc_from_source); })
+                .or_insert_with(|| (pred_arc.clone(), acc_from_source));
         }
     }
 
@@ -1050,11 +1068,10 @@ mod tests {
                 // For intersection field, identity for UNION operation is ALL_ONES.
                 // This requires knowing the capacity.
                 // In tests, let's assume a small capacity or a convention.
-                // For simplicity in this mock, let's use a convention where MAX_VAL + 1 is capacity.
                 // This is a known limitation of generic PathAccumulator identity.
                 // A better mock would take capacity in its constructor or have a static capacity.
                 // Let's use a placeholder that means "all ones conceptually".
-                 intersection: (0..10).collect(), // Mocking "all ones up to 9"
+                 intersection: BTreeSet::new(),
             }
         }
     }
@@ -1072,14 +1089,6 @@ mod tests {
             Self {
                 active: self.active.intersection(&other.active).cloned().collect(),
                 intersection: self.intersection.intersection(&other.intersection).cloned().collect(), // Or union, depending on semantic
-            }
-        }
-
-         fn identity_for_union() -> Self {
-            Self {
-                active: BTreeSet::new(), // Empty set for OR-like active
-                // ALL_ONES for AND-like intersection
-                intersection: (0..10).collect(), // Mocking "all ones up to 9"
             }
         }
     }
