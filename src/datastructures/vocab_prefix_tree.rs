@@ -357,6 +357,74 @@ impl VocabPrefixTree {
         }
     }
 
+    /// Finds the longest token in the tree that is a prefix of the given `bytes`.
+    ///
+    /// Returns `Some((token_id, matched_prefix_bytes))` if a match is found.
+    /// The `matched_prefix_bytes` is a slice of the token's full byte sequence stored in the tree.
+    ///
+    /// If the input `bytes` is empty:
+    ///  - If the empty string `""` is a token in the tree, it returns `Some((empty_token_id, &[]))`.
+    ///  - Otherwise, it returns `None`.
+    ///
+    /// If the input `bytes` is not empty:
+    ///  - It searches for the longest token that is a prefix of `bytes`.
+    ///  - If the empty string `""` is a token and no non-empty token prefix is found,
+    ///    it will return `Some((empty_token_id, &[]))`.
+    ///  - If no token (including potentially the empty string) is a prefix, it returns `None`.
+    pub fn find_longest_prefix_token<'s>(&'s self, bytes: &[u8]) -> Option<(usize, &'s [u8])> {
+        let mut longest_match_info: Option<(usize, &'s [u8])> = None;
+        let mut current_node: &'s VocabPrefixTreeNode = &self.root;
+
+        // Handle empty string token possibility upfront.
+        // If it exists, it's a candidate for the longest prefix.
+        if self.has_empty_string_token {
+            longest_match_info = Some((self.root.token_id(), self.root.prefix())); // prefix is &[]
+        }
+
+        // If the input `bytes` itself is empty, the only possible match is the empty string token (if it exists).
+        if bytes.is_empty() {
+            return longest_match_info;
+        }
+
+        let mut remaining_bytes = bytes;
+
+        // Traverse the tree along the path defined by the input `bytes`.
+        // Every node landed on is a token, and thus a candidate for the longest prefix match.
+        loop {
+            let mut found_match_in_children = false;
+            for (edge_label, child_node) in current_node.children() {
+                if remaining_bytes.starts_with(edge_label) {
+                    // Descend to the child node.
+                    current_node = child_node;
+                    remaining_bytes = &remaining_bytes[edge_label.len()..];
+
+                    // This child_node represents a token. Its full prefix is `current_node.prefix()`.
+                    // This token is a prefix of the original `bytes` input.
+                    // Update longest_match_info as this is a longer or equally long (but later found) prefix.
+                    longest_match_info = Some((current_node.token_id(), current_node.prefix()));
+
+                    found_match_in_children = true;
+                    break; // Continue traversal from the new current_node.
+                }
+            }
+
+            if !found_match_in_children {
+                // No child edge matches the start of the remaining_bytes.
+                // Cannot extend the prefix further. The current longest_match_info is the result.
+                break;
+            }
+
+            if remaining_bytes.is_empty() {
+                // All input bytes have been consumed along tree edges.
+                // The token corresponding to the current_node is the longest possible match.
+                // (This was already updated when we landed on current_node).
+                break;
+            }
+        }
+        longest_match_info
+    }
+
+
     /// Returns `true` if the empty string `""` was provided as a token
     /// during the build process, `false` otherwise.
     pub fn has_empty_string_token(&self) -> bool {
@@ -856,5 +924,81 @@ mod tests {
         assert_eq!(node_banana_ref.prefix_length, 6); // "banana"
         assert!(node_b_children_iter.next().is_none());
     }
-}
 
+    #[test]
+    fn test_find_longest_prefix_token() {
+        let tokens = vec![
+            (1, b("a")),
+            (10, b("ape")),
+            (11, b("apple")),
+            (12, b("apply")),
+            (20, b("banana")),
+            (99, b("")), // Empty string token
+        ];
+        let tree = VocabPrefixTree::build(&tokens);
+
+        // Test case 1: Exact match for "apple"
+        assert_eq!(tree.find_longest_prefix_token(b"apple"), Some((11, &b("apple")[..])));
+
+        // Test case 2: Input is longer than any token, "apple" is longest prefix
+        assert_eq!(tree.find_longest_prefix_token(b"applepie"), Some((11, &b("apple")[..])));
+
+        // Test case 3: Input is "apply", exact match
+        assert_eq!(tree.find_longest_prefix_token(b"apply"), Some((12, &b("apply")[..])));
+
+        // Test case 4: Input is "ape", exact match
+        assert_eq!(tree.find_longest_prefix_token(b"ape"), Some((10, &b("ape")[..])));
+
+        // Test case 5: Input is "ap", "a" is the longest prefix token
+        assert_eq!(tree.find_longest_prefix_token(b"ap"), Some((1, &b("a")[..])));
+
+        // Test case 6: Input is "application", "apply" is not a prefix, "a" is.
+        assert_eq!(tree.find_longest_prefix_token(b"application"), Some((1, &b("a")[..])));
+
+
+        // Test case 7: Input is "banana", exact match
+        assert_eq!(tree.find_longest_prefix_token(b("banana")), Some((20, &b("banana")[..])));
+
+        // Test case 8: Input is "bananatart", "banana" is longest prefix
+        assert_eq!(tree.find_longest_prefix_token(b("bananatart")), Some((20, &b("banana")[..])));
+
+        // Test case 9: Input is "b", no token starts with "b" other than "banana"
+        // Since "" is a token, it should be returned.
+        assert_eq!(tree.find_longest_prefix_token(b"b"), Some((99, &b("")[..])));
+
+
+        // Test case 10: Input is "c", no token starts with "c". "" is a token.
+        assert_eq!(tree.find_longest_prefix_token(b"c"), Some((99, &b("")[..])));
+
+        // Test case 11: Input is "", "" is a token.
+        assert_eq!(tree.find_longest_prefix_token(b""), Some((99, &b("")[..])));
+
+        // Test case 12: Tree without empty string token
+        let tokens_no_empty = vec![
+            (1, b("a")),
+            (11, b("apple")),
+        ];
+        let tree_no_empty = VocabPrefixTree::build(&tokens_no_empty);
+
+        assert_eq!(tree_no_empty.find_longest_prefix_token(b"applepie"), Some((11, &b("apple")[..])));
+        assert_eq!(tree_no_empty.find_longest_prefix_token(b"ax"), Some((1, &b("a")[..])));
+        // Input "b", no token is a prefix, and "" is not a token.
+        assert_eq!(tree_no_empty.find_longest_prefix_token(b"b"), None);
+        // Input "", "" is not a token.
+        assert_eq!(tree_no_empty.find_longest_prefix_token(b""), None);
+
+        // Test case 13: Only empty string token
+        let tokens_only_empty = vec![(55, b(""))];
+        let tree_only_empty = VocabPrefixTree::build(&tokens_only_empty);
+        assert!(tree_only_empty.has_empty_string_token());
+        assert_eq!(tree_only_empty.find_longest_prefix_token(b"abc"), Some((55, &b("")[..])));
+        assert_eq!(tree_only_empty.find_longest_prefix_token(b""), Some((55, &b("")[..])));
+
+        // Test case 14: Empty tree
+        let empty_tokens: Vec<(usize, Vec<u8>)> = vec![];
+        let tree_empty = VocabPrefixTree::build(&empty_tokens);
+        assert!(!tree_empty.has_empty_string_token());
+        assert_eq!(tree_empty.find_longest_prefix_token(b"abc"), None);
+        assert_eq!(tree_empty.find_longest_prefix_token(b""), None);
+    }
+}
