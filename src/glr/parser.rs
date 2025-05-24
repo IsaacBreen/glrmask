@@ -473,10 +473,12 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
             // `state` is the current ParseState. `state.stack` is the Arc<GSSNode> for its stack top.
             // Check for cycle: if state.stack is already in visited_on_this_path for this reduction chain.
             if visited_on_this_path.contains(&state.stack) {
-                crate::debug!(2, "Cycle detected: GSSNode at {:p} (state {:?}) encountered again in reduction path.", state.stack, state.stack.value);
+                crate::debug!(2, "Cycle detected: GSSNode at {:p} (state {:?}) encountered again in reduction path while processing token {:?}.", state.stack, state.stack.value, token_id);
                 // The `state` (which includes state.stack, the Arc that forms the cycle point) is moved into cycled_states.
                 // self.cycled_states.insert_with(state.key(), state, |existing, new_s| existing.merge(new_s));
                 // continue; // Don't process this state further down this cyclic path.
+                // Print the tree.
+                print_gss_forest(&[state.stack.clone()], usize::MAX);
                 // Panic
                 panic!("Cycle detected: GSSNode at {:p} (state {:?}) encountered again in reduction path.", state.stack, state.stack.value);
             }
