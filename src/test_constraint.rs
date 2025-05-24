@@ -326,26 +326,34 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Load LLM tokens from GPT-2 vocab.json
     let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
-    let cache_dir = Path::new(".cache/test_vocabs");
+    let cache_dir = Path::new(".cache/test_vocabs"); // Consistent with other tests
     let vocab_file_name = "gpt2_vocab.json";
 
     let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
 
     let mut llm_token_map = LLMTokenMap::new();
-    let mut max_llm_token_id_val: u32 = 0;
+    let mut max_original_llm_token_id_val: usize = 0;
 
-    // Sample GPT-2 tokens to speed up this test
+    // Using a sample of the GPT-2 vocabulary to keep the test reasonably fast.
+    // Adjust `prop` as needed. 0.01 means 1% of the vocab.
     let prop = 1.0;
-    // let prop = 0.15;
     let total_tokens = gpt2_raw_vocab.len();
-    let sample_size = (total_tokens as f64 * prop) as usize; // Changed 64 to 66 to introduce a compile error
-    println!("Sampling {} out of {} GPT-2 tokens for precompute", sample_size, total_tokens);
-    for (token_str, id_val) in gpt2_raw_vocab.into_iter().take(sample_size) {
-        llm_token_map.insert(token_str.into_bytes(), LLMTokenID(id_val as usize));
-        if id_val > max_llm_token_id_val {
-            max_llm_token_id_val = id_val;
+    let sample_size = ((total_tokens as f64 * prop) as usize).max(1); // Ensure at least 1 token
+    println!("Sampling {} out of {} GPT-2 tokens for the test.", sample_size, total_tokens);
+
+    for (token_str, id_val_u32) in gpt2_raw_vocab.into_iter().take(sample_size) {
+        let id_val = id_val_u32 as usize;
+        llm_token_map.insert(token_str.into_bytes(), LLMTokenID(id_val));
+        if id_val > max_original_llm_token_id_val {
+            max_original_llm_token_id_val = id_val;
         }
     }
+
+    if llm_token_map.is_empty() {
+        println!("Warning: LLM token map is empty after sampling. Max original ID will be 0.");
+        // max_original_llm_token_id_val will remain 0, which is fine.
+    }
+    println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
 
     // 2. Map the LLM tokens
     let mut internal_llm_token_map = GrammarConstraint::setup_llm_token_mappings(&llm_token_map);
@@ -616,5 +624,88 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     println!("Initial mask obtained ({} allowed LLM tokens).", mask.iter_bits().count());
 
+    // --- BEGIN ADDED CODE FOR SEQUENCE TESTING ---
+
+    let test_token_sequence_strs = vec!["from", " typing", " import", " Any"];
+    let mut test_token_sequence_ids = Vec::new();
+
+    println!("\nLooking up LLMTokenIDs for the test sequence: {:?}", test_token_sequence_strs);
+    for token_str in &test_token_sequence_strs {
+        let token_bytes = token_str.as_bytes().to_vec();
+        if let Some(llm_id) = grammar_constraint.llm_token_map.get_by_left(&token_bytes) {
+            test_token_sequence_ids.push(*llm_id);
+            println!("  Found: '{}' -> LLMTokenID({})", token_str, llm_id.0);
+        } else {
+            // If a token is not found, this test setup is problematic.
+            // For this specific sequence and GPT-2, they should exist.
+            // If not, the test might need to use a smaller, guaranteed vocab subset or skip.
+            panic!("LLM token '{}' not found in the loaded vocabulary. Test cannot proceed.", token_str);
+        }
+    }
+
+    println!("\nStepping through the token sequence:");
+    for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
+        let current_token_str = test_token_sequence_strs[i];
+        println!(
+            "Processing token {}/{}: '{}' (LLMTokenID({}))",
+            i + 1,
+            test_token_sequence_ids.len(),
+            current_token_str,
+            llm_token_id.0
+        );
+
+        // 3. Assert that the state is active (before step)
+        assert!(
+            constraint_state.is_active(),
+            "Constraint state should be active before processing token {} ('{}')",
+            i + 1, current_token_str
+        );
+
+        // 4. Step it with all LLM tokens (to update internal possibilities based on current GSS)
+        constraint_state.step_with_all_llm_tokens();
+
+        // 5. Get the mask
+        let current_mask = constraint_state.get_mask();
+        println!(
+            "  Mask (after step_with_all_llm_tokens) allows {} tokens. Checking for current token LLMTokenID({})...",
+            current_mask.iter_bits().count(),
+            llm_token_id.0
+        );
+
+        // 6. Assert that the next LLM token is in the mask
+        assert!(
+            current_mask.contains(llm_token_id.0),
+            "Expected LLMTokenID({}) for '{}' to be in the mask. Mask (first 100 if many): {:?}",
+            llm_token_id.0, current_token_str, current_mask.iter_bits().take(100).collect::<Vec<_>>()
+        );
+        println!("  LLMTokenID({}) for '{}' is in the mask.", llm_token_id.0, current_token_str);
+
+        // 7. Commit the next LLM token
+        constraint_state.commit(llm_token_id);
+        println!("  Committed LLMTokenID({}) for '{}'.", llm_token_id.0, current_token_str);
+
+        // 8. Assert that the state is active (after commit)
+        // This is important because a commit might lead to no valid future states.
+        assert!(
+            constraint_state.is_active(),
+            "Constraint state should be active after committing token {} ('{}')",
+            i + 1, current_token_str
+        );
+        println!("  Constraint state is active after commit.");
+    }
+
+    println!("\nFinished processing token sequence.");
+    // Final assertion: after the whole sequence, the state should still be active
+    // if the sequence is valid and doesn't lead to a dead end before its completion.
+    assert!(
+        constraint_state.is_active(),
+        "Constraint state should still be active after processing the entire sequence."
+    );
+    println!("Constraint state is active after the full sequence.");
+
+    // --- END ADDED CODE FOR SEQUENCE TESTING ---
+
+
     Ok(())
 }
+
