@@ -6,6 +6,7 @@ use crate::glr::table::{generate_glr_parser, generate_glr_parser_with_maps, gene
 use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
 use std::hash::{Hash, Hasher};
 use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast, eat_string_fast, choice_fast, eat_bytestring_fast, repeat1_fast, CompiledGrammar}; // Added eat_any_fast, CompiledGrammar
+use crate::datastructures::vocab_prefix_tree::VocabPrefixTree;
 
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
@@ -609,6 +610,15 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     );
     println!("GrammarConstraint constructed successfully.");
 
+    // Building VocabPrefixTree for token lookup
+    println!("Building VocabPrefixTree for token lookup...");
+    let mut tokens_for_lookup_tree: Vec<(usize, Vec<u8>)> = Vec::new();
+    for (bytes, original_llm_id) in grammar_constraint.llm_token_map.iter() {
+        tokens_for_lookup_tree.push((original_llm_id.0, bytes.clone()));
+    }
+    let token_lookup_tree = VocabPrefixTree::build(&tokens_for_lookup_tree);
+    println!("VocabPrefixTree for token lookup built successfully.");
+
     // 5. Basic Interaction with the GrammarConstraintState
     let mut constraint_state = grammar_constraint.init();
     constraint_state.step_with_all_llm_tokens();
@@ -623,15 +633,16 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     println!("\nLooking up LLMTokenIDs for the test sequence: {:?}", test_token_sequence_strs);
     for token_str in &test_token_sequence_strs {
-        let token_bytes = token_str.as_bytes().to_vec();
-        if let Some(llm_id) = grammar_constraint.llm_token_map.get_by_left(&token_bytes) {
-            test_token_sequence_ids.push(*llm_id);
-            println!("  Found: '{}' -> LLMTokenID({})", token_str, llm_id.0);
+        let token_bytes = token_str.as_bytes(); // .to_vec() is not needed as find_token takes &[u8]
+        if let Some(original_id_val) = token_lookup_tree.find_token(token_bytes) {
+            let llm_id = LLMTokenID(original_id_val);
+            test_token_sequence_ids.push(llm_id);
+            println!("  Found via VocabPrefixTree: '{}' -> LLMTokenID({})", token_str, llm_id.0);
         } else {
             // If a token is not found, this test setup is problematic.
             // For this specific sequence and GPT-2, they should exist.
             // If not, the test might need to use a smaller, guaranteed vocab subset or skip.
-            panic!("LLM token '{}' not found in the loaded vocabulary. Test cannot proceed.", token_str);
+            panic!("LLM token '{}' not found in the token_lookup_tree. Test cannot proceed.", token_str);
         }
     }
 
