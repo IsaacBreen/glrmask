@@ -626,7 +626,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
                 println!("  Matched: '{}' (ID {})", String::from_utf8_lossy(matched_bytes), token_id);
                 if matched_bytes != expected_token_bytes_ref {
                     panic!(
-                        "Tokenizer mismatch. Expected to match token string '{:?}', but VocabPrefixTree matched '{:?}' (ID {}). Remaining text: {:?}",
+                        "Tokenizer mismatch. Expected to match token string {:?}, but VocabPrefixTree matched {:?} (ID {}). Remaining text: {:?}",
                         String::from_utf8_lossy(expected_token_bytes_ref),
                         String::from_utf8_lossy(matched_bytes),
                         token_id,
@@ -641,7 +641,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
                 // If "" is a valid token and could be matched, this branch might not be hit if find_longest_prefix_token returns it.
                 // However, for this specific sequence, we expect non-empty matches.
                 // If an empty token was matched here, it would mean `expected_token_bytes_ref` was empty, which is not the case for this test.
-                panic!("Failed to tokenize with VocabPrefixTree. Expected to match token string '{:?}', but no prefix token found. Remaining text: {:?}",
+                panic!("Failed to tokenize with VocabPrefixTree. Expected to match token string {:?}, but no prefix token found. Remaining text: {:?}",
                     String::from_utf8_lossy(expected_token_bytes_ref), // This will be non-empty
                     String::from_utf8_lossy(text_to_process)
                 );
