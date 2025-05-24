@@ -3,7 +3,7 @@ local_system:
     - src/constraint.rs
     - src/datastructures/vocab_prefix_tree.rs
     - src/test_constraint.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/datastructures/vocab_prefix_tree.rs: |+
@@ -10403,5 +10403,634 @@ messages:
       --- Applying Changes ---
       Successfully replaced file: src/test_constraint.rs
       Successfully replaced file: src/datastructures/vocab_prefix_tree.rs
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/datastructures/vocab_prefix_tree.rs since previous turn:
+      ```diff
+      --- original version of src/datastructures/vocab_prefix_tree.rs+++ current version of src/datastructures/vocab_prefix_tree.rs@@ -357,6 +357,74 @@         }
+           }
+       
+      +    /// Finds the longest token in the tree that is a prefix of the given `bytes`.
+      +    ///
+      +    /// Returns `Some((token_id, matched_prefix_bytes))` if a match is found.
+      +    /// The `matched_prefix_bytes` is a slice of the token's full byte sequence stored in the tree.
+      +    ///
+      +    /// If the input `bytes` is empty:
+      +    ///  - If the empty string `""` is a token in the tree, it returns `Some((empty_token_id, &[]))`.
+      +    ///  - Otherwise, it returns `None`.
+      +    ///
+      +    /// If the input `bytes` is not empty:
+      +    ///  - It searches for the longest token that is a prefix of `bytes`.
+      +    ///  - If the empty string `""` is a token and no non-empty token prefix is found,
+      +    ///    it will return `Some((empty_token_id, &[]))`.
+      +    ///  - If no token (including potentially the empty string) is a prefix, it returns `None`.
+      +    pub fn find_longest_prefix_token<'s>(&'s self, bytes: &[u8]) -> Option<(usize, &'s [u8])> {
+      +        let mut longest_match_info: Option<(usize, &'s [u8])> = None;
+      +        let mut current_node: &'s VocabPrefixTreeNode = &self.root;
+      +
+      +        // Handle empty string token possibility upfront.
+      +        // If it exists, it's a candidate for the longest prefix.
+      +        if self.has_empty_string_token {
+      +            longest_match_info = Some((self.root.token_id(), self.root.prefix())); // prefix is &[]
+      +        }
+      +
+      +        // If the input `bytes` itself is empty, the only possible match is the empty string token (if it exists).
+      +        if bytes.is_empty() {
+      +            return longest_match_info;
+      +        }
+      +
+      +        let mut remaining_bytes = bytes;
+      +
+      +        // Traverse the tree along the path defined by the input `bytes`.
+      +        // Every node landed on is a token, and thus a candidate for the longest prefix match.
+      +        loop {
+      +            let mut found_match_in_children = false;
+      +            for (edge_label, child_node) in current_node.children() {
+      +                if remaining_bytes.starts_with(edge_label) {
+      +                    // Descend to the child node.
+      +                    current_node = child_node;
+      +                    remaining_bytes = &remaining_bytes[edge_label.len()..];
+      +
+      +                    // This child_node represents a token. Its full prefix is `current_node.prefix()`.
+      +                    // This token is a prefix of the original `bytes` input.
+      +                    // Update longest_match_info as this is a longer or equally long (but later found) prefix.
+      +                    longest_match_info = Some((current_node.token_id(), current_node.prefix()));
+      +
+      +                    found_match_in_children = true;
+      +                    break; // Continue traversal from the new current_node.
+      +                }
+      +            }
+      +
+      +            if !found_match_in_children {
+      +                // No child edge matches the start of the remaining_bytes.
+      +                // Cannot extend the prefix further. The current longest_match_info is the result.
+      +                break;
+      +            }
+      +
+      +            if remaining_bytes.is_empty() {
+      +                // All input bytes have been consumed along tree edges.
+      +                // The token corresponding to the current_node is the longest possible match.
+      +                // (This was already updated when we landed on current_node).
+      +                break;
+      +            }
+      +        }
+      +        longest_match_info
+      +    }
+      +
+      +
+           /// Returns `true` if the empty string `""` was provided as a token
+           /// during the build process, `false` otherwise.
+           pub fn has_empty_string_token(&self) -> bool {
+      @@ -856,5 +924,81 @@         assert_eq!(node_banana_ref.prefix_length, 6); // "banana"
+               assert!(node_b_children_iter.next().is_none());
+           }
+      +
+      +    #[test]
+      +    fn test_find_longest_prefix_token() {
+      +        let tokens = vec![
+      +            (1, b("a")),
+      +            (10, b("ape")),
+      +            (11, b("apple")),
+      +            (12, b("apply")),
+      +            (20, b("banana")),
+      +            (99, b("")), // Empty string token
+      +        ];
+      +        let tree = VocabPrefixTree::build(&tokens);
+      +
+      +        // Test case 1: Exact match for "apple"
+      +        assert_eq!(tree.find_longest_prefix_token(b"apple"), Some((11, &b("apple")[..])));
+      +
+      +        // Test case 2: Input is longer than any token, "apple" is longest prefix
+      +        assert_eq!(tree.find_longest_prefix_token(b"applepie"), Some((11, &b("apple")[..])));
+      +
+      +        // Test case 3: Input is "apply", exact match
+      +        assert_eq!(tree.find_longest_prefix_token(b"apply"), Some((12, &b("apply")[..])));
+      +
+      +        // Test case 4: Input is "ape", exact match
+      +        assert_eq!(tree.find_longest_prefix_token(b"ape"), Some((10, &b("ape")[..])));
+      +
+      +        // Test case 5: Input is "ap", "a" is the longest prefix token
+      +        assert_eq!(tree.find_longest_prefix_token(b"ap"), Some((1, &b("a")[..])));
+      +
+      +        // Test case 6: Input is "application", "apply" is not a prefix, "a" is.
+      +        assert_eq!(tree.find_longest_prefix_token(b"application"), Some((1, &b("a")[..])));
+      +
+      +
+      +        // Test case 7: Input is "banana", exact match
+      +        assert_eq!(tree.find_longest_prefix_token(&b("banana")), Some((20, &b("banana")[..])));
+      +
+      +        // Test case 8: Input is "bananatart", "banana" is longest prefix
+      +        assert_eq!(tree.find_longest_prefix_token(&b("bananatart")), Some((20, &b("banana")[..])));
+      +
+      +        // Test case 9: Input is "b", no token starts with "b" other than "banana"
+      +        // Since "" is a token, it should be returned.
+      +        assert_eq!(tree.find_longest_prefix_token(b"b"), Some((99, &b("")[..])));
+      +
+      +
+      +        // Test case 10: Input is "c", no token starts with "c". "" is a token.
+      +        assert_eq!(tree.find_longest_prefix_token(b"c"), Some((99, &b("")[..])));
+      +
+      +        // Test case 11: Input is "", "" is a token.
+      +        assert_eq!(tree.find_longest_prefix_token(b""), Some((99, &b("")[..])));
+      +
+      +        // Test case 12: Tree without empty string token
+      +        let tokens_no_empty = vec![
+      +            (1, b("a")),
+      +            (11, b("apple")),
+      +        ];
+      +        let tree_no_empty = VocabPrefixTree::build(&tokens_no_empty);
+      +
+      +        assert_eq!(tree_no_empty.find_longest_prefix_token(b"applepie"), Some((11, &b("apple")[..])));
+      +        assert_eq!(tree_no_empty.find_longest_prefix_token(b"ax"), Some((1, &b("a")[..])));
+      +        // Input "b", no token is a prefix, and "" is not a token.
+      +        assert_eq!(tree_no_empty.find_longest_prefix_token(b"b"), None);
+      +        // Input "", "" is not a token.
+      +        assert_eq!(tree_no_empty.find_longest_prefix_token(b""), None);
+      +
+      +        // Test case 13: Only empty string token
+      +        let tokens_only_empty = vec![(55, b(""))];
+      +        let tree_only_empty = VocabPrefixTree::build(&tokens_only_empty);
+      +        assert!(tree_only_empty.has_empty_string_token());
+      +        assert_eq!(tree_only_empty.find_longest_prefix_token(b"abc"), Some((55, &b("")[..])));
+      +        assert_eq!(tree_only_empty.find_longest_prefix_token(b""), Some((55, &b("")[..])));
+      +
+      +        // Test case 14: Empty tree
+      +        let empty_tokens: Vec<(usize, Vec<u8>)> = vec![];
+      +        let tree_empty = VocabPrefixTree::build(&empty_tokens);
+      +        assert!(!tree_empty.has_empty_string_token());
+      +        assert_eq!(tree_empty.find_longest_prefix_token(b"abc"), None);
+      +        assert_eq!(tree_empty.find_longest_prefix_token(b""), None);
+      +    }
+       }
+      -
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/test_constraint.rs since previous turn:
+      ```diff
+      --- original version of src/test_constraint.rs+++ current version of src/test_constraint.rs@@ -21,6 +21,7 @@ // reqwest will be used if the file isn't cached, ensure it's in dev-dependencies
+       use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+       use crate::types::TerminalID;
+      +use crate::datastructures::vocab_prefix_tree::VocabPrefixTree; // Added for tokenization
+       
+       // Use concrete types for merge tests
+       type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;
+      @@ -538,24 +539,14 @@ #[test]
+       fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
+           // 1. Define file path for the serialized CompiledGrammar
+      -    // Assuming the file is at `src/serialized_compiled_grammar.json` as per your setup.
+           let serialized_grammar_path = "src/serialized_compiled_grammar.json";
+      -    // For robustness if tests are run from different directories, you might consider:
+      -    // let cargo_manifest_dir = std::env::var("CARGO_MANIFEST_DIR")?;
+      -    // let serialized_grammar_path = Path::new(&cargo_manifest_dir).join("src/serialized_compiled_grammar.json");
+      -
+      -
+      -    // 2. Load CompiledGrammar from the JSON file
+      +
+           println!("Loading CompiledGrammar from: {}", serialized_grammar_path);
+           let json_string = match fs::read_to_string(serialized_grammar_path) {
+               Ok(s) => s,
+               Err(e) => {
+                   eprintln!("Failed to read serialized grammar file '{}': {}", serialized_grammar_path, e);
+                   eprintln!("Please ensure the file exists and is readable. Skipping this test.");
+      -            // If the file is critical and must exist, you might want to panic or return Err.
+      -            // For now, we'll print an error and let the test pass if the file is missing,
+      -            // as per "trust me it's there" but to avoid CI failures if it's not committed.
+      -            // To make it a hard requirement, replace the following with `return Err(e.into());`
+                   return Ok(());
+               }
+           };
+      @@ -567,18 +558,16 @@     // 3. Load GPT-2 Vocabulary
+           println!("Loading GPT-2 vocabulary...");
+           let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
+      -    let cache_dir = Path::new(".cache/test_vocabs"); // Consistent with other tests
+      +    let cache_dir = Path::new(".cache/test_vocabs"); 
+           let vocab_file_name = "gpt2_vocab.json";
+           let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
+       
+           let mut llm_token_map = LLMTokenMap::new();
+           let mut max_original_llm_token_id_val: usize = 0;
+       
+      -    // Using a sample of the GPT-2 vocabulary to keep the test reasonably fast.
+      -    // Adjust `prop` as needed. 0.01 means 1% of the vocab.
+           let prop = 1.0;
+           let total_tokens = gpt2_raw_vocab.len();
+      -    let sample_size = ((total_tokens as f64 * prop) as usize).max(1); // Ensure at least 1 token
+      +    let sample_size = ((total_tokens as f64 * prop) as usize).max(1);
+           println!("Sampling {} out of {} GPT-2 tokens for the test.", sample_size, total_tokens);
+       
+           for (token_str, id_val_u32) in gpt2_raw_vocab.into_iter().take(sample_size) {
+      @@ -591,53 +580,104 @@ 
+           if llm_token_map.is_empty() {
+               println!("Warning: LLM token map is empty after sampling. Max original ID will be 0.");
+      -        // max_original_llm_token_id_val will remain 0, which is fine.
+           }
+           println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
+       
+           // 4. Construct GrammarConstraint
+      -    // The `_eof_llm_token_id` parameter for `from_compiled_grammar` is a placeholder.
+      -    // The Python binding often passes 0.
+           let dummy_eof_placeholder = 0;
+      -
+           println!("Constructing GrammarConstraint...");
+           let grammar_constraint = GrammarConstraint::from_compiled_grammar(
+               compiled_grammar,
+      -        llm_token_map.clone(), // Pass the map with original LLMTokenIDs
+      +        llm_token_map.clone(), 
+               dummy_eof_placeholder,
+      -        max_original_llm_token_id_val // Max *original* ID from the llm_token_map
+      +        max_original_llm_token_id_val 
+           );
+           println!("GrammarConstraint constructed successfully.");
+       
+      -    // 5. Basic Interaction with the GrammarConstraintState
+      -    let mut constraint_state = grammar_constraint.init();
+      -    constraint_state.step_with_all_llm_tokens();
+      -    let mask = constraint_state.get_mask();
+      -
+      -    println!("Initial mask obtained ({} allowed LLM tokens).", mask.iter_bits().count());
+      -
+      -    // --- BEGIN ADDED CODE FOR SEQUENCE TESTING ---
+      -
+      +    // --- BEGIN MODIFIED CODE FOR SEQUENCE TESTING ---
+      +
+      +    // Build a VocabPrefixTree from the LLM token map for tokenization
+      +    let vocab_tokens_for_tree: Vec<(usize, Vec<u8>)> = grammar_constraint.llm_token_map
+      +        .iter()
+      +        .map(|(bytes, llm_id)| (llm_id.0, bytes.clone()))
+      +        .collect();
+      +    let tokenizer_vocab_tree = VocabPrefixTree::build(&vocab_tokens_for_tree);
+      +
+      +    // The full text to tokenize and the expected sequence of token strings
+      +    let full_text_to_tokenize = "from typing import Any";
+           let test_token_sequence_strs = vec!["from", " typing", " import", " Any"];
+      -    let mut test_token_sequence_ids = Vec::new();
+      -
+      -    println!("\nLooking up LLMTokenIDs for the test sequence: {:?}", test_token_sequence_strs);
+      +
+      +    // Manually get expected IDs for verification (original way)
+      +    let mut expected_token_ids_manual = Vec::new();
+           for token_str in &test_token_sequence_strs {
+               let token_bytes = token_str.as_bytes().to_vec();
+               if let Some(llm_id) = grammar_constraint.llm_token_map.get_by_left(&token_bytes) {
+      -            test_token_sequence_ids.push(*llm_id);
+      -            println!("  Found: '{}' -> LLMTokenID({})", token_str, llm_id.0);
+      +            expected_token_ids_manual.push(*llm_id);
+               } else {
+      -            // If a token is not found, this test setup is problematic.
+      -            // For this specific sequence and GPT-2, they should exist.
+      -            // If not, the test might need to use a smaller, guaranteed vocab subset or skip.
+      -            panic!("LLM token '{}' not found in the loaded vocabulary. Test cannot proceed.", token_str);
+      +            panic!("Expected LLM token '{}' not found in the loaded vocabulary for manual ID list. Test setup error.", token_str);
+               }
+           }
+      -
+      -    println!("\nStepping through the token sequence:");
+      +    
+      +    // Tokenize the full_text_to_tokenize using the VocabPrefixTree
+      +    let mut generated_token_ids = Vec::new();
+      +    let mut text_to_process = full_text_to_tokenize.as_bytes();
+      +    let mut expected_token_idx_in_sequence = 0;
+      +
+      +    println!("\nTokenizing '{}' using VocabPrefixTree:", full_text_to_tokenize);
+      +    while !text_to_process.is_empty() {
+      +        if expected_token_idx_in_sequence >= test_token_sequence_strs.len() {
+      +            panic!("Tokenized more tokens than expected. Remaining text: {:?}", String::from_utf8_lossy(text_to_process));
+      +        }
+      +        let expected_token_str_ref = test_token_sequence_strs[expected_token_idx_in_sequence];
+      +        let expected_token_bytes_ref = expected_token_str_ref.as_bytes();
+      +
+      +        match tokenizer_vocab_tree.find_longest_prefix_token(text_to_process) {
+      +            Some((token_id, matched_bytes)) => {
+      +                println!("  Matched: '{}' (ID {})", String::from_utf8_lossy(matched_bytes), token_id);
+      +                if matched_bytes != expected_token_bytes_ref {
+      +                    panic!(
+      +                        "Tokenizer mismatch. Expected to match token string '{:?}', but VocabPrefixTree matched '{:?}' (ID {}). Remaining text: {:?}",
+      +                        String::from_utf8_lossy(expected_token_bytes_ref),
+      +                        String::from_utf8_lossy(matched_bytes),
+      +                        token_id,
+      +                        String::from_utf8_lossy(text_to_process)
+      +                    );
+      +                }
+      +                generated_token_ids.push(LLMTokenID(token_id));
+      +                text_to_process = &text_to_process[matched_bytes.len()..];
+      +                expected_token_idx_in_sequence += 1;
+      +            }
+      +            None => {
+      +                panic!("Failed to tokenize with VocabPrefixTree. Expected to match token string '{:?}', but no prefix token found. Remaining text: {:?}",
+      +                    String::from_utf8_lossy(expected_token_bytes_ref),
+      +                    String::from_utf8_lossy(text_to_process)
+      +                );
+      +            }
+      +        }
+      +    }
+      +
+      +    if expected_token_idx_in_sequence < test_token_sequence_strs.len() {
+      +        panic!("Tokenization with VocabPrefixTree ended prematurely. Expected more tokens: {:?}", &test_token_sequence_strs[expected_token_idx_in_sequence..]);
+      +    }
+      +    
+      +    // Assert that the generated sequence of IDs matches the manually obtained one
+      +    assert_eq!(generated_token_ids, expected_token_ids_manual, "Tokenized ID sequence from VocabPrefixTree does not match manually expected ID sequence.");
+      +    println!("Successfully tokenized using VocabPrefixTree, IDs match manual lookup.");
+      +
+      +    // Now use `generated_token_ids` (or `expected_token_ids_manual` as they are asserted equal) for stepping the constraint state.
+      +    let test_token_sequence_ids = generated_token_ids; // Use the dynamically generated IDs
+      +
+      +    // 5. Basic Interaction with the GrammarConstraintState
+      +    let mut constraint_state = grammar_constraint.init();
+      +    // Initial step to populate possibilities
+      +    constraint_state.step_with_all_llm_tokens(); 
+      +    let initial_mask = constraint_state.get_mask();
+      +    println!("\nInitial mask obtained ({} allowed LLM tokens).", initial_mask.iter_bits().count());
+      +
+      +
+      +    println!("\nStepping through the token sequence with GrammarConstraint:");
+           for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
+      -        let current_token_str = test_token_sequence_strs[i];
+      +        let current_token_str = test_token_sequence_strs[i]; // For logging
+               println!(
+                   "Processing token {}/{}: '{}' (LLMTokenID({}))",
+                   i + 1,
+      @@ -646,17 +686,15 @@             llm_token_id.0
+               );
+       
+      -        // 3. Assert that the state is active (before step)
+               assert!(
+                   constraint_state.is_active(),
+                   "Constraint state should be active before processing token {} ('{}')",
+                   i + 1, current_token_str
+               );
+       
+      -        // 4. Step it with all LLM tokens (to update internal possibilities based on current GSS)
+      +        // Before committing a token, the mask should allow it.
+      +        // step_with_all_llm_tokens() is called to update based on current GSS before getting the mask.
+               constraint_state.step_with_all_llm_tokens();
+      -
+      -        // 5. Get the mask
+               let current_mask = constraint_state.get_mask();
+               println!(
+                   "  Mask (after step_with_all_llm_tokens) allows {} tokens. Checking for current token LLMTokenID({})...",
+      @@ -664,7 +702,6 @@             llm_token_id.0
+               );
+       
+      -        // 6. Assert that the next LLM token is in the mask
+               assert!(
+                   current_mask.contains(llm_token_id.0),
+                   "Expected LLMTokenID({}) for '{}' to be in the mask. Mask (first 100 if many): {:?}",
+      @@ -672,12 +709,9 @@         );
+               println!("  LLMTokenID({}) for '{}' is in the mask.", llm_token_id.0, current_token_str);
+       
+      -        // 7. Commit the next LLM token
+               constraint_state.commit(llm_token_id);
+               println!("  Committed LLMTokenID({}) for '{}'.", llm_token_id.0, current_token_str);
+       
+      -        // 8. Assert that the state is active (after commit)
+      -        // This is important because a commit might lead to no valid future states.
+               assert!(
+                   constraint_state.is_active(),
+                   "Constraint state should be active after committing token {} ('{}')",
+      @@ -686,18 +720,14 @@         println!("  Constraint state is active after commit.");
+           }
+       
+      -    println!("\nFinished processing token sequence.");
+      -    // Final assertion: after the whole sequence, the state should still be active
+      -    // if the sequence is valid and doesn't lead to a dead end before its completion.
+      +    println!("\nFinished processing token sequence with GrammarConstraint.");
+           assert!(
+               constraint_state.is_active(),
+               "Constraint state should still be active after processing the entire sequence."
+           );
+           println!("Constraint state is active after the full sequence.");
+       
+      -    // --- END ADDED CODE FOR SEQUENCE TESTING ---
+      -
+      +    // --- END MODIFIED CODE FOR SEQUENCE TESTING ---
+       
+           Ok(())
+       }
+      -
+
+      ```
+    metadata:
+  - user: Remove the manual token IDs from test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab.
+      Rewrite the full code for that test.
+    metadata:
+  - assistant: |-
+      Okay, I'll rewrite the `test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab` function in `src/test_constraint.rs` to remove the manual token ID lookup and rely solely on the `VocabPrefixTree` for tokenization.
+
+      Here's the full code for that specific test function:
+
+      ```rust 'src/test_constraint.rs'
+      #[test]
+      fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
+          // 1. Define file path for the serialized CompiledGrammar
+          let serialized_grammar_path = "src/serialized_compiled_grammar.json";
+
+          println!("Loading CompiledGrammar from: {}", serialized_grammar_path);
+          let json_string = match fs::read_to_string(serialized_grammar_path) {
+              Ok(s) => s,
+              Err(e) => {
+                  eprintln!("Failed to read serialized grammar file '{}': {}", serialized_grammar_path, e);
+                  eprintln!("Please ensure the file exists and is readable. Skipping this test.");
+                  return Ok(());
+              }
+          };
+
+          let json_node = JSONNode::from_json_string(&json_string)?;
+          let compiled_grammar = CompiledGrammar::from_json(json_node)?;
+          println!("Successfully loaded CompiledGrammar from JSON.");
+
+          // 3. Load GPT-2 Vocabulary
+          println!("Loading GPT-2 vocabulary...");
+          let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
+          let cache_dir = Path::new(".cache/test_vocabs"); 
+          let vocab_file_name = "gpt2_vocab.json";
+          let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
+
+          let mut llm_token_map = LLMTokenMap::new();
+          let mut max_original_llm_token_id_val: usize = 0;
+
+          let prop = 1.0;
+          let total_tokens = gpt2_raw_vocab.len();
+          let sample_size = ((total_tokens as f64 * prop) as usize).max(1);
+          println!("Sampling {} out of {} GPT-2 tokens for the test.", sample_size, total_tokens);
+
+          for (token_str, id_val_u32) in gpt2_raw_vocab.into_iter().take(sample_size) {
+              let id_val = id_val_u32 as usize;
+              llm_token_map.insert(token_str.into_bytes(), LLMTokenID(id_val));
+              if id_val > max_original_llm_token_id_val {
+                  max_original_llm_token_id_val = id_val;
+              }
+          }
+
+          if llm_token_map.is_empty() {
+              println!("Warning: LLM token map is empty after sampling. Max original ID will be 0.");
+          }
+          println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
+
+          // 4. Construct GrammarConstraint
+          let dummy_eof_placeholder = 0;
+          println!("Constructing GrammarConstraint...");
+          let grammar_constraint = GrammarConstraint::from_compiled_grammar(
+              compiled_grammar,
+              llm_token_map.clone(), 
+              dummy_eof_placeholder,
+              max_original_llm_token_id_val 
+          );
+          println!("GrammarConstraint constructed successfully.");
+
+          // --- BEGIN MODIFIED CODE FOR SEQUENCE TESTING ---
+
+          // Build a VocabPrefixTree from the LLM token map for tokenization
+          let vocab_tokens_for_tree: Vec<(usize, Vec<u8>)> = grammar_constraint.llm_token_map
+              .iter()
+              .map(|(bytes, llm_id)| (llm_id.0, bytes.clone()))
+              .collect();
+          let tokenizer_vocab_tree = VocabPrefixTree::build(&vocab_tokens_for_tree);
+
+          // The full text to tokenize and the expected sequence of token strings
+          let full_text_to_tokenize = "from typing import Any";
+          // test_token_sequence_strs is still needed to verify the tokenizer output and for logging.
+          let test_token_sequence_strs = vec!["from", " typing", " import", " Any"];
+          
+          // Tokenize the full_text_to_tokenize using the VocabPrefixTree
+          let mut generated_token_ids = Vec::new();
+          let mut text_to_process = full_text_to_tokenize.as_bytes();
+          let mut expected_token_idx_in_sequence = 0;
+
+          println!("\nTokenizing '{}' using VocabPrefixTree:", full_text_to_tokenize);
+          while !text_to_process.is_empty() {
+              if expected_token_idx_in_sequence >= test_token_sequence_strs.len() {
+                  panic!("Tokenized more tokens than expected. Remaining text: {:?}", String::from_utf8_lossy(text_to_process));
+              }
+              let expected_token_str_ref = test_token_sequence_strs[expected_token_idx_in_sequence];
+              let expected_token_bytes_ref = expected_token_str_ref.as_bytes();
+
+              match tokenizer_vocab_tree.find_longest_prefix_token(text_to_process) {
+                  Some((token_id, matched_bytes)) => {
+                      println!("  Matched: '{}' (ID {})", String::from_utf8_lossy(matched_bytes), token_id);
+                      if matched_bytes != expected_token_bytes_ref {
+                          panic!(
+                              "Tokenizer mismatch. Expected to match token string '{:?}', but VocabPrefixTree matched '{:?}' (ID {}). Remaining text: {:?}",
+                              String::from_utf8_lossy(expected_token_bytes_ref),
+                              String::from_utf8_lossy(matched_bytes),
+                              token_id,
+                              String::from_utf8_lossy(text_to_process)
+                          );
+                      }
+                      generated_token_ids.push(LLMTokenID(token_id));
+                      text_to_process = &text_to_process[matched_bytes.len()..];
+                      expected_token_idx_in_sequence += 1;
+                  }
+                  None => {
+                      // If "" is a valid token and could be matched, this branch might not be hit if find_longest_prefix_token returns it.
+                      // However, for this specific sequence, we expect non-empty matches.
+                      // If an empty token was matched here, it would mean `expected_token_bytes_ref` was empty, which is not the case for this test.
+                      panic!("Failed to tokenize with VocabPrefixTree. Expected to match token string '{:?}', but no prefix token found. Remaining text: {:?}",
+                          String::from_utf8_lossy(expected_token_bytes_ref), // This will be non-empty
+                          String::from_utf8_lossy(text_to_process)
+                      );
+                  }
+              }
+          }
+
+          if expected_token_idx_in_sequence < test_token_sequence_strs.len() {
+              panic!("Tokenization with VocabPrefixTree ended prematurely. Expected more tokens: {:?}", &test_token_sequence_strs[expected_token_idx_in_sequence..]);
+          }
+          
+          println!("Successfully tokenized using VocabPrefixTree.");
+
+          // Use the dynamically generated IDs for stepping the constraint state.
+          let test_token_sequence_ids = generated_token_ids; 
+
+          // 5. Basic Interaction with the GrammarConstraintState
+          let mut constraint_state = grammar_constraint.init();
+          // Initial step to populate possibilities
+          constraint_state.step_with_all_llm_tokens(); 
+          let initial_mask = constraint_state.get_mask();
+          println!("\nInitial mask obtained ({} allowed LLM tokens).", initial_mask.iter_bits().count());
+
+
+          println!("\nStepping through the token sequence with GrammarConstraint:");
+          for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
+              let current_token_str = test_token_sequence_strs[i]; // For logging
+              println!(
+                  "Processing token {}/{}: '{}' (LLMTokenID({}))",
+                  i + 1,
+                  test_token_sequence_ids.len(),
+                  current_token_str,
+                  llm_token_id.0
+              );
+
+              assert!(
+                  constraint_state.is_active(),
+                  "Constraint state should be active before processing token {} ('{}')",
+                  i + 1, current_token_str
+              );
+
+              // Before committing a token, the mask should allow it.
+              // step_with_all_llm_tokens() is called to update based on current GSS before getting the mask.
+              constraint_state.step_with_all_llm_tokens();
+              let current_mask = constraint_state.get_mask();
+              println!(
+                  "  Mask (after step_with_all_llm_tokens) allows {} tokens. Checking for current token LLMTokenID({})...",
+                  current_mask.iter_bits().count(),
+                  llm_token_id.0
+              );
+
+              assert!(
+                  current_mask.contains(llm_token_id.0),
+                  "Expected LLMTokenID({}) for '{}' to be in the mask. Mask (first 100 if many): {:?}",
+                  llm_token_id.0, current_token_str, current_mask.iter_bits().take(100).collect::<Vec<_>>()
+              );
+              println!("  LLMTokenID({}) for '{}' is in the mask.", llm_token_id.0, current_token_str);
+
+              constraint_state.commit(llm_token_id);
+              println!("  Committed LLMTokenID({}) for '{}'.", llm_token_id.0, current_token_str);
+
+              assert!(
+                  constraint_state.is_active(),
+                  "Constraint state should be active after committing token {} ('{}')",
+                  i + 1, current_token_str
+              );
+              println!("  Constraint state is active after commit.");
+          }
+
+          println!("\nFinished processing token sequence with GrammarConstraint.");
+          assert!(
+              constraint_state.is_active(),
+              "Constraint state should still be active after processing the entire sequence."
+          );
+          println!("Constraint state is active after the full sequence.");
+
+          // --- END MODIFIED CODE FOR SEQUENCE TESTING ---
+
+          Ok(())
+      }
+      ```
+    metadata:
+  - user: |
+      Using model 'gemini/gemini-2.5-flash-preview-05-20' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/test_constraint.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/test_constraint.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/test_constraint.rs
     metadata:
 ...

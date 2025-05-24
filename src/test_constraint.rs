@@ -605,18 +605,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     // The full text to tokenize and the expected sequence of token strings
     let full_text_to_tokenize = "from typing import Any";
+    // test_token_sequence_strs is still needed to verify the tokenizer output and for logging.
     let test_token_sequence_strs = vec!["from", " typing", " import", " Any"];
-
-    // Manually get expected IDs for verification (original way)
-    let mut expected_token_ids_manual = Vec::new();
-    for token_str in &test_token_sequence_strs {
-        let token_bytes = token_str.as_bytes().to_vec();
-        if let Some(llm_id) = grammar_constraint.llm_token_map.get_by_left(&token_bytes) {
-            expected_token_ids_manual.push(*llm_id);
-        } else {
-            panic!("Expected LLM token '{}' not found in the loaded vocabulary for manual ID list. Test setup error.", token_str);
-        }
-    }
     
     // Tokenize the full_text_to_tokenize using the VocabPrefixTree
     let mut generated_token_ids = Vec::new();
@@ -648,8 +638,11 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
                 expected_token_idx_in_sequence += 1;
             }
             None => {
+                // If "" is a valid token and could be matched, this branch might not be hit if find_longest_prefix_token returns it.
+                // However, for this specific sequence, we expect non-empty matches.
+                // If an empty token was matched here, it would mean `expected_token_bytes_ref` was empty, which is not the case for this test.
                 panic!("Failed to tokenize with VocabPrefixTree. Expected to match token string '{:?}', but no prefix token found. Remaining text: {:?}",
-                    String::from_utf8_lossy(expected_token_bytes_ref),
+                    String::from_utf8_lossy(expected_token_bytes_ref), // This will be non-empty
                     String::from_utf8_lossy(text_to_process)
                 );
             }
@@ -660,12 +653,10 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         panic!("Tokenization with VocabPrefixTree ended prematurely. Expected more tokens: {:?}", &test_token_sequence_strs[expected_token_idx_in_sequence..]);
     }
     
-    // Assert that the generated sequence of IDs matches the manually obtained one
-    assert_eq!(generated_token_ids, expected_token_ids_manual, "Tokenized ID sequence from VocabPrefixTree does not match manually expected ID sequence.");
-    println!("Successfully tokenized using VocabPrefixTree, IDs match manual lookup.");
+    println!("Successfully tokenized using VocabPrefixTree.");
 
-    // Now use `generated_token_ids` (or `expected_token_ids_manual` as they are asserted equal) for stepping the constraint state.
-    let test_token_sequence_ids = generated_token_ids; // Use the dynamically generated IDs
+    // Use the dynamically generated IDs for stepping the constraint state.
+    let test_token_sequence_ids = generated_token_ids; 
 
     // 5. Basic Interaction with the GrammarConstraintState
     let mut constraint_state = grammar_constraint.init();
