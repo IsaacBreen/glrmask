@@ -446,8 +446,7 @@ if __name__ == "__main__":
     print(f"Serialized CompiledGrammar JSON (length: {len(json_string)}):")
     # Indent it.
     json_string = json.dumps(json.loads(json_string), indent=4)
-    # Optionally print a snippet or save to file if too long
-    # print(textwrap.shorten(json_string, width=200, placeholder="..."))
+    grammar_path = Path(__file__).parent.parent / "src" / "serialized_compiled_grammar.json"
     with open("serialized_compiled_grammar.json", "w") as f:
         f.write(json_string)
 
