@@ -22,6 +22,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap};
 use crate::types::TerminalID;
 use crate::datastructures::vocab_prefix_tree::VocabPrefixTree; // Added for tokenization
+use std::time::Instant;
 
 // Use concrete types for merge tests
 type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;
@@ -675,7 +676,10 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             i + 1, current_token_str
         );
 
+        let step_start = Instant::now();
         constraint_state.step_with_all_llm_tokens();
+        let step_duration = step_start.elapsed();
+        println!("  step_with_all_llm_tokens took: {:?}", step_duration);
         let current_mask = constraint_state.get_mask();
         println!(
             "  Mask (after step_with_all_llm_tokens) allows {} tokens. Checking for current token LLMTokenID({})...",
@@ -690,7 +694,10 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         );
         println!("  LLMTokenID({}) for '{}' is in the mask.", llm_token_id.0, current_token_str);
 
+        let commit_start = Instant::now();
         constraint_state.commit(llm_token_id);
+        let commit_duration = commit_start.elapsed();
+        println!("  commit LLMTokenID({}) took: {:?}", llm_token_id.0, commit_duration);
         println!("  Committed LLMTokenID({}) for '{}'.", llm_token_id.0, current_token_str);
 
         assert!(
