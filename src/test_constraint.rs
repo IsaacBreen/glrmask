@@ -558,7 +558,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // 3. Load GPT-2 Vocabulary
     println!("Loading GPT-2 vocabulary...");
     let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
-    let cache_dir = Path::new(".cache/test_vocabs"); 
+    let cache_dir = Path::new(".cache/test_vocabs");
     let vocab_file_name = "gpt2_vocab.json";
     let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
 
@@ -572,7 +572,10 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     for (token_str, id_val_u32) in gpt2_raw_vocab.into_iter().take(sample_size) {
         let id_val = id_val_u32 as usize;
-        llm_token_map.insert(token_str.into_bytes(), LLMTokenID(id_val));
+        // Replace 'Ġ' with ' '
+        let token_str = token_str.replace("Ġ", " ");
+        let token_bytes = token_str.as_bytes().to_vec();
+        llm_token_map.insert(token_bytes, LLMTokenID(id_val));
         if id_val > max_original_llm_token_id_val {
             max_original_llm_token_id_val = id_val;
         }
@@ -588,9 +591,9 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     println!("Constructing GrammarConstraint...");
     let grammar_constraint = GrammarConstraint::from_compiled_grammar(
         compiled_grammar,
-        llm_token_map.clone(), 
+        llm_token_map.clone(),
         dummy_eof_placeholder,
-        max_original_llm_token_id_val 
+        max_original_llm_token_id_val
     );
     println!("GrammarConstraint constructed successfully.");
 
@@ -605,23 +608,23 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     // The full text to tokenize.
     let full_text_to_tokenize = "from typing import Any";
-    
+
     // Tokenize the full_text_to_tokenize using the VocabPrefixTree
     let mut test_token_sequence_ids = Vec::new();
     // This list will store the actual string content of tokens as produced by the vocab tree, primarily for logging.
-    let mut tokenized_strs_for_logging = Vec::new(); 
+    let mut tokenized_strs_for_logging = Vec::new();
     let mut text_to_process = full_text_to_tokenize.as_bytes();
-    
+
     println!("\nTokenizing '{}' using VocabPrefixTree:", full_text_to_tokenize);
     while !text_to_process.is_empty() {
         match tokenizer_vocab_tree.find_longest_prefix_token(text_to_process) {
             Some((token_id, matched_bytes)) => {
                 let matched_str = String::from_utf8_lossy(matched_bytes).to_string();
                 println!("  Matched: '{}' (ID {})", matched_str, token_id);
-                
+
                 test_token_sequence_ids.push(LLMTokenID(token_id));
                 tokenized_strs_for_logging.push(matched_str); // Store for logging
-                
+
                 text_to_process = &text_to_process[matched_bytes.len()..];
             }
             None => {
@@ -636,7 +639,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             }
         }
     }
-    
+
     if test_token_sequence_ids.is_empty() && !full_text_to_tokenize.is_empty() {
         panic!("VocabPrefixTree failed to produce any tokens for the non-empty input string: '{}'. Check vocabulary content.", full_text_to_tokenize);
     }
@@ -650,14 +653,14 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // 5. Basic Interaction with the GrammarConstraintState
     let mut constraint_state = grammar_constraint.init();
     // Initial step to populate possibilities
-    constraint_state.step_with_all_llm_tokens(); 
+    constraint_state.step_with_all_llm_tokens();
     let initial_mask = constraint_state.get_mask();
     println!("\nInitial mask obtained ({} allowed LLM tokens).", initial_mask.iter_bits().count());
 
     println!("\nStepping through the token sequence with GrammarConstraint:");
     for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
         // Use tokenized_strs_for_logging for logging, as it corresponds to the llm_token_id
-        let current_token_str = &tokenized_strs_for_logging[i]; 
+        let current_token_str = &tokenized_strs_for_logging[i];
         println!(
             "Processing token {}/{}: '{}' (LLMTokenID({}))",
             i + 1,
