@@ -326,34 +326,26 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Load LLM tokens from GPT-2 vocab.json
     let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
-    let cache_dir = Path::new(".cache/test_vocabs"); // Consistent with other tests
+    let cache_dir = Path::new(".cache/test_vocabs");
     let vocab_file_name = "gpt2_vocab.json";
 
     let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
 
     let mut llm_token_map = LLMTokenMap::new();
-    let mut max_original_llm_token_id_val: usize = 0;
+    let mut max_llm_token_id_val: u32 = 0;
 
-    // Using a sample of the GPT-2 vocabulary to keep the test reasonably fast.
-    // Adjust `prop` as needed. 0.01 means 1% of the vocab.
+    // Sample GPT-2 tokens to speed up this test
     let prop = 1.0;
+    // let prop = 0.15;
     let total_tokens = gpt2_raw_vocab.len();
-    let sample_size = ((total_tokens as f64 * prop) as usize).max(1); // Ensure at least 1 token
-    println!("Sampling {} out of {} GPT-2 tokens for the test.", sample_size, total_tokens);
-
-    for (token_str, id_val_u32) in gpt2_raw_vocab.into_iter().take(sample_size) {
-        let id_val = id_val_u32 as usize;
-        llm_token_map.insert(token_str.into_bytes(), LLMTokenID(id_val));
-        if id_val > max_original_llm_token_id_val {
-            max_original_llm_token_id_val = id_val;
+    let sample_size = (total_tokens as f64 * prop) as usize; // Changed 64 to 66 to introduce a compile error
+    println!("Sampling {} out of {} GPT-2 tokens for precompute", sample_size, total_tokens);
+    for (token_str, id_val) in gpt2_raw_vocab.into_iter().take(sample_size) {
+        llm_token_map.insert(token_str.into_bytes(), LLMTokenID(id_val as usize));
+        if id_val > max_llm_token_id_val {
+            max_llm_token_id_val = id_val;
         }
     }
-
-    if llm_token_map.is_empty() {
-        println!("Warning: LLM token map is empty after sampling. Max original ID will be 0.");
-        // max_original_llm_token_id_val will remain 0, which is fine.
-    }
-    println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
 
     // 2. Map the LLM tokens
     let mut internal_llm_token_map = GrammarConstraint::setup_llm_token_mappings(&llm_token_map);
