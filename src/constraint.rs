@@ -1282,4 +1282,8 @@ impl<'a> GrammarConstraintState<'a> {
             println!("--- GLRParserState::step was not called in this GrammarConstraintState::step ---");
         }
     }
+
+    fn is_active(&self) -> bool {
+        !self.state.is_empty()
+    }
 }
