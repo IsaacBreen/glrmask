@@ -988,8 +988,20 @@ fn simplify_node_recursive<T: Clone + Ord + Hash + Debug, A: PathAccumulator + C
         return canonical_arc.clone();
     }
 
-    let mut canonical_predecessor_arcs: BTreeSet<Arc<GSSNode<T, A>>> = BTreeSet::new();
+    let mut predecessor_knitting_map: BTreeMap<T, Arc<GSSNode<T, A>>> = BTreeMap::new();
     for original_pred_arc in &original_node_arc.predecessors {
+        let original_pred_value = original_pred_arc.value.clone();
+        if let Some(knitted_predecessor_arc) = predecessor_knitting_map.get_mut(&original_pred_value) {
+            let knitted_predecessor_mut_ref = Arc::make_mut(knitted_predecessor_arc);
+            knitted_predecessor_mut_ref.merge(original_pred_arc.as_ref().clone());
+        } else {
+            predecessor_knitting_map.insert(original_pred_value, original_pred_arc.clone());
+        }
+    }
+    let knitted_predecessors: Vec<Arc<GSSNode<T, A>>> = predecessor_knitting_map.into_values().collect();
+
+    let mut canonical_predecessor_arcs: BTreeSet<Arc<GSSNode<T, A>>> = BTreeSet::new();
+    for original_pred_arc in &knitted_predecessors {
         let simplified_pred_arc = simplify_node_recursive(
             original_pred_arc,
             original_ptr_memo,
