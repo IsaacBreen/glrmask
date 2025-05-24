@@ -1283,7 +1283,7 @@ impl<'a> GrammarConstraintState<'a> {
         }
     }
 
-    fn is_active(&self) -> bool {
+    pub fn is_active(&self) -> bool {
         !self.state.is_empty()
     }
 }
