@@ -371,7 +371,8 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
 
         for parent_arc in parents { // parent_arc is Arc<GSSNode<ParseStateNodeContent, A>>
             let top_of_parent_value = parent_arc.value.clone(); // This is ParseStateNodeContent { state_id }
-            let goto_state_id = self.parser.stage_7_table[&top_of_parent_value.state_id].gotos[&nt];
+            // let goto_state_id = self.parser.stage_7_table[&top_of_parent_value.state_id].gotos[&nt];
+            let goto_state_id = *self.parser.stage_7_table.get(&top_of_parent_value.state_id).expect(format!("State {} not found in stage_7_table", top_of_parent_value.state_id.0).as_str()).gotos.get(&nt).expect(format!("Non-terminal {} not found in gotos", nt.0).as_str());
 
             // Calculate acc for the new GOTO state's GSS node
             // It's the parent's acc intersected with the accumulator from the node being reduced.
