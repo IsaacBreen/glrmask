@@ -603,9 +603,9 @@ impl<'r> Precomputer<'r> {
         }
 
         crate::debug!(2, "Starting precompute DFS");
-        crate::debug!(2, "Roots for each tokenizer state:");
+        crate::debug!(3, "Roots for each tokenizer state:");
         for (sid, root) in &self.roots {
-            crate::debug!(2, "  {}: {:p}", sid.0, Arc::as_ptr(root));
+            crate::debug!(3, "  {}: {:p}", sid.0, Arc::as_ptr(root));
         }
         self.dfs(&self.vocab.root, assoc);
         crate::debug!(2, "Finished precompute DFS");
