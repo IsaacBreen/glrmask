@@ -555,6 +555,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let json_node = JSONNode::from_json_string(&json_string)?;
     let compiled_grammar = CompiledGrammar::from_json(json_node)?;
     println!("Successfully loaded CompiledGrammar from JSON.");
+    println!("{}", compiled_grammar);
 
     // 3. Load GPT-2 Vocabulary
     println!("Loading GPT-2 vocabulary...");
