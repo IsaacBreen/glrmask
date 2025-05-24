@@ -393,7 +393,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
     /// Debug helper so the main `step` body stays short.
     pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
         const MAX: usize = 30;
-        const PANIC_THRESHOLD: usize = 1000;
+        const PANIC_THRESHOLD: usize = 100;
 
         let roots: Vec<_> = self.active_states.values().map(|s| s.stack.clone()).collect();
         let stats = gather_gss_stats(&roots);
@@ -460,8 +460,10 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
 
         // Initial population of todo:
         // States from active_states are roots of new reduction chains. Their visited set is initially empty.
-        for state_to_process in std::mem::take(&mut self.active_states).into_values() {
-            todo.push((state_to_process, HashSet::new()));
+        let nodes: Vec<_> = self.active_states.values().map(|s| s.stack.clone()).collect();
+        let simplified_states = simplify_gss_forest(&nodes);
+        for state_to_process in simplified_states {
+            todo.push((ParseState { stack: state_to_process }, HashSet::new()));
         }
         
         let mut next = BTreeMap::<ParseStateKey, ParseState<A>>::new();
