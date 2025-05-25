@@ -359,6 +359,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
             // let goto_state_id = self.parser.stage_7_table[&top_of_parent_value.state_id].gotos[&nt];
             // let goto_state_id = *self.parser.stage_7_table.get(&top_of_parent_value.state_id).expect(format!("State {} not found in stage_7_table", top_of_parent_value.state_id.0).as_str()).gotos.get(&nt).expect(format!("Non-terminal {} not found in gotos", nt.0).as_str());
             let goto_state_id = self.parser.stage_7_table.get(&top_of_parent_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", top_of_parent_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos", nt.0)), |state_id| Ok(*state_id))).unwrap();
+            crate::debug!(4, "      Popped to parent {:p} with edge value {:?}, goto state ID {}", Arc::as_ptr(&parent_arc), edge_value, goto_state_id.0);
 
             // Calculate acc for the new GOTO state's GSS node
             // It's the parent's acc intersected with the accumulator from the node being reduced.
@@ -519,6 +520,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
                             crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top.state_id.0, token_id.0, nts);
                             for (nt, _prod_ids) in nts {
                                 // Use stack_arc_for_operations
+                                crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
                                 for s_new_arc in self.pop_and_goto(&stack_arc_for_operations, *len, *nt) {
                                     // Add to worklist for current step, passing the cloned updated visited set.
                                     todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
