@@ -351,25 +351,26 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
     ) -> Vec<Arc<GSSNode<ParseStateEdgeContent, A>>> { // Returns list of new stack tops
         let cur_acc_from_reducible_node = &stack.acc; // Get it from the stack being reduced
 
-        let mut parents = stack.popn(len); // These are Arcs to nodes revealed after popping
+        let mut parent = Arc::new(stack.popn(len)); // These are Arcs to nodes revealed after popping
         let mut out = Vec::new();
+        crate::debug!(4, "Popped to parent {:p} with {} predecessors...", Arc::as_ptr(&parent), parent.predecessors_with_values().len());
 
-        for (parent_arc, edge_value) in parents.predecessors_with_values() { // parent_arc is Arc<GSSNode<ParseStateNodeContent, A>>
+        for (_, edge_value) in parent.predecessors_with_values() { // parent_arc is Arc<GSSNode<ParseStateNodeContent, A>>
             let top_of_parent_value = edge_value.clone(); // This is ParseStateNodeContent { state_id }
             // let goto_state_id = self.parser.stage_7_table[&top_of_parent_value.state_id].gotos[&nt];
             // let goto_state_id = *self.parser.stage_7_table.get(&top_of_parent_value.state_id).expect(format!("State {} not found in stage_7_table", top_of_parent_value.state_id.0).as_str()).gotos.get(&nt).expect(format!("Non-terminal {} not found in gotos", nt.0).as_str());
             let goto_state_id = self.parser.stage_7_table.get(&top_of_parent_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", top_of_parent_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos", nt.0)), |state_id| Ok(*state_id))).unwrap();
-            crate::debug!(4, "   Popped to parent {:p} with edge value {:?}, goto state ID {}", Arc::as_ptr(&parent_arc), edge_value, goto_state_id.0);
+            crate::debug!(4, " ...and edge value {:?}. Goto state ID: {}", edge_value, goto_state_id.0);
 
             // Calculate acc for the new GOTO state's GSS node
             // It's the parent's acc intersected with the accumulator from the node being reduced.
-            let new_acc_for_goto_child = parent_arc.acc().intersect(cur_acc_from_reducible_node); // Use parent_arc.acc()
+            let new_acc_for_goto_child = parent.acc().intersect(cur_acc_from_reducible_node); // Use parent_arc.acc()
 
             let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id };
 
             // Create the new GSSNode (child of parent_arc)
             // parent_arc.push will give it parent_arc.acc by default (via new_with_predecessors)
-            let mut new_gss_node_arc = Arc::new(parent_arc.push(goto_node_content));
+            let mut new_gss_node_arc = Arc::new(parent.push(goto_node_content));
             // Now, explicitly set its acc to the computed intersection
             Arc::make_mut(&mut new_gss_node_arc).acc = new_acc_for_goto_child;
 
