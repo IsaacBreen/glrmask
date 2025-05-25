@@ -382,37 +382,36 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
         const MAX: usize = 30;
         const PANIC_THRESHOLD: usize = 10000;
 
-        // let roots: Vec<_> = self.active_states.values().map(|s| s.stack.clone()).collect();
-        // let stats = gather_gss_stats(&roots);
-        // crate::debug!(3, "{} - token {} ({:?}) - – active: {}, nodes: {:?}",
-        //               phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0), self.active_states.len(), stats);
-        //
-        // let make_msg = |print_full_forest, max_nodes_to_print| {
-        //     if print_full_forest {
-        //         format!("GSS ({} nodes):\n{}", stats.unique_nodes,
-        //                 print_gss_forest(&roots, max_nodes_to_print))
-        //     } else {
-        //         // fall back to longest path printing
-        //         match find_longest_path(&roots) {
-        //             Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
-        //                                stats.unique_nodes,
-        //                                p.len(),
-        //                                p.iter().map(|n| n.value.state_id.0)
-        //                                     .map(|id| id.to_string())
-        //                                     .collect::<Vec<_>>()
-        //                                     .join(" → ")),
-        //             None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
-        //         }
-        //     }
-        // };
-        //
-        // if stats.unique_nodes > PANIC_THRESHOLD {
-        //     let msg = make_msg(true, usize::MAX);
-        //     panic!("GSS too big ({} nodes). {}", stats.unique_nodes, msg);
-        // }
-        //
-        // debug!(4, "{}", make_msg(stats.unique_nodes <= MAX, MAX));
-        // todo!()
+        let roots: Vec<_> = vec![self.active_state.stack.clone()];
+        let stats = gather_gss_stats(&roots);
+        crate::debug!(3, "{} - token {} ({:?}) - nodes: {:?}",
+                      phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0), stats);
+
+        let make_msg = |print_full_forest, max_nodes_to_print| {
+            if print_full_forest {
+                format!("GSS ({} nodes):\n{}", stats.unique_nodes,
+                        print_gss_forest(&roots, max_nodes_to_print))
+            } else {
+                // fall back to longest path printing
+                match find_longest_path(&self.active_state.stack) {
+                    Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
+                                       stats.unique_nodes,
+                                       p.len(),
+                                       p.iter().map(|(ec, n)| ec.state_id.0)
+                                            .map(|id| id.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join(" → ")),
+                    None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
+                }
+            }
+        };
+
+        if stats.unique_nodes > PANIC_THRESHOLD {
+            let msg = make_msg(true, usize::MAX);
+            panic!("GSS too big ({} nodes). {}", stats.unique_nodes, msg);
+        }
+
+        debug!(4, "{}", make_msg(stats.unique_nodes <= MAX, MAX));
     }
 
     pub fn parse(&mut self, input: &[TerminalID]) {
