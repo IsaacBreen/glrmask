@@ -84,6 +84,12 @@ impl HybridBitset {
         }
     }
 
+    pub fn max_ones() -> Self {
+        HybridBitset {
+            inner: RangeSetBlaze::from_iter([0..=usize::MAX]),
+        }
+    }
+
     /// Creates a HybridBitset from an iterator of indices.
     pub fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
         HybridBitset {

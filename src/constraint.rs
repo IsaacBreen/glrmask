@@ -85,8 +85,7 @@ impl Default for LLMTokenInfo {
         // The correct initialization in GrammarConstraint::init provides the ALL_ONES intersection.
         Self {
             active:       Default::default(), // Empty set
-            intersection: Default::default(), // Empty set (this should be ALL_ONES for identity_for_union)
-                                              // Requires HybridBitset::ones(capacity)
+            intersection: HybridBitset::max_ones(),
         }
     }
 }
@@ -1095,7 +1094,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         for (tokenizer_state_id, state_val) in &self.state { // Renamed state to state_val
             let mut cloned_state = state_val.clone(); // Use state_val
-            cloned_state.active_state.stack.acc.active &= llm_tokens;
+            Arc::make_mut(&mut cloned_state.active_state.stack).acc.active &= llm_tokens;
             tokenizer_state_id_to_parse_states.insert(*tokenizer_state_id, cloned_state);
         }
 
@@ -1135,8 +1134,8 @@ impl<'a> GrammarConstraintState<'a> {
                 crate::debug!(3, "Processing grammar node {:p} token {:?}", node_ptr, grammar_token_id_opt.map(|gtid| gtid.0)); // Use grammar_token_id_opt
                 let mut cloned_glr_parse_state = glr_parse_state.clone();
                 let current_active_tokens = cloned_glr_parse_state.active_state.stack.acc.active.clone();
-                cloned_glr_parse_state.active_state.stack.acc.intersection &= &current_active_tokens;
-                cloned_glr_parse_state.active_state.stack.acc.active &= edge_llm_tokens;
+                Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc.intersection &= &current_active_tokens;
+                Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc.active &= edge_llm_tokens;
 
                 if let Some(gtid) = grammar_token_id_opt { // Use grammar_token_id_opt
                     *step_counts.borrow_mut().entry(*gtid).or_insert(0) += 1;
@@ -1161,8 +1160,8 @@ impl<'a> GrammarConstraintState<'a> {
                 if let Some(clean_end) = &node.value.clean_end { // clean_end has internal IDs
                     let mut final_glr_parse_state = current_glr_parse_state.clone();
                     let current_active_tokens = final_glr_parse_state.active_state.stack.acc.active.clone();
-                    final_glr_parse_state.active_state.stack.acc.intersection &= &current_active_tokens;
-                    final_glr_parse_state.active_state.stack.acc.active &= clean_end; // clean_end is internal
+                    Arc::make_mut(&mut final_glr_parse_state.active_state.stack).acc.intersection &= &current_active_tokens;
+                    Arc::make_mut(&mut final_glr_parse_state.active_state.stack).acc.active &= clean_end; // clean_end is internal
 
                     crate::debug!(3, "At clean end state");
                     if final_glr_parse_state.is_ok() {
@@ -1185,8 +1184,8 @@ impl<'a> GrammarConstraintState<'a> {
                         for (tokenizer_state_id, llm_tokens_from_finalizer) in &precomputed_finalizer.content { // llm_tokens_from_finalizer are internal
                             let mut glr_parse_state_filtered = current_glr_parse_state.clone(); // Start from current_glr_parse_state for filtering
                             let current_active_tokens = glr_parse_state_filtered.active_state.stack.acc.active.clone();
-                            glr_parse_state_filtered.active_state.stack.acc.intersection &= &current_active_tokens;
-                            glr_parse_state_filtered.active_state.stack.acc.active &= llm_tokens_from_finalizer; // llm_tokens_from_finalizer are internal
+                            Arc::make_mut(&mut glr_parse_state_filtered.active_state.stack).acc.intersection &= &current_active_tokens;
+                            Arc::make_mut(&mut glr_parse_state_filtered.active_state.stack).acc.active &= llm_tokens_from_finalizer; // llm_tokens_from_finalizer are internal
 
                             crate::debug!(3, "Processing finalizer for token_state_id {:?}", tokenizer_state_id);
                             if glr_parse_state_filtered.is_ok() { // This is current_glr_parse_state filtered by finalizer's llm_tokens

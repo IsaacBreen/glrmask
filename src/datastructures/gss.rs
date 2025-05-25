@@ -75,6 +75,10 @@ impl<T: Ord + Hash, A: PathAccumulator> GSSNode<T, A> { // T needs Ord for BTree
         }
     }
 
+    pub fn new_default() -> Self {
+        Self::new(A::default())
+    }
+
     /// Creates a new GSSNode with specified predecessors and edge values.
     /// The accumulator `acc` is derived from the union of predecessor accumulators.
     pub fn new_with_predecessors(predecessors_with_values: BTreeSet<(Arc<Self>, T)>) -> Self {
@@ -100,7 +104,7 @@ impl<T: Ord + Hash, A: PathAccumulator> GSSNode<T, A> { // T needs Ord for BTree
     pub fn predecessors_with_values(&self) -> &BTreeSet<(Arc<Self>, T)> {
         &self.predecessors_with_values
     }
-    
+
     pub fn is_empty(&self) -> bool {
         self.predecessors_with_values.is_empty()
     }
@@ -280,29 +284,27 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> { // Added
         Self::new_with_predecessors(new_node_predecessors_with_values)
     }
 
-    pub fn pop(&self) -> Vec<Arc<Self>> {
-        self.predecessors_with_values.iter().map(|(p, _)| p.clone()).collect()
+    pub fn pop(&self) -> GSSNode<T, A> {
+        todo!()
     }
 
-    pub fn popn(&self, n: usize) -> Vec<Arc<Self>> {
+    pub fn popn(&self, n: usize) -> GSSNode<T, A> {
         if n == 0 {
              panic!("popn(0) on a non-Arc GSSNode is ambiguous. Consider calling on Arc<GSSNode> or using a different base case.");
-        }
-
-        let mut current_level_nodes: Vec<Arc<Self>> = self.pop();
-        for _depth in 1..n {
-            let mut next_level_nodes_map: HashMap<*const GSSNode<T,A>, Arc<Self>> = HashMap::new();
-            for node_arc in current_level_nodes {
-                for pred_arc in node_arc.pop() {
-                    next_level_nodes_map.insert(Arc::as_ptr(&pred_arc), pred_arc);
-                }
+        } else if n == 1 {
+            self.pop()
+        } else {
+            let popped = self.pop();
+            if popped.is_empty() {
+                return Self::new(A::default());
+            };
+            let mut result = GSSNode::new_default();
+            for (pred_arc, edge_val) in popped.predecessors_with_values() {
+                let pred_popped = pred_arc.popn(n - 1);
+                result.merge(pred_popped);
             }
-            current_level_nodes = next_level_nodes_map.into_values().collect();
-            if current_level_nodes.is_empty() {
-                break;
-            }
+            result
         }
-        current_level_nodes
     }
 
     pub fn acc(&self) -> &A {
@@ -432,7 +434,7 @@ pub trait GSSTrait<T: Clone + Hash, A: PathAccumulator> {
     // type Peek<'a> where A: 'a, Self: 'a;
     // fn peek(&self) -> Self::Peek<'_>;
     fn push(&self, edge_value: T) -> GSSNode<T, A> where T: Ord + Clone, A: Clone; // Added Clone for GSSNode::push(self_owned_clone)
-    fn pop(&self) -> GSSNode<T, A>;
+    fn pop(&self) -> GSSNode<T, A> where T: Ord + Clone, A: Clone; // Added Clone for popn's GSSNode::popn
     fn popn(&self, n: usize) -> GSSNode<T, A> where T: Ord + Clone, A: Clone; // Added Clone for popn's GSSNode::popn
 }
 
@@ -497,11 +499,11 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A>
     }
 
     fn pop(&self) -> GSSNode<T, A> {
-        self.as_ref().map(|node_arc| node_arc.pop()).unwrap_or_default()
+        self.as_ref().map(|node_arc| node_arc.pop()).unwrap_or_else(GSSNode::new_default)
     }
 
     fn popn(&self, n: usize) -> GSSNode<T, A> {
-        self.as_ref().map(|node_arc| node_arc.popn(n)).unwrap_or_default()
+        self.as_ref().map(|node_arc| node_arc.popn(n)).unwrap_or_else(GSSNode::new_default)
     }
 }
 
@@ -521,12 +523,13 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A>
             }
         }
     }
+
     fn pop(&self) -> GSSNode<T, A> {
-        self.as_ref().map(|node| node.pop()).unwrap_or_default()
+        self.as_ref().map(|node| node.pop()).unwrap_or_else(GSSNode::new_default)
     }
 
     fn popn(&self, n: usize) -> GSSNode<T, A> {
-        self.as_ref().map(|node| node.popn(n)).unwrap_or_default()
+        self.as_ref().map(|node| node.popn(n)).unwrap_or_else(GSSNode::new_default)
     }
 }
 

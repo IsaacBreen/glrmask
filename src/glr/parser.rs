@@ -488,7 +488,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
                     Some(Stage7ShiftsAndReduces::Shift(to)) => {
                         crate::debug!(4, "Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
                         // Use stack_arc_for_operations
-                        let new_parse_state = self.push_state(stack_arc_for_operations, *to);
+                        let new_parse_state = self.push_state(&stack_arc_for_operations, *to);
                         next.merge(new_parse_state);
                     }
 
@@ -499,7 +499,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
                          }) => {
                         crate::debug!(4, "Reduce from state {} via token {} to nonterminal {}", top.state_id.0, token_id.0, nt.0);
                         // Use stack_arc_for_operations
-                        for s_new_arc in self.pop_and_goto(stack_arc_for_operations, *len, *nt) {
+                        for s_new_arc in self.pop_and_goto(&stack_arc_for_operations, *len, *nt) {
                             // Add to worklist for current step, passing the cloned updated visited set.
                             todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
                         }
@@ -512,7 +512,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
                         if let Some(to) = shift {
                             crate::debug!(4, " Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
                             // Use stack_arc_for_operations
-                            let new_parse_state = self.push_state(stack_arc_for_operations, *to);
+                            let new_parse_state = self.push_state(&stack_arc_for_operations, *to);
                             next.merge(new_parse_state);
                         }
                         // every reduce alternative
@@ -520,7 +520,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
                             crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top.state_id.0, token_id.0, nts);
                             for (nt, _prod_ids) in nts {
                                 // Use stack_arc_for_operations
-                                for s_new_arc in self.pop_and_goto(stack_arc_for_operations, *len, *nt) {
+                                for s_new_arc in self.pop_and_goto(&stack_arc_for_operations, *len, *nt) {
                                     // Add to worklist for current step, passing the cloned updated visited set.
                                     todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
                                 }
@@ -533,7 +533,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
                         crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, top.state_id.0);
                         // The `state` is moved into not_found.
                         // not_found.insert_with(state.key(), state, |existing, new_s| existing.merge(new_s));
-                        not_found.merge(state);
+                        not_found.merge(state.clone());
                     },
                 }
             }
