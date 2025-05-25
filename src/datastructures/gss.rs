@@ -100,6 +100,10 @@ impl<T: Ord + Hash, A: PathAccumulator> GSSNode<T, A> { // T needs Ord for BTree
     pub fn predecessors_with_values(&self) -> &BTreeSet<(Arc<Self>, T)> {
         &self.predecessors_with_values
     }
+    
+    pub fn is_empty(&self) -> bool {
+        self.predecessors_with_values.is_empty()
+    }
 }
 
 // Methods involving canonicalization

@@ -1016,10 +1016,8 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&mut self) -> LLMTokenBV {
         let mut internal_mask = HybridBitset::new(); // This will be composed of internal IDs
         for (_tokenizer_state_id, glr_parser_state) in &self.state {
-            for active_state in glr_parser_state.active_state.values() {
-                // Access the acc field on the GSS node
-                internal_mask |= &active_state.stack.acc().active; // .active is already internal
-            }
+            // Access the acc field on the GSS node
+            internal_mask |= &glr_parser_state.active_state.stack.acc().active; // .active is already internal
         }
         self.parent.internal_bv_to_original(&internal_mask) // Convert back to original IDs
     }
@@ -1053,12 +1051,12 @@ impl<'a> GrammarConstraintState<'a> {
         // Convert original LLMTokenID to internal LLMTokenID for the closure
         let internal_llm_id_val = self.parent.original_id_to_internal(llm_token_id).unwrap().0;
 
-        let closure = |content: &ParseStateEdgeContent, t: &LLMTokenInfo| -> Option<(ParseStateEdgeContent, LLMTokenInfo, bool)> {
+        let closure = |t: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
             if t.active.contains(internal_llm_id_val) { // .active is internal, compare with internal ID
                 if t.intersection == all_true_set {
-                    Some((ParseStateEdgeContent { state_id: content.state_id }, all_true_token_info.clone(), false))
+                    Some((all_true_token_info.clone(), false))
                 } else {
-                    Some((ParseStateEdgeContent { state_id: content.state_id}, all_true_token_info.clone(), true))
+                    Some((all_true_token_info.clone(), true))
                 }
             } else { // Original token ID not found in mapping, so it cannot be active
                 None
@@ -1067,18 +1065,14 @@ impl<'a> GrammarConstraintState<'a> {
 
         let mut memo = HashMap::new();
         self.state.retain(|_tokenizer_state_id, glr_state| {
-            glr_state.active_state.retain(|_key, parse_state| {
-                // crate::debug!(4, "Pruning parse state {:?}", parse_state.key());
-                let maybe_new_node = prune_and_transform_recursive(&parse_state.stack, &closure, &mut memo);
-                // crate::debug!(4, "Pruned parse state {:?}. Got new node {:?}.", parse_state.key(), maybe_new_node);
-                if let Some(new_node) = maybe_new_node {
-                    parse_state.stack = new_node;
-                    true
-                } else {
-                    false
-                }
-            });
-            !glr_state.active_state.is_empty()
+            let parse_state = &mut glr_state.active_state;
+            // crate::debug!(4, "Pruning parse state {:?}", parse_state.key());
+            let maybe_new_node = prune_and_transform_recursive(&parse_state.stack, &closure, &mut memo);
+            // crate::debug!(4, "Pruned parse state {:?}. Got new node {:?}.", parse_state.key(), maybe_new_node);
+            if let Some(new_node) = maybe_new_node {
+                parse_state.stack = new_node;
+            }
+            !glr_state.active_state.stack.predecessors_with_values().is_empty()
         });
 
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
@@ -1101,9 +1095,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         for (tokenizer_state_id, state_val) in &self.state { // Renamed state to state_val
             let mut cloned_state = state_val.clone(); // Use state_val
-            for parse_state in cloned_state.active_state.values_mut() {
-                Arc::make_mut(&mut parse_state.stack).acc.active &= llm_tokens;
-            }
+            cloned_state.active_state.stack.acc.active &= llm_tokens;
             tokenizer_state_id_to_parse_states.insert(*tokenizer_state_id, cloned_state);
         }
 
@@ -1140,27 +1132,21 @@ impl<'a> GrammarConstraintState<'a> {
             initial_nodes_and_values,
             |glr_parse_state, grammar_token_id_opt, edge_llm_tokens, child_node| { // Renamed grammar_token_id to grammar_token_id_opt
                 let node_ptr = std::ptr::addr_of!(*child_node);
-                crate::debug!(3, "Processing grammar node {:p} token {:?} with {} active states", node_ptr, grammar_token_id_opt.map(|gtid| gtid.0), glr_parse_state.active_state.len()); // Use grammar_token_id_opt
+                crate::debug!(3, "Processing grammar node {:p} token {:?}", node_ptr, grammar_token_id_opt.map(|gtid| gtid.0)); // Use grammar_token_id_opt
                 let mut cloned_glr_parse_state = glr_parse_state.clone();
-                cloned_glr_parse_state.active_state.retain(|_key, parse_state| {
-                    let current_active_tokens = parse_state.stack.acc.active.clone();
-                    Arc::make_mut(&mut parse_state.stack).acc.intersection &= &current_active_tokens;
-                    Arc::make_mut(&mut parse_state.stack).acc.active &= edge_llm_tokens;
-                    // // TODO: delete this
-                    // if parse_state.stack.acc.active.is_empty() {
-                    //     crate::debug!(4, "Pruning parse state {:?} because it has no active tokens", parse_state.key());
-                    // }
-                    !parse_state.stack.acc.active.is_empty()
-                });
+                let current_active_tokens = cloned_glr_parse_state.active_state.stack.acc.active.clone();
+                cloned_glr_parse_state.active_state.stack.acc.intersection &= &current_active_tokens;
+                cloned_glr_parse_state.active_state.stack.acc.active &= edge_llm_tokens;
+
                 if let Some(gtid) = grammar_token_id_opt { // Use grammar_token_id_opt
                     *step_counts.borrow_mut().entry(*gtid).or_insert(0) += 1;
                 }
                 grammar_token_id_opt.map(|gtid| cloned_glr_parse_state.step(gtid)); // Use grammar_token_id_opt
-                if cloned_glr_parse_state.active_state.is_empty() {
+                if cloned_glr_parse_state.active_state.stack.is_empty() {
                     crate::debug!(3, "No active states after processing grammar token {:?}", grammar_token_id_opt.map(|gtid| gtid.0)); // Use grammar_token_id_opt
                     return None;
                 } else {
-                    crate::debug!(3, "Processed grammar token {:?}, {} active states.", grammar_token_id_opt.map(|gtid| gtid.0), cloned_glr_parse_state.active_state.len()); // Use grammar_token_id_opt
+                    crate::debug!(3, "Processed grammar token {:?}.", grammar_token_id_opt.map(|gtid| gtid.0)); // Use grammar_token_id_opt
                     Some(cloned_glr_parse_state)
                 }
             },
@@ -1169,19 +1155,15 @@ impl<'a> GrammarConstraintState<'a> {
             },
             |node, current_glr_parse_state| {
                 let mut active_llm_tokens = HybridBitset::new();
-                for parse_state in current_glr_parse_state.active_state.values() {
-                    active_llm_tokens |= &parse_state.stack.acc.active;
-                }
+                active_llm_tokens |= &current_glr_parse_state.active_state.stack.acc.active;
                 let node_ptr = std::ptr::addr_of!(*node);
-                crate::debug!(3, "Processing node {:p} with {} active states, {} LLM tokens, {} finalizers", node_ptr, current_glr_parse_state.active_state.len(), active_llm_tokens.len(), node.value.finalizers().len()); // Use .finalizers()
+                crate::debug!(3, "Processing node {:p}, {} LLM tokens, {} finalizers", node_ptr, active_llm_tokens.len(), node.value.finalizers().len()); // Use .finalizers()
                 if let Some(clean_end) = &node.value.clean_end { // clean_end has internal IDs
                     let mut final_glr_parse_state = current_glr_parse_state.clone();
-                    final_glr_parse_state.active_state.retain(|_key, parse_state| {
-                        let current_active_tokens = parse_state.stack.acc.active.clone();
-                        Arc::make_mut(&mut parse_state.stack).acc.intersection &= &current_active_tokens;
-                        Arc::make_mut(&mut parse_state.stack).acc.active &= clean_end; // clean_end is internal
-                        !parse_state.stack.acc.active.is_empty()
-                    });
+                    let current_active_tokens = final_glr_parse_state.active_state.stack.acc.active.clone();
+                    final_glr_parse_state.active_state.stack.acc.intersection &= &current_active_tokens;
+                    final_glr_parse_state.active_state.stack.acc.active &= clean_end; // clean_end is internal
+
                     crate::debug!(3, "At clean end state");
                     if final_glr_parse_state.is_ok() {
                         crate::debug!(3, "GLR parse state at clean end is OK");
@@ -1202,12 +1184,9 @@ impl<'a> GrammarConstraintState<'a> {
                         crate::debug!(3, "Semi-final GLR parse state is OK");
                         for (tokenizer_state_id, llm_tokens_from_finalizer) in &precomputed_finalizer.content { // llm_tokens_from_finalizer are internal
                             let mut glr_parse_state_filtered = current_glr_parse_state.clone(); // Start from current_glr_parse_state for filtering
-                            glr_parse_state_filtered.active_state.retain(|_key, parse_state| {
-                                let current_active_tokens = parse_state.stack.acc.active.clone();
-                                Arc::make_mut(&mut parse_state.stack).acc.intersection &= &current_active_tokens;
-                                Arc::make_mut(&mut parse_state.stack).acc.active &= llm_tokens_from_finalizer; // llm_tokens_from_finalizer are internal
-                                !parse_state.stack.acc.active.is_empty()
-                            });
+                            let current_active_tokens = glr_parse_state_filtered.active_state.stack.acc.active.clone();
+                            glr_parse_state_filtered.active_state.stack.acc.intersection &= &current_active_tokens;
+                            glr_parse_state_filtered.active_state.stack.acc.active &= llm_tokens_from_finalizer; // llm_tokens_from_finalizer are internal
 
                             crate::debug!(3, "Processing finalizer for token_state_id {:?}", tokenizer_state_id);
                             if glr_parse_state_filtered.is_ok() { // This is current_glr_parse_state filtered by finalizer's llm_tokens
@@ -1221,25 +1200,21 @@ impl<'a> GrammarConstraintState<'a> {
                         }
                     }
                 }
-                !current_glr_parse_state.active_state.is_empty()
+                !current_glr_parse_state.active_state.stack.is_empty()
             },
         );
 
         // Simplify the GSS forest
         let mut roots = Vec::new();
         for (_tokenizer_state_id, glr_state) in self.state.iter() { // Renamed tokenizer_state_id
-            for active_state in glr_state.active_state.values() {
-                let root = active_state.stack.clone();
-                roots.push(root);
-            }
+            let root = glr_state.active_state.stack.clone();
+            roots.push(root);
         }
         let mut i = 0;
         let simplified_roots = simplify_gss_forest(&roots);
         for (tokenizer_state_id, glr_state) in self.state.iter_mut() {
-            for active_state in glr_state.active_state.values_mut() {
-                active_state.stack = simplified_roots[i].clone();
-                i += 1;
-            }
+            glr_state.active_state.stack = simplified_roots[i].clone();
+            i += 1;
         }
 
         // Print each GSS
