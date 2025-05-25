@@ -360,7 +360,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
             // let goto_state_id = self.parser.stage_7_table[&top_of_parent_value.state_id].gotos[&nt];
             // let goto_state_id = *self.parser.stage_7_table.get(&top_of_parent_value.state_id).expect(format!("State {} not found in stage_7_table", top_of_parent_value.state_id.0).as_str()).gotos.get(&nt).expect(format!("Non-terminal {} not found in gotos", nt.0).as_str());
             let goto_state_id = self.parser.stage_7_table.get(&top_of_parent_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", top_of_parent_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos (processing predecessor {:?} with edge value {:?})", nt.0, parent, edge_value)), |state_id| Ok(*state_id))).unwrap();
-            crate::debug!(4, " ...and edge value {:?}. Goto state ID: {}", edge_value, goto_state_id.0);
+            crate::debug!(4, " ...and edge value {:?}, predecessor {:?}, goto state ID {}", edge_value, parent, goto_state_id.0);
 
             // Calculate acc for the new GOTO state's GSS node
             // It's the parent's acc intersected with the accumulator from the node being reduced.
