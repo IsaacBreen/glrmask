@@ -359,8 +359,8 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
             let top_of_parent_value = edge_value.clone(); // This is ParseStateNodeContent { state_id }
             // let goto_state_id = self.parser.stage_7_table[&top_of_parent_value.state_id].gotos[&nt];
             // let goto_state_id = *self.parser.stage_7_table.get(&top_of_parent_value.state_id).expect(format!("State {} not found in stage_7_table", top_of_parent_value.state_id.0).as_str()).gotos.get(&nt).expect(format!("Non-terminal {} not found in gotos", nt.0).as_str());
-            let goto_state_id = self.parser.stage_7_table.get(&top_of_parent_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", top_of_parent_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos (processing predecessor {:p} with edge value {:?})", nt.0, parent, edge_value.state_id)), |state_id| Ok(*state_id))).unwrap();
-            crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, parent, goto_state_id.0);
+            let goto_state_id = self.parser.stage_7_table.get(&top_of_parent_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", top_of_parent_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos (processing predecessor {:p} with edge value {:?})", nt.0, Arc::as_ptr(&parent), edge_value.state_id)), |state_id| Ok(*state_id))).unwrap();
+            crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&parent), goto_state_id.0);
 
             // Calculate acc for the new GOTO state's GSS node
             // It's the parent's acc intersected with the accumulator from the node being reduced.
@@ -464,14 +464,14 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
             // `state` is the current ParseState. `state.stack` is the Arc<GSSNode> for its stack top.
             // Check for cycle: if state.stack is already in visited_on_this_path for this reduction chain.
             if visited_on_this_path.contains(&state.stack) {
-                crate::debug!(2, "Cycle detected: GSSNode at {:p} encountered again in reduction path while processing token {:?}.", state.stack, token_id);
+                crate::debug!(2, "Cycle detected: GSSNode at {:p} encountered again in reduction path while processing token {:?}.", Arc::as_ptr(&state.stack), token_id);
                 // The `state` (which includes state.stack, the Arc that forms the cycle point) is moved into cycled_states.
                 // self.cycled_states.insert_with(state.key(), state, |existing, new_s| existing.merge(new_s));
                 // continue; // Don't process this state further down this cyclic path.
                 // Print the tree.
                 print_gss_forest(&[state.stack.clone()], usize::MAX);
                 // Panic
-                panic!("Cycle detected: GSSNode at {:p} encountered again in reduction path.", state.stack);
+                panic!("Cycle detected: GSSNode at {:p} encountered again in reduction path.", Arc::as_ptr(&state.stack));
             }
 
             // Add state.stack to the history for paths stemming from this node.
