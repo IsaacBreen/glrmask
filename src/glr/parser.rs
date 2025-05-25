@@ -412,7 +412,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
         // }
         //
         // debug!(4, "{}", make_msg(stats.unique_nodes <= MAX, MAX));
-        todo!()
+        // todo!()
     }
 
     pub fn parse(&mut self, input: &[TerminalID]) {
@@ -558,21 +558,13 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
 
     pub fn merge_with(&mut self, other: GLRParserState<A>) {
         assert!(std::ptr::eq(self.parser, other.parser));
-        // for (key, state) in other.active_state {
-        //     self.active_state.insert_with(key, state, |existing, new_s| existing.merge(new_s));
-        // }
-        // for (key, state) in other.action_not_found_states {
-        //     self.action_not_found_states.insert_with(key, state, |existing, new_s| existing.merge(new_s));
-        // }
-        // for (key, state) in other.cycled_states {
-        //     self.cycled_states.insert_with(key, state, |existing, new_s| existing.merge(new_s));
-        // }
-        todo!()
+        self.active_state.merge(other.active_state);
+        self.action_not_found_states.merge(other.action_not_found_states);
+        self.cycled_states.merge(other.cycled_states);
     }
 
     pub fn is_ok(&self) -> bool {
-        // !self.active_state.is_empty()
-        todo!()
+        !self.active_state.stack.is_empty()
     }
 }
 
@@ -586,27 +578,7 @@ impl<A: PathAccumulator> ParseState<A> { // Generic over Accumulator A
     /// Merges `other` into `self`. Assumes `self.key() == other.key()`.
     /// Merges the GSS structures and combines the `acc` value at the top node using `PathAccumulator::union`.
     pub fn merge(&mut self, other: ParseState<A>) {
-        // assert_eq!(self.key(), other.key());
-        //
-        // // Combine 'acc' values at the top node using 'union'
-        // let self_acc = self.stack.acc(); // Use acc() accessor
-        // let other_acc = other.stack.acc(); // Use acc() accessor
-        // let combined_acc = self_acc.union(other_acc);
-        //
-        // // Get mutable access to self.stack, potentially cloning if shared (Arc > 1)
-        // let mut mutable_stack = Arc::make_mut(&mut self.stack);
-        //
-        // // Update the 'acc' value in the mutable top node's content
-        // mutable_stack.acc = combined_acc;
-        //
-        // // Merge the parent structures using GSSNode's merge_unchecked.
-        // // merge_unchecked also unions the accs, which is redundant here.
-        // // Assuming merge_unchecked is updated to only merge structure when acc is handled externally:
-        // // mutable_stack.merge_structure_unchecked(Arc::try_unwrap(other.stack).unwrap_or_else(|arc| (*arc).clone()));
-        // // If merge_unchecked *does* union accs, the above combined_acc calculation and assignment is still correct
-        // // because it will union combined_acc with other.stack.acc, resulting in combined_acc | other.stack.acc = combined_acc | combined_acc = combined_acc.
-        // mutable_stack.merge_unchecked(Arc::try_unwrap(other.stack).unwrap_or_else(|arc| (*arc).clone()));
-        todo!()
+        Arc::make_mut(&mut self.stack).merge(Arc::unwrap_or_clone(other.stack));
     }
 }
 
