@@ -648,48 +648,82 @@ pub fn prune_and_transform_roots<T: Clone + Ord + Hash + Debug, A: PathAccumulat
         .collect()
 }
 
-fn find_longest_path_recursive<T, A: PathAccumulator>(
+// Helper recursive function for find_longest_path.
+// It computes the longest path consisting of (edge_value, node_reached_by_edge) pairs,
+// ending with `node_arc` being the node reached by the last edge in the path.
+// T: Edge value type, must be Cloneable (for path construction), Ord + Hash (GSSNode requirements).
+// A: PathAccumulator type.
+fn find_longest_path_ending_at_node_recursive<T: Clone + Ord + Hash, A: PathAccumulator>(
     node_arc: &Arc<GSSNode<T, A>>,
-    memo: &mut HashMap<*const GSSNode<T, A>, Vec<Arc<GSSNode<T, A>>>>,
+    memo: &mut HashMap<*const GSSNode<T, A>, Vec<(T, Arc<GSSNode<T, A>>)>>,
     visited_recursion: &mut HashSet<*const GSSNode<T, A>>,
-) -> Vec<Arc<GSSNode<T, A>>> {
+) -> Vec<(T, Arc<GSSNode<T, A>>)> {
     let node_ptr = Arc::as_ptr(node_arc);
 
     if let Some(cached_path) = memo.get(&node_ptr) {
         return cached_path.clone();
     }
     if !visited_recursion.insert(node_ptr) {
+        return Vec::new(); // Cycle detected, return empty path for this branch
+    }
+
+    // Base case: If node_arc has no predecessors, it's a "root" in the GSS structure.
+    // No edge leads to it, so the path of (edge, node) pairs ending here is empty.
+    if node_arc.predecessors_with_values.is_empty() {
+        visited_recursion.remove(&node_ptr);
+        memo.insert(node_ptr, Vec::new());
         return Vec::new();
     }
 
-    let mut longest_pred_path: Vec<Arc<GSSNode<T, A>>> = Vec::new();
-    if !node_arc.predecessors_with_values.is_empty() {
-        for (pred_arc, _edge_val) in &node_arc.predecessors_with_values {
-            let pred_path = find_longest_path_recursive(pred_arc, memo, visited_recursion);
-            if pred_path.len() > longest_pred_path.len() {
-                longest_pred_path = pred_path;
-            }
+    let mut longest_path_found: Vec<(T, Arc<GSSNode<T, A>>)> = Vec::new();
+
+    // Iterate over all predecessors to find the one that contributes to the longest path to current node_arc
+    for (pred_arc, edge_val_to_current_node) in &node_arc.predecessors_with_values {
+        let path_from_pred_recursive = find_longest_path_ending_at_node_recursive(
+            pred_arc,
+            memo,
+            visited_recursion,
+        );
+
+        // Construct the candidate path: path to predecessor + (edge_to_current, current_node)
+        let mut current_candidate_path = path_from_pred_recursive;
+        current_candidate_path.push((edge_val_to_current_node.clone(), node_arc.clone()));
+
+        if current_candidate_path.len() > longest_path_found.len() {
+            longest_path_found = current_candidate_path;
         }
     }
 
-    let mut current_path = longest_pred_path;
-    current_path.push(node_arc.clone());
-
-    memo.insert(node_ptr, current_path.clone());
+    memo.insert(node_ptr, longest_path_found.clone());
     visited_recursion.remove(&node_ptr);
-    current_path
+    longest_path_found
 }
 
-pub fn find_longest_path<T, A: PathAccumulator>(root: &GSSNode<T, A>) -> Option<Vec<(T, Arc<GSSNode<T, A>>)>> {
-    let mut memo: HashMap<*const GSSNode<T, A>, Vec<Arc<GSSNode<T, A>>>> = HashMap::new();
+/// Finds the longest path leading to the predecessors of the given `root_node`.
+/// The path is a sequence of (edge_value, node_reached_by_edge) tuples.
+/// The `root_node` itself is not part of the returned path.
+/// If `root_node` has no predecessors, or if all paths are empty, returns `None` or `Some(Vec::new())`.
+pub fn find_longest_path<T: Clone + Ord + Hash, A: PathAccumulator>(root_node: &GSSNode<T, A>) -> Option<Vec<(T, Arc<GSSNode<T, A>>)>> {
+    if root_node.predecessors_with_values.is_empty() {
+        return None; // No predecessors, so no path leading to it.
+    }
 
-    // for root_arc in roots { // Ensure all paths from all roots are explored
-    //     let mut visited_recursion = HashSet::new();
-    //     find_longest_path_recursive(root_arc, &mut memo, &mut visited_recursion);
-    // }
+    let mut memo: HashMap<*const GSSNode<T, A>, Vec<(T, Arc<GSSNode<T, A>>)>> = HashMap::new();
+    let mut longest_overall_path: Option<Vec<(T, Arc<GSSNode<T, A>>)>> = None;
 
-    // memo.into_values().max_by_key(|path| path.len())
-    todo!()
+    // Iterate over direct predecessors of root_node. The path we seek ends at one of these predecessors.
+    for (pred_arc, _edge_val_to_pred) in root_node.predecessors_with_values() {
+        let mut visited_recursion = HashSet::new(); // Fresh for each DFS traversal from a direct predecessor
+        let path_ending_at_pred = find_longest_path_ending_at_node_recursive(pred_arc, &mut memo, &mut visited_recursion);
+
+        // If this path is longer than any found so far, update longest_overall_path.
+        // This handles the first path found (longest_overall_path is None) and subsequent longer paths.
+        // An empty path_ending_at_pred can become the longest_overall_path if it's the first one considered.
+        if longest_overall_path.as_ref().map_or(true, |current_longest| path_ending_at_pred.len() > current_longest.len()) {
+            longest_overall_path = Some(path_ending_at_pred);
+        }
+    }
+    longest_overall_path
 }
 
 #[derive(Debug, Clone, Default)]
