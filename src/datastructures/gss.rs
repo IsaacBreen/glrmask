@@ -424,8 +424,8 @@ pub trait GSSTrait<T: Clone + Hash, A: PathAccumulator> {
     type Peek<'a> where A: 'a, Self: 'a;
     fn peek(&self) -> Self::Peek<'_>;
     fn push(&self, edge_value: T) -> GSSNode<T, A> where T: Ord + Clone, A: Clone; // Added Clone for GSSNode::push(self_owned_clone)
-    fn pop(&self) -> Vec<Arc<GSSNode<T, A>>>;
-    fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T, A>>> where T: Ord + Clone, A: Clone; // Added Clone for popn's GSSNode::popn
+    fn pop(&self) -> GSSNode<T, A>;
+    fn popn(&self, n: usize) -> GSSNode<T, A> where T: Ord + Clone, A: Clone; // Added Clone for popn's GSSNode::popn
 }
 
 impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for GSSNode<T, A> {
@@ -440,11 +440,11 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for GSSNo
         GSSNode::push(self_owned_clone, edge_value)
     }
 
-    fn pop(&self) -> Vec<Arc<GSSNode<T, A>>> {
+    fn pop(&self) -> GSSNode<T, A> {
         GSSNode::pop(self)
     }
 
-    fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T, A>>> {
+    fn popn(&self, n: usize) -> GSSNode<T, A> {
         GSSNode::popn(self, n)
     }
 }
@@ -462,11 +462,11 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for Arc<G
         GSSNode::new_with_predecessors(new_preds_with_values)
     }
 
-    fn pop(&self) -> Vec<Arc<GSSNode<T, A>>> {
+    fn pop(&self) -> GSSNode<T, A> {
         self.as_ref().pop()
     }
 
-    fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T, A>>> {
+    fn popn(&self, n: usize) -> GSSNode<T, A> {
         self.as_ref().popn(n)
     }
 }
@@ -488,11 +488,11 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A>
         }
     }
 
-    fn pop(&self) -> Vec<Arc<GSSNode<T, A>>> {
+    fn pop(&self) -> GSSNode<T, A> {
         self.as_ref().map(|node_arc| node_arc.pop()).unwrap_or_default()
     }
 
-    fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T, A>>> {
+    fn popn(&self, n: usize) -> GSSNode<T, A> {
         self.as_ref().map(|node_arc| node_arc.popn(n)).unwrap_or_default()
     }
 }
@@ -513,11 +513,11 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A>
             }
         }
     }
-    fn pop(&self) -> Vec<Arc<GSSNode<T, A>>> {
+    fn pop(&self) -> GSSNode<T, A> {
         self.as_ref().map(|node| node.pop()).unwrap_or_default()
     }
 
-    fn popn(&self, n: usize) -> Vec<Arc<GSSNode<T, A>>> {
+    fn popn(&self, n: usize) -> GSSNode<T, A> {
         self.as_ref().map(|node| node.popn(n)).unwrap_or_default()
     }
 }
@@ -605,32 +605,6 @@ pub fn prune_and_transform_roots<T: Clone + Ord + Hash + Debug, A: PathAccumulat
         .iter()
         .map(|root| prune_and_transform_recursive_canonical(root, closure, &mut memo, &mut cache))
         .collect()
-}
-
-pub fn pop_and_apply_contextual_accumulator<T: Clone + Ord + Hash, A: PathAccumulator + Clone>(
-    source_nodes: &[Arc<GSSNode<T, A>>],
-) -> Vec<Arc<GSSNode<T, A>>> {
-    let mut resultMap: HashMap<*const GSSNode<T, A>, (Arc<GSSNode<T, A>>, A)> = HashMap::new();
-
-    for src_node_arc in source_nodes {
-        let acc_from_source = src_node_arc.acc.clone();
-        for (pred_arc, _edge_val) in &src_node_arc.predecessors_with_values {
-            let pred_ptr = Arc::as_ptr(pred_arc);
-            resultMap.entry(pred_ptr)
-                .and_modify(|e| { e.1 = e.1.union(&acc_from_source); })
-                .or_insert_with(|| (pred_arc.clone(), acc_from_source.clone()));
-        }
-    }
-
-    let mut final_nodes: Vec<Arc<GSSNode<T, A>>> = Vec::with_capacity(resultMap.len());
-    for (_ptr, (original_pred_arc, pop_context_a)) in resultMap {
-        let mut arc_to_modify = original_pred_arc;
-
-        let node_instance_mut = Arc::make_mut(&mut arc_to_modify);
-        node_instance_mut.acc = node_instance_mut.acc.intersect(&pop_context_a);
-        final_nodes.push(arc_to_modify);
-    }
-    final_nodes
 }
 
 fn find_longest_path_recursive<T, A: PathAccumulator>(
@@ -1065,51 +1039,6 @@ mod tests {
 
         assert_ne!(Arc::as_ptr(s_n4_base_arc), Arc::as_ptr(s_n4_other_arc));
         assert_ne!(Arc::as_ptr(s_d1_arc), Arc::as_ptr(&s_d2_arc));
-    }
-
-
-    #[test]
-    fn test_pop_and_apply_contextual_accumulator_basic() {
-        let acc0 = MockPathAccumulator { active: BTreeSet::from([0]), ..Default::default() };
-        let acc1 = MockPathAccumulator { active: BTreeSet::from([1]), ..Default::default() };
-
-        let r0 = nc_root_node_arc(acc0.clone());
-        let r1 = nc_root_node_arc(acc1.clone());
-
-        let node_a = nc_node_arc(MockPathAccumulator::default(), vec![(r0.clone(), 0)]);
-        let node_b = nc_node_arc(MockPathAccumulator::default(), vec![(r1.clone(), 1)]);
-
-        let node_a_original_acc = node_a.acc.clone();
-        let node_b_original_acc = node_b.acc.clone();
-
-        let node_c = nc_node_arc(MockPathAccumulator::default(), vec![(node_a.clone(), 10)]);
-        let node_d = nc_node_arc(MockPathAccumulator::default(), vec![(node_b.clone(), 20)]);
-
-        let source_nodes = vec![node_c.clone(), node_d.clone()];
-        let popped_nodes = pop_and_apply_contextual_accumulator(&source_nodes);
-
-        assert_eq!(popped_nodes.len(), 2);
-
-        let popped_a = popped_nodes.iter().find(|n_arc| n_arc.predecessors_with_values.iter().any(|(p,_)| Arc::ptr_eq(p, &r0))).expect("Popped A not found");
-        let popped_b = popped_nodes.iter().find(|n_arc| n_arc.predecessors_with_values.iter().any(|(p,_)| Arc::ptr_eq(p, &r1))).expect("Popped B not found");
-
-
-        assert_eq!(popped_a.acc, node_a_original_acc.intersect(&node_c.acc));
-        assert_eq!(popped_b.acc, node_b_original_acc.intersect(&node_d.acc));
-
-        let node_e = nc_node_arc(MockPathAccumulator::default(), vec![(node_a.clone(), 30), (node_b.clone(), 40)]);
-        let node_e_acc = node_a.acc.union(&node_b.acc);
-        assert_eq!(node_e.acc, node_e_acc);
-
-        let source_nodes_e = vec![node_e.clone()];
-        let popped_nodes_from_e = pop_and_apply_contextual_accumulator(&source_nodes_e);
-        assert_eq!(popped_nodes_from_e.len(), 2);
-
-        let popped_a_from_e = popped_nodes_from_e.iter().find(|n_arc| n_arc.predecessors_with_values.iter().any(|(p,_)| Arc::ptr_eq(p, &r0))).expect("Popped A from E not found");
-        let popped_b_from_e = popped_nodes_from_e.iter().find(|n_arc| n_arc.predecessors_with_values.iter().any(|(p,_)| Arc::ptr_eq(p, &r1))).expect("Popped B from E not found");
-
-        assert_eq!(popped_a_from_e.acc, node_a_original_acc.intersect(&node_e_acc));
-        assert_eq!(popped_b_from_e.acc, node_b_original_acc.intersect(&node_e_acc));
     }
 }
 
