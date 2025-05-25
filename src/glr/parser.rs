@@ -349,7 +349,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
         nt: NonTerminalID,
         // cur_t: &T was &LLMTokenInfo, now it's stack.acc
         // So, pass stack.acc as cur_acc_from_reducible_node
-    ) -> Vec<Arc<GSSNode<ParseStateEdgeContent, A>>> { // Returns list of new stack tops
+    ) -> Arc<GSSNode<ParseStateEdgeContent, A>> { // Returns list of new stack tops
         let cur_acc_from_reducible_node = &stack.acc; // Get it from the stack being reduced
 
         let mut parent = if len == 0 {
@@ -357,7 +357,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
         } else {
             Arc::new(edge_src.popn(len - 1))
         };
-        let mut out = Vec::new();
+        let mut out = GSSNode::new_default();
         crate::debug!(4, "Popped to parent {:p} with {} predecessors...", Arc::as_ptr(&parent), parent.predecessors_with_values().len());
 
         for (_predecessor, edge_value) in parent.predecessors_with_values() { // parent_arc is Arc<GSSNode<ParseStateNodeContent, A>>
@@ -375,13 +375,13 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
 
             // Create the new GSSNode (child of parent_arc)
             // parent_arc.push will give it parent_arc.acc by default (via new_with_predecessors)
-            let mut new_gss_node_arc = Arc::new(parent.push(goto_node_content));
+            let mut new_gss_node_arc = parent.push(goto_node_content);
             // Now, explicitly set its acc to the computed intersection
-            Arc::make_mut(&mut new_gss_node_arc).acc = new_acc_for_goto_child;
+            new_gss_node_arc.acc = new_acc_for_goto_child;
 
-            out.push(new_gss_node_arc);
+            out.merge(new_gss_node_arc);
         }
-        out
+        Arc::new(out)
     }
 
     /// Debug helper so the main `step` body stays short.
@@ -505,10 +505,9 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
                          }) => {
                         crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", top.state_id.0, token_id.0, nt.0, len);
                         // Use stack_arc_for_operations
-                        for s_new_arc in self.pop_and_goto(&stack_arc_for_operations, parent_arc, *len, *nt) {
-                            // Add to worklist for current step, passing the cloned updated visited set.
-                            todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
-                        }
+                        let s_new_arc = self.pop_and_goto(&stack_arc_for_operations, parent_arc, *len, *nt);
+                        // Add to worklist for current step, passing the cloned updated visited set.
+                        todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
                     }
 
                     /* ------ 3. shift / reduce split ------ */
@@ -527,10 +526,9 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
                             for (nt, _prod_ids) in nts {
                                 // Use stack_arc_for_operations
                                 crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
-                                for s_new_arc in self.pop_and_goto(&stack_arc_for_operations, parent_arc, *len, *nt) {
-                                    // Add to worklist for current step, passing the cloned updated visited set.
-                                    todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
-                                }
+                                let s_new_arc = self.pop_and_goto(&stack_arc_for_operations, parent_arc, *len, *nt);
+                                // Add to worklist for current step, passing the cloned updated visited set.
+                                todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
                             }
                         }
                     }

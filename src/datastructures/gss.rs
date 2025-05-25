@@ -434,6 +434,7 @@ pub trait GSSTrait<T: Clone + Hash, A: PathAccumulator> {
     // type Peek<'a> where A: 'a, Self: 'a;
     // fn peek(&self) -> Self::Peek<'_>;
     fn push(&self, edge_value: T) -> GSSNode<T, A> where T: Ord + Clone, A: Clone; // Added Clone for GSSNode::push(self_owned_clone)
+    fn push_to(&self, edge_value: T, dest: &mut GSSNode<T, A>) where T: Ord + Clone, A: Clone; // Added Clone for GSSNode::push(self_owned_clone)
     fn pop(&self) -> GSSNode<T, A> where T: Ord + Clone, A: Clone; // Added Clone for popn's GSSNode::popn
     fn popn(&self, n: usize) -> GSSNode<T, A> where T: Ord + Clone, A: Clone; // Added Clone for popn's GSSNode::popn
 }
@@ -448,6 +449,10 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for GSSNo
     fn push(&self, edge_value: T) -> GSSNode<T, A> {
         let self_owned_clone = self.clone();
         GSSNode::push(self_owned_clone, edge_value)
+    }
+
+    fn push_to(&self, edge_value: T, dest: &mut GSSNode<T, A>) {
+        GSSNode::push_to(&self, edge_value, dest)
     }
 
     fn pop(&self) -> GSSNode<T, A> {
@@ -470,6 +475,11 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for Arc<G
         let mut new_preds_with_values = BTreeSet::new();
         new_preds_with_values.insert((self.clone(), edge_value));
         GSSNode::new_with_predecessors(new_preds_with_values)
+    }
+
+    fn push_to(&self, edge_value: T, dest: &mut GSSNode<T, A>) {
+        dest.merge(self.as_ref().clone());
+        dest.acc.intersect(&self.acc);
     }
 
     fn pop(&self) -> GSSNode<T, A> {
@@ -498,6 +508,16 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A>
         }
     }
 
+    fn push_to(&self, edge_value: T, dest: &mut GSSNode<T, A>) {
+        match self {
+            Some(arc_node) => arc_node.push_to(edge_value, dest),
+            None => {
+                let root_state = GSSNode::new(A::default());
+                root_state.push_to(edge_value, dest)
+            }
+        }
+    }
+
     fn pop(&self) -> GSSNode<T, A> {
         self.as_ref().map(|node_arc| node_arc.pop()).unwrap_or_else(GSSNode::new_default)
     }
@@ -520,6 +540,16 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A>
             None => {
                 let root_state = GSSNode::new(A::default());
                 root_state.push(edge_value)
+            }
+        }
+    }
+
+    fn push_to(&self, edge_value: T, dest: &mut GSSNode<T, A>) {
+        match self {
+            Some(node) => node.push_to(edge_value, dest),
+            None => {
+                let root_state = GSSNode::new(A::default());
+                root_state.push_to(edge_value, dest)
             }
         }
     }
