@@ -113,11 +113,12 @@ impl std::fmt::Debug for LLMTokenInfo {
         const MAX_ITEMS: usize = 10;
 
         let fmt_bv = |bv: &LLMTokenBV| -> String {
-            let ids: Vec<_> = bv.iter().collect();
-            match ids.len() > MAX_ITEMS {
-                true  => format!("[{:?}… ({} total)]", &ids[..MAX_ITEMS], ids.len()),
-                false => format!("{:?}", ids),
-            }
+            // let ids: Vec<_> = bv.iter().collect();
+            // match ids.len() > MAX_ITEMS {
+            //     true  => format!("[{:?}… ({} total)]", &ids[..MAX_ITEMS], ids.len()),
+            //     false => format!("{:?}", ids),
+            // }
+            format!("{:?}", bv)
         };
 
         f.debug_struct("LLMTokenInfo")
