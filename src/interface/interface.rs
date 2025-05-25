@@ -696,7 +696,7 @@ mod tests {
         bitvec.into()
     }
 
-    #[ignore]
+    // #[ignore]
     #[test]
     fn test_grammar_from_exprs() {
         let exprs = vec![
@@ -755,7 +755,7 @@ mod tests {
         assert_eq!(mask_after_final, expected_mask_final);
     }
 
-    #[ignore]
+    // #[ignore]
     #[test]
     fn test_grammar_from_exprs_simple() {
         let exprs = vec![
