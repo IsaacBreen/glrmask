@@ -96,6 +96,10 @@ impl<T: Ord + Hash, A: PathAccumulator> GSSNode<T, A> { // T needs Ord for BTree
             hash_key_cache,
         }
     }
+
+    pub fn predecessors_with_values(&self) -> &BTreeSet<(Arc<Self>, T)> {
+        &self.predecessors_with_values
+    }
 }
 
 // Methods involving canonicalization
@@ -421,19 +425,19 @@ impl<T: Ord + Hash, A: PathAccumulator + Ord> Ord for GSSNode<T, A> { // T needs
 }
 
 pub trait GSSTrait<T: Clone + Hash, A: PathAccumulator> {
-    type Peek<'a> where A: 'a, Self: 'a;
-    fn peek(&self) -> Self::Peek<'_>;
+    // type Peek<'a> where A: 'a, Self: 'a;
+    // fn peek(&self) -> Self::Peek<'_>;
     fn push(&self, edge_value: T) -> GSSNode<T, A> where T: Ord + Clone, A: Clone; // Added Clone for GSSNode::push(self_owned_clone)
     fn pop(&self) -> GSSNode<T, A>;
     fn popn(&self, n: usize) -> GSSNode<T, A> where T: Ord + Clone, A: Clone; // Added Clone for popn's GSSNode::popn
 }
 
 impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for GSSNode<T, A> {
-    type Peek<'a> = &'a A where A: 'a, T: 'a;
+    // type Peek<'a> = &'a A where A: 'a, T: 'a;
 
-    fn peek(&self) -> Self::Peek<'_> {
-        &self.acc
-    }
+    // fn peek(&self) -> Self::Peek<'_> {
+    //     &self.acc
+    // }
 
     fn push(&self, edge_value: T) -> GSSNode<T, A> {
         let self_owned_clone = self.clone();
@@ -450,11 +454,11 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for GSSNo
 }
 
 impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for Arc<GSSNode<T, A>> {
-    type Peek<'a> = &'a A where A: 'a, T: 'a;
-
-    fn peek(&self) -> Self::Peek<'_> {
-        &self.acc
-    }
+    // type Peek<'a> = &'a A where A: 'a, T: 'a;
+    //
+    // fn peek(&self) -> Self::Peek<'_> {
+    //     &self.acc
+    // }
 
     fn push(&self, edge_value: T) -> GSSNode<T, A> {
         let mut new_preds_with_values = BTreeSet::new();
@@ -472,11 +476,11 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for Arc<G
 }
 
 impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A> for Option<Arc<GSSNode<T, A>>> {
-    type Peek<'a> = Option<&'a A> where A: 'a, T: 'a;
-
-    fn peek(&self) -> Self::Peek<'_> {
-        self.as_ref().map(|node_arc| node_arc.peek())
-    }
+    // type Peek<'a> = Option<&'a A> where A: 'a, T: 'a;
+    //
+    // fn peek(&self) -> Self::Peek<'_> {
+    //     self.as_ref().map(|node_arc| node_arc.peek())
+    // }
 
     fn push(&self, edge_value: T) -> GSSNode<T, A> {
         match self {
@@ -498,11 +502,11 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A>
 }
 
 impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A> for Option<GSSNode<T, A>> {
-     type Peek<'a> = Option<&'a A> where A: 'a, T: 'a;
-
-    fn peek(&self) -> Self::Peek<'_> {
-        self.as_ref().map(|node| node.peek())
-    }
+    //  type Peek<'a> = Option<&'a A> where A: 'a, T: 'a;
+    //
+    // fn peek(&self) -> Self::Peek<'_> {
+    //     self.as_ref().map(|node| node.peek())
+    // }
 
     fn push(&self, edge_value: T) -> GSSNode<T, A> {
         match self {
@@ -639,15 +643,16 @@ fn find_longest_path_recursive<T, A: PathAccumulator>(
     current_path
 }
 
-pub fn find_longest_path<T, A: PathAccumulator>(roots: &[Arc<GSSNode<T, A>>]) -> Option<Vec<Arc<GSSNode<T, A>>>> {
+pub fn find_longest_path<T, A: PathAccumulator>(root: &GSSNode<T, A>) -> Option<Vec<(T, Arc<GSSNode<T, A>>)>> {
     let mut memo: HashMap<*const GSSNode<T, A>, Vec<Arc<GSSNode<T, A>>>> = HashMap::new();
 
-    for root_arc in roots { // Ensure all paths from all roots are explored
-        let mut visited_recursion = HashSet::new();
-        find_longest_path_recursive(root_arc, &mut memo, &mut visited_recursion);
-    }
+    // for root_arc in roots { // Ensure all paths from all roots are explored
+    //     let mut visited_recursion = HashSet::new();
+    //     find_longest_path_recursive(root_arc, &mut memo, &mut visited_recursion);
+    // }
 
-    memo.into_values().max_by_key(|path| path.len())
+    // memo.into_values().max_by_key(|path| path.len())
+    todo!()
 }
 
 #[derive(Debug, Clone, Default)]
