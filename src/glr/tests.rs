@@ -482,6 +482,10 @@ fn test_epsilon_rules_ambiguity() {
     let tokens = vec![
         *parser.terminal_map.get_by_left(&Terminal("x".to_string())).unwrap(),
     ];
+    
+    let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+    state.step(eof);
+    assert!(state.is_ok(), "GLR parser should accept input with epsilon rules");
 
     let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
     state.parse(&tokens);
