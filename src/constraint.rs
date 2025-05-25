@@ -40,8 +40,6 @@ pub type GrammarTokenBV = BitVec; // BitVec is not easily JSONConvertible withou
 pub struct LLMTokenInfo {
     pub active:       LLMTokenBV,
     pub intersection: LLMTokenBV,
-    // Add capacity field if Default needs it
-    // capacity: usize,
 }
 
 // Manual impl for LLMTokenInfo
