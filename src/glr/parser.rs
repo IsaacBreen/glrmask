@@ -496,7 +496,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
                              nonterminal_id: nt,
                              len, ..
                          }) => {
-                        crate::debug!(4, "Reduce from state {} via token {} to nonterminal {}", top.state_id.0, token_id.0, nt.0);
+                        crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", top.state_id.0, token_id.0, nt.0, len);
                         // Use stack_arc_for_operations
                         for s_new_arc in self.pop_and_goto(&stack_arc_for_operations, *len, *nt) {
                             // Add to worklist for current step, passing the cloned updated visited set.
