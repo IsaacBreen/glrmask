@@ -284,26 +284,23 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> { // Added
         Self::new_with_predecessors(new_node_predecessors_with_values)
     }
 
+    pub fn pop_into(&self, mut result: GSSNode<T, A>) -> GSSNode<T, A> {
+        for (pred_arc, edge_val) in self.predecessors_with_values() {
+            let pred_popped = pred_arc.pop();
+            result.merge(pred_popped);
+        }
+        result
+    }
+
     pub fn pop(&self) -> GSSNode<T, A> {
-        todo!()
+        self.pop_into(GSSNode::new_default())
     }
 
     pub fn popn(&self, n: usize) -> GSSNode<T, A> {
         if n == 0 {
-             panic!("popn(0) on a non-Arc GSSNode is ambiguous. Consider calling on Arc<GSSNode> or using a different base case.");
-        } else if n == 1 {
-            self.pop()
+             self.clone()
         } else {
-            let popped = self.pop();
-            if popped.is_empty() {
-                return Self::new(A::default());
-            };
-            let mut result = GSSNode::new_default();
-            for (pred_arc, edge_val) in popped.predecessors_with_values() {
-                let pred_popped = pred_arc.popn(n - 1);
-                result.merge(pred_popped);
-            }
-            result
+            self.pop().popn(n - 1)
         }
     }
 
