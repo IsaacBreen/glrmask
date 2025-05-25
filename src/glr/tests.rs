@@ -60,6 +60,7 @@ fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
 fn test_simple_parse_table_generation_and_parse() {
     // This test now implicitly checks that the simple grammar passes validation.
     let parser = create_simple_parser();
+    println!("Parser: {}", parser);
     let eof = *parser
         .terminal_map
         .get_by_left(&Terminal("$".to_string()))
