@@ -286,8 +286,7 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> { // Added
 
     pub fn pop_into(&self, mut result: GSSNode<T, A>) -> GSSNode<T, A> {
         for (pred_arc, edge_val) in self.predecessors_with_values() {
-            let pred_popped = pred_arc.pop();
-            result.merge(pred_popped);
+            result.merge(pred_arc.as_ref().clone());
         }
         result
     }
