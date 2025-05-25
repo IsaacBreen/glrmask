@@ -477,6 +477,7 @@ fn test_epsilon_rules_ambiguity() {
         prod("B", vec![]), // Epsilon
     ];
     let parser = generate_glr_parser(&productions, 0);
+    println!("Parser: {}", parser);
     let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
     let tokens = vec![
         *parser.terminal_map.get_by_left(&Terminal("x".to_string())).unwrap(),
