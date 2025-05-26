@@ -631,8 +631,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         let mut current_sequence_token_names_valid = true;
 
         for token_name in seq_terminal_names {
-            if let Some(terminal_id_val) = compiled_grammar.token_name_map.get_by_left(&token_name.to_string()) {
-                terminal_id_sequence.push(crate::types::TerminalID(*terminal_id_val));
+            if let Some(terminal_id_val) = compiled_grammar.glr_parser.terminal_map.get_by_left(&Terminal(token_name.to_string())) {
+                terminal_id_sequence.push(terminal_id_val);
             } else {
                 println!(
                     "  Warning: Terminal name '{}' not found in compiled_grammar.token_name_map for sequence {}. This sequence will be skipped.",
@@ -672,7 +672,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             terminals: std::sync::Arc::new(crate::datastructures::gss::GSSNode::new_default()),
         };
         
-        let mut glr_state = compiled_grammar.parser.init_glr_parser_with_acc(dummy_llm_token_info);
+        let mut glr_state = compiled_grammar.glr_parser.init_glr_parser_with_acc(dummy_llm_token_info);
 
         let seq_names_display = seq_terminal_names.join(" → ");
         print!(
@@ -684,7 +684,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
         let mut sequence_parse_ok = true;
         for (token_in_seq_idx, &grammar_token_id) in terminal_id_sequence.iter().enumerate() {
-            glr_state.step(grammar_token_id);
+            glr_state.step(*grammar_token_id);
             if !glr_state.is_ok() {
                 println!(
                     "failed at token #{} ('{}'). Parser no longer in OK state.",
