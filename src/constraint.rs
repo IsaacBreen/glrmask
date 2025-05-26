@@ -27,7 +27,6 @@ use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
-use uuid::Uuid;
 
 pub type LLMTokenBV = HybridBitset;
 pub type GrammarTokenBV = BitVec; // BitVec is not easily JSONConvertible without a specific strategy (e.g., as Vec<bool> or Vec<usize> of set bits)
@@ -105,6 +104,7 @@ impl std::fmt::Debug for LLMTokenInfo {
         f.debug_struct("LLMTokenInfo")
             .field("active", &fmt_bv(&self.active))
             .field("intersection", &fmt_bv(&self.intersection))
+            .field("terminals", &self.terminals)
             .finish()
     }
 }
