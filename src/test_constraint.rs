@@ -978,7 +978,7 @@ fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::err
     let json_node = JSONNode::from_json_string(&json_string)?;
     let compiled_grammar = CompiledGrammar::from_json(json_node)?;
     println!("[Test] Successfully loaded CompiledGrammar from JSON.");
-    println!("[Test] Original grammar structure: {}", compiled_grammar);
+    println!("[Test] Original grammar structure: {}", compiled_grammar.definition);
 
     // 2. Define "interesting" symbols for filtering based on the sequence
     let sequence_to_test_names = vec!["STRING[0]", "STRING[0]", "\"->\""];

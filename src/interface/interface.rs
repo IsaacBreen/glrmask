@@ -165,6 +165,25 @@ impl JSONConvertible for GrammarDefinition {
     }
 }
 
+impl Display for GrammarDefinition {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "GrammarDefinition:")?;
+        writeln!(f, "  Productions ({}):", self.productions.len())?;
+        for production in &self.productions {
+            write!(f, "    {} -> ", production.lhs.0)?;
+            for (i, symbol) in production.rhs.iter().enumerate() {
+                if i == production.rhs.len() - 1 {
+                    write!(f, "{}", symbol.0)?;
+                } else {
+                    write!(f, "{} ", symbol.0)?;
+                }
+            }
+            writeln!(f)?;
+        }
+        Ok(())
+    }
+}
+
 impl GrammarDefinition {
     /// Generates a unique indexed name (e.g., Base[0], Base[1]) avoiding collisions.
     fn generate_unique_indexed_name(
