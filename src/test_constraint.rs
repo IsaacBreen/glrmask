@@ -557,6 +557,164 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     println!("Successfully loaded CompiledGrammar from JSON.");
     println!("{}", compiled_grammar);
 
+    // --- New test section for grammar terminal sequences ---
+    println!("\nTesting GLR parser with specific grammar terminal sequences...");
+
+    // Define the sequences of terminal names to test
+    let test_sequences_str = vec![
+        // Sequence 0
+        vec!["IGNORE[0][0]", "->"],
+        // Sequence 1
+        vec!["STRING[0]", "->"],
+        // Sequence 2
+        vec!["FSTRING_START[0]", "->"],
+        // Sequence 3
+        vec!["IGNORE[0][0]", "...", "->"],
+        // Sequence 4
+        vec!["STRING[0]", "...", "->"],
+        // Sequence 5
+        vec!["FSTRING_START[0]", "...", "->"],
+        // Sequence 6
+        vec!["IGNORE[0][0]", "==", "->"],
+        // Sequence 7
+        vec!["STRING[0]", "==", "->"],
+        // Sequence 8
+        vec!["FSTRING_START[0]", "==", "->"],
+        // Sequence 9
+        vec!["IGNORE[0][0]", "!=", "->"],
+        // Sequence 10
+        vec!["STRING[0]", "!=", "->"],
+        // Sequence 11
+        vec!["FSTRING_START[0]", "!=", "->"],
+        // Sequence 12
+        vec!["IGNORE[0][0]", "<=", "->"],
+        // Sequence 13
+        vec!["STRING[0]", "<=", "->"],
+        // Sequence 14
+        vec!["FSTRING_START[0]", "<=", "->"],
+        // Sequence 15
+        vec!["IGNORE[0][0]", ">=", "->"],
+        // Sequence 16
+        vec!["STRING[0]", ">=", "->"],
+        // Sequence 17
+        vec!["FSTRING_START[0]", ">=", "->"],
+        // Sequence 18
+        vec!["IGNORE[0][0]", "<<", "->"],
+        // Sequence 19
+        vec!["STRING[0]", "<<", "->"],
+        // Sequence 20
+        vec!["FSTRING_START[0]", "<<", "->"],
+        // Sequence 21
+        vec!["IGNORE[0][0]", "STRING[0]", "->"],
+        // Sequence 22
+        vec!["STRING[0]", "STRING[0]", "->"],
+        // Sequence 23
+        vec!["FSTRING_START[0]", "STRING[0]", "->"],
+        // Sequence 24
+        vec!["IGNORE[0][0]", "FSTRING_START[0]", "->"],
+        // Sequence 25
+        vec!["STRING[0]", "FSTRING_START[0]", "->"],
+        // Sequence 26
+        vec!["FSTRING_START[0]", "FSTRING_START[0]", "->"],
+        // Sequence 27
+        vec!["IGNORE[0][0]", "FSTRING_MIDDLE[0]", "->"],
+        // Sequence 28
+        vec!["STRING[0]", "FSTRING_MIDDLE[0]", "->"],
+        // Sequence 29
+        vec!["FSTRING_START[0]", "FSTRING_MIDDLE[0]", "->"],
+    ];
+
+    let mut all_sequences_passed = true;
+
+    for (seq_idx, seq_terminal_names) in test_sequences_str.iter().enumerate() {
+        let mut terminal_id_sequence = Vec::new();
+        let mut current_sequence_token_names_valid = true;
+
+        for token_name in seq_terminal_names {
+            if let Some(terminal_id_val) = compiled_grammar.token_name_map.get_by_left(&token_name.to_string()) {
+                terminal_id_sequence.push(crate::types::TerminalID(*terminal_id_val));
+            } else {
+                println!(
+                    "  Warning: Terminal name '{}' not found in compiled_grammar.token_name_map for sequence {}. This sequence will be skipped.",
+                    token_name, seq_idx
+                );
+                current_sequence_token_names_valid = false;
+                all_sequences_passed = false; // Mark as failed due to unknown token
+                break;
+            }
+        }
+
+        if !current_sequence_token_names_valid {
+            continue; // Move to the next sequence
+        }
+
+        if terminal_id_sequence.is_empty() {
+            if seq_terminal_names.is_empty() {
+                println!("  Sequence {} is empty by definition, skipping actual parsing test.", seq_idx);
+            } else {
+                // This case should ideally be caught by the token name check,
+                // but as a safeguard if a sequence of valid names somehow results in empty IDs.
+                println!(
+                    "  Sequence {} ('{}') resulted in an empty TerminalID sequence despite non-empty names. Skipping.",
+                    seq_idx, seq_terminal_names.join(" → ")
+                );
+                all_sequences_passed = false;
+            }
+            continue;
+        }
+
+        // Initialize GLRParserState with a dummy accumulator.
+        // For this test, we are focused on the GLR parser's grammar rule processing,
+        // not LLM token constraints, so the accumulator's content is not critical.
+        let dummy_llm_token_info = crate::constraint::LLMTokenInfo {
+            active: HybridBitset::new(), // Empty bitset
+            intersection: HybridBitset::new(), // Empty bitset; for PathAccumulator, this might differ from default
+            terminals: std::sync::Arc::new(crate::datastructures::gss::GSSNode::new_default()),
+        };
+        
+        let mut glr_state = compiled_grammar.parser.init_glr_parser_with_acc(dummy_llm_token_info);
+
+        let seq_names_display = seq_terminal_names.join(" → ");
+        print!(
+            "  Testing sequence {} ({} tokens): '{}'... ",
+            seq_idx,
+            terminal_id_sequence.len(),
+            seq_names_display
+        );
+
+        let mut sequence_parse_ok = true;
+        for (token_in_seq_idx, &grammar_token_id) in terminal_id_sequence.iter().enumerate() {
+            glr_state.step(grammar_token_id);
+            if !glr_state.is_ok() {
+                println!(
+                    "failed at token #{} ('{}'). Parser no longer in OK state.",
+                    token_in_seq_idx + 1,
+                    seq_terminal_names[token_in_seq_idx]
+                );
+                sequence_parse_ok = false;
+                all_sequences_passed = false;
+                break;
+            }
+        }
+
+        if sequence_parse_ok {
+            // If the loop completed, check the final state.
+            // is_ok() should still be true if the sequence is a valid partial parse.
+            if glr_state.is_ok() {
+                println!("succeeded. Parser remains in OK state.");
+            } else {
+                // This should ideally not be reached if the loop's check is comprehensive,
+                // but included for robustness.
+                println!("failed. Parser not in OK state after processing the full sequence.");
+                all_sequences_passed = false;
+            }
+        }
+    }
+
+    assert!(all_sequences_passed, "One or more grammar terminal sequence tests failed. See warnings/errors above.");
+    println!("GLR parser testing with specific grammar terminal sequences finished.");
+    // --- End of new test section ---
+
     // 3. Load GPT-2 Vocabulary
     println!("Loading GPT-2 vocabulary...");
     let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
