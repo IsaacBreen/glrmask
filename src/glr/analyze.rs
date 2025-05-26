@@ -458,22 +458,19 @@ pub fn filter_productions_by_reachability(
         let lhs = &production.lhs;
 
         // Condition 1: LHS itself is an interesting symbol.
-        if interesting_symbols.contains(&Symbol::NonTerminal(lhs.clone())) {
-            kept_productions.push(production.clone());
-            continue;
-        }
+        let cond1_lhs_is_interesting = interesting_symbols.contains(&Symbol::NonTerminal(lhs.clone()));
         
         // Condition 2: LHS is reachable from an interesting non-terminal.
-        let cond1_lhs_is_reachable_from_interesting_nt = reachable_from_set.contains(lhs);
+        let cond2_lhs_is_reachable_from_interesting_nt = reachable_from_set.contains(lhs);
         
         // Condition 3: RHS of *this specific* production can derive an interesting symbol.
         // This is computed to be OR'd with Condition 1.
-        let mut cond2_current_rhs_can_derive_interesting = false;
+        let mut cond3_current_rhs_can_derive_interesting = false;
         for symbol_in_rhs in &production.rhs {
             match symbol_in_rhs {
                 Symbol::Terminal(_) => {
                     if interesting_symbols.contains(symbol_in_rhs) {
-                        cond2_current_rhs_can_derive_interesting = true;
+                        cond3_current_rhs_can_derive_interesting = true;
                         break;
                     }
                 }
@@ -482,22 +479,23 @@ pub fn filter_productions_by_reachability(
                     // 1. It IS an interesting symbol itself (e.g. if interesting_symbols can contain NTs)
                     // 2. OR it can derive an interesting symbol (i.e., nt_in_rhs is in can_derive_set)
                     if interesting_symbols.contains(symbol_in_rhs) || can_derive_set.contains(nt_in_rhs) {
-                        cond2_current_rhs_can_derive_interesting = true;
+                        cond3_current_rhs_can_derive_interesting = true;
                         break;
                     }
                 }
             }
         }
 
-        if cond1_lhs_is_reachable_from_interesting_nt || cond2_current_rhs_can_derive_interesting {
+        if cond1_lhs_is_interesting || cond2_lhs_is_reachable_from_interesting_nt || cond3_current_rhs_can_derive_interesting {
             kept_productions.push(production.clone());
         } else {
             crate::debug!(
                 4,
-                "Filtering out production: {} (LHS_is_reachable_from_interesting_NT: {}, Current_RHS_can_derive_interesting: {})",
+                "Filtering out production: {} (LHS is interesting: {}, LHS reachable from interesting NT: {}, RHS can derive interesting: {})",
                 production,
-                cond1_lhs_is_reachable_from_interesting_nt,
-                cond2_current_rhs_can_derive_interesting
+                cond1_lhs_is_interesting,
+                cond2_lhs_is_reachable_from_interesting_nt,
+                cond3_current_rhs_can_derive_interesting
             );
         }
     }
