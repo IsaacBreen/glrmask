@@ -563,65 +563,65 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // Define the sequences of terminal names to test
     let test_sequences_str = vec![
         // Sequence 0
-        vec!["IGNORE[0][0]", "->"],
+        vec!["IGNORE[0][0]", "\"->\""],
         // Sequence 1
-        vec!["STRING[0]", "->"],
+        vec!["STRING[0]", "\"->\""],
         // Sequence 2
-        vec!["FSTRING_START[0]", "->"],
+        vec!["FSTRING_START[0]", "\"->\""],
         // Sequence 3
-        vec!["IGNORE[0][0]", "...", "->"],
+        vec!["IGNORE[0][0]", "\"...\"", "\"->\""],
         // Sequence 4
-        vec!["STRING[0]", "...", "->"],
+        vec!["STRING[0]", "\"...\"", "\"->\""],
         // Sequence 5
-        vec!["FSTRING_START[0]", "...", "->"],
+        vec!["FSTRING_START[0]", "\"...\"", "\"->\""],
         // Sequence 6
-        vec!["IGNORE[0][0]", "==", "->"],
+        vec!["IGNORE[0][0]", "\"==\"", "\"->\""],
         // Sequence 7
-        vec!["STRING[0]", "==", "->"],
+        vec!["STRING[0]", "\"==\"", "\"->\""],
         // Sequence 8
-        vec!["FSTRING_START[0]", "==", "->"],
+        vec!["FSTRING_START[0]", "\"==\"", "\"->\""],
         // Sequence 9
-        vec!["IGNORE[0][0]", "!=", "->"],
+        vec!["IGNORE[0][0]", "\"!=\"", "\"->\""],
         // Sequence 10
-        vec!["STRING[0]", "!=", "->"],
+        vec!["STRING[0]", "\"!=\"", "\"->\""],
         // Sequence 11
-        vec!["FSTRING_START[0]", "!=", "->"],
+        vec!["FSTRING_START[0]", "\"!=\"", "\"->\""],
         // Sequence 12
-        vec!["IGNORE[0][0]", "<=", "->"],
+        vec!["IGNORE[0][0]", "\"<=\"", "\"->\""],
         // Sequence 13
-        vec!["STRING[0]", "<=", "->"],
+        vec!["STRING[0]", "\"<=\"", "\"->\""],
         // Sequence 14
-        vec!["FSTRING_START[0]", "<=", "->"],
+        vec!["FSTRING_START[0]", "\"<=\"", "\"->\""],
         // Sequence 15
-        vec!["IGNORE[0][0]", ">=", "->"],
+        vec!["IGNORE[0][0]", "\">=\"", "\"->\""],
         // Sequence 16
-        vec!["STRING[0]", ">=", "->"],
+        vec!["STRING[0]", "\">=\"", "\"->\""],
         // Sequence 17
-        vec!["FSTRING_START[0]", ">=", "->"],
+        vec!["FSTRING_START[0]", "\">=\"", "\"->\""],
         // Sequence 18
-        vec!["IGNORE[0][0]", "<<", "->"],
+        vec!["IGNORE[0][0]", "\"<<\"", "\"->\""],
         // Sequence 19
-        vec!["STRING[0]", "<<", "->"],
+        vec!["STRING[0]", "\"<<\"", "\"->\""],
         // Sequence 20
-        vec!["FSTRING_START[0]", "<<", "->"],
+        vec!["FSTRING_START[0]", "\"<<\"", "\"->\""],
         // Sequence 21
-        vec!["IGNORE[0][0]", "STRING[0]", "->"],
+        vec!["IGNORE[0][0]", "STRING[0]", "\"->\""],
         // Sequence 22
-        vec!["STRING[0]", "STRING[0]", "->"],
+        vec!["STRING[0]", "STRING[0]", "\"->\""],
         // Sequence 23
-        vec!["FSTRING_START[0]", "STRING[0]", "->"],
+        vec!["FSTRING_START[0]", "STRING[0]", "\"->\""],
         // Sequence 24
-        vec!["IGNORE[0][0]", "FSTRING_START[0]", "->"],
+        vec!["IGNORE[0][0]", "FSTRING_START[0]", "\"->\""],
         // Sequence 25
-        vec!["STRING[0]", "FSTRING_START[0]", "->"],
+        vec!["STRING[0]", "FSTRING_START[0]", "\"->\""],
         // Sequence 26
-        vec!["FSTRING_START[0]", "FSTRING_START[0]", "->"],
+        vec!["FSTRING_START[0]", "FSTRING_START[0]", "\"->\""],
         // Sequence 27
-        vec!["IGNORE[0][0]", "FSTRING_MIDDLE[0]", "->"],
+        vec!["IGNORE[0][0]", "FSTRING_MIDDLE[0]", "\"->\""],
         // Sequence 28
-        vec!["STRING[0]", "FSTRING_MIDDLE[0]", "->"],
+        vec!["STRING[0]", "FSTRING_MIDDLE[0]", "\"->\""],
         // Sequence 29
-        vec!["FSTRING_START[0]", "FSTRING_MIDDLE[0]", "->"],
+        vec!["FSTRING_START[0]", "FSTRING_MIDDLE[0]", "\"->\""],
     ];
 
     let mut all_sequences_passed = true;
