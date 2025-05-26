@@ -344,3 +344,133 @@ pub fn drop_dead(productions: &[Production]) -> Vec<Production> {
 
     new_productions
 }
+
+/// Computes the set of non-terminals that can derive a string containing at least one of the interesting_symbols.
+fn compute_can_derive_interesting(
+    productions: &[Production],
+    interesting_symbols: &BTreeSet<Symbol>,
+) -> BTreeSet<NonTerminal> {
+    let mut can_derive_interesting = BTreeSet::new();
+    let mut changed = true;
+
+    while changed {
+        changed = false;
+        for production in productions {
+            if can_derive_interesting.contains(&production.lhs) {
+                continue;
+            }
+
+            let mut rhs_can_lead_to_interesting = false;
+            for symbol_in_rhs in &production.rhs {
+                match symbol_in_rhs {
+                    Symbol::Terminal(_) => {
+                        if interesting_symbols.contains(symbol_in_rhs) {
+                            rhs_can_lead_to_interesting = true;
+                            break;
+                        }
+                    }
+                    Symbol::NonTerminal(nt_in_rhs) => {
+                        // An RHS non-terminal leads to interesting if it IS an interesting symbol itself,
+                        // OR it can derive an interesting symbol.
+                        if interesting_symbols.contains(symbol_in_rhs) || can_derive_interesting.contains(nt_in_rhs) {
+                            rhs_can_lead_to_interesting = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if rhs_can_lead_to_interesting {
+                if can_derive_interesting.insert(production.lhs.clone()) {
+                    changed = true;
+                }
+            }
+        }
+    }
+    can_derive_interesting
+}
+
+/// Computes the set of non-terminals that are reachable by derivation from any non-terminal in interesting_symbols.
+/// If interesting_symbols contains no non-terminals, this returns an empty set.
+fn compute_reachable_from_interesting_nts(
+    productions: &[Production],
+    interesting_symbols: &BTreeSet<Symbol>,
+) -> BTreeSet<NonTerminal> {
+    let mut seed_interesting_nts = BTreeSet::new();
+    for s in interesting_symbols {
+        if let Symbol::NonTerminal(nt) = s {
+            seed_interesting_nts.insert(nt.clone());
+        }
+    }
+
+    if seed_interesting_nts.is_empty() {
+        return BTreeSet::new();
+    }
+
+    let mut reachable_set = seed_interesting_nts.clone();
+    let mut worklist: VecDeque<NonTerminal> = seed_interesting_nts.into_iter().collect();
+
+    while let Some(nt_lhs_from_worklist) = worklist.pop_front() {
+        // Find productions where nt_lhs_from_worklist is the LHS
+        for production in productions {
+            if production.lhs == nt_lhs_from_worklist {
+                for symbol_in_rhs in &production.rhs {
+                    if let Symbol::NonTerminal(nt_in_rhs) = symbol_in_rhs {
+                        if !reachable_set.contains(nt_in_rhs) {
+                             if reachable_set.insert(nt_in_rhs.clone()) { // Check insert result
+                                worklist.push_back(nt_in_rhs.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    reachable_set
+}
+
+/// Filters productions based on reachability criteria related to a set of "interesting" symbols.
+///
+/// A production is kept if its Left-Hand Side (LHS) non-terminal meets at least one of the following conditions:
+/// 1. It can derive a string containing at least one of the `interesting_symbols`.
+/// 2. It is derivable from a non-terminal that is itself one of the `interesting_symbols`
+///    (if `interesting_symbols` contains any non-terminals).
+///
+/// If `interesting_symbols` is empty, no productions will be kept.
+pub fn filter_productions_by_reachability(
+    initial_productions: &[Production],
+    interesting_symbols: &BTreeSet<Symbol>,
+) -> Vec<Production> {
+    if interesting_symbols.is_empty() {
+        crate::debug!(2, "filter_productions_by_reachability: interesting_symbols is empty, returning no productions.");
+        return Vec::new();
+    }
+
+    let can_derive_set = compute_can_derive_interesting(initial_productions, interesting_symbols);
+    crate::debug!(3, "filter_productions_by_reachability: CanDeriveInteresting set: {:?}", can_derive_set.iter().map(|nt| &nt.0).collect::<Vec<_>>());
+
+    let reachable_from_set = compute_reachable_from_interesting_nts(initial_productions, interesting_symbols);
+    crate::debug!(3, "filter_productions_by_reachability: ReachableFromInterestingNTs set: {:?}", reachable_from_set.iter().map(|nt| &nt.0).collect::<Vec<_>>());
+
+    let mut kept_productions = Vec::new();
+    for production in initial_productions {
+        let lhs = &production.lhs;
+        
+        // Condition 1: LHS can derive an interesting symbol.
+        let cond1_lhs_can_derive_interesting = can_derive_set.contains(lhs);
+        
+        // Condition 2: LHS is reachable from an interesting non-terminal.
+        let cond2_lhs_reachable_from_interesting_nt = reachable_from_set.contains(lhs);
+
+        if cond1_lhs_can_derive_interesting || cond2_lhs_reachable_from_interesting_nt {
+            kept_productions.push(production.clone());
+        } else {
+            crate::debug!(4, "Filtering out production: {} (LHS can derive interesting: {}, LHS reachable from interesting NT: {})", production, cond1_lhs_can_derive_interesting, cond2_lhs_reachable_from_interesting_nt);
+        }
+    }
+    
+    // Note: `generate_glr_parser_with_maps` (which will likely consume this output)
+    // internally calls `remove_productions_with_undefined_nonterminals` and `validate`,
+    // so further cleanup here might be redundant if that's the next step.
+    kept_productions
+}
