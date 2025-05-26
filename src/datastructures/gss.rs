@@ -31,8 +31,7 @@ impl PathAccumulator for () {
 fn compute_internal_hash_key<T: Hash, A: PathAccumulator>(
     predecessors_with_values: &BTreeSet<(Arc<GSSNode<T, A>>, T)>
 ) -> u64 {
-    let hasher = crc::crc32::Digest::new(crc::crc32::KOOPMAN);
-    let mut hasher = DeterministicHasher::new();
+    let mut hasher = DeterministicHasher::new(DefaultHasher::new());
     // The BTreeSet ensures predecessors_with_values are iterated in a canonical order.
     // Order depends on Arc pointer addresses and T values.
     for (pred_arc, edge_val) in predecessors_with_values {
