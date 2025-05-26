@@ -982,6 +982,7 @@ fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::err
 
     // 2. Define "interesting" symbols for filtering based on the sequence
     let sequence_to_test_names = vec!["\"...\"", "\";\"", "\"elif\""];
+    let sequence_to_test_names = vec!["STRING[0]", "STRING[0]", "\"->\""];
     let mut interesting_symbols = BTreeSet::new();
     for name_str in &sequence_to_test_names {
         // All elements in this specific sequence are terminals
@@ -1094,3 +1095,4 @@ fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::err
     println!("[Test] Test 'test_filtered_grammar_with_specific_sequence' completed successfully.");
     Ok(())
 }
+

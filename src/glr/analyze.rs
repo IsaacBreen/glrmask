@@ -432,9 +432,10 @@ fn compute_reachable_from_interesting_nts(
 /// Filters productions based on reachability criteria related to a set of "interesting" symbols.
 ///
 /// A production is kept if its Left-Hand Side (LHS) non-terminal meets at least one of the following conditions:
-/// 1. It can derive a string containing at least one of the `interesting_symbols`.
-/// 2. It is derivable from a non-terminal that is itself one of the `interesting_symbols`
+/// 1. It is derivable from a non-terminal that is itself one of the `interesting_symbols`
 ///    (if `interesting_symbols` contains any non-terminals).
+/// 2. The Right-Hand Side (RHS) of the production can derive a string containing
+///    at least one of the `interesting_symbols`.
 ///
 /// If `interesting_symbols` is empty, no productions will be kept.
 pub fn filter_productions_by_reachability(
@@ -456,16 +457,42 @@ pub fn filter_productions_by_reachability(
     for production in initial_productions {
         let lhs = &production.lhs;
         
-        // Condition 1: LHS can derive an interesting symbol.
-        let cond1_lhs_can_derive_interesting = can_derive_set.contains(lhs);
+        // Condition 1: LHS is reachable from an interesting non-terminal.
+        let cond1_lhs_is_reachable_from_interesting_nt = reachable_from_set.contains(lhs);
         
-        // Condition 2: LHS is reachable from an interesting non-terminal.
-        let cond2_lhs_reachable_from_interesting_nt = reachable_from_set.contains(lhs);
+        // Condition 2: RHS of *this specific* production can derive an interesting symbol.
+        // This is computed to be OR'd with Condition 1.
+        let mut cond2_current_rhs_can_derive_interesting = false;
+        for symbol_in_rhs in &production.rhs {
+            match symbol_in_rhs {
+                Symbol::Terminal(_) => {
+                    if interesting_symbols.contains(symbol_in_rhs) {
+                        cond2_current_rhs_can_derive_interesting = true;
+                        break;
+                    }
+                }
+                Symbol::NonTerminal(nt_in_rhs) => {
+                    // An RHS non-terminal leads to interesting if:
+                    // 1. It IS an interesting symbol itself (e.g. if interesting_symbols can contain NTs)
+                    // 2. OR it can derive an interesting symbol (i.e., nt_in_rhs is in can_derive_set)
+                    if interesting_symbols.contains(symbol_in_rhs) || can_derive_set.contains(nt_in_rhs) {
+                        cond2_current_rhs_can_derive_interesting = true;
+                        break;
+                    }
+                }
+            }
+        }
 
-        if cond1_lhs_can_derive_interesting || cond2_lhs_reachable_from_interesting_nt {
+        if cond1_lhs_is_reachable_from_interesting_nt || cond2_current_rhs_can_derive_interesting {
             kept_productions.push(production.clone());
         } else {
-            crate::debug!(4, "Filtering out production: {} (LHS can derive interesting: {}, LHS reachable from interesting NT: {})", production, cond1_lhs_can_derive_interesting, cond2_lhs_reachable_from_interesting_nt);
+            crate::debug!(
+                4,
+                "Filtering out production: {} (LHS_is_reachable_from_interesting_NT: {}, Current_RHS_can_derive_interesting: {})",
+                production,
+                cond1_lhs_is_reachable_from_interesting_nt,
+                cond2_current_rhs_can_derive_interesting
+            );
         }
     }
     
@@ -474,3 +501,4 @@ pub fn filter_productions_by_reachability(
     // so further cleanup here might be redundant if that's the next step.
     kept_productions
 }
+
