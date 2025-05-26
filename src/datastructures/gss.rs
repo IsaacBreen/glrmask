@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Assuming this exists elsewhere
 use std::collections::BTreeMap as StdMap;
-
+use deterministic_hash::DeterministicHasher;
 
 // Type alias for the canonicalization cache key
 // Key is the set of (predecessor_node_arc, edge_value_T_leading_to_this_node)
@@ -31,7 +31,7 @@ impl PathAccumulator for () {
 fn compute_internal_hash_key<T: Hash, A: PathAccumulator>(
     predecessors_with_values: &BTreeSet<(Arc<GSSNode<T, A>>, T)>
 ) -> u64 {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = DeterministicHasher::new();
     // The BTreeSet ensures predecessors_with_values are iterated in a canonical order.
     // Order depends on Arc pointer addresses and T values.
     for (pred_arc, edge_val) in predecessors_with_values {
