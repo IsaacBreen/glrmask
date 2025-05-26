@@ -6,7 +6,7 @@ use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal
 use crate::glr::table::{generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
 use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
 use std::hash::{Hash, Hasher};
-use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast, eat_string_fast, choice_fast, eat_bytestring_fast, repeat1_fast, CompiledGrammar}; // Added eat_any_fast, CompiledGrammar
+use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast, eat_string_fast, choice_fast, eat_bytestring_fast, repeat1_fast, CompiledGrammar, GrammarDefinition}; // Added eat_any_fast, CompiledGrammar
 use crate::glr::analyze; // Import the analyze module
 
 use std::fs::{self, File};
@@ -1019,6 +1019,12 @@ fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::err
     // Use the original terminal_map and non_terminal_map from the loaded compiled_grammar.
     // `generate_glr_parser_with_maps` includes validation, which might panic if the filtered grammar is invalid.
     println!("[Test] Rebuilding parser with filtered productions...");
+    let filtered_definition = GrammarDefinition {
+        productions: filtered_productions.clone(),
+        start_production_id: new_start_production_id,
+        terminal_name_to_group_id: compiled_grammar.definition.terminal_name_to_group_id.clone(),
+        terminal_expr_to_group_id: compiled_grammar.definition.terminal_expr_to_group_id.clone(),
+    };
     let filtered_parser = match std::panic::catch_unwind(|| {
         generate_glr_parser_with_maps(
             &filtered_productions,
@@ -1035,7 +1041,7 @@ fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::err
     };
     println!("[Test] Rebuilt parser with filtered productions. New parser has {} states.", filtered_parser.stage_7_table.len());
     // For debugging the structure of the filtered parser:
-    println!("[Test] Filtered parser structure: {}", filtered_parser);
+    println!("[Test] Filtered grammar structure: {}", filtered_definition);
 
     // 6. Convert the test sequence names to TerminalIDs using the *filtered_parser's* terminal_map.
     let mut sequence_to_test_ids = Vec::new();
