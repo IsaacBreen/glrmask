@@ -397,21 +397,9 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> { // Added
         self.hash_key_cache = compute_internal_hash_key::<T, A>(&self.predecessors_with_values);
     }
 
-    pub fn merge_unchecked(&mut self, mut other: Self) {
-         self.acc = self.acc.union(&other.acc);
-        self.predecessors_with_values.append(&mut other.predecessors_with_values);
-        self.hash_key_cache = compute_internal_hash_key::<T, A>(&self.predecessors_with_values);
-    }
-
     pub fn merged(self, other: Self) -> Self {
         let mut merged = self.clone();
         merged.merge(other);
-        merged
-    }
-
-    pub fn merged_unchecked(self, other: Self) -> Self {
-        let mut merged = self.clone();
-        merged.merge_unchecked(other);
         merged
     }
 
