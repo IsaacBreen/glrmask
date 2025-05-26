@@ -1124,7 +1124,10 @@ impl<'a> GrammarConstraintState<'a> {
                 if let Some(gtid) = grammar_token_id_opt { // Use grammar_token_id_opt
                     *step_counts.borrow_mut().entry(*gtid).or_insert(0) += 1;
                 }
-                grammar_token_id_opt.map(|gtid| cloned_glr_parse_state.step(gtid)); // Use grammar_token_id_opt
+                grammar_token_id_opt.map(|gtid| {
+                    Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc.terminals = cloned_glr_parse_state.active_state.stack.acc.terminals.clone().push(gtid);
+                    cloned_glr_parse_state.step(gtid);
+                }); // Use grammar_token_id_opt
                 if cloned_glr_parse_state.active_state.stack.is_empty() {
                     crate::debug!(3, "No active states after processing grammar token {:?}", grammar_token_id_opt.map(|gtid| gtid.0)); // Use grammar_token_id_opt
                     return None;
