@@ -995,6 +995,7 @@ pub fn simplify_gss_forest<T: Clone + Ord + Hash + Debug, A: PathAccumulator + C
         *r_arc = unique_r_arc.clone();
 
     }
+    assert_eq!(roots.len(), simplified_roots_vec.len());
     simplified_roots_vec
 }
 
