@@ -990,10 +990,12 @@ pub fn simplify_gss_forest<T: Clone + Ord + Hash + Debug, A: PathAccumulator + C
 
     // Deduplicate root Arcs if multiple original roots simplify to the same canonical Arc
     let mut unique_simplified_roots_map: HashMap<*const GSSNode<T,A>, Arc<GSSNode<T,A>>> = HashMap::new();
-    for r_arc in simplified_roots_vec { // Use _vec to avoid conflict with original roots name
-        unique_simplified_roots_map.entry(Arc::as_ptr(&r_arc)).or_insert(r_arc);
+    for r_arc in simplified_roots_vec.iter_mut() { // Use _vec to avoid conflict with original roots name
+        let unique_r_arc =unique_simplified_roots_map.entry(Arc::as_ptr(&r_arc)).or_insert(r_arc.clone());
+        *r_arc = unique_r_arc.clone();
+
     }
-    unique_simplified_roots_map.into_values().collect()
+    simplified_roots_vec
 }
 
 
