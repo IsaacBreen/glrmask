@@ -639,6 +639,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         // THIS one is important. Actual failure case. Causes goto not found panic.
         vec!["\"...\"", "\";\"", "\"elif\""],
     ];
+    test_sequences_str.reverse(); // Reverse the order of the test sequences
 
     let mut all_sequences_passed = true;
 
