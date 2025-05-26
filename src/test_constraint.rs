@@ -627,6 +627,11 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let mut all_sequences_passed = true;
 
     for (seq_idx, seq_terminal_names) in test_sequences_str.iter().enumerate() {
+        let mut seq_terminal_names = seq_terminal_names.clone();
+        let last = seq_terminal_names.pop().unwrap();
+        seq_terminal_names.reverse();
+        seq_terminal_names.push(last);
+
         let mut terminal_id_sequence = Vec::new();
         let mut current_sequence_token_names_valid = true;
 
