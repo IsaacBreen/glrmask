@@ -1026,6 +1026,8 @@ fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::err
         terminal_name_to_group_id: compiled_grammar.definition.terminal_name_to_group_id.clone(),
         terminal_expr_to_group_id: compiled_grammar.definition.terminal_expr_to_group_id.clone(),
     };
+    // For debugging the structure of the filtered parser:
+    println!("[Test] Filtered grammar structure: {}", filtered_definition);
     let filtered_parser = match std::panic::catch_unwind(|| {
         generate_glr_parser_with_maps(
             &filtered_productions,
@@ -1041,8 +1043,6 @@ fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::err
         }
     };
     println!("[Test] Rebuilt parser with filtered productions. New parser has {} states.", filtered_parser.stage_7_table.len());
-    // For debugging the structure of the filtered parser:
-    println!("[Test] Filtered grammar structure: {}", filtered_definition);
 
     // 6. Convert the test sequence names to TerminalIDs using the *filtered_parser's* terminal_map.
     let mut sequence_to_test_ids = Vec::new();
