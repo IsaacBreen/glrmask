@@ -41,7 +41,7 @@ fn compute_internal_hash_key<T: Hash, A: PathAccumulator>(
     hasher.finish()
 }
 
-#[derive(Debug, Clone)] // Removed PartialEq, Eq, PartialOrd, Ord, Hash for manual impl
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct GSSNode<T, A: PathAccumulator> {
     // T is the type of value on edges leading to this node.
     // Nodes themselves do not store a singular T value.
@@ -441,46 +441,46 @@ impl<T, A: PathAccumulator> Drop for GSSNode<T, A> {
     }
 }
 
-impl<T: Hash, A: PathAccumulator> Hash for GSSNode<T, A> {
-    fn hash<H_hasher: Hasher>(&self, state: &mut H_hasher) {
-        self.hash_key_cache.hash(state);
-    }
-}
+// impl<T: Hash, A: PathAccumulator> Hash for GSSNode<T, A> {
+//     fn hash<H_hasher: Hasher>(&self, state: &mut H_hasher) {
+//         self.hash_key_cache.hash(state);
+//     }
+// }
 
-impl<T: Ord + Hash + PartialEq, A: PathAccumulator + PartialEq> PartialEq for GSSNode<T, A> { // T needs Ord for BTreeSet
-    fn eq(&self, other: &Self) -> bool {
-        if std::ptr::eq(self, other) { return true; }
-        self.hash_key_cache == other.hash_key_cache &&
-        self.predecessors_with_values == other.predecessors_with_values &&
-        self.acc == other.acc
-    }
-}
+// impl<T: Ord + Hash + PartialEq, A: PathAccumulator + PartialEq> PartialEq for GSSNode<T, A> { // T needs Ord for BTreeSet
+//     fn eq(&self, other: &Self) -> bool {
+//         if std::ptr::eq(self, other) { return true; }
+//         self.hash_key_cache == other.hash_key_cache &&
+//         self.predecessors_with_values == other.predecessors_with_values &&
+//         self.acc == other.acc
+//     }
+// }
+//
+// impl<T: Ord + Hash + Eq, A: PathAccumulator + Eq> Eq for GSSNode<T, A> {} // T needs Ord for BTreeSet
 
-impl<T: Ord + Hash + Eq, A: PathAccumulator + Eq> Eq for GSSNode<T, A> {} // T needs Ord for BTreeSet
-
-impl<T: Ord + Hash + PartialOrd, A: PathAccumulator + PartialOrd> PartialOrd for GSSNode<T, A> { // T needs Ord for BTreeSet
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if std::ptr::eq(self, other) { return Some(Ordering::Equal); }
-        match self.hash_key_cache.partial_cmp(&other.hash_key_cache) {
-            Some(Ordering::Equal) => {
-                match self.predecessors_with_values.partial_cmp(&other.predecessors_with_values) {
-                    Some(Ordering::Equal) => self.acc.partial_cmp(&other.acc),
-                    other_ordering => other_ordering,
-                }
-            }
-            other_ordering => other_ordering,
-        }
-    }
-}
-
-impl<T: Ord + Hash, A: PathAccumulator + Ord> Ord for GSSNode<T, A> { // T needs Ord for BTreeSet
-    fn cmp(&self, other: &Self) -> Ordering {
-        if std::ptr::eq(self, other) { return Ordering::Equal; }
-        self.hash_key_cache.cmp(&other.hash_key_cache)
-            .then_with(|| self.predecessors_with_values.cmp(&other.predecessors_with_values))
-            .then_with(|| self.acc.cmp(&other.acc))
-    }
-}
+// impl<T: Ord + Hash + PartialOrd, A: PathAccumulator + PartialOrd> PartialOrd for GSSNode<T, A> { // T needs Ord for BTreeSet
+//     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+//         if std::ptr::eq(self, other) { return Some(Ordering::Equal); }
+//         match self.hash_key_cache.partial_cmp(&other.hash_key_cache) {
+//             Some(Ordering::Equal) => {
+//                 match self.predecessors_with_values.partial_cmp(&other.predecessors_with_values) {
+//                     Some(Ordering::Equal) => self.acc.partial_cmp(&other.acc),
+//                     other_ordering => other_ordering,
+//                 }
+//             }
+//             other_ordering => other_ordering,
+//         }
+//     }
+// }
+//
+// impl<T: Ord + Hash, A: PathAccumulator + Ord> Ord for GSSNode<T, A> { // T needs Ord for BTreeSet
+//     fn cmp(&self, other: &Self) -> Ordering {
+//         if std::ptr::eq(self, other) { return Ordering::Equal; }
+//         self.hash_key_cache.cmp(&other.hash_key_cache)
+//             .then_with(|| self.predecessors_with_values.cmp(&other.predecessors_with_values))
+//             .then_with(|| self.acc.cmp(&other.acc))
+//     }
+// }
 
 pub trait GSSTrait<T: Clone + Hash, A: PathAccumulator> {
     // type Peek<'a> where A: 'a, Self: 'a;
