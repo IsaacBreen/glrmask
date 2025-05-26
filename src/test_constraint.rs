@@ -1503,7 +1503,6 @@ fn test_minimized_grammar_causes_panic() -> Result<(), Box<dyn std::error::Error
     // P6: atom -> "..."
     // P7: NEWLINE ->
     let minimized_productions = vec![
-        prod("start'", vec![nt("start'''")]),                            // P0
         prod("block", vec![t("..."), t(";")]),          // P4
         prod("elif_stmt", vec![t("elif"), nt("block"), nt("elif_stmt")]), // P5
     ];
@@ -1546,7 +1545,8 @@ fn test_minimized_grammar_causes_panic() -> Result<(), Box<dyn std::error::Error
         terminal_map_for_minimized.clone(), // Pass the maps specific to this grammar
         non_terminal_map_for_minimized.clone(),
     );
-    
+    println!("Parser: {}", parser);
+
     // Initialize GLRParserState (accumulator type `()` is fine for this test)
     let mut glr_state = parser.init_glr_parser::<()>();
 
