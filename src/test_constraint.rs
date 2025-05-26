@@ -790,7 +790,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             }
             // If a panic occurs, the test will fail here.
             // If we wanted to log the sequence that caused a panic, it would require more setup
-            // (e.g. std::panic::catch_unwind), but the goal here is just to detect panics.
+            // (e.panic::catch_unwind), but the goal here is just to detect panics.
         }
     }
     println!("GLR parser fuzz test completed ({} iterations).", num_fuzz_iterations);
@@ -1220,8 +1220,52 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
         std::io::stdout().flush().unwrap();
         let mut made_change_in_this_pass = false;
 
-        // Phase 1: Try removing symbols from RHS of productions
-        print!("[Minimizer] Pass {}: Trying to remove RHS symbols", pass_num);
+        // Phase 1 (New Order): Try removing whole productions
+        print!("[Minimizer] Pass {}: Trying to remove whole productions", pass_num);
+        std::io::stdout().flush().unwrap();
+        let mut best_reduction_after_prod_removal = None;
+        'production_removal_loop: for prod_idx_to_remove in (0..current_productions.len()).rev() {
+            if current_productions[prod_idx_to_remove].lhs == augmented_start_rule_lhs {
+                // Do not remove the augmented start rule itself.
+                continue;
+            }
+            // Ensure we don't remove the very last production if it's the start rule,
+            // though the check above should handle the typical augmented start rule.
+            if current_productions.len() == 1 && current_productions[0].lhs == augmented_start_rule_lhs {
+                continue;
+            }
+
+            print!("p"); std::io::stdout().flush().unwrap();
+            let mut productions_after_prod_removed = current_productions.clone();
+            productions_after_prod_removed.remove(prod_idx_to_remove);
+
+            if productions_after_prod_removed.is_empty() {
+                continue;
+            }
+
+            if causes_specific_panic(
+                &productions_after_prod_removed,
+                &augmented_start_rule_lhs,
+                &sequence_to_test_names,
+                PANIC_SUBSTRING_TO_FIND,
+            ) {
+                best_reduction_after_prod_removal = Some(productions_after_prod_removed);
+                 println!("\n[Minimizer] Pass {}: Reduced by removing P{} (LHS: {}). New total productions: {}",
+                         pass_num, prod_idx_to_remove, current_productions[prod_idx_to_remove].lhs.0, best_reduction_after_prod_removal.as_ref().unwrap().len());
+                break 'production_removal_loop; // Found a successful reduction
+            }
+        }
+        println!(); 
+
+        if let Some(reduced_productions) = best_reduction_after_prod_removal {
+            current_productions = reduced_productions;
+            made_change_in_this_pass = true;
+            continue; // Restart pass with smaller grammar
+        }
+
+        // Phase 2 (New Order): If no production was removed, try removing symbols from RHS
+        // This block is only reached if made_change_in_this_pass is still false (implicitly, due to the continue above).
+        print!("[Minimizer] Pass {}: No production removals successful. Trying to remove RHS symbols", pass_num);
         std::io::stdout().flush().unwrap();
         let mut best_reduction_after_symbol_removal = None;
         'symbol_removal_loop: for prod_idx in 0..current_productions.len() {
@@ -1243,7 +1287,7 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
                     best_reduction_after_symbol_removal = Some(productions_after_symbol_removed);
                     println!("\n[Minimizer] Pass {}: Reduced by removing symbol #{} from P{} (LHS: {}). New total productions: {}",
                              pass_num, symbol_idx_to_remove, prod_idx, current_productions[prod_idx].lhs.0, best_reduction_after_symbol_removal.as_ref().unwrap().len());
-                    break 'symbol_removal_loop;
+                    break 'symbol_removal_loop; // Found a successful reduction
                 }
             }
         }
@@ -1252,58 +1296,13 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
         if let Some(reduced_productions) = best_reduction_after_symbol_removal {
             current_productions = reduced_productions;
             made_change_in_this_pass = true;
-            // Continue to the next pass to restart reduction attempts on the smaller grammar
+            continue; // Restart pass with smaller grammar
         }
 
-        // Phase 2: Try removing whole productions
-        if !made_change_in_this_pass {
-            print!("[Minimizer] Pass {}: No symbol removals successful. Trying to remove whole productions", pass_num);
-            std::io::stdout().flush().unwrap();
-            let mut best_reduction_after_prod_removal = None;
-            
-            'production_removal_loop: for prod_idx_to_remove in (0..current_productions.len()).rev() {
-                if current_productions[prod_idx_to_remove].lhs == augmented_start_rule_lhs {
-                    // Do not remove the augmented start rule itself.
-                    continue;
-                }
-                // Ensure we don't remove the very last production if it's the start rule,
-                // though the check above should handle the typical augmented start rule.
-                if current_productions.len() == 1 && current_productions[0].lhs == augmented_start_rule_lhs {
-                    continue;
-                }
-
-
-                print!("p"); std::io::stdout().flush().unwrap();
-                let mut productions_after_prod_removed = current_productions.clone();
-                productions_after_prod_removed.remove(prod_idx_to_remove);
-
-                if productions_after_prod_removed.is_empty() { // Should not happen if start rule is protected
-                    continue;
-                }
-
-                if causes_specific_panic(
-                    &productions_after_prod_removed,
-                    &augmented_start_rule_lhs,
-                    &sequence_to_test_names,
-                    PANIC_SUBSTRING_TO_FIND,
-                ) {
-                    best_reduction_after_prod_removal = Some(productions_after_prod_removed);
-                     println!("\n[Minimizer] Pass {}: Reduced by removing P{} (LHS: {}). New total productions: {}",
-                             pass_num, prod_idx_to_remove, current_productions[prod_idx_to_remove].lhs.0, best_reduction_after_prod_removal.as_ref().unwrap().len());
-                    break 'production_removal_loop;
-                }
-            }
-            println!(); 
-
-            if let Some(reduced_productions) = best_reduction_after_prod_removal {
-                current_productions = reduced_productions;
-                made_change_in_this_pass = true;
-            }
-        }
-
-        if !made_change_in_this_pass {
+        // If no change was made in this entire pass (neither production nor symbol removal)
+        if !made_change_in_this_pass { // This check is effectively testing if both phases failed to make a change
             println!("[Minimizer] Pass {}: No further reductions found.", pass_num);
-            break; 
+            break; // Exit the main loop
         }
     }
 
