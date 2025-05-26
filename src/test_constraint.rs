@@ -756,7 +756,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     } else {
         let mut rng = rand::thread_rng();
         for i in 0..num_fuzz_iterations {
-            if i % 100 == 0 && i > 0 { // Log progress
+            if i % 100 == 0 { // Log progress
                 println!("  Fuzz test iteration {}/{}", i, num_fuzz_iterations);
             }
             let mut glr_state = compiled_grammar.glr_parser.init_glr_parser_with_acc(dummy_llm_token_info.clone());
