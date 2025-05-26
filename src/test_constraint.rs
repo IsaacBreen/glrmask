@@ -23,6 +23,7 @@ use crate::tokenizer::{LLMTokenID, LLMTokenMap};
 use crate::types::TerminalID;
 use crate::datastructures::vocab_prefix_tree::VocabPrefixTree; // Added for tokenization
 use std::time::Instant;
+use rand::prelude::IndexedRandom;
 use rand::Rng;
 use rand::seq::SliceRandom;
 
@@ -761,7 +762,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             let mut glr_state = compiled_grammar.glr_parser.init_glr_parser_with_acc(dummy_llm_token_info.clone());
             
             let num_tokens_this_attempt = rng.gen_range(0..=max_tokens_per_fuzz_attempt);
-            let mut current_fuzz_sequence_names = Vec::new(); // For logging on panic (if needed, not strictly for this test)
+            let mut current_fuzz_sequence_names: Vec<String> = Vec::new();
 
             for _ in 0..num_tokens_this_attempt {
                 if let Some(random_terminal_id) = all_grammar_terminal_ids.choose(&mut rng) {
