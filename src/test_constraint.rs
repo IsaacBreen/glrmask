@@ -763,20 +763,20 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             
             let num_tokens_this_attempt = rng.gen_range(0..=max_tokens_per_fuzz_attempt);
             let mut current_fuzz_sequence_names: Vec<String> = Vec::new();
+            let mut current_fuzz_sequence_ids: Vec<TerminalID> = Vec::new();
 
             for _ in 0..num_tokens_this_attempt {
-                if let Some(random_terminal_id) = all_grammar_terminal_ids.choose(&mut rng) {
-                    // For debugging, you could find the name:
-                    // let token_name = compiled_grammar.glr_parser.terminal_map.get_by_right(random_terminal_id).map(|t| t.0.clone()).unwrap_or_else(|| "UNKNOWN_TOKEN".to_string());
-                    // current_fuzz_sequence_names.push(token_name);
-                    
-                    // The core of the fuzz test: step and see if it panics.
-                    // We don't care about glr_state.is_ok() here.
-                    glr_state.step(*random_terminal_id);
-                } else {
-                    // Should not happen if all_grammar_terminal_ids is not empty.
-                    break; 
-                }
+                let random_terminal_id = all_grammar_terminal_ids.choose(&mut rng).unwrap();
+                // For debugging, you could find the name:
+                let token_name = compiled_grammar.glr_parser.terminal_map.get_by_right(random_terminal_id).map(|t| t.0.clone()).unwrap_or_else(|| "UNKNOWN_TOKEN".to_string());
+                current_fuzz_sequence_names.push(token_name);
+                current_fuzz_sequence_ids.push(*random_terminal_id);
+            }
+            for token_name in current_fuzz_sequence_names {
+                // The core of the fuzz test: step and see if it panics.
+                // We don't care about glr_state.is_ok() here.
+                let random_terminal_id = compiled_grammar.glr_parser.terminal_map.get_by_left(&Terminal(token_name.clone())).unwrap();
+                glr_state.step(*random_terminal_id);
             }
             // If a panic occurs, the test will fail here.
             // If we wanted to log the sequence that caused a panic, it would require more setup
