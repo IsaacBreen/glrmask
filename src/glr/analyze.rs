@@ -457,12 +457,10 @@ pub fn filter_productions_by_reachability(
     for production in initial_productions {
         let lhs = &production.lhs;
         
-        //
-        
-        // Condition 2: LHS is reachable from an interesting non-terminal.
+        // Condition 1: LHS is reachable from an interesting non-terminal.
         let cond1_lhs_is_reachable_from_interesting_nt = reachable_from_set.contains(lhs);
         
-        // Condition 3: RHS of *this specific* production can derive an interesting symbol.
+        // Condition 2: RHS of *this specific* production can derive an interesting symbol.
         // This is computed to be OR'd with Condition 1.
         let mut cond2_current_rhs_can_derive_interesting = false;
         for symbol_in_rhs in &production.rhs {
