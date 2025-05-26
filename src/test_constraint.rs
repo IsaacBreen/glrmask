@@ -652,7 +652,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     }
 
     for (seq_idx, seq_terminal_names) in test_sequences_str.iter().enumerate() {
-
+        println!("\nTesting sequence {} ({} tokens): '{}'... ", seq_idx, seq_terminal_names.len(), seq_terminal_names.join(" → "));
 
         let mut terminal_id_sequence = Vec::new();
         let mut current_sequence_token_names_valid = true;
@@ -782,7 +782,6 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
                 // We don't care about glr_state.is_ok() here.
                 let seen_so_far: Vec<_> = current_fuzz_sequence_names[..i].iter().cloned().collect();
                 println!("    Stepping with token {}/{}: '{}' (Terminal {}). Seen so far: {:?}", i + 1, num_tokens_this_attempt, current_fuzz_sequence_names[i], terminal_id.0, seen_so_far);
-                println!("    ----------");
                 glr_state.step(*terminal_id);
             }
             // If a panic occurs, the test will fail here.
