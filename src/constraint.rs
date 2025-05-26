@@ -1166,7 +1166,7 @@ impl<'a> GrammarConstraintState<'a> {
                     *step_counts.borrow_mut().entry(*possible_final_grammar_token).or_insert(0) += 1;
 
                     let terminals = possible_next_glr_parse_state.active_state.stack.acc.terminals.clone();
-                    print_gss_forest(&[terminals.clone()], usize::MAX);
+                    println!("{}", print_gss_forest(&[terminals.clone()], usize::MAX));
                     possible_next_glr_parse_state.step(*possible_final_grammar_token);
                     if possible_next_glr_parse_state.is_ok() {
                         crate::debug!(3, "Semi-final GLR parse state is OK");
