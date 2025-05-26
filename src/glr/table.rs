@@ -192,6 +192,7 @@ type Stage7Result = (
 );
 
 fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+    dbg!(&productions);
     let initial_item = Item {
         production: productions[start_production_id].clone(),
         dot_position: 0,
