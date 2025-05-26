@@ -14,7 +14,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, print_precompute_stats, PrecomputeStats};
 use crate::datastructures::charmap::TrieMap;
-use crate::datastructures::gss::{prune_and_transform_recursive, prune_and_transform_recursive_canonical, simplify_gss_forest, GSSNode, PathAccumulator}; // Import PathAccumulator
+use crate::datastructures::gss::{print_gss_forest, prune_and_transform_recursive, prune_and_transform_recursive_canonical, simplify_gss_forest, GSSNode, PathAccumulator}; // Import PathAccumulator
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -39,7 +39,7 @@ pub type GrammarTokenBV = BitVec; // BitVec is not easily JSONConvertible withou
 pub struct LLMTokenInfo {
     pub active:       LLMTokenBV,
     pub intersection: LLMTokenBV,
-    pub terminals:    GSSNode<TerminalID, ()>,
+    pub terminals:    Arc<GSSNode<TerminalID, ()>>,
 }
 
 impl Default for LLMTokenInfo {
@@ -61,7 +61,7 @@ impl Default for LLMTokenInfo {
         Self {
             active:       Default::default(), // Empty set
             intersection: HybridBitset::max_ones(),
-            terminals:    GSSNode::new_default(),
+            terminals:    Arc::new(GSSNode::new_default()),
         }
     }
 }
@@ -69,7 +69,7 @@ impl Default for LLMTokenInfo {
 impl PathAccumulator for LLMTokenInfo {
     fn union(&self, other: &Self) -> Self {
         let mut terminals = self.terminals.clone();
-        terminals.merge(other.terminals.clone());
+        Arc::make_mut(&mut terminals).merge(other.terminals.as_ref().clone());
         Self {
             active:       &self.active | &other.active,
             intersection: &self.intersection & &other.intersection, // Intersection field becomes stricter (AND)
@@ -404,7 +404,7 @@ impl GrammarConstraint {
         let initial_llm_token_acc = LLMTokenInfo { // Renamed from info
             active:       base_set_for_info.clone(),
             intersection: base_set_for_info,
-            terminals:    GSSNode::new_default(),
+            terminals:    Arc::new(GSSNode::new_default()),
         };
         let mut state = BTreeMap::new();
         state.insert(
@@ -1028,7 +1028,7 @@ impl<'a> GrammarConstraintState<'a> {
         let all_true_token_info = LLMTokenInfo {
             active:       all_true_set.clone(),
             intersection: all_true_set.clone(),
-            terminals:    GSSNode::new_default(),
+            terminals:    Arc::new(GSSNode::new_default()),
         };
 
         // Convert original LLMTokenID to internal LLMTokenID for the closure
@@ -1120,12 +1120,11 @@ impl<'a> GrammarConstraintState<'a> {
                 let current_active_tokens = cloned_glr_parse_state.active_state.stack.acc.active.clone();
                 Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc.intersection &= &current_active_tokens;
                 Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc.active &= edge_llm_tokens;
-
                 if let Some(gtid) = grammar_token_id_opt { // Use grammar_token_id_opt
                     *step_counts.borrow_mut().entry(*gtid).or_insert(0) += 1;
                 }
                 grammar_token_id_opt.map(|gtid| {
-                    Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc.terminals = cloned_glr_parse_state.active_state.stack.acc.terminals.clone().push(gtid);
+                    Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc.terminals = Arc::new(cloned_glr_parse_state.active_state.stack.acc.terminals.as_ref().clone().push(gtid));
                     cloned_glr_parse_state.step(gtid);
                 }); // Use grammar_token_id_opt
                 if cloned_glr_parse_state.active_state.stack.is_empty() {
@@ -1165,6 +1164,9 @@ impl<'a> GrammarConstraintState<'a> {
                     let mut possible_next_glr_parse_state = current_glr_parse_state.clone();
                     crate::debug!(3, "Stepping semi-final GLR parse state");
                     *step_counts.borrow_mut().entry(*possible_final_grammar_token).or_insert(0) += 1;
+
+                    let terminals = possible_next_glr_parse_state.active_state.stack.acc.terminals.clone();
+                    print_gss_forest(&[terminals.clone()], usize::MAX);
                     possible_next_glr_parse_state.step(*possible_final_grammar_token);
                     if possible_next_glr_parse_state.is_ok() {
                         crate::debug!(3, "Semi-final GLR parse state is OK");
