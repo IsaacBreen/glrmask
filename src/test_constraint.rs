@@ -635,6 +635,9 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         vec!["STRING[0]", "\">=\"", "\"->\""],
         vec!["IGNORE[0][0]", "STRING[0]", "\"->\""],
         vec!["STRING[0]", "STRING[0]", "\"->\""],
+
+        // THIS one is important. Actual failure case. Causes goto not found panic.
+        vec!["\"...\"", "\";\"", "\"elif\""],
     ];
 
     let mut all_sequences_passed = true;
