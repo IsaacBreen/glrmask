@@ -23,6 +23,8 @@ use crate::tokenizer::{LLMTokenID, LLMTokenMap};
 use crate::types::TerminalID;
 use crate::datastructures::vocab_prefix_tree::VocabPrefixTree; // Added for tokenization
 use std::time::Instant;
+use rand::Rng;
+use rand::seq::SliceRandom;
 
 // Use concrete types for merge tests
 type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;
@@ -386,7 +388,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
         prod("A", vec![]),
     ];
     let terminal_map: BiBTreeMap<Terminal, TerminalID> = token_name_map.iter().map(|(name, id)| (Terminal(name.clone()), TerminalID(*id))).collect();
-    let parser = generate_glr_parser_with_terminal_map(&productions, 0, terminal_map);
+    let parser = generate_glr_parser(&productions, 0);
 
     // Ensure that "def" is a valid initial LLM token
     let max_llm_token_id = token_name_map.iter().map(|(_, id)| *id).max().unwrap();
@@ -733,10 +735,57 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     // assert!(all_sequences_passed, "One or more grammar terminal sequence tests failed. See warnings/errors above.");
     println!("GLR parser testing with specific grammar terminal sequences finished.");
-    // --- End of new test section ---
 
-    // 3. Load GPT-2 Vocabulary
-    println!("Loading GPT-2 vocabulary...");
+    // --- GLR Parser Fuzz Test ---
+    println!("\nStarting GLR parser fuzz test...");
+    let num_fuzz_iterations = 1000;
+    let max_tokens_per_fuzz_attempt = 10;
+
+    // Re-use dummy_llm_token_info defined earlier for initializing GLRParserState
+    let dummy_llm_token_info = crate::constraint::LLMTokenInfo {
+        active: HybridBitset::new(),
+        intersection: HybridBitset::new(),
+        terminals: std::sync::Arc::new(crate::datastructures::gss::GSSNode::new_default()),
+    };
+
+    let all_grammar_terminal_ids: Vec<_> = compiled_grammar.glr_parser.terminal_map.right_values().cloned().collect();
+
+    if all_grammar_terminal_ids.is_empty() {
+        println!("  Warning: No grammar terminal IDs found in compiled_grammar.glr_parser.terminal_map. Fuzz test will be trivial or skipped.");
+    } else {
+        let mut rng = rand::thread_rng();
+        for i in 0..num_fuzz_iterations {
+            if i % 100 == 0 && i > 0 { // Log progress
+                println!("  Fuzz test iteration {}/{}", i, num_fuzz_iterations);
+            }
+            let mut glr_state = compiled_grammar.glr_parser.init_glr_parser_with_acc(dummy_llm_token_info.clone());
+            
+            let num_tokens_this_attempt = rng.gen_range(0..=max_tokens_per_fuzz_attempt);
+            let mut current_fuzz_sequence_names = Vec::new(); // For logging on panic (if needed, not strictly for this test)
+
+            for _ in 0..num_tokens_this_attempt {
+                if let Some(random_terminal_id) = all_grammar_terminal_ids.choose(&mut rng) {
+                    // For debugging, you could find the name:
+                    // let token_name = compiled_grammar.glr_parser.terminal_map.get_by_right(random_terminal_id).map(|t| t.0.clone()).unwrap_or_else(|| "UNKNOWN_TOKEN".to_string());
+                    // current_fuzz_sequence_names.push(token_name);
+                    
+                    // The core of the fuzz test: step and see if it panics.
+                    // We don't care about glr_state.is_ok() here.
+                    glr_state.step(*random_terminal_id);
+                } else {
+                    // Should not happen if all_grammar_terminal_ids is not empty.
+                    break; 
+                }
+            }
+            // If a panic occurs, the test will fail here.
+            // If we wanted to log the sequence that caused a panic, it would require more setup
+            // (e.g. std::panic::catch_unwind), but the goal here is just to detect panics.
+        }
+    }
+    println!("GLR parser fuzz test completed ({} iterations).", num_fuzz_iterations);
+    // --- End of GLR Parser Fuzz Test ---
+
+    println!("\nLoading GPT-2 vocabulary...");
     let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
     let cache_dir = Path::new(".cache/test_vocabs");
     let vocab_file_name = "gpt2_vocab.json";
