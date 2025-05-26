@@ -740,7 +740,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     // --- GLR Parser Fuzz Test ---
     println!("\nStarting GLR parser fuzz test...");
-    let num_fuzz_iterations = 1000;
+    let num_fuzz_iterations = 10000;
     let max_tokens_per_fuzz_attempt = 10;
 
     // Re-use dummy_llm_token_info defined earlier for initializing GLRParserState
@@ -777,7 +777,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             for (i, terminal_id) in current_fuzz_sequence_ids.iter().enumerate() {
                 // The core of the fuzz test: step and see if it panics.
                 // We don't care about glr_state.is_ok() here.
-                let seen_so_far: Vec<_> = current_fuzz_sequence_ids[..i].iter().cloned().collect();
+                let seen_so_far: Vec<_> = current_fuzz_sequence_names[..i].iter().cloned().collect();
                 println!("    Stepping with token {}/{}: '{}' (Terminal {}). Seen so far: {:?}", i + 1, num_tokens_this_attempt, current_fuzz_sequence_names[i], terminal_id.0, seen_so_far);
                 glr_state.step(*terminal_id);
             }
