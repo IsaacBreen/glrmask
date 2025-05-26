@@ -61,6 +61,45 @@ pub struct GSSNode<T, A: PathAccumulator> {
 //     }
 // }
 
+/// An iterator over all paths leading to a GSS node.
+/// Paths are represented as `Vec<T>`, where `T` is the edge value type.
+/// The iteration proceeds from the target node upwards to its roots.
+#[derive(Clone)]
+pub struct PathsIter<'a, T: Clone, A: PathAccumulator> {
+    // The queue stores tuples of (node_to_visit, path_suffix_from_original_node_to_current_node).
+    // The path_suffix is built in reverse order during traversal and corrected when a full path is yielded.
+    // We use &'a GSSNode to avoid Arc cloning if not necessary for the iterator's logic itself,
+    // and to tie the iterator's lifetime to the GSSNode it's iterating over.
+    queue: VecDeque<(&'a GSSNode<T, A>, Vec<T>)>,
+}
+
+impl<'a, T: Clone, A: PathAccumulator> Iterator for PathsIter<'a, T, A> {
+    type Item = Vec<T>; // Each path is a Vec of edge values.
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some((current_node_ref, mut path_suffix_reversed)) = self.queue.pop_front() {
+            if current_node_ref.predecessors_with_values.is_empty() {
+                // This node is a root for the current path.
+                // The path is complete. Reverse it to get the correct order.
+                path_suffix_reversed.reverse();
+                return Some(path_suffix_reversed);
+            } else {
+                // This node has predecessors. Add them to the queue for further exploration.
+                for (pred_arc, edge_val) in &current_node_ref.predecessors_with_values {
+                    let mut new_path_suffix_reversed = path_suffix_reversed.clone();
+                    // The edge_val leads from pred_arc to current_node_ref.
+                    // So, it's the next segment when tracing the path "upwards".
+                    new_path_suffix_reversed.push(edge_val.clone());
+                    // Add the predecessor node and the extended path suffix to the queue.
+                    // pred_arc.as_ref() gets a &GSSNode<T, A> from Arc<GSSNode<T, A>>.
+                    self.queue.push_back((pred_arc.as_ref(), new_path_suffix_reversed));
+                }
+            }
+        }
+        None // The queue is empty, so no more paths can be found.
+    }
+}
+
 
 // Methods for creating non-canonical GSSNode instances
 impl<T: Ord + Hash, A: PathAccumulator> GSSNode<T, A> { // T needs Ord for BTreeSet key part, Hash for hash_key_cache
@@ -337,6 +376,22 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> { // Added
 
     pub fn flatten_bulk(nodes: &[Arc<GSSNode<T, A>>]) -> Vec<Vec<(T, A)>> {
         nodes.iter().flat_map(|node_arc| node_arc.as_ref().flatten()).collect()
+    }
+
+    /// Returns an iterator over all paths that terminate at this GSS node.
+    ///
+    /// Each path is a `Vec<T>` containing the sequence of edge values from a root
+    /// of the GSS graph to this node. The paths are yielded as they are found by
+    /// a breadth-first search-like traversal upwards from this node.
+    ///
+    /// Example: If node C has a predecessor B with edge value `val_bc`, and B has
+    /// a predecessor A (a root) with edge value `val_ab`, then one path yielded
+    /// for `C.iter_paths()` would be `vec![val_ab, val_bc]`.
+    pub fn iter_paths(&self) -> PathsIter<'_, T, A> {
+        let mut queue = VecDeque::new();
+        // Start traversal from `self` with an empty path suffix.
+        queue.push_back((self, Vec::new()));
+        PathsIter { queue }
     }
 
     pub fn merge(&mut self, mut other: Self) {
