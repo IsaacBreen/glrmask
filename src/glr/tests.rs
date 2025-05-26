@@ -1,8 +1,9 @@
 use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, GLRParserState};
 use crate::glr::table::{generate_glr_parser, TerminalID};
-use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals}; // Import the analyze module
+use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability}; // Import the analyze module
 use bimap::BiBTreeMap;
+use std::collections::BTreeSet;
 
 // --- Helper Functions for Tests ---
 
@@ -660,6 +661,56 @@ fn test_nullable_nonterminal_before_terminal() {
     state_empty_fail.parse(&tokens_empty_fail);
     state_empty_fail.step(eof_token_id);
     assert!(!state_empty_fail.is_ok(), "Parse succeeded for invalid input '$'");
+}
+
+#[test]
+fn test_filter_productions_selectivity() {
+    // Grammar:
+    // S -> X
+    // X -> A T_int  (P0) // A is not interesting, T_int is.
+    // X -> B        (P1) // B is not interesting, does not lead to T_int.
+    // A -> a        (P2) // a is not interesting.
+    // B -> b        (P3) // b is not interesting.
+    // Goal: If interesting is {T_int}, only X -> A T_int should be kept.
+    //       X -> B should be filtered out because its RHS (B) does not lead to T_int.
+    let productions = vec![
+        prod("S", vec![nt("X")]),
+        prod("X", vec![nt("A"), t("T_int")]), // P0
+        prod("X", vec![nt("B")]),             // P1
+        prod("A", vec![t("a")]),              // P2
+        prod("B", vec![t("b")]),              // P3
+    ];
+
+    let t_int_symbol = Symbol::Terminal(Terminal("T_int".to_string()));
+    let interesting_symbols: BTreeSet<Symbol> = [t_int_symbol.clone()].iter().cloned().collect();
+
+    let filtered = filter_productions_by_reachability(&productions, &interesting_symbols);
+
+    // Expected productions to be kept:
+    // X -> A T_int (because RHS contains T_int, and X is bootstrap LHS)
+    // S -> X       (because X can derive T_int, and S is bootstrap LHS via X)
+    // We expect X -> B to be filtered out.
+    // We expect A -> a to be filtered out.
+    // We expect B -> b to be filtered out.
+
+    let expected_kept_productions = vec![
+        // Order might vary based on BTreeSet iteration if not careful,
+        // but content should be these two.
+        // The filter iterates initial_productions, so order should be preserved if input is ordered.
+        prod("S", vec![nt("X")]),
+        prod("X", vec![nt("A"), t("T_int")]),
+    ];
+    
+    // Convert to BTreeSet for comparison to ignore order issues if any.
+    let filtered_set: BTreeSet<_> = filtered.iter().cloned().collect();
+    let expected_set: BTreeSet<_> = expected_kept_productions.iter().cloned().collect();
+
+    assert_eq!(filtered_set.len(), 2, "Expected 2 productions to be kept, got {}. Filtered: {:?}", filtered_set.len(), filtered_set);
+    assert_eq!(filtered_set, expected_set, "Filtered productions do not match expected. Filtered: {:?}, Expected: {:?}", filtered_set, expected_set);
+
+    // Specifically check that "X -> B" is NOT in the filtered set.
+    let prod_x_b = prod("X", vec![nt("B")]);
+    assert!(!filtered_set.contains(&prod_x_b), "Production 'X -> B' should have been filtered out.");
 }
 
 // --- Notes on Limitations Not Easily Tested Here ---

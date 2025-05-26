@@ -429,13 +429,20 @@ fn compute_reachable_from_interesting_nts(
     reachable_set
 }
 
-/// Filters productions based on reachability criteria related to a set of "interesting" symbols.
+/// Filters productions to keep only those relevant to deriving specified "interesting" symbols.
 ///
-/// A production is kept if its Left-Hand Side (LHS) non-terminal meets at least one of the following conditions:
-/// 1. It is derivable from a non-terminal that is itself one of the `interesting_symbols`
-///    (if `interesting_symbols` contains any non-terminals).
-/// 2. The Right-Hand Side (RHS) of the production can derive a string containing
-///    at least one of the `interesting_symbols`.
+/// A production `P: L -> R` is kept if its Left-Hand Side (LHS) `L` is "relevant"
+/// AND its Right-Hand Side (RHS) `R` can derive a string containing an interesting symbol.
+///
+/// An LHS `L` is "relevant" if:
+/// 1. `L` is itself an interesting non-terminal.
+/// 2. `L` is reachable by derivation from an interesting non-terminal.
+/// 3. `L` is the LHS of any production whose RHS directly contains an interesting *terminal*.
+///    (This bootstraps relevance when `interesting_symbols` only contains terminals).
+///
+/// The RHS `R` "can derive an interesting symbol" if:
+/// 1. `R` directly contains an interesting symbol (terminal or non-terminal).
+/// 2. `R` contains a non-terminal `N` that can itself derive an interesting symbol.
 ///
 /// If `interesting_symbols` is empty, no productions will be kept.
 pub fn filter_productions_by_reachability(
@@ -447,55 +454,73 @@ pub fn filter_productions_by_reachability(
         return Vec::new();
     }
 
+    // --- Pre-computation ---
+    // 1. Non-terminals that can derive an interesting symbol.
     let can_derive_set = compute_can_derive_interesting(initial_productions, interesting_symbols);
     crate::debug!(3, "filter_productions_by_reachability: CanDeriveInteresting set: {:?}", can_derive_set.iter().map(|nt| &nt.0).collect::<Vec<_>>());
 
-    let reachable_from_set = compute_reachable_from_interesting_nts(initial_productions, interesting_symbols);
-    crate::debug!(3, "filter_productions_by_reachability: ReachableFromInterestingNTs set: {:?}", reachable_from_set.iter().map(|nt| &nt.0).collect::<Vec<_>>());
+    // 2. Non-terminals reachable from an interesting non-terminal.
+    let reachable_from_interesting_nt_set = compute_reachable_from_interesting_nts(initial_productions, interesting_symbols);
+    crate::debug!(3, "filter_productions_by_reachability: ReachableFromInterestingNTs set: {:?}", reachable_from_interesting_nt_set.iter().map(|nt| &nt.0).collect::<Vec<_>>());
 
+    // 3. Bootstrap LHS non-terminals: NTs that are LHS of productions directly producing an interesting terminal.
+    let mut bootstrap_lhs_nts = BTreeSet::new();
+    for production in initial_productions {
+        for symbol_in_rhs in &production.rhs {
+            if matches!(symbol_in_rhs, Symbol::Terminal(_)) && interesting_symbols.contains(symbol_in_rhs) {
+                bootstrap_lhs_nts.insert(production.lhs.clone());
+                break; // Found one interesting terminal in this RHS, enough to mark LHS.
+            }
+        }
+    }
+    crate::debug!(3, "filter_productions_by_reachability: BootstrapLHS NTs (from interesting terminals): {:?}", bootstrap_lhs_nts.iter().map(|nt| &nt.0).collect::<Vec<_>>());
+
+    // --- Filtering Loop ---
     let mut kept_productions = Vec::new();
     for production in initial_productions {
         let lhs = &production.lhs;
 
-        // Condition 1: LHS itself is an interesting symbol.
-        let cond1_lhs_is_interesting = interesting_symbols.contains(&Symbol::NonTerminal(lhs.clone()));
-        
-        // Condition 2: LHS is reachable from an interesting non-terminal.
-        let cond2_lhs_is_reachable_from_interesting_nt = reachable_from_set.contains(lhs);
-        
-        // Condition 3: RHS of *this specific* production can derive an interesting symbol.
-        // This is computed to be OR'd with Condition 1.
-        let mut cond3_current_rhs_can_derive_interesting = false;
+        // Condition A: Is the LHS 'L' relevant?
+        // A1: L is an interesting non-terminal.
+        let cond_a1_lhs_is_interesting_nt = interesting_symbols.contains(&Symbol::NonTerminal(lhs.clone()));
+        // A2: L is reachable from an interesting non-terminal.
+        let cond_a2_lhs_is_reachable_from_interesting_nt = reachable_from_interesting_nt_set.contains(lhs);
+        // A3: L is a bootstrap LHS (produces an interesting terminal directly).
+        let cond_a3_lhs_is_bootstrap = bootstrap_lhs_nts.contains(lhs);
+
+        let is_lhs_relevant = cond_a1_lhs_is_interesting_nt || cond_a2_lhs_is_reachable_from_interesting_nt || cond_a3_lhs_is_bootstrap;
+
+        // Condition B: Can the RHS of *this specific* production derive an interesting symbol?
+        let mut can_rhs_derive_interesting = false;
         for symbol_in_rhs in &production.rhs {
             match symbol_in_rhs {
                 Symbol::Terminal(_) => {
                     if interesting_symbols.contains(symbol_in_rhs) {
-                        cond3_current_rhs_can_derive_interesting = true;
+                        can_rhs_derive_interesting = true;
                         break;
                     }
                 }
                 Symbol::NonTerminal(nt_in_rhs) => {
-                    // An RHS non-terminal leads to interesting if:
-                    // 1. It IS an interesting symbol itself (e.g. if interesting_symbols can contain NTs)
-                    // 2. OR it can derive an interesting symbol (i.e., nt_in_rhs is in can_derive_set)
                     if interesting_symbols.contains(symbol_in_rhs) || can_derive_set.contains(nt_in_rhs) {
-                        cond3_current_rhs_can_derive_interesting = true;
+                        can_rhs_derive_interesting = true;
                         break;
                     }
                 }
             }
         }
 
-        if cond1_lhs_is_interesting || cond2_lhs_is_reachable_from_interesting_nt || cond3_current_rhs_can_derive_interesting {
+        if is_lhs_relevant && can_rhs_derive_interesting {
             kept_productions.push(production.clone());
         } else {
             crate::debug!(
                 4,
-                "Filtering out production: {} (LHS is interesting: {}, LHS reachable from interesting NT: {}, RHS can derive interesting: {})",
+                "Filtering out production: {} (LHS relevant: {} [is_interesting_nt: {}, is_reachable: {}, is_bootstrap: {}], RHS can derive interesting: {})",
                 production,
-                cond1_lhs_is_interesting,
-                cond2_lhs_is_reachable_from_interesting_nt,
-                cond3_current_rhs_can_derive_interesting
+                is_lhs_relevant,
+                cond_a1_lhs_is_interesting_nt,
+                cond_a2_lhs_is_reachable_from_interesting_nt,
+                cond_a3_lhs_is_bootstrap,
+                can_rhs_derive_interesting
             );
         }
     }
@@ -503,6 +528,9 @@ pub fn filter_productions_by_reachability(
     // Note: `generate_glr_parser_with_maps` (which will likely consume this output)
     // internally calls `remove_productions_with_undefined_nonterminals` and `validate`,
     // so further cleanup here might be redundant if that's the next step.
+    // However, an iterative approach to ensure all kept productions are connected
+    // to each other and form a valid sub-grammar might be needed if this simple filter
+    // plus subsequent cleanup is insufficient. For now, this implements the AND logic.
     kept_productions
 }
 
