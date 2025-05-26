@@ -1034,7 +1034,7 @@ fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::err
     };
     println!("[Test] Rebuilt parser with filtered productions. New parser has {} states.", filtered_parser.stage_7_table.len());
     // For debugging the structure of the filtered parser:
-    // println!("[Test] Filtered parser structure: {}", filtered_parser);
+    println!("[Test] Filtered parser structure: {}", filtered_parser);
 
     // 6. Convert the test sequence names to TerminalIDs using the *filtered_parser's* terminal_map.
     let mut sequence_to_test_ids = Vec::new();
