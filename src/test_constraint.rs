@@ -782,6 +782,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
                 // We don't care about glr_state.is_ok() here.
                 let seen_so_far: Vec<_> = current_fuzz_sequence_names[..i].iter().cloned().collect();
                 println!("    Stepping with token {}/{}: '{}' (Terminal {}). Seen so far: {:?}", i + 1, num_tokens_this_attempt, current_fuzz_sequence_names[i], terminal_id.0, seen_so_far);
+                println!("    ----------");
                 glr_state.step(*terminal_id);
             }
             // If a panic occurs, the test will fail here.
