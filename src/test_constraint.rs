@@ -1,5 +1,5 @@
 use rand::rngs::StdRng;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use crate::finite_automata::eat_u8;
 use crate::{choice, choice_fast, groups, seq, seq_fast};
 use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal};
@@ -38,7 +38,7 @@ type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
 
 // Use concrete types for EdgeInserter tests
 type TestTrieEI = Trie<&'static str, HybridBitset, String>; // Use HybridBitset here
-type TestNodeEI = Arc<Mutex<TestTrieEI>>;
+type TestNodeEI = Arc<Mutex<TestTrieEI>;
 
 // Helper to get Arc pointer for tests
 fn arc_ptr<N>(arc: &Arc<Mutex<N>>) -> *const Mutex<N> {
@@ -744,122 +744,129 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     println!("GLR parser testing with specific grammar terminal sequences finished.");
 
     // --- New test section for grammar filtering and specific sequence ---
-    println!("\nTesting filtered grammar with specific sequence 'STRING[0] STRING[0] \"->\"'...");
+    #[test]
+    fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::error::Error>> {
+        // 1. Load the serialized CompiledGrammar
+        let serialized_grammar_path = "src/serialized_compiled_grammar.json";
+        println!("[Test] Loading CompiledGrammar from: {}", serialized_grammar_path);
+        let json_string = match fs::read_to_string(serialized_grammar_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[Test] Failed to read serialized grammar file '{}': {}", serialized_grammar_path, e);
+                eprintln!("[Test] Ensure the file exists (e.g., by running the test that generates it or placing it manually).");
+                return Err(Box::new(e)); // Fail the test if the prerequisite file is not found
+            }
+        };
+        let json_node = JSONNode::from_json_string(&json_string)?;
+        let compiled_grammar = CompiledGrammar::from_json(json_node)?;
+        println!("[Test] Successfully loaded CompiledGrammar from JSON.");
 
-    let interesting_terminal_names_for_filter = vec!["STRING[0]", "\"->\""];
-    let mut interesting_symbols_for_filter = BTreeSet::new();
-    for name_str in &interesting_terminal_names_for_filter {
-        interesting_symbols_for_filter.insert(Symbol::Terminal(Terminal(name_str.to_string())));
-    }
-    // If "STRING[0]" could also be a non-terminal that's interesting, you'd add:
-    // interesting_symbols_for_filter.insert(Symbol::NonTerminal(NonTerminal("STRING[0]".to_string())));
+        // 2. Define "interesting" symbols for filtering based on the sequence
+        let sequence_to_test_names = vec!["STRING[0]", "STRING[0]", "\"->\""];
+        let mut interesting_symbols = BTreeSet::new();
+        for name_str in &sequence_to_test_names {
+            // All elements in this specific sequence are terminals
+            interesting_symbols.insert(Symbol::Terminal(Terminal(name_str.to_string())));
+        }
+        println!("[Test] Interesting symbols for filtering: {:?}", sequence_to_test_names);
 
-    let filtered_productions = crate::glr::analyze::filter_productions_by_reachability(
-        &compiled_grammar.definition.productions,
-        &interesting_symbols_for_filter
-    );
+        // 3. Apply the filter_productions_by_reachability function
+        let filtered_productions = filter_productions_by_reachability(
+            &compiled_grammar.definition.productions,
+            &interesting_symbols
+        );
 
-    println!("Original number of productions: {}", compiled_grammar.definition.productions.len());
-    println!("Filtered number of productions: {}", filtered_productions.len());
-    if filtered_productions.is_empty() && !compiled_grammar.definition.productions.is_empty() {
-        println!("Warning: All productions were filtered out. The interesting symbols might not be reachable or productive in the original grammar, or the filter is too aggressive.");
-        // Depending on expectations, you might panic or assert here.
-        // For this test, we'll try to proceed if the start symbol is still there.
-    }
-    // for prod in &filtered_productions {
-    //     println!("  Kept: {}", prod);
-    // }
+        println!("[Test] Original number of productions: {}", compiled_grammar.definition.productions.len());
+        println!("[Test] Filtered number of productions: {}", filtered_productions.len());
 
-    // Find the new start_production_id
-    let original_start_production = &compiled_grammar.definition.productions[compiled_grammar.definition.start_production_id];
-    let new_start_production_id_opt = filtered_productions.iter().position(|p| p == original_start_production);
+        if filtered_productions.is_empty() && !compiled_grammar.definition.productions.is_empty() {
+            // This is a critical failure if we expect the sequence to be parsable at all.
+            panic!("[Test] All productions were filtered out. This indicates the interesting symbols are not reachable or productive in the original grammar, or the filter is too aggressive for this scenario.");
+        }
 
-    if new_start_production_id_opt.is_none() {
-        // If the original start production S_aug -> S_orig is removed, it means S_orig is not relevant.
-        // This implies the grammar cannot produce the interesting symbols starting from S_orig,
-        // nor is S_orig reachable from any interesting non-terminals (if any were specified).
-        // This might be expected if the interesting symbols are unrelated to the main grammar.
-        println!("Original start production ('{}') was filtered out. This might be expected if it's not relevant to the interesting symbols.", original_start_production);
-        println!("Skipping parser rebuild and sequence test for filtered grammar.");
-        // To make the test fail if the start symbol is unexpectedly removed, you could panic here:
-        // panic!("Original start production was filtered out. Cannot rebuild parser for sequence test.");
-    } else {
-        let new_start_id = new_start_production_id_opt.unwrap();
-        println!("Original start production found in filtered set at new index: {}.", new_start_id);
+        // 4. Determine the start_production_id for the filtered set.
+        // It must be the same augmented start production as in the original grammar.
+        let original_start_production = &compiled_grammar.definition.productions[compiled_grammar.definition.start_production_id];
+        let new_start_production_id = match filtered_productions.iter().position(|p| p == original_start_production) {
+            Some(id) => id,
+            None => {
+                panic!("[Test] Original start production ('{}') was filtered out. This is unexpected if the sequence is meant to be parsable by the grammar. Cannot proceed with parser rebuild.", original_start_production);
+            }
+        };
+        println!("[Test] Original start production found in filtered set at new index: {}.", new_start_production_id);
 
-        // Rebuild parser with filtered productions
-        // Use original terminal_map and non_terminal_map from the loaded compiled_grammar
-        
-        // Catch potential panics from generate_glr_parser_with_maps (e.g., validation errors on the filtered grammar)
-        let filtered_parser_result = std::panic::catch_unwind(|| {
+        // 5. Rebuild the GLR parser using the filtered productions.
+        // Use the original terminal_map and non_terminal_map from the loaded compiled_grammar.
+        // `generate_glr_parser_with_maps` includes validation, which might panic if the filtered grammar is invalid.
+        println!("[Test] Rebuilding parser with filtered productions...");
+        let filtered_parser = match std::panic::catch_unwind(|| {
             generate_glr_parser_with_maps(
                 &filtered_productions,
-                new_start_id,
+                new_start_production_id,
                 compiled_grammar.glr_parser.terminal_map.clone(),
                 compiled_grammar.glr_parser.non_terminal_map.clone(),
             )
-        });
-
-        match filtered_parser_result {
-            Ok(filtered_parser) => {
-                println!("Rebuilt parser with filtered productions. New parser has {} states.", filtered_parser.stage_7_table.len());
-                // println!("Filtered parser structure: {}", filtered_parser); // Potentially very verbose
-
-                // The specific sequence to test: vec!["STRING[0]", "STRING[0]", "\"->\""]
-                let sequence_to_test_names = vec!["STRING[0]", "STRING[0]", "\"->\""];
-                let mut sequence_to_test_ids = Vec::new();
-                let mut sequence_terminals_found = true;
-                for name_str in &sequence_to_test_names {
-                    if let Some(term_id) = filtered_parser.terminal_map.get_by_left(&Terminal(name_str.to_string())) {
-                        sequence_to_test_ids.push(*term_id);
-                    } else {
-                        println!("Error: Terminal '{}' from test sequence not found in filtered_parser's terminal_map.", name_str);
-                        sequence_terminals_found = false;
-                        break;
-                    }
-                }
-
-                if !sequence_terminals_found {
-                    println!("Cannot run sequence test on filtered parser due to missing terminals.");
-                    // Optionally panic or assert here to make the test fail clearly.
-                    // panic!("Failed to map all terminals for the sequence test on filtered grammar.");
-                } else {
-                    // Initialize GLRParserState with a unit accumulator `()`
-                    let mut glr_state_filtered = filtered_parser.init_glr_parser::<()>();
-
-                    println!("Stepping filtered parser with sequence: {:?}", sequence_to_test_names);
-                    let mut step_by_step_ok = true;
-                    for (idx, &terminal_id) in sequence_to_test_ids.iter().enumerate() {
-                        glr_state_filtered.step(terminal_id);
-                        println!("  Stepped with '{}' (ID {}). Parser OK: {}", sequence_to_test_names[idx], terminal_id.0, glr_state_filtered.is_ok());
-                        if !glr_state_filtered.is_ok() {
-                            step_by_step_ok = false;
-                            println!("  Parser became not OK after stepping with '{}'.", sequence_to_test_names[idx]);
-                            // This is the critical point for debugging the sequence.
-                            // If it fails here, the filtered grammar (which should be minimal for this sequence)
-                            // does not parse this prefix.
-                            break; 
-                        }
-                    }
-                    
-                    if step_by_step_ok {
-                        println!("Filtered parser successfully processed the sequence token by token: {:?}. Final state OK: {}", sequence_to_test_names, glr_state_filtered.is_ok());
-                        // Depending on whether the sequence is complete or just a prefix,
-                        // glr_state_filtered.is_ok() should be true.
-                        // For this specific test, we expect it to be a valid parse or prefix.
-                        assert!(glr_state_filtered.is_ok(), "Filtered parser should be in OK state after processing the sequence: {:?}", sequence_to_test_names);
-                    } else {
-                        // This assertion will make the test fail if any step made the parser not OK.
-                        assert!(step_by_step_ok, "Filtered parser failed to process the sequence: {:?}. Check logs above.", sequence_to_test_names);
-                    }
-                }
-            }
+        }) {
+            Ok(parser) => parser,
             Err(panic_payload) => {
-                println!("Error: Panicked while generating parser from filtered productions: {:?}", panic_payload);
-                // This makes the test fail if parser generation itself fails on the filtered set.
-                panic!("Parser generation failed for filtered productions. The filter might have produced an invalid grammar structure (e.g., due to validation errors like new cycles or undefined non-terminals not caught by the filter itself).");
+                eprintln!("[Test] Panicked while generating parser from filtered productions: {:?}", panic_payload);
+                panic!("[Test] Parser generation failed for filtered productions. The filter might have produced an invalid grammar (e.g., due to new cycles, undefined non-terminals not handled by the filter, or other validation issues).");
+            }
+        };
+        println!("[Test] Rebuilt parser with filtered productions. New parser has {} states.", filtered_parser.stage_7_table.len());
+        // For debugging the structure of the filtered parser:
+        // println!("[Test] Filtered parser structure: {}", filtered_parser);
+
+        // 6. Convert the test sequence names to TerminalIDs using the *filtered_parser's* terminal_map.
+        let mut sequence_to_test_ids = Vec::new();
+        let mut all_terminals_mapped = true;
+        for name_str in &sequence_to_test_names {
+            if let Some(term_id) = filtered_parser.terminal_map.get_by_left(&Terminal(name_str.to_string())) {
+                sequence_to_test_ids.push(*term_id);
+            } else {
+                eprintln!("[Test] Error: Terminal '{}' from test sequence not found in filtered_parser's terminal_map.", name_str);
+                all_terminals_mapped = false;
+                break;
             }
         }
+
+        if !all_terminals_mapped {
+            panic!("[Test] Cannot run sequence test on filtered parser: one or more terminals from the sequence ('{:?}') were not found in its terminal_map. The filter might have removed necessary terminal definitions, or they were not part of the original grammar's terminal mapping in a way that survived filtering.", sequence_to_test_names);
+        }
+        assert_eq!(sequence_to_test_ids.len(), sequence_to_test_names.len(), "[Test] Mismatch in length between terminal names and resolved IDs for the test sequence.");
+
+        // 7. Initialize GLRParserState for the filtered parser.
+        // We use a unit accumulator `()` as this test focuses on grammar rule processing, not LLM token constraints.
+        let mut glr_state_filtered = filtered_parser.init_glr_parser::<()>();
+        println!("[Test] Initialized GLR state for filtered parser.");
+
+        // 8. Step the GLRParserState with the sequence of TerminalIDs.
+        println!("[Test] Stepping filtered parser with sequence: {:?} (IDs: {:?})", sequence_to_test_names, sequence_to_test_ids.iter().map(|id| id.0).collect::<Vec<_>>());
+        let mut step_by_step_ok = true;
+        for (idx, &terminal_id) in sequence_to_test_ids.iter().enumerate() {
+            glr_state_filtered.step(terminal_id);
+            println!("[Test]   Stepped with '{}' (ID {}). Parser OK: {}", sequence_to_test_names[idx], terminal_id.0, glr_state_filtered.is_ok());
+            if !glr_state_filtered.is_ok() {
+                step_by_step_ok = false;
+                eprintln!("[Test]   Parser became NOT OK after stepping with '{}'. This is the failure point for the sequence with the filtered grammar.", sequence_to_test_names[idx]);
+                // For detailed debugging, you might want to print the GSS of the failed state:
+                // glr_state_filtered.log_gss("GSS at failure point", terminal_id);
+                break; 
+            }
+        }
+
+        // 9. Assert the outcome.
+        if step_by_step_ok {
+            println!("[Test] Filtered parser successfully processed the sequence token by token: {:?}. Final state OK: {}", sequence_to_test_names, glr_state_filtered.is_ok());
+            // This sequence should be a valid prefix or complete parse if the grammar logic for it is correct.
+            assert!(glr_state_filtered.is_ok(), "[Test] Filtered parser should be in OK state after processing the sequence: {:?}", sequence_to_test_names);
+        } else {
+            // This assertion will cause the test to fail if any step resulted in a non-OK state.
+            assert!(step_by_step_ok, "[Test] Filtered parser FAILED to process the sequence: {:?}. Check logs above for the failing step.", sequence_to_test_names);
+        }
+
+        println!("[Test] Test 'test_filtered_grammar_with_specific_sequence' completed successfully.");
+        Ok(())
     }
     // --- End of new test section ---
 
@@ -987,7 +994,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             }
             None => {
                 // If the vocab tree cannot tokenize a part of a known-good string,
-                // it implies an issue with the vocab tree or the test string itself
+                // it implies an an issue with the vocab tree or the test string itself
                 // relative to the loaded vocabulary.
                 panic!(
                     "Failed to tokenize with VocabPrefixTree. No prefix token found for remaining text: {:?}. This might indicate the test string '{}' contains segments not representable by single tokens in the loaded vocabulary, or the vocabulary is missing expected tokens.",
@@ -1079,3 +1086,4 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     Ok(())
 }
+
