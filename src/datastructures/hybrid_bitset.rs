@@ -429,6 +429,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use std::iter::FromIterator;
+    use deterministic_hash::DeterministicHasher;
 
     // Thresholds are no longer used by HybridBitset directly
     const SPARSE_TO_DENSE_THRESHOLD: usize = 128; // Keep for test logic if needed, but not for HybridBitset
@@ -568,7 +569,7 @@ mod tests {
 
         use std::collections::hash_map::DefaultHasher;
         let hash = |s: &HybridBitset| -> u64 {
-            let mut hasher = DefaultHasher::new();
+            let mut hasher = DeterministicHasher::new(DefaultHasher::new());
             s.hash(&mut hasher);
             hasher.finish()
         };

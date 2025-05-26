@@ -6,14 +6,16 @@ use std::sync::{Arc, Mutex, TryLockError, MutexGuard};
 use std::sync::atomic::{AtomicUsize, Ordering}; // Added for tests
 use std::cmp::Reverse;          // min-heap helper
 use std::collections::BinaryHeap;
-use std::hash::{Hash, Hasher}; // Added for Hash implementation
+use std::hash::{DefaultHasher, Hash, Hasher}; // Added for Hash implementation
 use std::cell::RefCell; // Not strictly needed with the chosen direct BFS approach in to_json, but good to keep in mind for context-passing alternatives.
 
 
 use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
 use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
+use std::collections::BTreeMap as StdMap;
+use deterministic_hash::DeterministicHasher;
+// Added for derive macro pattern
 
 
 /// Error type indicating that a cycle was detected during an operation
@@ -1201,7 +1203,7 @@ where
             for (apw, ev) in dest_map { // Iterates in ArcPtrWrapper order
                 let child_arc = apw.as_arc();
                 // Create a temporary hasher for the (EV, Arc_content) pair.
-                let mut pair_hasher = std::collections::hash_map::DefaultHasher::new();
+                let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
                 ev.hash(&mut pair_hasher);
                 Self::hash_arc_recursive(child_arc, &mut pair_hasher, recursion_marker, current_depth);
                 pair_hashes.push(pair_hasher.finish());
