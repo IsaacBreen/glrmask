@@ -28,6 +28,7 @@ use std::time::Instant;
 use rand::prelude::IndexedRandom;
 use rand::{Rng, SeedableRng};
 use rand::seq::SliceRandom;
+use crate::glr::analyze::filter_productions_by_reachability;
 
 // Use concrete types for merge tests
 type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;
@@ -38,7 +39,7 @@ type TestNodeBasic = Arc<Mutex<TestTrieBasic>>;
 
 // Use concrete types for EdgeInserter tests
 type TestTrieEI = Trie<&'static str, HybridBitset, String>; // Use HybridBitset here
-type TestNodeEI = Arc<Mutex<TestTrieEI>;
+type TestNodeEI = Arc<Mutex<TestTrieEI>>;
 
 // Helper to get Arc pointer for tests
 fn arc_ptr<N>(arc: &Arc<Mutex<N>>) -> *const Mutex<N> {
