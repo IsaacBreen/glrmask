@@ -964,9 +964,9 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     Ok(())
 }
 
-// --- New test section for grammar filtering and specific sequence ---
+// TODO: This test needs to be uncommented and passed once the fix for the panic is in place.
 // #[test]
-// #[ignore] // Commented out to avoid running it unless specifically asked for
+// #[ignore] // Ignore this test until the root cause of the panic is fixed.
 // fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::error::Error>> {
 //     // 1. Load the serialized CompiledGrammar
 //     let serialized_grammar_path = "src/serialized_compiled_grammar.json";
@@ -1106,7 +1106,6 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
 const PANIC_SUBSTRING_TO_FIND: &str = "not found in gotos for";
 
-// Helper function to test if a grammar configuration causes the specific panic
 fn causes_specific_panic(
     productions_to_test: &[Production],
     original_augmented_start_lhs: &NonTerminal,
@@ -1123,7 +1122,6 @@ fn causes_specific_panic(
     {
         Some(idx) => idx,
         None => {
-            // Augmented start rule is missing, this grammar is too broken to test for the specific panic.
             return false;
         }
     };
@@ -1137,7 +1135,6 @@ fn causes_specific_panic(
         if let Some(term_id) = current_terminal_map.get_by_left(&terminal_to_find) {
             sequence_terminal_ids.push(*term_id);
         } else {
-            // Terminal needed for the sequence is no longer defined in this perturbed grammar.
             return false;
         }
     }
@@ -1158,7 +1155,7 @@ fn causes_specific_panic(
     }));
 
     match result {
-        Ok(_) => false, // No panic
+        Ok(_) => false,
         Err(panic_payload) => {
             let panic_message = if let Some(s) = panic_payload.downcast_ref::<String>() {
                 s.clone()
@@ -1175,8 +1172,7 @@ fn causes_specific_panic(
 /// Helper to remove symbols from productions.
 /// `productions`: The vector of productions to modify.
 /// `locations_to_remove`: A slice of `(prod_idx, symbol_idx_in_rhs)` tuples.
-/// `prod_idx` refers to the index in the `productions` vector *before* any modifications
-/// within this specific call.
+/// `prod_idx` refers to the index in the `productions` vector.
 fn remove_symbols_at_locations_destructive(
     productions: &mut Vec<Production>, // Mutably borrow to modify in place
     locations_to_remove: &[(usize, usize)], // (prod_idx, symbol_idx_in_rhs)
@@ -1286,7 +1282,7 @@ fn simplify_and_inline_unit_nonterminal_rules(
                 // but the current greedy "take first good one" should eventually stabilize or exhaust options.
                 // For now, we just don't make a change and the loop will eventually terminate.
                 // To ensure progress, we must ensure this path doesn't lead to an infinite loop.
-                // The current logic is: if this candidate is bad, it's skipped. The next iteration will
+                // The current logic is: if an inlining is bad, it's skipped. The next iteration will
                 // find the *same* candidate if `productions` hasn't changed.
                 // This means we must ensure that if an inlining is bad, `made_change_in_this_iteration` remains false.
                 // The current structure does this.
@@ -1493,5 +1489,110 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
     }
 
     assert!(false, "[Minimizer] Minimization finished. Review the MRE printed above and address the underlying panic.");
+    Ok(())
+}
+
+#[test]
+fn test_minimized_grammar_causes_panic() -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n[Test MRE] Testing the manually defined minimized grammar that causes the panic.");
+
+    // 1. Manually define the minimized grammar
+    // P0: start' -> start'''
+    // P1: simple_stmts -> atom simple_stmts[1] NEWLINE
+    // P2: simple_stmts[0] ->
+    // P3: simple_stmts[1] -> ";"
+    // P4: block -> NEWLINE simple_stmts
+    // P5: elif_stmt -> "elif" block elif_stmt
+    // P6: atom -> "..."
+    // P7: NEWLINE ->
+    let minimized_productions = vec![
+        prod("start'", vec![nt("start'''")]),                            // P0
+        prod("simple_stmts", vec![nt("atom"), nt("simple_stmts[1]"), nt("NEWLINE")]), // P1
+        prod("simple_stmts[0]", vec![]),                                // P2
+        prod("simple_stmts[1]", vec![t(";")]) ,                         // P3
+        prod("block", vec![nt("NEWLINE"), nt("simple_stmts")]),          // P4
+        prod("elif_stmt", vec![t("elif"), nt("block"), nt("elif_stmt")]), // P5
+        prod("atom", vec![t("...")]),                                   // P6
+        prod("NEWLINE", vec![]),                                        // P7
+    ];
+    let start_production_id_for_minimized = 0; // P0 is the start rule
+
+    // 2. Define the input sequence that triggers the panic
+    let input_sequence_names = ["...", ";", "elif"];
+    println!("[Test MRE] Input sequence: {:?}", input_sequence_names);
+
+    // 3. Create terminal and non-terminal maps specifically for this minimized grammar
+    //    This ensures IDs are compact and consistent for the small grammar.
+    let terminal_map_for_minimized = assign_terminal_ids(&minimized_productions);
+    let non_terminal_map_for_minimized = assign_non_terminal_ids(&minimized_productions);
+
+    println!("[Test MRE] Terminal Map for Minimized Grammar: {:?}", terminal_map_for_minimized);
+    println!("[Test MRE] Non-Terminal Map for Minimized Grammar: {:?}", non_terminal_map_for_minimized);
+
+
+    // 4. Convert input sequence names to TerminalIDs using the new map
+    let mut input_sequence_ids = Vec::new();
+    for name_str in &input_sequence_names {
+        let terminal_to_find = Terminal(name_str.to_string());
+        if let Some(term_id) = terminal_map_for_minimized.get_by_left(&terminal_to_find) {
+            input_sequence_ids.push(*term_id);
+        } else {
+            panic!("[Test MRE] Critical error: Terminal '{}' from input sequence not found in minimized grammar's terminal map. Map: {:?}", 
+                   name_str, terminal_map_for_minimized);
+        }
+    }
+    println!("[Test MRE] Input sequence TerminalIDs: {:?}", input_sequence_ids.iter().map(|id| id.0).collect::<Vec<_>>());
+
+
+    // 5. Attempt to generate parser and step, catching the expected panic
+    println!("[Test MRE] Attempting to generate parser and run sequence...");
+    let panic_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // Generate GLRParser for the minimized grammar
+        let parser = generate_glr_parser_with_maps(
+            &minimized_productions,
+            start_production_id_for_minimized,
+            terminal_map_for_minimized.clone(), // Pass the maps specific to this grammar
+            non_terminal_map_for_minimized.clone(),
+        );
+        
+        // Initialize GLRParserState (accumulator type `()` is fine for this test)
+        let mut glr_state = parser.init_glr_parser::<()>();
+
+        // Step through the input sequence
+        for (idx, &terminal_id) in input_sequence_ids.iter().enumerate() {
+            println!("[Test MRE] Stepping with token {}/{} ('{}', ID {})", 
+                     idx + 1, input_sequence_ids.len(), input_sequence_names[idx], terminal_id.0);
+            glr_state.step(terminal_id);
+            // We don't check glr_state.is_ok() here because the panic might occur
+            // during a step, even if the state was "ok" before that specific step.
+        }
+        // If it reaches here without panic, the test for panic reproduction fails.
+        println!("[Test MRE] Sequence processed without panic. This is unexpected if the MRE is correct.");
+    }));
+
+    // 6. Assert that the panic occurred and contains the specific substring
+    match panic_result {
+        Ok(_) => {
+            assert!(false, "[Test MRE] The minimized grammar did NOT panic as expected with the input sequence.");
+        }
+        Err(payload) => {
+            println!("[Test MRE] Caught a panic, as expected.");
+            let panic_message = if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = payload.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "Unknown panic payload type".to_string()
+            };
+            println!("[Test MRE] Panic message: {}", panic_message);
+            assert!(
+                panic_message.contains(PANIC_SUBSTRING_TO_FIND),
+                "[Test MRE] Panic occurred, but the message did not contain the expected substring '{}'. Full message: {}",
+                PANIC_SUBSTRING_TO_FIND, panic_message
+            );
+            println!("[Test MRE] Panic message contains the expected substring. Test successful for MRE.");
+        }
+    }
+
     Ok(())
 }
