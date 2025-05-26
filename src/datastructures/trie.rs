@@ -832,7 +832,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         // ------------------------------------------------------------------
         let mut values   : HashMap<*const Mutex<Self>, V> = HashMap::new();
         let mut done     : HashSet <*const Mutex<Self>>   = HashSet ::new();
-        let mut todo     : BTreeMap<usize, HashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
+        let mut todo     : BTreeMap<usize, BTreeSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
 
         // Seed with the user-supplied starting set
         for (node_arc, v0) in initial_nodes_and_values {
