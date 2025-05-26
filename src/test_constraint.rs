@@ -635,7 +635,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         let mut terminal_id_sequence = Vec::new();
         let mut current_sequence_token_names_valid = true;
 
-        for token_name in seq_terminal_names {
+        for token_name in &seq_terminal_names {
             if let Some(terminal_id_val) = compiled_grammar.glr_parser.terminal_map.get_by_left(&Terminal(token_name.to_string())) {
                 terminal_id_sequence.push(terminal_id_val);
             } else {
