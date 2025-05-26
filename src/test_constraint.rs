@@ -561,7 +561,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     println!("\nTesting GLR parser with specific grammar terminal sequences...");
 
     // Define the sequences of terminal names to test
-    let test_sequences_str = vec![
+    let mut test_sequences_str = vec![
         // Sequence 0
         vec!["IGNORE[0][0]", "\"->\""],
         // Sequence 1
@@ -626,16 +626,22 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     let mut all_sequences_passed = true;
 
-    for (seq_idx, seq_terminal_names) in test_sequences_str.iter().enumerate() {
-        let mut seq_terminal_names = seq_terminal_names.clone();
+    for i in 0..test_sequences_str.len() {
+        // Add a reversed version of the sequence to test
+        let mut seq_terminal_names = test_sequences_str[i].clone();
         let last = seq_terminal_names.pop().unwrap();
         seq_terminal_names.reverse();
         seq_terminal_names.push(last);
+        test_sequences_str.push(seq_terminal_names);
+    }
+
+    for (seq_idx, seq_terminal_names) in test_sequences_str.iter().enumerate() {
+
 
         let mut terminal_id_sequence = Vec::new();
         let mut current_sequence_token_names_valid = true;
 
-        for token_name in &seq_terminal_names {
+        for token_name in seq_terminal_names {
             if let Some(terminal_id_val) = compiled_grammar.glr_parser.terminal_map.get_by_left(&Terminal(token_name.to_string())) {
                 terminal_id_sequence.push(terminal_id_val);
             } else {
