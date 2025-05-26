@@ -772,6 +772,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
                 current_fuzz_sequence_names.push(token_name);
                 current_fuzz_sequence_ids.push(*random_terminal_id);
             }
+            println!("  Fuzz sequence: {}", current_fuzz_sequence_names.join(" → "));
             for token_name in current_fuzz_sequence_names {
                 // The core of the fuzz test: step and see if it panics.
                 // We don't care about glr_state.is_ok() here.
