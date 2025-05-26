@@ -19581,4 +19581,616 @@ messages:
       --- Applying Changes ---
       Successfully replaced file: src/test_constraint.rs
     metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/analyze.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/tests.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/interface/interface.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/test_constraint.rs since previous turn:
+      ```diff
+      --- original version of src/test_constraint.rs+++ current version of src/test_constraint.rs@@ -30,6 +30,8 @@ use rand::seq::SliceRandom;
+       use crate::glr::analyze::{filter_productions_by_reachability, remove_productions_with_undefined_nonterminals};
+       use std::panic::{self, AssertUnwindSafe}; // Added for panic catching
+      +use std::collections::HashMap; // For the symbol removal helper
+      +
+       
+       // Use concrete types for merge tests
+       type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;
+      @@ -1170,6 +1172,40 @@     }
+       }
+       
+      +fn remove_symbols_at_locations_destructive(
+      +    productions: &mut Vec<Production>,
+      +    // Locations are (prod_idx_in_current_productions, symbol_idx_in_current_rhs)
+      +    locations_to_remove: &[(usize, usize)],
+      +) {
+      +    // Create a map to group symbol indices by their production index
+      +    let mut symbols_to_remove_by_prod: HashMap<usize, BTreeSet<usize>> = HashMap::new();
+      +    for &(prod_idx, symbol_idx) in locations_to_remove {
+      +        symbols_to_remove_by_prod
+      +            .entry(prod_idx)
+      +            .or_default()
+      +            .insert(symbol_idx);
+      +    }
+      +
+      +    let mut new_productions = Vec::with_capacity(productions.len());
+      +    for (current_prod_idx, prod) in productions.iter().enumerate() {
+      +        if let Some(indices_in_rhs_to_remove) = symbols_to_remove_by_prod.get(&current_prod_idx) {
+      +            let mut new_rhs = Vec::new();
+      +            for (symbol_idx, symbol) in prod.rhs.iter().enumerate() {
+      +                if !indices_in_rhs_to_remove.contains(&symbol_idx) {
+      +                    new_rhs.push(symbol.clone());
+      +                }
+      +            }
+      +            new_productions.push(Production {
+      +                lhs: prod.lhs.clone(),
+      +                rhs: new_rhs,
+      +            });
+      +        } else {
+      +            new_productions.push(prod.clone()); // No symbols removed from this production
+      +        }
+      +    }
+      +    *productions = new_productions;
+      +}
+      +
+       #[test]
+       fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Error>> {
+           // Load the base compiled grammar
+      @@ -1201,109 +1237,137 @@     let mut current_productions = initial_productions;
+           let mut pass_num = 0;
+       
+      -    // First, verify the initial grammar causes the panic
+           if !causes_specific_panic(
+               &current_productions,
+               &augmented_start_rule_lhs,
+               &sequence_to_test_names,
+               PANIC_SUBSTRING_TO_FIND,
+           ) {
+      -        assert!(false, "[Minimizer] Initial grammar does not cause the specific panic. Cannot proceed with minimization.");
+      -        return Ok(()); // Or panic
+      +        assert!(false, "[Minimizer] Initial grammar does not cause the specific panic. Cannot proceed.");
+      +        return Ok(());
+           }
+           println!("[Minimizer] Confirmed: Initial grammar causes the specific panic.");
+       
+      +    let mut rng = StdRng::seed_from_u64(42); // For reproducibility
+      +
+      +    const ATTEMPTS_PER_STRATEGY: usize = 200; // Number of random chunks to try per strategy in a pass
+      +    const MAX_CHUNK_PRODUCTIONS: usize = 3;  // Max productions to try removing at once
+      +    const MAX_CHUNK_SYMBOLS: usize = 3;      // Max symbols to try removing at once
+       
+           loop {
+               pass_num += 1;
+               println!("\n[Minimizer] Starting Pass {}. Current productions: {}", pass_num, current_productions.len());
+               std::io::stdout().flush().unwrap();
+      -        let mut made_change_in_this_pass = false;
+      -
+      -        // Phase 1: Try removing symbols from RHS of productions
+      -        print!("[Minimizer] Pass {}: Trying to remove RHS symbols", pass_num);
+      +        let mut made_change_this_pass = false;
+      +
+      +        // --- Strategy 1: Try removing chunks of productions ---
+      +        print!("[Minimizer] Pass {}: Trying to remove production chunks ({} attempts)...", pass_num, ATTEMPTS_PER_STRATEGY);
+               std::io::stdout().flush().unwrap();
+      -        let mut best_reduction_after_symbol_removal = None;
+      -        'symbol_removal_loop: for prod_idx in 0..current_productions.len() {
+      -            let num_rhs_symbols = current_productions[prod_idx].rhs.len();
+      -            if num_rhs_symbols == 0 {
+      -                continue; 
+      +        for attempt in 0..ATTEMPTS_PER_STRATEGY {
+      +            if current_productions.len() <= 1 { break; } // Need at least one non-start rule to remove
+      +
+      +            let eligible_prod_indices: Vec<usize> = (0..current_productions.len())
+      +                .filter(|&idx| current_productions[idx].lhs != augmented_start_rule_lhs)
+      +                .collect();
+      +
+      +            if eligible_prod_indices.is_empty() { break; } // No eligible productions to remove
+      +
+      +            let max_possible_chunk = eligible_prod_indices.len();
+      +            let chunk_size = rng.gen_range(1..=std::cmp::min(MAX_CHUNK_PRODUCTIONS, max_possible_chunk));
+      +            
+      +            let indices_to_remove_from_eligible: Vec<usize> = eligible_prod_indices
+      +                .choose_multiple(&mut rng, chunk_size)
+      +                .cloned()
+      +                .collect();
+      +
+      +            if indices_to_remove_from_eligible.is_empty() && chunk_size > 0 { continue; }
+      +
+      +
+      +            let mut temp_productions = current_productions.clone();
+      +            
+      +            // The `indices_to_remove_from_eligible` are already actual indices from `current_productions`
+      +            // because `eligible_prod_indices` stores actual indices.
+      +            // We just need to sort them descending for removal.
+      +            let mut sorted_indices_to_remove = indices_to_remove_from_eligible; // These are actual indices
+      +            sorted_indices_to_remove.sort_unstable_by(|a, b| b.cmp(a)); // Sort descending
+      +
+      +            temp_productions = current_productions.clone();
+      +            for &idx_to_remove in &sorted_indices_to_remove {
+      +                temp_productions.remove(idx_to_remove);
+                   }
+      -            for symbol_idx_to_remove in (0..num_rhs_symbols).rev() { // Iterate backwards for stable removal
+      -                print!("."); std::io::stdout().flush().unwrap();
+      -                let mut productions_after_symbol_removed = current_productions.clone();
+      -                productions_after_symbol_removed[prod_idx].rhs.remove(symbol_idx_to_remove);
+      -
+      -                if causes_specific_panic(
+      -                    &productions_after_symbol_removed,
+      -                    &augmented_start_rule_lhs,
+      -                    &sequence_to_test_names,
+      -                    PANIC_SUBSTRING_TO_FIND,
+      -                ) {
+      -                    best_reduction_after_symbol_removal = Some(productions_after_symbol_removed);
+      -                    println!("\n[Minimizer] Pass {}: Reduced by removing symbol #{} from P{} (LHS: {}). New total productions: {}",
+      -                             pass_num, symbol_idx_to_remove, prod_idx, current_productions[prod_idx].lhs.0, best_reduction_after_symbol_removal.as_ref().unwrap().len());
+      -                    break 'symbol_removal_loop;
+      +
+      +
+      +            if causes_specific_panic(
+      +                &temp_productions,
+      +                &augmented_start_rule_lhs,
+      +                &sequence_to_test_names,
+      +                PANIC_SUBSTRING_TO_FIND,
+      +            ) {
+      +                if attempt % 50 == 0 || temp_productions.len() < current_productions.len() - (chunk_size/2) { // Log less frequently or on big changes
+      +                   print!("+P{} ", chunk_size); std::io::stdout().flush().unwrap();
+      +                }
+      +                current_productions = temp_productions;
+      +                made_change_this_pass = true;
+      +                // No break here, let it try more production removals in this pass
+      +            }
+      +        }
+      +        println!();
+      +        if made_change_this_pass {
+      +            println!("[Minimizer] Pass {}: Made changes via production removal. New count: {}", pass_num, current_productions.len());
+      +            continue; // Restart pass with the smaller grammar
+      +        }
+      +
+      +        // --- Strategy 2: Try removing chunks of symbols ---
+      +        print!("[Minimizer] Pass {}: Trying to remove symbol chunks ({} attempts)...", pass_num, ATTEMPTS_PER_STRATEGY);
+      +        std::io::stdout().flush().unwrap();
+      +        for attempt in 0..ATTEMPTS_PER_STRATEGY {
+      +            if current_productions.is_empty() { break; }
+      +
+      +            let mut all_symbol_locations: Vec<(usize, usize)> = Vec::new(); // (prod_idx, symbol_idx_in_rhs)
+      +            for (prod_idx, prod) in current_productions.iter().enumerate() {
+      +                for symbol_idx in 0..prod.rhs.len() {
+      +                    all_symbol_locations.push((prod_idx, symbol_idx));
+                       }
+                   }
+      -        }
+      -        println!(); 
+      -
+      -        if let Some(reduced_productions) = best_reduction_after_symbol_removal {
+      -            current_productions = reduced_productions;
+      -            made_change_in_this_pass = true;
+      -            // Continue to the next pass to restart reduction attempts on the smaller grammar
+      -        }
+      -
+      -        // Phase 2: Try removing whole productions
+      -        if !made_change_in_this_pass {
+      -            print!("[Minimizer] Pass {}: No symbol removals successful. Trying to remove whole productions", pass_num);
+      -            std::io::stdout().flush().unwrap();
+      -            let mut best_reduction_after_prod_removal = None;
+      +
+      +            if all_symbol_locations.is_empty() { break; } // No symbols to remove
+      +
+      +            let chunk_size = rng.gen_range(1..=std::cmp::min(MAX_CHUNK_SYMBOLS, all_symbol_locations.len()));
+                   
+      -            'production_removal_loop: for prod_idx_to_remove in (0..current_productions.len()).rev() {
+      -                if current_productions[prod_idx_to_remove].lhs == augmented_start_rule_lhs {
+      -                    // Do not remove the augmented start rule itself.
+      -                    continue;
+      +            let locations_to_remove: Vec<(usize, usize)> = all_symbol_locations
+      +                .choose_multiple(&mut rng, chunk_size)
+      +                .cloned()
+      +                .collect();
+      +            
+      +            if locations_to_remove.is_empty() && chunk_size > 0 { continue; }
+      +
+      +            let mut temp_productions = current_productions.clone();
+      +            remove_symbols_at_locations_destructive(&mut temp_productions, &locations_to_remove);
+      +
+      +            if causes_specific_panic(
+      +                &temp_productions,
+      +                &augmented_start_rule_lhs,
+      +                &sequence_to_test_names,
+      +                PANIC_SUBSTRING_TO_FIND,
+      +            ) {
+      +                 if attempt % 50 == 0 { // Log less frequently
+      +                   print!("+S{} ", chunk_size); std::io::stdout().flush().unwrap();
+                       }
+      -                // Ensure we don't remove the very last production if it's the start rule,
+      -                // though the check above should handle the typical augmented start rule.
+      -                if current_productions.len() == 1 && current_productions[0].lhs == augmented_start_rule_lhs {
+      -                    continue;
+      -                }
+      -
+      -
+      -                print!("p"); std::io::stdout().flush().unwrap();
+      -                let mut productions_after_prod_removed = current_productions.clone();
+      -                productions_after_prod_removed.remove(prod_idx_to_remove);
+      -
+      -                if productions_after_prod_removed.is_empty() { // Should not happen if start rule is protected
+      -                    continue;
+      -                }
+      -
+      -                if causes_specific_panic(
+      -                    &productions_after_prod_removed,
+      -                    &augmented_start_rule_lhs,
+      -                    &sequence_to_test_names,
+      -                    PANIC_SUBSTRING_TO_FIND,
+      -                ) {
+      -                    best_reduction_after_prod_removal = Some(productions_after_prod_removed);
+      -                     println!("\n[Minimizer] Pass {}: Reduced by removing P{} (LHS: {}). New total productions: {}",
+      -                             pass_num, prod_idx_to_remove, current_productions[prod_idx_to_remove].lhs.0, best_reduction_after_prod_removal.as_ref().unwrap().len());
+      -                    break 'production_removal_loop;
+      -                }
+      +                current_productions = temp_productions;
+      +                made_change_this_pass = true;
+      +                // No break here, let it try more symbol removals in this pass
+                   }
+      -            println!(); 
+      -
+      -            if let Some(reduced_productions) = best_reduction_after_prod_removal {
+      -                current_productions = reduced_productions;
+      -                made_change_in_this_pass = true;
+      -            }
+      -        }
+      -
+      -        if !made_change_in_this_pass {
+      +        }
+      +        println!();
+      +        if made_change_this_pass {
+      +             println!("[Minimizer] Pass {}: Made changes via symbol removal. New count: {}", pass_num, current_productions.len());
+      +            continue; // Restart pass
+      +        }
+      +
+      +        // If no change was made in this pass by either strategy
+      +        if !made_change_this_pass {
+                   println!("[Minimizer] Pass {}: No further reductions found.", pass_num);
+      -            break; 
+      +            break; // Exit the main loop
+               }
+           }
+       
+
+      ```
+    metadata:
+  - user: Do the final code. It should be elegant and satisfyingly fast.
+    metadata:
+  - assistant: |-
+      Okay, here's the refined version of `test_minimize_grammar_for_goto_panic` incorporating stochastic chunk-based removal, aiming for elegance and improved speed.
+
+      **Prerequisites:**
+
+      1.  Ensure `rand` is in your `[dev-dependencies]` in `Cargo.toml`:
+          ```toml
+          [dev-dependencies]
+          rand = "0.8"
+          # ... other dev-dependencies
+          ```
+
+      **Code for `src/test_constraint.rs`:**
+
+      First, add the necessary imports at the top of your `src/test_constraint.rs` file if they aren't already there:
+
+      ```rust
+      // ... other imports ...
+      use rand::seq::SliceRandom;
+      use rand::{Rng, SeedableRng};
+      use rand::rngs::StdRng;
+      use std::collections::HashMap; // For the symbol removal helper
+      // ... other imports ...
+      ```
+
+      Next, add the helper function `remove_symbols_at_locations_destructive` (if you haven't already from the previous step, or use this refined version):
+
+      ```rust
+      /// Helper to remove symbols from productions.
+      /// `productions`: The vector of productions to modify.
+      /// `locations_to_remove`: A slice of `(prod_idx, symbol_idx_in_rhs)` tuples.
+      /// `prod_idx` refers to the index in the `productions` vector *before* any modifications
+      /// within this specific call.
+      fn remove_symbols_at_locations_destructive(
+          productions: &mut Vec<Production>,
+          locations_to_remove: &[(usize, usize)],
+      ) {
+          // Group symbol indices to remove by their original production index
+          let mut symbols_to_remove_by_prod: HashMap<usize, BTreeSet<usize>> = HashMap::new();
+          for &(prod_idx, symbol_idx) in locations_to_remove {
+              symbols_to_remove_by_prod
+                  .entry(prod_idx)
+                  .or_default()
+                  .insert(symbol_idx);
+          }
+
+          // Iterate over the productions. If a production is targeted, rebuild its RHS.
+          for (prod_idx, prod_ref_mut) in productions.iter_mut().enumerate() {
+              if let Some(indices_in_rhs_to_remove) = symbols_to_remove_by_prod.get(&prod_idx) {
+                  let original_rhs = std::mem::take(&mut prod_ref_mut.rhs); // Take ownership of old RHS
+                  let mut new_rhs = Vec::with_capacity(original_rhs.len());
+                  for (symbol_idx, symbol) in original_rhs.into_iter().enumerate() {
+                      if !indices_in_rhs_to_remove.contains(&symbol_idx) {
+                          new_rhs.push(symbol);
+                      }
+                  }
+                  prod_ref_mut.rhs = new_rhs; // Assign the new RHS
+              }
+          }
+      }
+      ```
+
+      Finally, replace the entire `test_minimize_grammar_for_goto_panic` function with the following:
+
+      ```rust
+      #[test]
+      fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Error>> {
+          // --- Initial Setup (same as before) ---
+          let serialized_grammar_path = "src/serialized_compiled_grammar.json";
+          println!("[Minimizer] Loading base CompiledGrammar from: {}", serialized_grammar_path);
+          let json_string = match fs::read_to_string(serialized_grammar_path) {
+              Ok(s) => s,
+              Err(e) => {
+                  eprintln!("[Minimizer] Failed to read serialized grammar file '{}': {}", serialized_grammar_path, e);
+                  return Err(Box::new(e));
+              }
+          };
+          let json_node = JSONNode::from_json_string(&json_string)?;
+          let compiled_grammar = CompiledGrammar::from_json(json_node)?;
+          println!("[Minimizer] Successfully loaded CompiledGrammar.");
+
+          let initial_productions = compiled_grammar.definition.productions.clone();
+          let augmented_start_rule_lhs = compiled_grammar.definition.productions
+              [compiled_grammar.definition.start_production_id].lhs.clone();
+          let sequence_to_test_names = ["\"...\"", "\";\"", "\"elif\""];
+
+          println!("[Minimizer] Starting stochastic minimization for panic substring: '{}'", PANIC_SUBSTRING_TO_FIND);
+          println!("[Minimizer] Initial number of productions: {}", initial_productions.len());
+          println!("[Minimizer] Test sequence: {:?}", sequence_to_test_names);
+          println!("[Minimizer] Augmented start LHS: {}", augmented_start_rule_lhs.0);
+
+          let mut current_productions = initial_productions;
+
+          if !causes_specific_panic(
+              &current_productions,
+              &augmented_start_rule_lhs,
+              &sequence_to_test_names,
+              PANIC_SUBSTRING_TO_FIND,
+          ) {
+              eprintln!("[Minimizer] Initial grammar does not cause the specific panic. Cannot proceed.");
+              // To make this a failing test if the initial condition isn't met:
+              assert!(false, "Initial grammar does not cause the specific panic.");
+              return Ok(()); // Or return an Err
+          }
+          println!("[Minimizer] Confirmed: Initial grammar causes the specific panic.");
+
+          let mut rng = StdRng::seed_from_u64(42); // For reproducible random choices
+          let mut pass_num = 0;
+
+          // --- Tunable Parameters for Stochastic Search ---
+          const ATTEMPTS_PER_STRATEGY_PASS: usize = 100; // How many random chunks to try per strategy in a pass
+          const MAX_PRODUCTIONS_TO_REMOVE_IN_CHUNK: usize = 3;
+          const MAX_SYMBOLS_TO_REMOVE_IN_CHUNK: usize = 5;
+
+          // --- Main Minimization Loop ---
+          'pass_loop: loop {
+              pass_num += 1;
+              println!(
+                  "\n[Minimizer] Starting Pass {}. Current productions: {}",
+                  pass_num,
+                  current_productions.len()
+              );
+              std::io::stdout().flush().unwrap();
+              let mut made_change_in_this_pass = false;
+
+              // --- Strategy 1: Try removing chunks of productions ---
+              if current_productions.len() > 1 { // Need at least one production beyond the (potentially) protected start rule
+                  print!("[Minimizer] Pass {}: Trying production chunk removal ({} attempts)...", pass_num, ATTEMPTS_PER_STRATEGY_PASS);
+                  std::io::stdout().flush().unwrap();
+                  for attempt in 0..ATTEMPTS_PER_STRATEGY_PASS {
+                      let eligible_prod_indices: Vec<usize> = (0..current_productions.len())
+                          .filter(|&idx| current_productions[idx].lhs != augmented_start_rule_lhs)
+                          .collect();
+
+                      if eligible_prod_indices.is_empty() {
+                          break; // No non-start-rule productions left to remove
+                      }
+
+                      let chunk_size = rng.gen_range(1..=std::cmp::min(MAX_PRODUCTIONS_TO_REMOVE_IN_CHUNK, eligible_prod_indices.len()));
+                      
+                      // Select `chunk_size` distinct indices from `eligible_prod_indices`
+                      // These chosen_indices are actual indices into `current_productions`
+                      let chosen_indices_to_remove: Vec<usize> = eligible_prod_indices
+                          .choose_multiple(&mut rng, chunk_size)
+                          .cloned()
+                          .collect();
+
+                      if chosen_indices_to_remove.is_empty() { continue; }
+
+                      let mut temp_productions = current_productions.clone();
+                      
+                      // Remove productions by sorted index (descending) to maintain index validity
+                      let mut sorted_indices = chosen_indices_to_remove;
+                      sorted_indices.sort_unstable_by(|a, b| b.cmp(a)); // Sort descending
+
+                      for &idx_to_remove in &sorted_indices {
+                          temp_productions.remove(idx_to_remove);
+                      }
+                      
+                      if temp_productions.is_empty() || !temp_productions.iter().any(|p| p.lhs == augmented_start_rule_lhs) {
+                          // Ensure the grammar is not empty and still contains the start rule
+                          continue;
+                      }
+
+                      if causes_specific_panic(
+                          &temp_productions,
+                          &augmented_start_rule_lhs,
+                          &sequence_to_test_names,
+                          PANIC_SUBSTRING_TO_FIND,
+                      ) {
+                          if attempt % (ATTEMPTS_PER_STRATEGY_PASS / 10 + 1) == 0 { print!("#"); std::io::stdout().flush().unwrap(); }
+                          current_productions = temp_productions;
+                          made_change_in_this_pass = true;
+                          // Greedily take the first successful chunk reduction in this strategy's attempts
+                          // and restart the pass.
+                          println!("\n[Minimizer] Reduced by production chunk ({} removed). New count: {}", chunk_size, current_productions.len());
+                          continue 'pass_loop; 
+                      }
+                  }
+                  println!(); // Newline after attempts printing
+              }
+
+
+              // --- Strategy 2: Try removing chunks of symbols (only if no productions were removed) ---
+              // No 'else' needed here due to the `continue 'pass_loop'` above.
+              // This code is reached if Strategy 1 made no change.
+              
+              let mut all_symbol_locations: Vec<(usize, usize)> = Vec::new(); // (prod_idx, symbol_idx_in_rhs)
+              for (prod_idx, prod) in current_productions.iter().enumerate() {
+                  for symbol_idx in 0..prod.rhs.len() {
+                      all_symbol_locations.push((prod_idx, symbol_idx));
+                  }
+              }
+
+              if !all_symbol_locations.is_empty() {
+                  print!("[Minimizer] Pass {}: Trying symbol chunk removal ({} attempts)...", pass_num, ATTEMPTS_PER_STRATEGY_PASS);
+                  std::io::stdout().flush().unwrap();
+                  for attempt in 0..ATTEMPTS_PER_STRATEGY_PASS {
+                      let chunk_size = rng.gen_range(1..=std::cmp::min(MAX_SYMBOLS_TO_REMOVE_IN_CHUNK, all_symbol_locations.len()));
+                      
+                      let locations_to_remove: Vec<(usize, usize)> = all_symbol_locations
+                          .choose_multiple(&mut rng, chunk_size)
+                          .cloned()
+                          .collect();
+
+                      if locations_to_remove.is_empty() { continue; }
+
+                      let mut temp_productions = current_productions.clone();
+                      remove_symbols_at_locations_destructive(&mut temp_productions, &locations_to_remove);
+                      
+                      // It's possible removing symbols emptied all rules or disconnected the start rule.
+                      // A more robust check might be needed if this becomes an issue.
+                      if temp_productions.is_empty() || !temp_productions.iter().any(|p| p.lhs == augmented_start_rule_lhs) {
+                           continue;
+                      }
+
+
+                      if causes_specific_panic(
+                          &temp_productions,
+                          &augmented_start_rule_lhs,
+                          &sequence_to_test_names,
+                          PANIC_SUBSTRING_TO_FIND,
+                      ) {
+                          if attempt % (ATTEMPTS_PER_STRATEGY_PASS / 10 + 1) == 0 { print!("*"); std::io::stdout().flush().unwrap(); }
+                          current_productions = temp_productions;
+                          made_change_in_this_pass = true;
+                          // Greedily take the first successful symbol chunk reduction and restart the pass.
+                          println!("\n[Minimizer] Reduced by symbol chunk ({} removed). New count: {}", chunk_size, current_productions.len());
+                          continue 'pass_loop;
+                      }
+                  }
+                  println!(); // Newline after attempts printing
+              }
+
+              // --- End of Pass ---
+              if !made_change_in_this_pass {
+                  println!("[Minimizer] Pass {}: No further reductions found in this pass.", pass_num);
+                  break 'pass_loop; // Exit the main minimization loop
+              }
+          }
+
+          // --- Output Final Minimized Grammar ---
+          println!("\n[Minimizer] Minimization complete.");
+          println!("[Minimizer] Final number of productions: {}", current_productions.len());
+          println!("[Minimizer] Minimized Grammar Productions (Augmented Start LHS: {}):", augmented_start_rule_lhs.0);
+          for (idx, prod) in current_productions.iter().enumerate() {
+              println!("  P{}: {}", idx, prod);
+          }
+
+          // Fail the test to ensure the MRE is reviewed.
+          assert!(false, "[Minimizer] Minimization finished. Review the MRE printed above and address the underlying panic.");
+          Ok(())
+      }
+      ```
+
+      **Key Improvements and Elegance:**
+
+      1.  **Clearer Pass Structure:** The `continue 'pass_loop'` makes the greedy restart explicit and easy to follow. If any reduction is found (either production or symbol chunk), the entire pass restarts with the smaller grammar.
+      2.  **Robust Production Removal:** The selection of productions to remove now correctly uses `eligible_prod_indices` and then removes them by their actual (sorted descending) indices from `current_productions`.
+      3.  **Protection of Start Rule:** Explicitly filters out the augmented start rule from being a candidate for removal. Also added a check to ensure `temp_productions` is not empty and still contains the start rule after modification, though `causes_specific_panic` would likely fail anyway if the start rule is gone.
+      4.  **Symbol Location Collection:** `all_symbol_locations` is collected once per symbol removal strategy attempt, which is fine.
+      5.  **Tunable Constants:** `ATTEMPTS_PER_STRATEGY_PASS`, `MAX_PRODUCTIONS_TO_REMOVE_IN_CHUNK`, `MAX_SYMBOLS_TO_REMOVE_IN_CHUNK` are at the top for easy adjustment.
+      6.  **Concise Logging:** Progress indicators (`#` for production removal, `*` for symbol removal) are printed less frequently to reduce console noise, with a summary line when a reduction is made.
+      7.  **`remove_symbols_at_locations_destructive` Refinement:** It now uses `iter_mut()` and `std::mem::take` for slightly cleaner modification of production RHS.
+
+      This version should be significantly faster than a deterministic single-item removal approach for many cases, as it can make larger reductive steps. The "satisfyingly fast" part will depend on the specific grammar and the nature of the panic, but this is a strong stochastic approach.
+    metadata:
+  - user: |
+      Using model 'gemini/gemini-2.5-flash-preview-05-20' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/test_constraint.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/test_constraint.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/test_constraint.rs
+    metadata:
 ...
