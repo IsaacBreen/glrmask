@@ -1,3 +1,4 @@
+use rand::rngs::StdRng;
 use std::collections::BTreeMap;
 use crate::finite_automata::eat_u8;
 use crate::{choice, choice_fast, groups, seq, seq_fast};
@@ -24,7 +25,7 @@ use crate::types::TerminalID;
 use crate::datastructures::vocab_prefix_tree::VocabPrefixTree; // Added for tokenization
 use std::time::Instant;
 use rand::prelude::IndexedRandom;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use rand::seq::SliceRandom;
 
 // Use concrete types for merge tests
@@ -754,7 +755,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     if all_grammar_terminal_ids.is_empty() {
         println!("  Warning: No grammar terminal IDs found in compiled_grammar.glr_parser.terminal_map. Fuzz test will be trivial or skipped.");
     } else {
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::seed_from_u64(42);
         for i in 0..num_fuzz_iterations {
             if i % 100 == 0 { // Log progress
                 println!("  Fuzz test iteration {}/{}", i, num_fuzz_iterations);
