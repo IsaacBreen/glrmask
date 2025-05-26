@@ -429,6 +429,38 @@ fn compute_reachable_from_interesting_nts(
     reachable_set
 }
 
+/// Helper function to check if an RHS can lead to an interesting symbol.
+fn rhs_is_productive_for_interesting(
+    rhs: &[Symbol],
+    interesting_symbols: &BTreeSet<Symbol>,
+    can_derive_set_for_nts: &BTreeSet<NonTerminal>, // Precomputed set of NTs that can derive interesting
+) -> bool {
+    // An empty RHS doesn't directly produce an interesting symbol through its own content.
+    // The case for L -> epsilon where L itself is important is handled in the main filter logic.
+    if rhs.is_empty() {
+        return false;
+    }
+
+    for symbol_in_rhs in rhs {
+        match symbol_in_rhs {
+            Symbol::Terminal(_) => {
+                // If a terminal in the RHS is one of the interesting_symbols
+                if interesting_symbols.contains(symbol_in_rhs) {
+                    return true;
+                }
+            }
+            Symbol::NonTerminal(nt_in_rhs) => {
+                // If a non-terminal in the RHS is itself an interesting_symbol (as an NT)
+                // OR if that non-terminal is known to be able to derive an interesting_symbol
+                if interesting_symbols.contains(symbol_in_rhs) || can_derive_set_for_nts.contains(nt_in_rhs) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Filters productions based on reachability criteria related to a set of "interesting" symbols.
 ///
 /// A production is kept if its Left-Hand Side (LHS) non-terminal meets at least one of the following conditions:
@@ -455,17 +487,45 @@ pub fn filter_productions_by_reachability(
     let mut kept_productions = Vec::new();
     for production in initial_productions {
         let lhs = &production.lhs;
+        let rhs = &production.rhs;
         
-        // Condition 1: LHS can derive an interesting symbol.
-        let cond1_lhs_can_derive_interesting = can_derive_set.contains(lhs);
-        
-        // Condition 2: LHS is reachable from an interesting non-terminal.
-        let cond2_lhs_reachable_from_interesting_nt = reachable_from_set.contains(lhs);
+        let mut keep_this_production = false;
 
-        if cond1_lhs_can_derive_interesting || cond2_lhs_reachable_from_interesting_nt {
+        let lhs_in_can_derive_set = can_derive_set.contains(lhs);
+        let mut rhs_contributes_to_interesting = false; // For logging
+
+        if lhs_in_can_derive_set {
+            // If LHS can derive an interesting symbol, this specific rule L -> R is useful if:
+            // 1. Its RHS can lead to an interesting symbol, OR
+            // 2. Its RHS is empty (L -> eps), meaning L's nullability (which is established
+            //    as useful by L being in can_derive_set) is achieved via this rule.
+            if rhs_is_productive_for_interesting(rhs, interesting_symbols, &can_derive_set) {
+                keep_this_production = true;
+                rhs_contributes_to_interesting = true;
+            } else if rhs.is_empty() {
+                keep_this_production = true;
+                rhs_contributes_to_interesting = true; // Epsilon rule contributes if LHS is in can_derive_set
+            }
+        }
+        
+        let lhs_in_reachable_set = reachable_from_set.contains(lhs);
+        if !keep_this_production && lhs_in_reachable_set {
+            // If the LHS is reachable from an interesting non-terminal,
+            // this production is part of the definition of that reachable LHS, so keep it.
+            keep_this_production = true;
+        }
+
+        if keep_this_production {
             kept_productions.push(production.clone());
         } else {
-            crate::debug!(4, "Filtering out production: {} (LHS can derive interesting: {}, LHS reachable from interesting NT: {})", production, cond1_lhs_can_derive_interesting, cond2_lhs_reachable_from_interesting_nt);
+            crate::debug!(
+                4,
+                "Filtering out production: {} (LHS in can_derive_set: {}, (RHS productive or empty): {}, LHS in reachable_from_set: {})",
+                production,
+                lhs_in_can_derive_set,
+                rhs_contributes_to_interesting, // This is true if the reason for keeping under cond1 was met
+                lhs_in_reachable_set
+            );
         }
     }
     
