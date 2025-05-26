@@ -337,12 +337,9 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> { // Added
 
     pub fn popn(&self, n: usize) -> GSSNode<T, A> {
         if n == 0 {
-             // panic!("it is meaningless to call pop with n=0");
             self.clone()
-        // } else if n==1 {
-        //     self.clone()
         } else {
-            self.pop_into(GSSNode::new_default()).popn(n - 1)
+            self.pop().popn(n - 1)
         }
     }
 
