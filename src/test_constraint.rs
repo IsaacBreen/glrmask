@@ -29,7 +29,7 @@ use rand::prelude::IndexedRandom;
 use rand::{Rng, SeedableRng};
 use rand::seq::SliceRandom;
 use crate::glr::analyze::{filter_productions_by_reachability, remove_productions_with_undefined_nonterminals};
-
+use std::panic::{self, AssertUnwindSafe}; // Added for panic catching
 
 // Use concrete types for merge tests
 type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;
@@ -963,141 +963,358 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 }
 
 // --- New test section for grammar filtering and specific sequence ---
+// #[test]
+// #[ignore] // Commented out to avoid running it unless specifically asked for
+// fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::error::Error>> {
+//     // 1. Load the serialized CompiledGrammar
+//     let serialized_grammar_path = "src/serialized_compiled_grammar.json";
+//     println!("[Test] Loading CompiledGrammar from: {}", serialized_grammar_path);
+//     let json_string = match fs::read_to_string(serialized_grammar_path) {
+//         Ok(s) => s,
+//         Err(e) => {
+//             eprintln!("[Test] Failed to read serialized grammar file '{}': {}", serialized_grammar_path, e);
+//             eprintln!("[Test] Ensure the file exists (e.g., by running the test that generates it or placing it manually).");
+//             return Err(Box::new(e)); // Fail the test if the prerequisite file is not found
+//         }
+//     };
+//     let json_node = JSONNode::from_json_string(&json_string)?;
+//     let compiled_grammar = CompiledGrammar::from_json(json_node)?;
+//     println!("[Test] Successfully loaded CompiledGrammar from JSON.");
+//     println!("[Test] Original grammar structure: {}", compiled_grammar.definition);
+
+//     // 2. Define "interesting" symbols for filtering based on the sequence
+//     let sequence_to_test_names = vec!["\"...\"", "\";\"", "\"elif\""];
+//     let mut interesting_symbols = BTreeSet::new();
+//     for name_str in &sequence_to_test_names {
+//         // All elements in this specific sequence are terminals
+//         interesting_symbols.insert(Symbol::Terminal(Terminal(name_str.to_string())));
+//     }
+//     println!("[Test] Interesting symbols for filtering: {:?}", sequence_to_test_names);
+
+//     // 3. Apply the filter_productions_by_reachability function
+//     let initially_filtered_productions = filter_productions_by_reachability(
+//         &compiled_grammar.definition.productions,
+//         &interesting_symbols,
+//     );
+//     println!("[Test] Productions after initial filter_productions_by_reachability: {}", initially_filtered_productions.len());
+
+//     // 4. Apply remove_productions_with_undefined_nonterminals
+//     let final_filtered_productions = remove_productions_with_undefined_nonterminals(&initially_filtered_productions);
+//     println!("[Test] Productions after remove_productions_with_undefined_nonterminals: {}", final_filtered_productions.len());
+
+
+//     println!("[Test] Original number of productions: {}", compiled_grammar.definition.productions.len());
+//     println!("[Test] Filtered number of productions (final): {}", final_filtered_productions.len());
+
+//     if final_filtered_productions.is_empty() {
+//         if compiled_grammar.definition.productions.is_empty() {
+//              println!("[Test] Original grammar was empty, so filtered grammar is also empty. This is expected.");
+//         } else {
+//             panic!("[Test] All productions were filtered out after cleanup. This indicates the interesting symbols are not reachable or productive in the original grammar, or the filter is too aggressive for this scenario, or the cleanup removed everything.");
+//         }
+//     }
+
+
+//     // 5. Determine the start_production_id for the filtered set.
+//     // It must be the same augmented start production as in the original grammar.
+//     let original_start_production = &compiled_grammar.definition.productions[compiled_grammar.definition.start_production_id];
+//     let new_start_production_id = match final_filtered_productions.iter().position(|p| p == original_start_production) {
+//         Some(id) => id,
+//         None => {
+//              if final_filtered_productions.is_empty() {
+//                 println!("[Test] Filtered productions list is empty, so original start production cannot be found. Skipping parser rebuild and sequence test.");
+//                 return Ok(()); // Or handle as a test failure if an empty grammar is not expected
+//             }
+//             panic!("[Test] Original start production ('{}') was filtered out. This is unexpected if the sequence is meant to be parsable by the grammar. Cannot proceed with parser rebuild.", original_start_production);
+//         }
+//     };
+//     println!("[Test] Original start production found in filtered set at new index: {}.", new_start_production_id);
+
+//     // 6. Rebuild the GLR parser using the filtered productions.
+//     // Use the original terminal_map and non_terminal_map from the loaded compiled_grammar.
+//     // `generate_glr_parser_with_maps` includes validation, which might panic if the filtered grammar is invalid.
+//     println!("[Test] Rebuilding parser with filtered productions...");
+//     let filtered_definition = GrammarDefinition {
+//         productions: final_filtered_productions.clone(), // Use the cleaned list
+//         start_production_id: new_start_production_id,
+//         terminal_name_to_group_id: compiled_grammar.definition.terminal_name_to_group_id.clone(),
+//         terminal_expr_to_group_id: compiled_grammar.definition.terminal_expr_to_group_id.clone(),
+//     };
+//     // For debugging the structure of the filtered parser:
+//     println!("[Test] Filtered grammar structure: {}", filtered_definition);
+//     let filtered_parser = generate_glr_parser_with_maps(
+//         &final_filtered_productions, // Use the cleaned list
+//         new_start_production_id,
+//         compiled_grammar.glr_parser.terminal_map.clone(),
+//         compiled_grammar.glr_parser.non_terminal_map.clone(),
+//     );
+//     println!("[Test] Rebuilt parser with filtered productions. New parser has {} states.", filtered_parser.stage_7_table.len());
+
+//     // 7. Convert the test sequence names to TerminalIDs using the *filtered_parser's* terminal_map.
+//     let mut sequence_to_test_ids = Vec::new();
+//     let mut all_terminals_mapped = true;
+//     for name_str in &sequence_to_test_names {
+//         if let Some(term_id) = filtered_parser.terminal_map.get_by_left(&Terminal(name_str.to_string())) {
+//             sequence_to_test_ids.push(*term_id);
+//         } else {
+//             eprintln!("[Test] Error: Terminal '{}' from test sequence not found in filtered_parser's terminal_map.", name_str);
+//             all_terminals_mapped = false;
+//             break;
+//         }
+//     }
+
+//     if !all_terminals_mapped {
+//         panic!("[Test] Cannot run sequence test on filtered parser: one or more terminals from the sequence ('{:?}') were not found in its terminal_map. The filter might have removed necessary terminal definitions, or they were not part of the original grammar's terminal mapping in a way that survived filtering.", sequence_to_test_names);
+//     }
+//     assert_eq!(sequence_to_test_ids.len(), sequence_to_test_names.len(), "[Test] Mismatch in length between terminal names and resolved IDs for the test sequence.");
+
+//     // 8. Initialize GLRParserState for the filtered parser.
+//     // We use a unit accumulator `()` as this test focuses on grammar rule processing, not LLM token constraints.
+//     let mut glr_state_filtered = filtered_parser.init_glr_parser::<()>();
+//     println!("[Test] Initialized GLR state for filtered parser.");
+
+//     // 9. Step the GLRParserState with the sequence of TerminalIDs.
+//     println!("[Test] Stepping filtered parser with sequence: {:?} (IDs: {:?})", sequence_to_test_names, sequence_to_test_ids.iter().map(|id| id.0).collect::<Vec<_>>());
+//     let mut step_by_step_ok = true;
+//     for (idx, &terminal_id) in sequence_to_test_ids.iter().enumerate() {
+//         glr_state_filtered.step(terminal_id);
+//         println!("[Test]   Stepped with '{}' (ID {}). Parser OK: {}", sequence_to_test_names[idx], terminal_id.0, glr_state_filtered.is_ok());
+//         if !glr_state_filtered.is_ok() {
+//             step_by_step_ok = false;
+//             eprintln!("[Test]   Parser became NOT OK after stepping with '{}'. This is the failure point for the sequence with the filtered grammar.", sequence_to_test_names[idx]);
+//             // For detailed debugging, you might want to print the GSS of the failed state:
+//             // glr_state_filtered.log_gss("GSS at failure point", terminal_id);
+//             break;
+//         }
+//     }
+
+//     // 10. Assert the outcome.
+//     if step_by_step_ok {
+//         println!("[Test] Filtered parser successfully processed the sequence token by token: {:?}. Final state OK: {}", sequence_to_test_names, glr_state_filtered.is_ok());
+//         // This sequence should be a valid prefix or complete parse if the grammar logic for it is correct.
+//         // assert!(glr_state_filtered.is_ok(), "[Test] Filtered parser should be in OK state after processing the sequence: {:?}", sequence_to_test_names);
+//     } else {
+//         // This assertion will cause the test to fail if any step resulted in a non-OK state.
+//         // assert!(step_by_step_ok, "[Test] Filtered parser FAILED to process the sequence: {:?}. Check logs above for the failing step.", sequence_to_test_names);
+//     }
+
+//     println!("[Test] Test 'test_filtered_grammar_with_specific_sequence' completed successfully.");
+//     Ok(())
+// }
+
+const PANIC_SUBSTRING_TO_FIND: &str = "not found in gotos for";
+
+// Helper function to test if a grammar configuration causes the specific panic
+fn causes_specific_panic(
+    productions_to_test: &[Production],
+    original_augmented_start_lhs: &NonTerminal,
+    sequence_terminal_names: &[&str],
+    panic_substring: &str,
+) -> bool {
+    if productions_to_test.is_empty() {
+        return false;
+    }
+
+    let current_start_prod_index = match productions_to_test
+        .iter()
+        .position(|p| p.lhs == *original_augmented_start_lhs)
+    {
+        Some(idx) => idx,
+        None => {
+            // Augmented start rule is missing, this grammar is too broken to test for the specific panic.
+            return false;
+        }
+    };
+
+    let current_terminal_map = assign_terminal_ids(productions_to_test);
+    let current_non_terminal_map = assign_non_terminal_ids(productions_to_test);
+
+    let mut sequence_terminal_ids = Vec::new();
+    for name_str in sequence_terminal_names {
+        let terminal_to_find = Terminal(name_str.to_string());
+        if let Some(term_id) = current_terminal_map.get_by_left(&terminal_to_find) {
+            sequence_terminal_ids.push(*term_id);
+        } else {
+            // Terminal needed for the sequence is no longer defined in this perturbed grammar.
+            return false;
+        }
+    }
+
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        let parser = generate_glr_parser_with_maps(
+            productions_to_test,
+            current_start_prod_index,
+            current_terminal_map,
+            current_non_terminal_map,
+        );
+
+        let mut glr_state = parser.init_glr_parser::<()>();
+
+        for &terminal_id in &sequence_terminal_ids {
+            glr_state.step(terminal_id);
+        }
+    }));
+
+    match result {
+        Ok(_) => false, // No panic
+        Err(panic_payload) => {
+            let panic_message = if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "Unknown panic payload type".to_string()
+            };
+            panic_message.contains(panic_substring)
+        }
+    }
+}
+
 #[test]
-fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Load the serialized CompiledGrammar
+#[ignore] // This test is for manual MRE generation and can be slow.
+fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Error>> {
+    // Load the base compiled grammar
     let serialized_grammar_path = "src/serialized_compiled_grammar.json";
-    println!("[Test] Loading CompiledGrammar from: {}", serialized_grammar_path);
+    println!("[Minimizer] Loading base CompiledGrammar from: {}", serialized_grammar_path);
     let json_string = match fs::read_to_string(serialized_grammar_path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[Test] Failed to read serialized grammar file '{}': {}", serialized_grammar_path, e);
-            eprintln!("[Test] Ensure the file exists (e.g., by running the test that generates it or placing it manually).");
-            return Err(Box::new(e)); // Fail the test if the prerequisite file is not found
+            eprintln!("[Minimizer] Failed to read serialized grammar file '{}': {}", serialized_grammar_path, e);
+            return Err(Box::new(e));
         }
     };
     let json_node = JSONNode::from_json_string(&json_string)?;
     let compiled_grammar = CompiledGrammar::from_json(json_node)?;
-    println!("[Test] Successfully loaded CompiledGrammar from JSON.");
-    println!("[Test] Original grammar structure: {}", compiled_grammar.definition);
+    println!("[Minimizer] Successfully loaded CompiledGrammar.");
 
-    // 2. Define "interesting" symbols for filtering based on the sequence
-    let sequence_to_test_names = vec!["\"...\"", "\";\"", "\"elif\""];
-    let mut interesting_symbols = BTreeSet::new();
-    for name_str in &sequence_to_test_names {
-        // All elements in this specific sequence are terminals
-        interesting_symbols.insert(Symbol::Terminal(Terminal(name_str.to_string())));
+    let initial_productions = compiled_grammar.definition.productions.clone();
+    let augmented_start_rule_lhs = compiled_grammar.definition.productions
+        [compiled_grammar.definition.start_production_id].lhs.clone();
+
+    // The sequence that causes the panic
+    let sequence_to_test_names = ["\"...\"", "\";\"", "\"elif\""];
+
+    println!("[Minimizer] Starting minimization for panic substring: '{}'", PANIC_SUBSTRING_TO_FIND);
+    println!("[Minimizer] Initial number of productions: {}", initial_productions.len());
+    println!("[Minimizer] Test sequence: {:?}", sequence_to_test_names);
+    println!("[Minimizer] Augmented start LHS: {}", augmented_start_rule_lhs.0);
+
+    let mut current_productions = initial_productions;
+    let mut pass_num = 0;
+
+    // First, verify the initial grammar causes the panic
+    if !causes_specific_panic(
+        &current_productions,
+        &augmented_start_rule_lhs,
+        &sequence_to_test_names,
+        PANIC_SUBSTRING_TO_FIND,
+    ) {
+        assert!(false, "[Minimizer] Initial grammar does not cause the specific panic. Cannot proceed with minimization.");
+        return Ok(()); // Or panic
     }
-    println!("[Test] Interesting symbols for filtering: {:?}", sequence_to_test_names);
-
-    // 3. Apply the filter_productions_by_reachability function
-    let initially_filtered_productions = filter_productions_by_reachability(
-        &compiled_grammar.definition.productions,
-        &interesting_symbols,
-    );
-    println!("[Test] Productions after initial filter_productions_by_reachability: {}", initially_filtered_productions.len());
-
-    // 4. Apply remove_productions_with_undefined_nonterminals
-    let final_filtered_productions = remove_productions_with_undefined_nonterminals(&initially_filtered_productions);
-    println!("[Test] Productions after remove_productions_with_undefined_nonterminals: {}", final_filtered_productions.len());
+    println!("[Minimizer] Confirmed: Initial grammar causes the specific panic.");
 
 
-    println!("[Test] Original number of productions: {}", compiled_grammar.definition.productions.len());
-    println!("[Test] Filtered number of productions (final): {}", final_filtered_productions.len());
+    loop {
+        pass_num += 1;
+        println!("\n[Minimizer] Starting Pass {}. Current productions: {}", pass_num, current_productions.len());
+        std::io::stdout().flush().unwrap();
+        let mut made_change_in_this_pass = false;
 
-    if final_filtered_productions.is_empty() {
-        if compiled_grammar.definition.productions.is_empty() {
-             println!("[Test] Original grammar was empty, so filtered grammar is also empty. This is expected.");
-        } else {
-            panic!("[Test] All productions were filtered out after cleanup. This indicates the interesting symbols are not reachable or productive in the original grammar, or the filter is too aggressive for this scenario, or the cleanup removed everything.");
-        }
-    }
-
-
-    // 5. Determine the start_production_id for the filtered set.
-    // It must be the same augmented start production as in the original grammar.
-    let original_start_production = &compiled_grammar.definition.productions[compiled_grammar.definition.start_production_id];
-    let new_start_production_id = match final_filtered_productions.iter().position(|p| p == original_start_production) {
-        Some(id) => id,
-        None => {
-             if final_filtered_productions.is_empty() {
-                println!("[Test] Filtered productions list is empty, so original start production cannot be found. Skipping parser rebuild and sequence test.");
-                return Ok(()); // Or handle as a test failure if an empty grammar is not expected
+        // Phase 1: Try removing symbols from RHS of productions
+        print!("[Minimizer] Pass {}: Trying to remove RHS symbols", pass_num);
+        std::io::stdout().flush().unwrap();
+        let mut best_reduction_after_symbol_removal = None;
+        'symbol_removal_loop: for prod_idx in 0..current_productions.len() {
+            let num_rhs_symbols = current_productions[prod_idx].rhs.len();
+            if num_rhs_symbols == 0 {
+                continue; 
             }
-            panic!("[Test] Original start production ('{}') was filtered out. This is unexpected if the sequence is meant to be parsable by the grammar. Cannot proceed with parser rebuild.", original_start_production);
+            for symbol_idx_to_remove in (0..num_rhs_symbols).rev() { // Iterate backwards for stable removal
+                print!("."); std::io::stdout().flush().unwrap();
+                let mut productions_after_symbol_removed = current_productions.clone();
+                productions_after_symbol_removed[prod_idx].rhs.remove(symbol_idx_to_remove);
+
+                if causes_specific_panic(
+                    &productions_after_symbol_removed,
+                    &augmented_start_rule_lhs,
+                    &sequence_to_test_names,
+                    PANIC_SUBSTRING_TO_FIND,
+                ) {
+                    best_reduction_after_symbol_removal = Some(productions_after_symbol_removed);
+                    println!("\n[Minimizer] Pass {}: Reduced by removing symbol #{} from P{} (LHS: {}). New total productions: {}",
+                             pass_num, symbol_idx_to_remove, prod_idx, current_productions[prod_idx].lhs.0, best_reduction_after_symbol_removal.as_ref().unwrap().len());
+                    break 'symbol_removal_loop;
+                }
+            }
         }
-    };
-    println!("[Test] Original start production found in filtered set at new index: {}.", new_start_production_id);
+        println!(); 
 
-    // 6. Rebuild the GLR parser using the filtered productions.
-    // Use the original terminal_map and non_terminal_map from the loaded compiled_grammar.
-    // `generate_glr_parser_with_maps` includes validation, which might panic if the filtered grammar is invalid.
-    println!("[Test] Rebuilding parser with filtered productions...");
-    let filtered_definition = GrammarDefinition {
-        productions: final_filtered_productions.clone(), // Use the cleaned list
-        start_production_id: new_start_production_id,
-        terminal_name_to_group_id: compiled_grammar.definition.terminal_name_to_group_id.clone(),
-        terminal_expr_to_group_id: compiled_grammar.definition.terminal_expr_to_group_id.clone(),
-    };
-    // For debugging the structure of the filtered parser:
-    println!("[Test] Filtered grammar structure: {}", filtered_definition);
-    let filtered_parser = generate_glr_parser_with_maps(
-        &final_filtered_productions, // Use the cleaned list
-        new_start_production_id,
-        compiled_grammar.glr_parser.terminal_map.clone(),
-        compiled_grammar.glr_parser.non_terminal_map.clone(),
-    );
-    println!("[Test] Rebuilt parser with filtered productions. New parser has {} states.", filtered_parser.stage_7_table.len());
+        if let Some(reduced_productions) = best_reduction_after_symbol_removal {
+            current_productions = reduced_productions;
+            made_change_in_this_pass = true;
+            // Continue to the next pass to restart reduction attempts on the smaller grammar
+        }
 
-    // 7. Convert the test sequence names to TerminalIDs using the *filtered_parser's* terminal_map.
-    let mut sequence_to_test_ids = Vec::new();
-    let mut all_terminals_mapped = true;
-    for name_str in &sequence_to_test_names {
-        if let Some(term_id) = filtered_parser.terminal_map.get_by_left(&Terminal(name_str.to_string())) {
-            sequence_to_test_ids.push(*term_id);
-        } else {
-            eprintln!("[Test] Error: Terminal '{}' from test sequence not found in filtered_parser's terminal_map.", name_str);
-            all_terminals_mapped = false;
-            break;
+        // Phase 2: Try removing whole productions
+        if !made_change_in_this_pass {
+            print!("[Minimizer] Pass {}: No symbol removals successful. Trying to remove whole productions", pass_num);
+            std::io::stdout().flush().unwrap();
+            let mut best_reduction_after_prod_removal = None;
+            
+            'production_removal_loop: for prod_idx_to_remove in (0..current_productions.len()).rev() {
+                if current_productions[prod_idx_to_remove].lhs == augmented_start_rule_lhs {
+                    // Do not remove the augmented start rule itself.
+                    continue;
+                }
+                // Ensure we don't remove the very last production if it's the start rule,
+                // though the check above should handle the typical augmented start rule.
+                if current_productions.len() == 1 && current_productions[0].lhs == augmented_start_rule_lhs {
+                    continue;
+                }
+
+
+                print!("p"); std::io::stdout().flush().unwrap();
+                let mut productions_after_prod_removed = current_productions.clone();
+                productions_after_prod_removed.remove(prod_idx_to_remove);
+
+                if productions_after_prod_removed.is_empty() { // Should not happen if start rule is protected
+                    continue;
+                }
+
+                if causes_specific_panic(
+                    &productions_after_prod_removed,
+                    &augmented_start_rule_lhs,
+                    &sequence_to_test_names,
+                    PANIC_SUBSTRING_TO_FIND,
+                ) {
+                    best_reduction_after_prod_removal = Some(productions_after_prod_removed);
+                     println!("\n[Minimizer] Pass {}: Reduced by removing P{} (LHS: {}). New total productions: {}",
+                             pass_num, prod_idx_to_remove, current_productions[prod_idx_to_remove].lhs.0, best_reduction_after_prod_removal.as_ref().unwrap().len());
+                    break 'production_removal_loop;
+                }
+            }
+            println!(); 
+
+            if let Some(reduced_productions) = best_reduction_after_prod_removal {
+                current_productions = reduced_productions;
+                made_change_in_this_pass = true;
+            }
+        }
+
+        if !made_change_in_this_pass {
+            println!("[Minimizer] Pass {}: No further reductions found.", pass_num);
+            break; 
         }
     }
 
-    if !all_terminals_mapped {
-        panic!("[Test] Cannot run sequence test on filtered parser: one or more terminals from the sequence ('{:?}') were not found in its terminal_map. The filter might have removed necessary terminal definitions, or they were not part of the original grammar's terminal mapping in a way that survived filtering.", sequence_to_test_names);
-    }
-    assert_eq!(sequence_to_test_ids.len(), sequence_to_test_names.len(), "[Test] Mismatch in length between terminal names and resolved IDs for the test sequence.");
-
-    // 8. Initialize GLRParserState for the filtered parser.
-    // We use a unit accumulator `()` as this test focuses on grammar rule processing, not LLM token constraints.
-    let mut glr_state_filtered = filtered_parser.init_glr_parser::<()>();
-    println!("[Test] Initialized GLR state for filtered parser.");
-
-    // 9. Step the GLRParserState with the sequence of TerminalIDs.
-    println!("[Test] Stepping filtered parser with sequence: {:?} (IDs: {:?})", sequence_to_test_names, sequence_to_test_ids.iter().map(|id| id.0).collect::<Vec<_>>());
-    let mut step_by_step_ok = true;
-    for (idx, &terminal_id) in sequence_to_test_ids.iter().enumerate() {
-        glr_state_filtered.step(terminal_id);
-        println!("[Test]   Stepped with '{}' (ID {}). Parser OK: {}", sequence_to_test_names[idx], terminal_id.0, glr_state_filtered.is_ok());
-        if !glr_state_filtered.is_ok() {
-            step_by_step_ok = false;
-            eprintln!("[Test]   Parser became NOT OK after stepping with '{}'. This is the failure point for the sequence with the filtered grammar.", sequence_to_test_names[idx]);
-            // For detailed debugging, you might want to print the GSS of the failed state:
-            // glr_state_filtered.log_gss("GSS at failure point", terminal_id);
-            break;
-        }
+    println!("\n[Minimizer] Minimization complete.");
+    println!("[Minimizer] Final number of productions: {}", current_productions.len());
+    println!("[Minimizer] Minimized Grammar Productions (LHS of original augmented start rule: {}):", augmented_start_rule_lhs.0);
+    for (idx, prod) in current_productions.iter().enumerate() {
+        println!("  P{}: {}", idx, prod);
     }
 
-    // 10. Assert the outcome.
-    if step_by_step_ok {
-        println!("[Test] Filtered parser successfully processed the sequence token by token: {:?}. Final state OK: {}", sequence_to_test_names, glr_state_filtered.is_ok());
-        // This sequence should be a valid prefix or complete parse if the grammar logic for it is correct.
-        // assert!(glr_state_filtered.is_ok(), "[Test] Filtered parser should be in OK state after processing the sequence: {:?}", sequence_to_test_names);
-    } else {
-        // This assertion will cause the test to fail if any step resulted in a non-OK state.
-        // assert!(step_by_step_ok, "[Test] Filtered parser FAILED to process the sequence: {:?}. Check logs above for the failing step.", sequence_to_test_names);
-    }
-
-    println!("[Test] Test 'test_filtered_grammar_with_specific_sequence' completed successfully.");
+    assert!(false, "[Minimizer] Minimization finished. Review the MRE printed above.");
     Ok(())
 }
-
