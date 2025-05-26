@@ -168,14 +168,17 @@ impl JSONConvertible for GrammarDefinition {
 impl Display for GrammarDefinition {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "GrammarDefinition:")?;
+        writeln!(f, "  Start Production ID: {}", self.start_production_id)?;
         writeln!(f, "  Productions ({}):", self.productions.len())?;
         for production in &self.productions {
             write!(f, "    {} -> ", production.lhs.0)?;
             for (i, symbol) in production.rhs.iter().enumerate() {
-                if i == production.rhs.len() - 1 {
-                    write!(f, "{}", symbol.0)?;
-                } else {
-                    write!(f, "{} ", symbol.0)?;
+                match symbol {
+                    Symbol::Terminal(terminal) => write!(f, "{}", terminal.0)?,
+                    Symbol::NonTerminal(non_terminal) => write!(f, "{}", non_terminal.0)?,
+                }
+                if i < production.rhs.len() - 1 {
+                    write!(f, " ")?;
                 }
             }
             writeln!(f)?;
