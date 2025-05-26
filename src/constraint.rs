@@ -82,7 +82,7 @@ impl PathAccumulator for LLMTokenInfo {
         // assert that the total number of paths in the right terminals is equal to or greater than the total number of paths in the left terminals
         let left_terminals_paths = self.terminals.iter_paths().collect::<Vec<_>>();
         let right_terminals_paths = right.terminals.iter_paths().collect::<Vec<_>>();
-        assert!(left_terminals_paths.len() >= right_terminals_paths.len());
+        assert!(left_terminals_paths.len() <= right_terminals_paths.len());
         Self {
             active:       &self.active & &right.active,
             intersection: &self.intersection & &right.intersection,
