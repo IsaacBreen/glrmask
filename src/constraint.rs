@@ -1029,21 +1029,19 @@ impl<'a> GrammarConstraintState<'a> {
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
         let all_true_set = HybridBitset::ones(self.parent.internal_max_llm_token + 1);
-        let all_true_token_info = LLMTokenInfo {
-            active:       all_true_set.clone(),
-            intersection: all_true_set.clone(),
-            terminals:    Arc::new(GSSNode::new_default()),
-        };
 
         // Convert original LLMTokenID to internal LLMTokenID for the closure
         let internal_llm_id_val = self.parent.original_id_to_internal(llm_token_id).unwrap().0;
 
         let closure = |t: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
+            let mut t = t.clone();
             if t.active.contains(internal_llm_id_val) { // .active is internal, compare with internal ID
                 if t.intersection == all_true_set {
-                    Some((all_true_token_info.clone(), false))
+                    Some((t, false))
                 } else {
-                    Some((all_true_token_info.clone(), true))
+                    t.active = all_true_set.clone();
+                    t.intersection = all_true_set.clone();
+                    Some((t, true))
                 }
             } else { // Original token ID not found in mapping, so it cannot be active
                 None
