@@ -17,12 +17,12 @@ pub type NodeCache<T, A> = HashMap<NodeCacheKey<T, A>, Arc<GSSNode<T, A>>>;
 
 pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash + Default {
     fn union(&self, other: &Self) -> Self;
-    fn intersect(&self, right: &Self) -> Self;
+    fn pop(&self, right: &Self) -> Self;
 }
 
 impl PathAccumulator for () {
     fn union(&self, _other: &Self) -> Self { () }
-    fn intersect(&self, _right: &Self) -> Self { () }
+    fn pop(&self, _right: &Self) -> Self { () }
 }
 
 // Helper function to compute a node's hash_key_cache.
@@ -491,7 +491,7 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for Arc<G
 
     fn push_to(&self, edge_value: T, dest: &mut GSSNode<T, A>) {
         dest.merge(self.as_ref().clone());
-        dest.acc.intersect(&self.acc);
+        dest.acc.pop(&self.acc);
     }
 
     fn pop(&self) -> GSSNode<T, A> {
@@ -985,7 +985,8 @@ mod tests {
                 intersection: self.intersection.union(&other.intersection).cloned().collect(),
             }
         }
-        fn intersect(&self, right: &Self) -> Self {
+
+        fn pop(&self, right: &Self) -> Self {
             Self {
                 active: self.active.intersection(&right.active).cloned().collect(),
                 intersection: self.intersection.intersection(&right.intersection).cloned().collect(),

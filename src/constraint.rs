@@ -27,7 +27,7 @@ use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
-
+use uuid::Uuid;
 
 pub type LLMTokenBV = HybridBitset;
 pub type GrammarTokenBV = BitVec; // BitVec is not easily JSONConvertible without a specific strategy (e.g., as Vec<bool> or Vec<usize> of set bits)
@@ -40,7 +40,7 @@ pub type GrammarTokenBV = BitVec; // BitVec is not easily JSONConvertible withou
 pub struct LLMTokenInfo {
     pub active:       LLMTokenBV,
     pub intersection: LLMTokenBV,
-    pub terminals:    Vec<Vec<TerminalID>>,
+    pub terminals:    GSSNode<TerminalID, ()>,
 }
 
 impl Default for LLMTokenInfo {
@@ -62,30 +62,28 @@ impl Default for LLMTokenInfo {
         Self {
             active:       Default::default(), // Empty set
             intersection: HybridBitset::max_ones(),
-            terminals:    vec![vec![]],
+            terminals:    GSSNode::new_default(),
         }
     }
 }
 
 impl PathAccumulator for LLMTokenInfo {
     fn union(&self, other: &Self) -> Self {
-        // The existing merge logic seems to fit the 'union' semantic for paths
         let mut terminals = self.terminals.clone();
-        terminals.extend(other.terminals.clone());
+        terminals.merge(other.terminals.clone());
         Self {
             active:       &self.active | &other.active,
             intersection: &self.intersection & &other.intersection, // Intersection field becomes stricter (AND)
             terminals,
         }
     }
-    fn intersect(&self, right: &Self) -> Self {
-        // The existing intersect logic fits the 'intersect' semantic
-        let mut terminals = self.terminals.clone();
-        // Keep only terminals vecs that
+
+    fn pop(&self, right: &Self) -> Self {
+        // Keep the right terminals
         Self {
             active:       &self.active & &right.active,
             intersection: &self.intersection & &right.intersection,
-            terminals,
+            terminals:    right.terminals.clone(),
         }
     }
 }
@@ -406,6 +404,7 @@ impl GrammarConstraint {
         let initial_llm_token_acc = LLMTokenInfo { // Renamed from info
             active:       base_set_for_info.clone(),
             intersection: base_set_for_info,
+            terminals:    GSSNode::new_default(),
         };
         let mut state = BTreeMap::new();
         state.insert(
@@ -1027,8 +1026,9 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
         let all_true_set = HybridBitset::ones(self.parent.internal_max_llm_token + 1);
         let all_true_token_info = LLMTokenInfo {
-            active: all_true_set.clone(),
+            active:       all_true_set.clone(),
             intersection: all_true_set.clone(),
+            terminals:    GSSNode::new_default(),
         };
 
         // Convert original LLMTokenID to internal LLMTokenID for the closure

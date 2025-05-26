@@ -374,7 +374,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
 
             // Calculate acc for the new GOTO state's GSS node
             // It's the parent's acc intersected with the accumulator from the node being reduced.
-            let new_acc_for_goto_child = parent.acc().intersect(cur_acc_from_reducible_node); // Use parent_arc.acc()
+            let new_acc_for_goto_child = parent.acc().pop(cur_acc_from_reducible_node); // Use parent_arc.acc()
 
             let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id };
 
