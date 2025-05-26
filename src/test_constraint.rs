@@ -492,7 +492,7 @@ fn test_simple_def_match_non_zero_llm_id() {
         prod("S", vec![t("DEF_T")]), // Production 0
     ];
 
-    // 4. Map grammar terminal "DEF_T" to tokenizer group ID 0
+    // 4. Map grammar terminals "DEF_T" to tokenizer group ID 0
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
     grammar_token_map.insert(Terminal("DEF_T".to_string()), TerminalID(0));
     // Note: For this minimal test focusing on the initial mask for "def",
@@ -1110,7 +1110,7 @@ const PANIC_SUBSTRING_TO_FIND: &str = "not found in gotos for";
 fn causes_specific_panic(
     productions_to_test: &[Production],
     original_augmented_start_lhs: &NonTerminal,
-    sequence_terminal_names: &[&str],
+    sequence_to_test_names: &[&str],
     panic_substring: &str,
 ) -> bool {
     if productions_to_test.is_empty() {
@@ -1132,7 +1132,7 @@ fn causes_specific_panic(
     let current_non_terminal_map = assign_non_terminal_ids(productions_to_test);
 
     let mut sequence_terminal_ids = Vec::new();
-    for name_str in sequence_terminal_names {
+    for name_str in sequence_to_test_names {
         let terminal_to_find = Terminal(name_str.to_string());
         if let Some(term_id) = current_terminal_map.get_by_left(&terminal_to_find) {
             sequence_terminal_ids.push(*term_id);
@@ -1178,10 +1178,10 @@ fn causes_specific_panic(
 /// `prod_idx` refers to the index in the `productions` vector *before* any modifications
 /// within this specific call.
 fn remove_symbols_at_locations_destructive(
-    productions: &mut Vec<Production>,
-    locations_to_remove: &[(usize, usize)],
+    productions: &mut Vec<Production>, // Mutably borrow to modify in place
+    locations_to_remove: &[(usize, usize)], // (prod_idx, symbol_idx_in_rhs)
 ) {
-    // Group symbol indices to remove by their original production index
+    // Group symbol indices to remove by their production index
     let mut symbols_to_remove_by_prod: HashMap<usize, BTreeSet<usize>> = HashMap::new();
     for &(prod_idx, symbol_idx) in locations_to_remove {
         symbols_to_remove_by_prod
@@ -1203,6 +1203,122 @@ fn remove_symbols_at_locations_destructive(
             prod_ref_mut.rhs = new_rhs; // Assign the new RHS
         }
     }
+}
+
+/// Final simplification pass: Inlines rules of the form A -> B (single non-terminal RHS)
+/// if the inlining preserves the target panic.
+fn simplify_and_inline_unit_nonterminal_rules(
+    mut productions: Vec<Production>, // Takes ownership, returns new Vec
+    augmented_start_rule_lhs: &NonTerminal,
+    sequence_to_test_names: &[&str],
+    panic_substring: &str,
+) -> Vec<Production> {
+    println!("\n[Simplifier] Starting final unit non-terminal inlining pass...");
+    let mut iteration = 0;
+    loop {
+        iteration += 1;
+        let initial_prod_count = productions.len();
+        println!("[Simplifier] Iteration {}. Current productions: {}", iteration, initial_prod_count);
+        
+        let mut made_change_in_this_iteration = false;
+        let mut best_candidate_to_inline: Option<(NonTerminal, NonTerminal, usize)> = None;
+
+        // Find the first eligible candidate A -> B
+        for (idx, p) in productions.iter().enumerate() {
+            // Rule: A -> B (where B is a single NonTerminal)
+            // Condition 1: LHS (A) is not the augmented start symbol.
+            // Condition 2: RHS has exactly one symbol.
+            // Condition 3: That one symbol is a NonTerminal (B).
+            // Condition 4: A != B (avoid trivial A -> A inlining here).
+            if p.lhs != *augmented_start_rule_lhs &&
+               p.rhs.len() == 1 {
+                if let Symbol::NonTerminal(ref b_nt) = p.rhs[0] {
+                    if p.lhs != *b_nt {
+                        best_candidate_to_inline = Some((p.lhs.clone(), b_nt.clone(), idx));
+                        break; // Found a candidate, try to process it
+                    }
+                }
+            }
+        }
+
+        if let Some((a_nt_to_inline, b_nt_replacement, p_candidate_idx)) = best_candidate_to_inline {
+            println!("[Simplifier] Attempting to inline {} -> {} (from P{})", 
+                     a_nt_to_inline.0, b_nt_replacement.0, p_candidate_idx);
+
+            let mut temp_productions_after_inlining = Vec::new();
+            // 1. Copy all productions except the one being inlined (A -> B)
+            for (idx, p) in productions.iter().enumerate() {
+                if idx != p_candidate_idx {
+                    temp_productions_after_inlining.push(p.clone());
+                }
+            }
+
+            // 2. Perform the inlining: replace `a_nt_to_inline` with `b_nt_replacement` in RHS of other rules
+            for prod_being_modified in temp_productions_after_inlining.iter_mut() {
+                let mut new_rhs = Vec::with_capacity(prod_being_modified.rhs.len());
+                let mut rhs_was_changed = false;
+                for symbol_in_rhs in prod_being_modified.rhs.iter() {
+                    if let Symbol::NonTerminal(nt_in_rhs) = symbol_in_rhs {
+                        if *nt_in_rhs == a_nt_to_inline {
+                            new_rhs.push(Symbol::NonTerminal(b_nt_replacement.clone()));
+                            rhs_was_changed = true;
+                        } else {
+                            new_rhs.push(symbol_in_rhs.clone());
+                        }
+                    } else {
+                        new_rhs.push(symbol_in_rhs.clone());
+                    }
+                }
+                if rhs_was_changed {
+                    prod_being_modified.rhs = new_rhs;
+                }
+            }
+            
+            // 3. Verify that the augmented start rule still exists and the grammar is valid for panic check
+            if temp_productions_after_inlining.is_empty() || 
+               !temp_productions_after_inlining.iter().any(|p| p.lhs == *augmented_start_rule_lhs) {
+                println!("[Simplifier] Inlining {} -> {} would remove the augmented start rule or empty the grammar. Reverting.", 
+                         a_nt_to_inline.0, b_nt_replacement.0);
+                // This specific inlining is problematic, effectively skip it for this iteration.
+                // The outer loop will continue, but this candidate won't be picked again in this state
+                // if it leads to this invalid grammar.
+                // To be safer, we could mark this (A,B) pair as "not to be inlined" for future iterations,
+                // but the current greedy "take first good one" should eventually stabilize or exhaust options.
+                // For now, we just don't make a change and the loop will eventually terminate.
+                // To ensure progress, we must ensure this path doesn't lead to an infinite loop.
+                // The current logic is: if this candidate is bad, it's skipped. The next iteration will
+                // find the *same* candidate if `productions` hasn't changed.
+                // This means we must ensure that if an inlining is bad, `made_change_in_this_iteration` remains false.
+                // The current structure does this.
+            } else if causes_specific_panic(
+                &temp_productions_after_inlining,
+                augmented_start_rule_lhs,
+                sequence_to_test_names,
+                panic_substring,
+            ) {
+                println!("[Simplifier] Successfully inlined {} -> {}. Productions count: {} -> {}", 
+                         a_nt_to_inline.0, b_nt_replacement.0, 
+                         productions.len(), temp_productions_after_inlining.len());
+                productions = temp_productions_after_inlining; // Commit the change
+                made_change_in_this_iteration = true;
+            } else {
+                println!("[Simplifier] Inlining {} -> {} removed the target panic. Reverting this step.", 
+                         a_nt_to_inline.0, b_nt_replacement.0);
+            }
+        }
+
+
+        if !made_change_in_this_iteration {
+            if initial_prod_count == productions.len() { // No change in production count means no successful inlining
+                 println!("[Simplifier] No more valid unit non-terminal inlinings found in this iteration.");
+                break; // Exit the simplification loop
+            }
+            // If production count changed but made_change_in_this_iteration is false, it implies an issue.
+            // However, successful inlining sets it to true.
+        }
+    }
+    println!("[Simplifier] Final unit non-terminal inlining pass finished.");
+    productions
 }
 
 #[test]
@@ -1240,21 +1356,18 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
         PANIC_SUBSTRING_TO_FIND,
     ) {
         eprintln!("[Minimizer] Initial grammar does not cause the specific panic. Cannot proceed.");
-        // To make this a failing test if the initial condition isn't met:
         assert!(false, "Initial grammar does not cause the specific panic.");
-        return Ok(()); // Or return an Err
+        return Ok(());
     }
     println!("[Minimizer] Confirmed: Initial grammar causes the specific panic.");
 
-    let mut rng = StdRng::seed_from_u64(42); // For reproducible random choices
+    let mut rng = StdRng::seed_from_u64(42);
     let mut pass_num = 0;
 
-    // --- Tunable Parameters for Stochastic Search ---
-    const ATTEMPTS_PER_STRATEGY_PASS: usize = 100; // How many random chunks to try per strategy in a pass
+    const ATTEMPTS_PER_STRATEGY_PASS: usize = 100;
     const MAX_PRODUCTIONS_TO_REMOVE_IN_CHUNK: usize = 3;
-    const MAX_SYMBOLS_TO_REMOVE_IN_CHUNK: usize = 5;
+    const MAX_SYMBOLS_TO_REMOVE_IN_CHUNK: usize = 5; // Increased slightly
 
-    // --- Main Minimization Loop ---
     'pass_loop: loop {
         pass_num += 1;
         println!(
@@ -1266,7 +1379,7 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
         let mut made_change_in_this_pass = false;
 
         // --- Strategy 1: Try removing chunks of productions ---
-        if current_productions.len() > 1 { // Need at least one production beyond the (potentially) protected start rule
+        if current_productions.len() > 1 {
             print!("[Minimizer] Pass {}: Trying production chunk removal ({} attempts)...", pass_num, ATTEMPTS_PER_STRATEGY_PASS);
             std::io::stdout().flush().unwrap();
             for attempt in 0..ATTEMPTS_PER_STRATEGY_PASS {
@@ -1274,14 +1387,10 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
                     .filter(|&idx| current_productions[idx].lhs != augmented_start_rule_lhs)
                     .collect();
 
-                if eligible_prod_indices.is_empty() {
-                    break; // No non-start-rule productions left to remove
-                }
+                if eligible_prod_indices.is_empty() { break; }
 
                 let chunk_size = rng.gen_range(1..=std::cmp::min(MAX_PRODUCTIONS_TO_REMOVE_IN_CHUNK, eligible_prod_indices.len()));
                 
-                // Select `chunk_size` distinct indices from `eligible_prod_indices`
-                // These chosen_indices are actual indices into `current_productions`
                 let chosen_indices_to_remove: Vec<usize> = eligible_prod_indices
                     .choose_multiple(&mut rng, chunk_size)
                     .cloned()
@@ -1290,17 +1399,13 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
                 if chosen_indices_to_remove.is_empty() { continue; }
 
                 let mut temp_productions = current_productions.clone();
-                
-                // Remove productions by sorted index (descending) to maintain index validity
                 let mut sorted_indices = chosen_indices_to_remove;
-                sorted_indices.sort_unstable_by(|a, b| b.cmp(a)); // Sort descending
-
+                sorted_indices.sort_unstable_by(|a, b| b.cmp(a));
                 for &idx_to_remove in &sorted_indices {
                     temp_productions.remove(idx_to_remove);
                 }
                 
                 if temp_productions.is_empty() || !temp_productions.iter().any(|p| p.lhs == augmented_start_rule_lhs) {
-                    // Ensure the grammar is not empty and still contains the start rule
                     continue;
                 }
 
@@ -1313,21 +1418,15 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
                     if attempt % (ATTEMPTS_PER_STRATEGY_PASS / 10 + 1) == 0 { print!("#"); std::io::stdout().flush().unwrap(); }
                     current_productions = temp_productions;
                     made_change_in_this_pass = true;
-                    // Greedily take the first successful chunk reduction in this strategy's attempts
-                    // and restart the pass.
                     println!("\n[Minimizer] Reduced by production chunk ({} removed). New count: {}", chunk_size, current_productions.len());
                     continue 'pass_loop; 
                 }
             }
-            println!(); // Newline after attempts printing
+            println!();
         }
 
-
-        // --- Strategy 2: Try removing chunks of symbols (only if no productions were removed) ---
-        // No 'else' needed here due to the `continue 'pass_loop'` above.
-        // This code is reached if Strategy 1 made no change.
-        
-        let mut all_symbol_locations: Vec<(usize, usize)> = Vec::new(); // (prod_idx, symbol_idx_in_rhs)
+        // --- Strategy 2: Try removing chunks of symbols ---
+        let mut all_symbol_locations: Vec<(usize, usize)> = Vec::new();
         for (prod_idx, prod) in current_productions.iter().enumerate() {
             for symbol_idx in 0..prod.rhs.len() {
                 all_symbol_locations.push((prod_idx, symbol_idx));
@@ -1339,7 +1438,6 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
             std::io::stdout().flush().unwrap();
             for attempt in 0..ATTEMPTS_PER_STRATEGY_PASS {
                 let chunk_size = rng.gen_range(1..=std::cmp::min(MAX_SYMBOLS_TO_REMOVE_IN_CHUNK, all_symbol_locations.len()));
-                
                 let locations_to_remove: Vec<(usize, usize)> = all_symbol_locations
                     .choose_multiple(&mut rng, chunk_size)
                     .cloned()
@@ -1350,12 +1448,9 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
                 let mut temp_productions = current_productions.clone();
                 remove_symbols_at_locations_destructive(&mut temp_productions, &locations_to_remove);
                 
-                // It's possible removing symbols emptied all rules or disconnected the start rule.
-                // A more robust check might be needed if this becomes an issue.
                 if temp_productions.is_empty() || !temp_productions.iter().any(|p| p.lhs == augmented_start_rule_lhs) {
                      continue;
                 }
-
 
                 if causes_specific_panic(
                     &temp_productions,
@@ -1366,30 +1461,37 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
                     if attempt % (ATTEMPTS_PER_STRATEGY_PASS / 10 + 1) == 0 { print!("*"); std::io::stdout().flush().unwrap(); }
                     current_productions = temp_productions;
                     made_change_in_this_pass = true;
-                    // Greedily take the first successful symbol chunk reduction and restart the pass.
                     println!("\n[Minimizer] Reduced by symbol chunk ({} removed). New count: {}", chunk_size, current_productions.len());
                     continue 'pass_loop;
                 }
             }
-            println!(); // Newline after attempts printing
+            println!();
         }
 
-        // --- End of Pass ---
         if !made_change_in_this_pass {
-            println!("[Minimizer] Pass {}: No further reductions found in this pass.", pass_num);
-            break 'pass_loop; // Exit the main minimization loop
+            println!("[Minimizer] Pass {}: No further reductions found in this stochastic pass.", pass_num);
+            break 'pass_loop;
         }
     }
 
+    println!("\n[Minimizer] Stochastic minimization phase complete.");
+    println!("[Minimizer] Productions after stochastic phase: {}", current_productions.len());
+
+    // --- Final Simplification Pass: Inline A -> B rules ---
+    current_productions = simplify_and_inline_unit_nonterminal_rules(
+        current_productions,
+        &augmented_start_rule_lhs,
+        &sequence_to_test_names,
+        PANIC_SUBSTRING_TO_FIND,
+    );
+
     // --- Output Final Minimized Grammar ---
-    println!("\n[Minimizer] Minimization complete.");
-    println!("[Minimizer] Final number of productions: {}", current_productions.len());
+    println!("\n[Minimizer] Final number of productions after all simplifications: {}", current_productions.len());
     println!("[Minimizer] Minimized Grammar Productions (Augmented Start LHS: {}):", augmented_start_rule_lhs.0);
     for (idx, prod) in current_productions.iter().enumerate() {
         println!("  P{}: {}", idx, prod);
     }
 
-    // Fail the test to ensure the MRE is reviewed.
     assert!(false, "[Minimizer] Minimization finished. Review the MRE printed above and address the underlying panic.");
     Ok(())
 }
