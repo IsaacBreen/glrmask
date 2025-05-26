@@ -774,11 +774,12 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
                 current_fuzz_sequence_ids.push(*random_terminal_id);
             }
             println!("  Fuzz sequence: {}", current_fuzz_sequence_names.join(" → "));
-            for token_name in current_fuzz_sequence_names {
+            for (i, terminal_id) in current_fuzz_sequence_ids.iter().enumerate() {
                 // The core of the fuzz test: step and see if it panics.
                 // We don't care about glr_state.is_ok() here.
-                let random_terminal_id = compiled_grammar.glr_parser.terminal_map.get_by_left(&Terminal(token_name.clone())).unwrap();
-                glr_state.step(*random_terminal_id);
+                let seen_so_far = current_fuzz_sequence_ids[..i].iter().cloned().collect();
+                println!("    Stepping with token {}/{}: '{}' (Terminal {}). Seen so far: {:?}", i + 1, num_tokens_this_attempt, current_fuzz_sequence_names[i], *terminal_id, seen_so_far);
+                glr_state.step(*terminal_id);
             }
             // If a panic occurs, the test will fail here.
             // If we wanted to log the sequence that caused a panic, it would require more setup
