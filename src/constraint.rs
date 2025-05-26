@@ -14,7 +14,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, print_precompute_stats, PrecomputeStats};
 use crate::datastructures::charmap::TrieMap;
-use crate::datastructures::gss::{prune_and_transform_recursive, prune_and_transform_recursive_canonical, simplify_gss_forest, PathAccumulator}; // Import PathAccumulator
+use crate::datastructures::gss::{prune_and_transform_recursive, prune_and_transform_recursive_canonical, simplify_gss_forest, GSSNode, PathAccumulator}; // Import PathAccumulator
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -24,7 +24,7 @@ use crate::glr::parser::{
     GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, // Remove MergeAndIntersect from this import
 };
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
-use crate::types::TerminalID as GrammarTokenID;
+use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 
@@ -40,32 +40,8 @@ pub type GrammarTokenBV = BitVec; // BitVec is not easily JSONConvertible withou
 pub struct LLMTokenInfo {
     pub active:       LLMTokenBV,
     pub intersection: LLMTokenBV,
+    pub terminals:    Vec<Vec<TerminalID>>,
 }
-
-// Manual impl for LLMTokenInfo
-impl JSONConvertible for LLMTokenInfo {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("active".to_string(), self.active.to_json());
-        obj.insert("intersection".to_string(), self.intersection.to_json());
-        // If capacity is added: obj.insert("capacity".to_string(), self.capacity.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let active = obj.remove("active").ok_or_else(|| "Missing field active for LLMTokenInfo".to_string())
-                                .and_then(LLMTokenBV::from_json)?;
-                let intersection = obj.remove("intersection").ok_or_else(|| "Missing field intersection for LLMTokenInfo".to_string())
-                                      .and_then(LLMTokenBV::from_json)?;
-                 // If capacity is added: let capacity = obj.remove("capacity").ok_or_else(|| "Missing field capacity for LLMTokenInfo".to_string()).and_then(usize::from_json)?;
-                Ok(LLMTokenInfo { active, intersection /* , capacity if added */ })
-            }
-            _ => Err("Expected JSONNode::Object for LLMTokenInfo".to_string()),
-        }
-    }
-}
-
 
 impl Default for LLMTokenInfo {
     fn default() -> Self {
@@ -86,6 +62,7 @@ impl Default for LLMTokenInfo {
         Self {
             active:       Default::default(), // Empty set
             intersection: HybridBitset::max_ones(),
+            terminals:    vec![vec![]],
         }
     }
 }
@@ -93,16 +70,22 @@ impl Default for LLMTokenInfo {
 impl PathAccumulator for LLMTokenInfo {
     fn union(&self, other: &Self) -> Self {
         // The existing merge logic seems to fit the 'union' semantic for paths
+        let mut terminals = self.terminals.clone();
+        terminals.extend(other.terminals.clone());
         Self {
             active:       &self.active | &other.active,
             intersection: &self.intersection & &other.intersection, // Intersection field becomes stricter (AND)
+            terminals,
         }
     }
-    fn intersect(&self, other: &Self) -> Self {
+    fn intersect(&self, right: &Self) -> Self {
         // The existing intersect logic fits the 'intersect' semantic
+        let mut terminals = self.terminals.clone();
+        // Keep only terminals vecs that
         Self {
-            active:       &self.active & &other.active,
-            intersection: &self.intersection & &other.intersection,
+            active:       &self.active & &right.active,
+            intersection: &self.intersection & &right.intersection,
+            terminals,
         }
     }
 }

@@ -17,12 +17,12 @@ pub type NodeCache<T, A> = HashMap<NodeCacheKey<T, A>, Arc<GSSNode<T, A>>>;
 
 pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash + Default {
     fn union(&self, other: &Self) -> Self;
-    fn intersect(&self, other: &Self) -> Self;
+    fn intersect(&self, right: &Self) -> Self;
 }
 
 impl PathAccumulator for () {
     fn union(&self, _other: &Self) -> Self { () }
-    fn intersect(&self, _other: &Self) -> Self { () }
+    fn intersect(&self, _right: &Self) -> Self { () }
 }
 
 // Helper function to compute a node's hash_key_cache.
@@ -349,6 +349,18 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> { // Added
          self.acc = self.acc.union(&other.acc);
         self.predecessors_with_values.append(&mut other.predecessors_with_values);
         self.hash_key_cache = compute_internal_hash_key::<T, A>(&self.predecessors_with_values);
+    }
+
+    pub fn merged(self, other: Self) -> Self {
+        let mut merged = self.clone();
+        merged.merge(other);
+        merged
+    }
+
+    pub fn merged_unchecked(self, other: Self) -> Self {
+        let mut merged = self.clone();
+        merged.merge_unchecked(other);
+        merged
     }
 
     pub fn map<F_edge, U_edge>(&self, f_edge: F_edge) -> GSSNode<U_edge, A>
@@ -973,10 +985,10 @@ mod tests {
                 intersection: self.intersection.union(&other.intersection).cloned().collect(),
             }
         }
-        fn intersect(&self, other: &Self) -> Self {
+        fn intersect(&self, right: &Self) -> Self {
             Self {
-                active: self.active.intersection(&other.active).cloned().collect(),
-                intersection: self.intersection.intersection(&other.intersection).cloned().collect(),
+                active: self.active.intersection(&right.active).cloned().collect(),
+                intersection: self.intersection.intersection(&right.intersection).cloned().collect(),
             }
         }
     }

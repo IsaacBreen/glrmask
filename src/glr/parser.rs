@@ -353,7 +353,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
     ) -> Arc<GSSNode<ParseStateEdgeContent, A>> { // Returns list of new stack tops
         let cur_acc_from_reducible_node = &stack.acc; // Get it from the stack being reduced
 
-        let mut parent;
+        let parent;
         let predecessors_with_values;
         if len == 0 {
             parent = stack.clone();
