@@ -622,6 +622,15 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         vec!["STRING[0]", "FSTRING_MIDDLE[0]", "\"->\""],
         // Sequence 29
         vec!["FSTRING_START[0]", "FSTRING_MIDDLE[0]", "\"->\""],
+
+        vec!["IGNORE[0][0]", "\"->\""],
+        vec!["STRING[0]", "\"->\""],
+        vec!["IGNORE[0][0]", "\"!=\"", "\"->\""],
+        vec!["STRING[0]", "\"!=\"", "\"->\""],
+        vec!["IGNORE[0][0]", "\">=\"", "\"->\""],
+        vec!["STRING[0]", "\">=\"", "\"->\""],
+        vec!["IGNORE[0][0]", "STRING[0]", "\"->\""],
+        vec!["STRING[0]", "STRING[0]", "\"->\""],
     ];
 
     let mut all_sequences_passed = true;
