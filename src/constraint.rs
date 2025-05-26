@@ -1168,7 +1168,11 @@ impl<'a> GrammarConstraintState<'a> {
                     *step_counts.borrow_mut().entry(*possible_final_grammar_token).or_insert(0) += 1;
 
                     let terminals = possible_next_glr_parse_state.active_state.stack.acc.terminals.clone();
-                    crate::debug!(3, "Terminal history (candidates, NOT ALL CORRECT) before stepping: {:?}", terminals.iter_paths().collect::<Vec<_>>());
+                    crate::debug!(3, "Terminal history (candidates, NOT ALL CORRECT) before stepping:");
+                    for path in terminals.iter_paths() {
+                        let path_str = path.iter().map(|t| self.parent.token_name_map.get_by_right(&t.0).map(|s| s.clone()).unwrap_or("<Unknown Name>".to_string())).collect::<Vec<_>>().join(" → ");
+                        crate::debug!(3, "  {}", path_str);
+                    }
                     possible_next_glr_parse_state.step(*possible_final_grammar_token);
                     if possible_next_glr_parse_state.is_ok() {
                         crate::debug!(3, "Semi-final GLR parse state is OK");
