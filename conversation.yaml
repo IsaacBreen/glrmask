@@ -13,7 +13,7 @@ local_system:
   conversation_file:
   compile_command:
   initial_file_contents:
-    src/glr/analyze.rs: |+
+    src/glr/analyze.rs: |
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use crate::glr::grammar::{NonTerminal, Production, Symbol};
 
@@ -448,10 +448,9 @@ local_system:
       /// Filters productions based on reachability criteria related to a set of "interesting" symbols.
       ///
       /// A production is kept if its Left-Hand Side (LHS) non-terminal meets at least one of the following conditions:
-      /// 1. It is derivable from a non-terminal that is itself one of the `interesting_symbols`
+      /// 1. It can derive a string containing at least one of the `interesting_symbols`.
+      /// 2. It is derivable from a non-terminal that is itself one of the `interesting_symbols`
       ///    (if `interesting_symbols` contains any non-terminals).
-      /// 2. The Right-Hand Side (RHS) of the production can derive a string containing
-      ///    at least one of the `interesting_symbols`.
       ///
       /// If `interesting_symbols` is empty, no productions will be kept.
       pub fn filter_productions_by_reachability(
@@ -472,47 +471,17 @@ local_system:
           let mut kept_productions = Vec::new();
           for production in initial_productions {
               let lhs = &production.lhs;
-
-              // Condition 1: LHS itself is an interesting symbol.
-              let cond1_lhs_is_interesting = interesting_symbols.contains(&Symbol::NonTerminal(lhs.clone()));
+              
+              // Condition 1: LHS can derive an interesting symbol.
+              let cond1_lhs_can_derive_interesting = can_derive_set.contains(lhs);
               
               // Condition 2: LHS is reachable from an interesting non-terminal.
-              let cond2_lhs_is_reachable_from_interesting_nt = reachable_from_set.contains(lhs);
-              
-              // Condition 3: RHS of *this specific* production can derive an interesting symbol.
-              // This is computed to be OR'd with Condition 1.
-              let mut cond3_current_rhs_can_derive_interesting = false;
-              for symbol_in_rhs in &production.rhs {
-                  match symbol_in_rhs {
-                      Symbol::Terminal(_) => {
-                          if interesting_symbols.contains(symbol_in_rhs) {
-                              cond3_current_rhs_can_derive_interesting = true;
-                              break;
-                          }
-                      }
-                      Symbol::NonTerminal(nt_in_rhs) => {
-                          // An RHS non-terminal leads to interesting if:
-                          // 1. It IS an interesting symbol itself (e.g. if interesting_symbols can contain NTs)
-                          // 2. OR it can derive an interesting symbol (i.e., nt_in_rhs is in can_derive_set)
-                          if interesting_symbols.contains(symbol_in_rhs) || can_derive_set.contains(nt_in_rhs) {
-                              cond3_current_rhs_can_derive_interesting = true;
-                              break;
-                          }
-                      }
-                  }
-              }
+              let cond2_lhs_reachable_from_interesting_nt = reachable_from_set.contains(lhs);
 
-              if cond1_lhs_is_interesting || cond2_lhs_is_reachable_from_interesting_nt || cond3_current_rhs_can_derive_interesting {
+              if cond1_lhs_can_derive_interesting || cond2_lhs_reachable_from_interesting_nt {
                   kept_productions.push(production.clone());
               } else {
-                  crate::debug!(
-                      4,
-                      "Filtering out production: {} (LHS is interesting: {}, LHS reachable from interesting NT: {}, RHS can derive interesting: {})",
-                      production,
-                      cond1_lhs_is_interesting,
-                      cond2_lhs_is_reachable_from_interesting_nt,
-                      cond3_current_rhs_can_derive_interesting
-                  );
+                  crate::debug!(4, "Filtering out production: {} (LHS can derive interesting: {}, LHS reachable from interesting NT: {})", production, cond1_lhs_can_derive_interesting, cond2_lhs_reachable_from_interesting_nt);
               }
           }
           
@@ -521,7 +490,6 @@ local_system:
           // so further cleanup here might be redundant if that's the next step.
           kept_productions
       }
-
     src/glr/grammar.rs: |
       use std::collections::{BTreeMap, BTreeSet};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
@@ -1701,7 +1669,6 @@ local_system:
       );
 
       fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
-          dbg!(&productions);
           let initial_item = Item {
               production: productions[start_production_id].clone(),
               dot_position: 0,
@@ -4910,7 +4877,7 @@ local_system:
           }
       }
 
-    src/test_constraint.rs: |+
+    src/test_constraint.rs: |
       use rand::rngs::StdRng;
       use std::collections::{BTreeMap, BTreeSet};
       use crate::finite_automata::eat_u8;
@@ -5895,7 +5862,6 @@ local_system:
 
           // 2. Define "interesting" symbols for filtering based on the sequence
           let sequence_to_test_names = vec!["\"...\"", "\";\"", "\"elif\""];
-          let sequence_to_test_names = vec!["STRING[0]", "STRING[0]", "\"->\""];
           let mut interesting_symbols = BTreeSet::new();
           for name_str in &sequence_to_test_names {
               // All elements in this specific sequence are terminals
@@ -5939,15 +5905,23 @@ local_system:
               terminal_name_to_group_id: compiled_grammar.definition.terminal_name_to_group_id.clone(),
               terminal_expr_to_group_id: compiled_grammar.definition.terminal_expr_to_group_id.clone(),
           };
+          let filtered_parser = match std::panic::catch_unwind(|| {
+              generate_glr_parser_with_maps(
+                  &filtered_productions,
+                  new_start_production_id,
+                  compiled_grammar.glr_parser.terminal_map.clone(),
+                  compiled_grammar.glr_parser.non_terminal_map.clone(),
+              )
+          }) {
+              Ok(parser) => parser,
+              Err(panic_payload) => {
+                  eprintln!("[Test] Panicked while generating parser from filtered productions: {:?}", panic_payload);
+                  panic!("[Test] Parser generation failed for filtered productions. The filter might have produced an invalid grammar (e.g., due to new cycles, undefined non-terminals not handled by the filter, or other validation issues).");
+              }
+          };
+          println!("[Test] Rebuilt parser with filtered productions. New parser has {} states.", filtered_parser.stage_7_table.len());
           // For debugging the structure of the filtered parser:
           println!("[Test] Filtered grammar structure: {}", filtered_definition);
-          let filtered_parser = generate_glr_parser_with_maps(
-              &filtered_productions,
-              new_start_production_id,
-              compiled_grammar.glr_parser.terminal_map.clone(),
-              compiled_grammar.glr_parser.non_terminal_map.clone(),
-          );
-          println!("[Test] Rebuilt parser with filtered productions. New parser has {} states.", filtered_parser.stage_7_table.len());
 
           // 6. Convert the test sequence names to TerminalIDs using the *filtered_parser's* terminal_map.
           let mut sequence_to_test_ids = Vec::new();
@@ -6000,9 +5974,8 @@ local_system:
           println!("[Test] Test 'test_filtered_grammar_with_specific_sequence' completed successfully.");
           Ok(())
       }
-
   prev_file_contents:
-    src/glr/analyze.rs: |+
+    src/glr/analyze.rs: |
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use crate::glr::grammar::{NonTerminal, Production, Symbol};
 
@@ -6437,10 +6410,9 @@ local_system:
       /// Filters productions based on reachability criteria related to a set of "interesting" symbols.
       ///
       /// A production is kept if its Left-Hand Side (LHS) non-terminal meets at least one of the following conditions:
-      /// 1. It is derivable from a non-terminal that is itself one of the `interesting_symbols`
+      /// 1. It can derive a string containing at least one of the `interesting_symbols`.
+      /// 2. It is derivable from a non-terminal that is itself one of the `interesting_symbols`
       ///    (if `interesting_symbols` contains any non-terminals).
-      /// 2. The Right-Hand Side (RHS) of the production can derive a string containing
-      ///    at least one of the `interesting_symbols`.
       ///
       /// If `interesting_symbols` is empty, no productions will be kept.
       pub fn filter_productions_by_reachability(
@@ -6461,47 +6433,17 @@ local_system:
           let mut kept_productions = Vec::new();
           for production in initial_productions {
               let lhs = &production.lhs;
-
-              // Condition 1: LHS itself is an interesting symbol.
-              let cond1_lhs_is_interesting = interesting_symbols.contains(&Symbol::NonTerminal(lhs.clone()));
+              
+              // Condition 1: LHS can derive an interesting symbol.
+              let cond1_lhs_can_derive_interesting = can_derive_set.contains(lhs);
               
               // Condition 2: LHS is reachable from an interesting non-terminal.
-              let cond2_lhs_is_reachable_from_interesting_nt = reachable_from_set.contains(lhs);
-              
-              // Condition 3: RHS of *this specific* production can derive an interesting symbol.
-              // This is computed to be OR'd with Condition 1.
-              let mut cond3_current_rhs_can_derive_interesting = false;
-              for symbol_in_rhs in &production.rhs {
-                  match symbol_in_rhs {
-                      Symbol::Terminal(_) => {
-                          if interesting_symbols.contains(symbol_in_rhs) {
-                              cond3_current_rhs_can_derive_interesting = true;
-                              break;
-                          }
-                      }
-                      Symbol::NonTerminal(nt_in_rhs) => {
-                          // An RHS non-terminal leads to interesting if:
-                          // 1. It IS an interesting symbol itself (e.g. if interesting_symbols can contain NTs)
-                          // 2. OR it can derive an interesting symbol (i.e., nt_in_rhs is in can_derive_set)
-                          if interesting_symbols.contains(symbol_in_rhs) || can_derive_set.contains(nt_in_rhs) {
-                              cond3_current_rhs_can_derive_interesting = true;
-                              break;
-                          }
-                      }
-                  }
-              }
+              let cond2_lhs_reachable_from_interesting_nt = reachable_from_set.contains(lhs);
 
-              if cond1_lhs_is_interesting || cond2_lhs_is_reachable_from_interesting_nt || cond3_current_rhs_can_derive_interesting {
+              if cond1_lhs_can_derive_interesting || cond2_lhs_reachable_from_interesting_nt {
                   kept_productions.push(production.clone());
               } else {
-                  crate::debug!(
-                      4,
-                      "Filtering out production: {} (LHS is interesting: {}, LHS reachable from interesting NT: {}, RHS can derive interesting: {})",
-                      production,
-                      cond1_lhs_is_interesting,
-                      cond2_lhs_is_reachable_from_interesting_nt,
-                      cond3_current_rhs_can_derive_interesting
-                  );
+                  crate::debug!(4, "Filtering out production: {} (LHS can derive interesting: {}, LHS reachable from interesting NT: {})", production, cond1_lhs_can_derive_interesting, cond2_lhs_reachable_from_interesting_nt);
               }
           }
           
@@ -6510,7 +6452,6 @@ local_system:
           // so further cleanup here might be redundant if that's the next step.
           kept_productions
       }
-
     src/glr/grammar.rs: |
       use std::collections::{BTreeMap, BTreeSet};
       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
@@ -7690,7 +7631,6 @@ local_system:
       );
 
       fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
-          dbg!(&productions);
           let initial_item = Item {
               production: productions[start_production_id].clone(),
               dot_position: 0,
@@ -10899,7 +10839,7 @@ local_system:
           }
       }
 
-    src/test_constraint.rs: |+
+    src/test_constraint.rs: |
       use rand::rngs::StdRng;
       use std::collections::{BTreeMap, BTreeSet};
       use crate::finite_automata::eat_u8;
@@ -11884,7 +11824,6 @@ local_system:
 
           // 2. Define "interesting" symbols for filtering based on the sequence
           let sequence_to_test_names = vec!["\"...\"", "\";\"", "\"elif\""];
-          let sequence_to_test_names = vec!["STRING[0]", "STRING[0]", "\"->\""];
           let mut interesting_symbols = BTreeSet::new();
           for name_str in &sequence_to_test_names {
               // All elements in this specific sequence are terminals
@@ -11928,15 +11867,23 @@ local_system:
               terminal_name_to_group_id: compiled_grammar.definition.terminal_name_to_group_id.clone(),
               terminal_expr_to_group_id: compiled_grammar.definition.terminal_expr_to_group_id.clone(),
           };
+          let filtered_parser = match std::panic::catch_unwind(|| {
+              generate_glr_parser_with_maps(
+                  &filtered_productions,
+                  new_start_production_id,
+                  compiled_grammar.glr_parser.terminal_map.clone(),
+                  compiled_grammar.glr_parser.non_terminal_map.clone(),
+              )
+          }) {
+              Ok(parser) => parser,
+              Err(panic_payload) => {
+                  eprintln!("[Test] Panicked while generating parser from filtered productions: {:?}", panic_payload);
+                  panic!("[Test] Parser generation failed for filtered productions. The filter might have produced an invalid grammar (e.g., due to new cycles, undefined non-terminals not handled by the filter, or other validation issues).");
+              }
+          };
+          println!("[Test] Rebuilt parser with filtered productions. New parser has {} states.", filtered_parser.stage_7_table.len());
           // For debugging the structure of the filtered parser:
           println!("[Test] Filtered grammar structure: {}", filtered_definition);
-          let filtered_parser = generate_glr_parser_with_maps(
-              &filtered_productions,
-              new_start_production_id,
-              compiled_grammar.glr_parser.terminal_map.clone(),
-              compiled_grammar.glr_parser.non_terminal_map.clone(),
-          );
-          println!("[Test] Rebuilt parser with filtered productions. New parser has {} states.", filtered_parser.stage_7_table.len());
 
           // 6. Convert the test sequence names to TerminalIDs using the *filtered_parser's* terminal_map.
           let mut sequence_to_test_ids = Vec::new();
@@ -11989,7 +11936,6 @@ local_system:
           println!("[Test] Test 'test_filtered_grammar_with_specific_sequence' completed successfully.");
           Ok(())
       }
-
   diffs_applied_this_send: true
 system:
   message: |2
@@ -12451,10 +12397,9 @@ messages:
       /// Filters productions based on reachability criteria related to a set of "interesting" symbols.
       ///
       /// A production is kept if its Left-Hand Side (LHS) non-terminal meets at least one of the following conditions:
-      /// 1. It is derivable from a non-terminal that is itself one of the `interesting_symbols`
+      /// 1. It can derive a string containing at least one of the `interesting_symbols`.
+      /// 2. It is derivable from a non-terminal that is itself one of the `interesting_symbols`
       ///    (if `interesting_symbols` contains any non-terminals).
-      /// 2. The Right-Hand Side (RHS) of the production can derive a string containing
-      ///    at least one of the `interesting_symbols`.
       ///
       /// If `interesting_symbols` is empty, no productions will be kept.
       pub fn filter_productions_by_reachability(
@@ -12475,47 +12420,17 @@ messages:
           let mut kept_productions = Vec::new();
           for production in initial_productions {
               let lhs = &production.lhs;
-
-              // Condition 1: LHS itself is an interesting symbol.
-              let cond1_lhs_is_interesting = interesting_symbols.contains(&Symbol::NonTerminal(lhs.clone()));
+              
+              // Condition 1: LHS can derive an interesting symbol.
+              let cond1_lhs_can_derive_interesting = can_derive_set.contains(lhs);
               
               // Condition 2: LHS is reachable from an interesting non-terminal.
-              let cond2_lhs_is_reachable_from_interesting_nt = reachable_from_set.contains(lhs);
-              
-              // Condition 3: RHS of *this specific* production can derive an interesting symbol.
-              // This is computed to be OR'd with Condition 1.
-              let mut cond3_current_rhs_can_derive_interesting = false;
-              for symbol_in_rhs in &production.rhs {
-                  match symbol_in_rhs {
-                      Symbol::Terminal(_) => {
-                          if interesting_symbols.contains(symbol_in_rhs) {
-                              cond3_current_rhs_can_derive_interesting = true;
-                              break;
-                          }
-                      }
-                      Symbol::NonTerminal(nt_in_rhs) => {
-                          // An RHS non-terminal leads to interesting if:
-                          // 1. It IS an interesting symbol itself (e.g. if interesting_symbols can contain NTs)
-                          // 2. OR it can derive an interesting symbol (i.e., nt_in_rhs is in can_derive_set)
-                          if interesting_symbols.contains(symbol_in_rhs) || can_derive_set.contains(nt_in_rhs) {
-                              cond3_current_rhs_can_derive_interesting = true;
-                              break;
-                          }
-                      }
-                  }
-              }
+              let cond2_lhs_reachable_from_interesting_nt = reachable_from_set.contains(lhs);
 
-              if cond1_lhs_is_interesting || cond2_lhs_is_reachable_from_interesting_nt || cond3_current_rhs_can_derive_interesting {
+              if cond1_lhs_can_derive_interesting || cond2_lhs_reachable_from_interesting_nt {
                   kept_productions.push(production.clone());
               } else {
-                  crate::debug!(
-                      4,
-                      "Filtering out production: {} (LHS is interesting: {}, LHS reachable from interesting NT: {}, RHS can derive interesting: {})",
-                      production,
-                      cond1_lhs_is_interesting,
-                      cond2_lhs_is_reachable_from_interesting_nt,
-                      cond3_current_rhs_can_derive_interesting
-                  );
+                  crate::debug!(4, "Filtering out production: {} (LHS can derive interesting: {}, LHS reachable from interesting NT: {})", production, cond1_lhs_can_derive_interesting, cond2_lhs_reachable_from_interesting_nt);
               }
           }
           
@@ -12524,7 +12439,6 @@ messages:
           // so further cleanup here might be redundant if that's the next step.
           kept_productions
       }
-
 
       ```
     metadata:
@@ -13729,7 +13643,6 @@ messages:
       );
 
       fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
-          dbg!(&productions);
           let initial_item = Item {
               production: productions[start_production_id].clone(),
               dot_position: 0,
@@ -17943,7 +17856,6 @@ messages:
 
           // 2. Define "interesting" symbols for filtering based on the sequence
           let sequence_to_test_names = vec!["\"...\"", "\";\"", "\"elif\""];
-          let sequence_to_test_names = vec!["STRING[0]", "STRING[0]", "\"->\""];
           let mut interesting_symbols = BTreeSet::new();
           for name_str in &sequence_to_test_names {
               // All elements in this specific sequence are terminals
@@ -17987,15 +17899,23 @@ messages:
               terminal_name_to_group_id: compiled_grammar.definition.terminal_name_to_group_id.clone(),
               terminal_expr_to_group_id: compiled_grammar.definition.terminal_expr_to_group_id.clone(),
           };
+          let filtered_parser = match std::panic::catch_unwind(|| {
+              generate_glr_parser_with_maps(
+                  &filtered_productions,
+                  new_start_production_id,
+                  compiled_grammar.glr_parser.terminal_map.clone(),
+                  compiled_grammar.glr_parser.non_terminal_map.clone(),
+              )
+          }) {
+              Ok(parser) => parser,
+              Err(panic_payload) => {
+                  eprintln!("[Test] Panicked while generating parser from filtered productions: {:?}", panic_payload);
+                  panic!("[Test] Parser generation failed for filtered productions. The filter might have produced an invalid grammar (e.g., due to new cycles, undefined non-terminals not handled by the filter, or other validation issues).");
+              }
+          };
+          println!("[Test] Rebuilt parser with filtered productions. New parser has {} states.", filtered_parser.stage_7_table.len());
           // For debugging the structure of the filtered parser:
           println!("[Test] Filtered grammar structure: {}", filtered_definition);
-          let filtered_parser = generate_glr_parser_with_maps(
-              &filtered_productions,
-              new_start_production_id,
-              compiled_grammar.glr_parser.terminal_map.clone(),
-              compiled_grammar.glr_parser.non_terminal_map.clone(),
-          );
-          println!("[Test] Rebuilt parser with filtered productions. New parser has {} states.", filtered_parser.stage_7_table.len());
 
           // 6. Convert the test sequence names to TerminalIDs using the *filtered_parser's* terminal_map.
           let mut sequence_to_test_ids = Vec::new();
@@ -18049,14 +17969,13 @@ messages:
           Ok(())
       }
 
-
       ```
     metadata:
       filename: src/test_constraint.rs
   - user: |-
       Often I have a token sequence and I want to make sure the parser parses it correctly.
       e.g. in test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab
-      Right now I'm having issues with this sequence specifically: `vec!["\"...\"", "\";\"", "\"elif\""]`.
+      Right now I'm having issues with this sequence specifically: `vec!["STRING[0]", "STRING[0]", "\"->\""]`.
       I want to isolate the problem.
       Add a method that takes productions and a set of symbols and removes any productions for which neither of the following are true:
       - the production can reach at least one symbol in the set (including indirectly)
@@ -18065,111 +17984,114 @@ messages:
       Add a NEW test under `test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab` that loads the same grammar, then applies this function to reduce the grammar to the minimal part needed to reproduce the problem, then rebuilds the parser, then steps it with that exact sequence I've given above.
 
       I've done most of this task. But still, `filter_productions_by_reachability` could do a better job of narrowing down productions.
-      First, obviously if the production's LHS is in the symbols of interest then we keep that production.
       If a production's LHS is reachable from any of the nonterminals in the symbols of interest set, we keep taht production. That's simple.
       Now, if that isn't the case, we need to look at the production's RHS to see if it can reach any of the symbols. If it can, we keep it.
-
-      Hmm... it isn't working properly. Fix it.
-
-      AH I think I know. We need to keep productions that are reachable from any other kept production. That's the issue.
     metadata:
   - assistant: |-
-      Okay, I'll provide the necessary modifications to the `filter_productions_by_reachability` function in `src/glr/analyze.rs`. The goal is to ensure that all productions necessary for defining non-terminals related to the "interesting symbols" are kept, including those transitively used.
+      Okay, I understand. You want to refine the logic in `filter_productions_by_reachability` to be more precise about why a production is kept, specifically when its LHS is not directly reachable from an "interesting" non-terminal. Then, you want to update the existing test `test_filtered_grammar_with_specific_sequence` to use the problematic sequence `vec!["STRING[0]", "STRING[0]", "\"->\""]`.
 
-      Here's how to modify `src/glr/analyze.rs`:
+      Here are the step-by-step instructions:
 
-      1.  **Replace the existing `filter_productions_by_reachability` function with the following improved version.** The core idea is to first identify a "seed set" of non-terminals that are directly relevant (either they are interesting non-terminals themselves or they can derive an interesting symbol). Then, we use `compute_reachable_from_interesting_nts` (which performs a transitive closure) to find all non-terminals involved in defining these seed non-terminals. Finally, any production whose LHS is one of these "all involved" non-terminals is kept.
+      **Step 1: Modify `filter_productions_by_reachability` in `src/glr/analyze.rs`**
 
+      The goal is to change the condition for keeping a production. A production `A -> alpha` will be kept if:
+      1. Its LHS non-terminal `A` is reachable from any non-terminal in `interesting_symbols`.
+         OR
+      2. If condition 1 is false, then the RHS `alpha` of this specific production can derive a string containing at least one of the `interesting_symbols`.
+
+      This involves changing how the second condition for keeping a production is evaluated.
+
+      In the file `src/glr/analyze.rs`, locate the `filter_productions_by_reachability` function.
+
+      Replace this block of code:
       ```rust
-      /// Filters productions based on relevance to a set of "interesting" symbols.
-      ///
-      /// The goal is to keep only those productions that are necessary to parse or define
-      /// structures related to the `interesting_symbols`.
-      ///
-      /// A production `P: LHS -> RHS` is kept if its `LHS` non-terminal is "involved".
-      /// A non-terminal `N` is considered "involved" if it meets any of these criteria,
-      /// or is reachable through productions from another "involved" non-terminal:
-      /// 1. `N` itself is one of the `interesting_symbols` (if `N` is a non-terminal).
-      /// 2. `N` can derive a string containing at least one of the `interesting_symbols`.
-      ///
-      /// The process is:
-      ///   a. Identify all non-terminals satisfying (1) or (2). This forms a "seed set" of directly relevant non-terminals.
-      ///   b. Perform a reachability analysis (graph traversal) starting from this seed set. Any non-terminal
-      ///      that appears on the right-hand side of a production whose left-hand side is in the (expanding) set of
-      ///      involved non-terminals also becomes involved.
-      ///   c. Finally, all productions whose LHS is an "involved" non-terminal are kept.
-      ///
-      /// If `interesting_symbols` is empty, no productions will be kept.
-      pub fn filter_productions_by_reachability(
-          initial_productions: &[Production],
-          interesting_symbols: &BTreeSet<Symbol>,
-      ) -> Vec<Production> {
-          if interesting_symbols.is_empty() {
-              crate::debug!(2, "filter_productions_by_reachability: interesting_symbols is empty, returning no productions.");
-              return Vec::new();
-          }
-
-          // Step 1: Find all non-terminals that can derive an interesting symbol.
-          // N is in can_derive_set if N =>* ... S_int ... where S_int is in interesting_symbols.
-          let can_derive_set = compute_can_derive_interesting(initial_productions, interesting_symbols);
-          crate::debug!(3, "filter_productions_by_reachability: CanDeriveInteresting set: {:?}", can_derive_set.iter().map(|nt| &nt.0).collect::<Vec<_>>());
-
-          // Step 2: Create the initial seed set of "directly relevant" symbols for overall reachability.
-          // These are non-terminals that are either interesting themselves or can derive an interesting symbol.
-          let mut seed_symbols_for_reachability = BTreeSet::new();
-          for nt in &can_derive_set {
-              seed_symbols_for_reachability.insert(Symbol::NonTerminal(nt.clone()));
-          }
-          for s in interesting_symbols {
-              if let Symbol::NonTerminal(_) = s {
-                  // Add only if it's an NT. If it's already covered by can_derive_set, BTreeSet handles duplicates.
-                  seed_symbols_for_reachability.insert(s.clone());
-              }
-          }
-          crate::debug!(3, "filter_productions_by_reachability: Seed symbols for overall reachability: {:?}", seed_symbols_for_reachability.iter().map(|s| match s { Symbol::NonTerminal(nt) => nt.0.as_str(), Symbol::Terminal(t) => t.0.as_str() }).collect::<Vec<_>>());
-
-          // Step 3: Compute all non-terminals "involved" with the interesting symbols.
-          // This includes the initial seed NTs and any NTs reachable from them via productions.
-          // If X is in seed_symbols_for_reachability (as an NT), and X -> Y Z, then Y and Z (if NTs) become involved.
-          let all_involved_nts = compute_reachable_from_interesting_nts(initial_productions, &seed_symbols_for_reachability);
-          crate::debug!(3, "filter_productions_by_reachability: All involved NTs (LHS must be in this set): {:?}", all_involved_nts.iter().map(|nt| &nt.0).collect::<Vec<_>>());
-
-          // Step 4: Filter productions. A production is kept if its LHS is an "involved" non-terminal.
           let mut kept_productions = Vec::new();
           for production in initial_productions {
-              if all_involved_nts.contains(&production.lhs) {
+              let lhs = &production.lhs;
+              
+              // Condition 1: LHS can derive an interesting symbol.
+              let cond1_lhs_can_derive_interesting = can_derive_set.contains(lhs);
+              
+              // Condition 2: LHS is reachable from an interesting non-terminal.
+              let cond2_lhs_reachable_from_interesting_nt = reachable_from_set.contains(lhs);
+
+              if cond1_lhs_can_derive_interesting || cond2_lhs_reachable_from_interesting_nt {
+                  kept_productions.push(production.clone());
+              } else {
+                  crate::debug!(4, "Filtering out production: {} (LHS can derive interesting: {}, LHS reachable from interesting NT: {})", production, cond1_lhs_can_derive_interesting, cond2_lhs_reachable_from_interesting_nt);
+              }
+          }
+      ```
+
+      With this new block:
+      ```rust
+          let mut kept_productions = Vec::new();
+          for production in initial_productions {
+              let lhs = &production.lhs;
+              
+              // Condition 1: LHS is reachable from an interesting non-terminal.
+              let cond1_lhs_is_reachable_from_interesting_nt = reachable_from_set.contains(lhs);
+              
+              // Condition 2: RHS of *this specific* production can derive an interesting symbol.
+              // This is computed to be OR'd with Condition 1.
+              let mut cond2_current_rhs_can_derive_interesting = false;
+              for symbol_in_rhs in &production.rhs {
+                  match symbol_in_rhs {
+                      Symbol::Terminal(_) => {
+                          if interesting_symbols.contains(symbol_in_rhs) {
+                              cond2_current_rhs_can_derive_interesting = true;
+                              break;
+                          }
+                      }
+                      Symbol::NonTerminal(nt_in_rhs) => {
+                          // An RHS non-terminal leads to interesting if:
+                          // 1. It IS an interesting symbol itself (e.g. if interesting_symbols can contain NTs)
+                          // 2. OR it can derive an interesting symbol (i.e., nt_in_rhs is in can_derive_set)
+                          if interesting_symbols.contains(symbol_in_rhs) || can_derive_set.contains(nt_in_rhs) {
+                              cond2_current_rhs_can_derive_interesting = true;
+                              break;
+                          }
+                      }
+                  }
+              }
+
+              if cond1_lhs_is_reachable_from_interesting_nt || cond2_current_rhs_can_derive_interesting {
                   kept_productions.push(production.clone());
               } else {
                   crate::debug!(
                       4,
-                      "Filtering out production: {} (LHS {} not in all_involved_nts)",
+                      "Filtering out production: {} (LHS_is_reachable_from_interesting_NT: {}, Current_RHS_can_derive_interesting: {})",
                       production,
-                      production.lhs.0
+                      cond1_lhs_is_reachable_from_interesting_nt,
+                      cond2_current_rhs_can_derive_interesting
                   );
               }
           }
-          
-          // Note: `generate_glr_parser_with_maps` (which will likely consume this output)
-          // internally calls `remove_productions_with_undefined_nonterminals` and `validate`,
-          // so further cleanup here might be redundant if that's the next step.
-          // However, it's good that this filter produces a self-contained set as much as possible.
-          // If `all_involved_nts` is empty (e.g. interesting_symbols only contains terminals not derivable),
-          // then kept_productions will be empty, which is correct.
-          kept_productions
-      }
       ```
 
-      **Explanation of Changes:**
+      **Explanation of changes in `filter_productions_by_reachability`:**
+      *   The first condition for keeping a production is now `cond1_lhs_is_reachable_from_interesting_nt` (which checks if the LHS non-terminal is in `reachable_from_set`).
+      *   The second condition, `cond2_current_rhs_can_derive_interesting`, is now calculated by iterating through the symbols of the current production's RHS. It checks if any symbol in the RHS is either directly an "interesting symbol" or (if it's a non-terminal) if that non-terminal can derive an "interesting symbol" (using the precomputed `can_derive_set`).
+      *   A production is kept if either `cond1_lhs_is_reachable_from_interesting_nt` is true OR `cond2_current_rhs_can_derive_interesting` is true.
+      *   The debug message for filtered-out productions has been updated to reflect these new conditions.
 
-      *   The function's logic is now more streamlined and directly implements the idea of finding all transitively "involved" non-terminals.
-      *   **`can_derive_set`**: This remains the same, identifying non-terminals that can produce an interesting symbol.
-      *   **`seed_symbols_for_reachability`**: This new set is crucial. It combines:
-          *   Non-terminals from `can_derive_set`.
-          *   Non-terminals that are themselves present in `interesting_symbols`.
-      *   **`all_involved_nts`**: This is computed by `compute_reachable_from_interesting_nts` using `seed_symbols_for_reachability` as its starting point. `compute_reachable_from_interesting_nts` effectively performs a graph traversal (transitive closure) from these seed non-terminals. If a seed non-terminal `S` has a production `S -> A B`, then `A` and `B` (if non-terminals) will be included in `all_involved_nts`, and so on.
-      *   **Filtering**: Productions are kept if their Left-Hand Side (LHS) is present in `all_involved_nts`. This ensures that if a non-terminal is deemed "involved", all its defining productions are retained.
+      **Step 2: Modify the test `test_filtered_grammar_with_specific_sequence` in `src/test_constraint.rs`**
 
-      This revised approach should correctly capture all productions that are truly necessary for the parts of the grammar related to your `interesting_symbols`, including all transitively required definitions.
+      You want this test to use the sequence `vec!["STRING[0]", "STRING[0]", "\"->\""]`.
+
+      In the file `src/test_constraint.rs`, find the test function `test_filtered_grammar_with_specific_sequence`.
+
+      Locate this line:
+      ```rust
+          let sequence_to_test_names = vec!["\"...\"", "\";\"", "\"elif\""];
+      ```
+
+      Change it to:
+      ```rust
+          let sequence_to_test_names = vec!["STRING[0]", "STRING[0]", "\"->\""];
+      ```
+
+      This will make the test focus on the specific sequence you're having trouble with. The rest of the test logic (loading the grammar, filtering, rebuilding the parser, and stepping through the sequence) should then apply to this new sequence.
     metadata:
   - user: |
       Using model 'gemini/gemini-2.5-flash-preview-05-20' for code completion.
@@ -18179,13 +18101,19 @@ messages:
         {
           "action": "replace",
           "filepath": "src/glr/analyze.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/test_constraint.rs"
         }
       ]
-      Found 1 code blocks with filepaths in attempt 1.
+      Found 2 code blocks with filepaths in attempt 1.
       Received code for required file: src/glr/analyze.rs
+      Received code for required file: src/test_constraint.rs
       All required file contents received or no content needed.
 
       --- Applying Changes ---
       Successfully replaced file: src/glr/analyze.rs
+      Successfully replaced file: src/test_constraint.rs
     metadata:
 ...
