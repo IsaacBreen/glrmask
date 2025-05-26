@@ -6,7 +6,9 @@ use std::collections::{HashMap, VecDeque};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use crate::glr::analyze::{drop_dead, remove_productions_with_undefined_nonterminals, validate};
+use crate::glr::grammar::{get_all_non_terminals_from_productions, get_all_terminals_from_productions};
 pub use crate::types::{TerminalID};
+pub use crate::glr::grammar::{ProductionID, NonTerminalID, StateID};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
 
@@ -154,32 +156,7 @@ impl JSONConvertible for Stage7Row {
 }
 
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StateID(pub usize);
-
-impl JSONConvertible for StateID {
-    fn to_json(&self) -> JSONNode { self.0.to_json() }
-    fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(StateID) }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProductionID(pub usize);
-
-impl JSONConvertible for ProductionID {
-    fn to_json(&self) -> JSONNode { self.0.to_json() }
-    fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(ProductionID) }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NonTerminalID(pub usize);
-
-impl JSONConvertible for NonTerminalID {
-    fn to_json(&self) -> JSONNode { self.0.to_json() }
-    fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(NonTerminalID) }
-}
-
-
-type Stage1Result = Stage1Table;
+type Stage1Result = BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>>;
 type Stage2Result = Stage2Table;
 type Stage3Result = Stage3Table;
 type Stage4Result = Stage4Table;
@@ -191,10 +168,13 @@ type Stage7Result = (
     StateID,
 );
 
-fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
-    dbg!(&productions);
+fn stage_1(productions: &[Production], start_production_id: ProductionID) -> Stage1Result {
+    if productions.is_empty() {
+        panic!("stage_1: productions list is empty, cannot proceed.");
+    }
+    // Access using .0 for the usize value of ProductionID
     let initial_item = Item {
-        production: productions[start_production_id].clone(),
+        production: productions[start_production_id.0 as usize].clone(),
         dot_position: 0,
     };
     let initial_closure = BTreeSet::from([initial_item]);
@@ -394,7 +374,7 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
     stage_6_table
 }
 
-fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
+fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: ProductionID, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
     let mut item_set_map = BiBTreeMap::new();
     let mut next_state_id = 0;
 
@@ -423,7 +403,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 
         // Determine if this state is an accepting state
         let is_accepting_state = item_set.iter().any(|item| {
-            item.production == productions[start_production_id] && item.dot_position == item.production.rhs.len()
+            item.production == productions[start_production_id.0 as usize] && item.dot_position == item.production.rhs.len()
         });
 
 
@@ -466,7 +446,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
     }
 
     let start_item = Item {
-        production: productions[start_production_id].clone(),
+        production: productions[start_production_id.0 as usize].clone(),
         dot_position: 0,
     };
     let start_state_id = *item_set_map.get_by_left(&BTreeSet::from([start_item])).unwrap();
@@ -474,48 +454,95 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
     (stage_7_table, item_set_map, start_state_id)
 }
 
-pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
-    let original_productions = productions.to_vec();
+pub fn generate_glr_parser_with_maps(
+    initial_productions: &[Production],
+    initial_start_production_id: ProductionID, // ID relative to initial_productions
+    terminal_map: BiBTreeMap<Terminal, TerminalID>,
+    non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+) -> GLRParser {
+    crate::debug!(2, "generate_glr_parser_with_maps: Received {} initial productions. Initial start prod ID: {:?}", initial_productions.len(), initial_start_production_id);
 
+    if initial_productions.is_empty() {
+        panic!("generate_glr_parser_with_maps: Received empty initial_productions list. Cannot build parser.");
+    }
+    if (initial_start_production_id.0 as usize) >= initial_productions.len() {
+        panic!("generate_glr_parser_with_maps: initial_start_production_id {:?} is out of bounds for initial_productions (len {}).", initial_start_production_id, initial_productions.len());
+    }
+
+    let original_start_lhs_nt = initial_productions[initial_start_production_id.0 as usize].lhs.clone();
+    crate::debug!(2, "generate_glr_parser_with_maps: Original start symbol LHS NT: {} ({:?})", original_start_lhs_nt.0, original_start_lhs_nt);
+
+
+    let all_initial_nts = get_all_non_terminals_from_productions(initial_productions);
+    let all_initial_ts = get_all_terminals_from_productions(initial_productions);
+    
     crate::debug!(2, "Removing productions with undefined non-terminals");
-    let productions = remove_productions_with_undefined_nonterminals(productions);
+    let productions_after_cleanup = remove_productions_with_undefined_nonterminals(
+        initial_productions.to_vec(),
+        &all_initial_nts, 
+        &all_initial_ts   
+    );
+
+    if productions_after_cleanup.is_empty() {
+        panic!("generate_glr_parser_with_maps: No productions remained after cleanup (remove_productions_with_undefined_nonterminals). Cannot build parser.");
+    }
+    crate::debug!(2, "generate_glr_parser_with_maps: {} productions remained after cleanup.", productions_after_cleanup.len());
+
+
+    let final_start_production_id = productions_after_cleanup
+        .iter()
+        .position(|p| p.lhs == original_start_lhs_nt)
+        .map(ProductionID)
+        .unwrap_or_else(|| {
+            let available_lhs_symbols: BTreeSet<String> = productions_after_cleanup.iter()
+                .map(|p| non_terminal_map.get_by_left(&p.lhs.to_id()).unwrap_or(&"UNKNOWN_NT".to_string()).clone())
+                .collect();
+            panic!(
+                "generate_glr_parser_with_maps: The original start symbol's LHS (NT: {}, ID: {:?}) productions were removed during cleanup. Filtered grammar is invalid. Available LHS: {:?}",
+                original_start_lhs_nt.0,
+                original_start_lhs_nt.to_id(),
+                available_lhs_symbols
+            );
+        });
+    crate::debug!(2, "generate_glr_parser_with_maps: Final start production ID (index into cleaned list): {:?}", final_start_production_id);
+
 
     crate::debug!(2, "Validating");
-    validate(&productions).expect("Validation error");
+    validate(&productions_after_cleanup).expect("Validation error");
 
     crate::debug!(2, "Stage 1");
-    let stage_1_table = stage_1(&productions, start_production_id);
-    crate::debug!(6, &stage_1_table);
+    let stage_1_table = stage_1(&productions_after_cleanup, final_start_production_id);
+    crate::debug!(6, "Stage 1 Table: {:?}", stage_1_table);
     crate::debug!(2, "Stage 2");
-    let stage_2_table = stage_2(stage_1_table, &productions);
-    crate::debug!(6, &stage_2_table);
+    let stage_2_table = stage_2(stage_1_table, &productions_after_cleanup);
+    crate::debug!(6, "Stage 2 Table: {:?}", stage_2_table);
     crate::debug!(2, "Stage 3");
-    let stage_3_table = stage_3(stage_2_table, &productions);
-    crate::debug!(6, &stage_3_table);
+    let stage_3_table = stage_3(stage_2_table, &productions_after_cleanup);
+    crate::debug!(6, "Stage 3 Table: {:?}", stage_3_table);
     crate::debug!(2, "Stage 4");
-    let stage_4_table = stage_4(stage_3_table, &productions);
-    crate::debug!(6, &stage_4_table);
+    let stage_4_table = stage_4(stage_3_table, &productions_after_cleanup);
+    crate::debug!(6, "Stage 4 Table: {:?}", stage_4_table);
     crate::debug!(2, "Stage 5");
-    let stage_5_table = stage_5(stage_4_table, &productions);
-    crate::debug!(6, &stage_5_table);
+    let stage_5_table = stage_5(stage_4_table, &productions_after_cleanup);
+    crate::debug!(6, "Stage 5 Table: {:?}", stage_5_table);
     crate::debug!(2, "Stage 6");
     let stage_6_table = stage_6(stage_5_table);
-    crate::debug!(6, &stage_6_table);
+    crate::debug!(6, "Stage 6 Table: {:?}", stage_6_table);
     crate::debug!(2, "Stage 7");
-    let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
-    crate::debug!(6, &stage_7_table);
+    let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions_after_cleanup, final_start_production_id, &terminal_map, &non_terminal_map);
+    crate::debug!(6, "Stage 7 Table: {:?}", stage_7_table);
     crate::debug!(2, "Done generating GLR parser");
 
-    GLRParser::new(stage_7_table, original_productions, terminal_map, non_terminal_map, item_set_map, start_state_id)
+    GLRParser::new(stage_7_table, initial_productions.to_vec(), terminal_map, non_terminal_map, item_set_map, start_state_id)
 }
 
-pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
+pub fn generate_glr_parser(productions: &[Production], start_production_id: ProductionID) -> GLRParser {
     let terminal_map = assign_terminal_ids(productions);
     let non_terminal_map = assign_non_terminal_ids(productions);
     generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
 }
 
-pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
+pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: ProductionID, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
     let non_terminal_map = assign_non_terminal_ids(productions);
     generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
 }
@@ -550,4 +577,3 @@ pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerm
     }
     non_terminal_map
 }
-

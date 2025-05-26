@@ -8,6 +8,8 @@ use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import Hyb
 use std::hash::{Hash, Hasher};
 use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast, eat_string_fast, choice_fast, eat_bytestring_fast, repeat1_fast, CompiledGrammar, GrammarDefinition}; // Added eat_any_fast, CompiledGrammar
 use crate::glr::analyze; // Import the analyze module
+use sep1::glr::grammar::{ProductionID, Symbol, TerminalID, NonTerminalID};
+
 
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
@@ -107,7 +109,7 @@ fn test_constraint_simple() {
         prod("X", vec![t("AB")]),             // X -> ab
     ];
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone());
+    let parser = generate_glr_parser_with_terminal_map(&productions, ProductionID(0), grammar_token_map.clone());
     dbg!(&parser);
 
     let mut token_name_map = BiBTreeMap::new();
@@ -188,7 +190,7 @@ fn test_constraint_expression() {
     grammar_token_map.insert(Terminal("I".to_string()), TerminalID(4));
     grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(5));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone()); // Start production is index 6
+    let parser = generate_glr_parser_with_terminal_map(&productions, ProductionID(0), grammar_token_map.clone()); // Start production is index 6
     dbg!(&parser);
 
     let mut token_name_map = BiBTreeMap::new();
@@ -340,7 +342,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
 
     let mut llm_token_map = LLMTokenMap::new();
-    let mut max_llm_token_id_val: u32 = 0;
+    let mut max_llm_token_id_val: usize = 0;
 
     // Sample GPT-2 tokens to speed up this test
     let prop = 1.0;
@@ -350,8 +352,8 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     println!("Sampling {} out of {} GPT-2 tokens for precompute", sample_size, total_tokens);
     for (token_str, id_val) in gpt2_raw_vocab.into_iter().take(sample_size) {
         llm_token_map.insert(token_str.into_bytes(), LLMTokenID(id_val as usize));
-        if id_val > max_llm_token_id_val {
-            max_llm_token_id_val = id_val;
+        if (id_val as usize) > max_llm_token_id_val {
+            max_llm_token_id_val = id_val as usize;
         }
     }
 
@@ -392,7 +394,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
         prod("A", vec![]),
     ];
     let terminal_map: BiBTreeMap<Terminal, TerminalID> = token_name_map.iter().map(|(name, id)| (Terminal(name.clone()), TerminalID(*id))).collect();
-    let parser = generate_glr_parser(&productions, 0);
+    let parser = generate_glr_parser(&productions, ProductionID(0));
 
     // Ensure that "def" is a valid initial LLM token
     let max_llm_token_id = token_name_map.iter().map(|(_, id)| *id).max().unwrap();
@@ -446,7 +448,7 @@ fn test_hideous_ambiguity() {
     token_name_map.insert("FSTRING_MIDDLE".to_string(), 0);
 
     // 5. Create the Parser
-    let parser = generate_glr_parser(&productions, 0);
+    let parser = generate_glr_parser(&productions, ProductionID(0));
     println!("{}", parser);
 
     // 6. Create the Constraint
@@ -499,7 +501,7 @@ fn test_simple_def_match_non_zero_llm_id() {
 
     let parser = generate_glr_parser_with_terminal_map(
         &productions,
-        0, // start_production_id
+        ProductionID(0), // start_production_id
         grammar_token_map.clone()
     );
 
@@ -963,7 +965,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
 // --- New test section for grammar filtering and specific sequence ---
 #[test]
-fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::error::Error>> {
+fn test_filtered_grammar_with_specific_sequence() -> Result<(), String> {
     // 1. Load the serialized CompiledGrammar
     let serialized_grammar_path = "src/serialized_compiled_grammar.json";
     println!("[Test] Loading CompiledGrammar from: {}", serialized_grammar_path);
@@ -972,7 +974,7 @@ fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::err
         Err(e) => {
             eprintln!("[Test] Failed to read serialized grammar file '{}': {}", serialized_grammar_path, e);
             eprintln!("[Test] Ensure the file exists (e.g., by running the test that generates it or placing it manually).");
-            return Err(Box::new(e)); // Fail the test if the prerequisite file is not found
+            return Err(e.to_string()); // Convert error to String for Err return type
         }
     };
     let json_node = JSONNode::from_json_string(&json_string)?;
@@ -981,78 +983,108 @@ fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::err
     println!("[Test] Original grammar structure: {}", compiled_grammar.definition);
 
     // 2. Define "interesting" symbols for filtering based on the sequence
-    let sequence_to_test_names = vec!["\"...\"", "\";\"", "\"elif\""];
     let sequence_to_test_names = vec!["STRING[0]", "STRING[0]", "\"->\""];
     let mut interesting_symbols = BTreeSet::new();
+    println!("[Test] Interesting symbol names for filtering: {:?}", sequence_to_test_names);
     for name_str in &sequence_to_test_names {
-        // All elements in this specific sequence are terminals
-        interesting_symbols.insert(Symbol::Terminal(Terminal(name_str.to_string())));
+        if name_str.starts_with("\"") && name_str.ends_with("\"") {
+            // Terminal
+            let t_name = name_str.trim_matches('\"').to_string();
+            if let Some(t_id) = compiled_grammar.glr_parser.terminal_map.get_by_left(&Terminal(t_name.clone())) {
+                interesting_symbols.insert(Symbol::Terminal(t_id.clone()));
+            } else {
+                println!("[Test] Warning: Terminal '{}' not found in map.", t_name);
+            }
+        } else {
+            // Non-terminal
+             let nt_name = name_str.to_string();
+             if let Some(nt_id) = compiled_grammar.glr_parser.non_terminal_map.get_by_left(&NonTerminal(nt_name.clone())) {
+                 interesting_symbols.insert(Symbol::NonTerminal(nt_id.clone()));
+             } else {
+                 println!("[Test] Warning: Non-terminal '{}' not found in map for interesting symbols.", nt_name);
+             }
+        }
     }
-    println!("[Test] Interesting symbols for filtering: {:?}", sequence_to_test_names);
+     println!("[Test] Parsed interesting_symbols (internal IDs): {:?}", interesting_symbols.iter().map(|s| s.to_string(None, None)).collect::<Vec<_>>());
+     println!("[Test] Parsed interesting_symbols (with names): {:?}", interesting_symbols.iter().map(|s| s.to_string(Some(&compiled_grammar.glr_parser.terminal_map), Some(&compiled_grammar.glr_parser.non_terminal_map))).collect::<Vec<_>>());
 
-    // 3. Apply the filter_productions_by_reachability function
+
+    // 3. Filter productions
     let filtered_productions = filter_productions_by_reachability(
         &compiled_grammar.definition.productions,
         &interesting_symbols,
+        &compiled_grammar.definition,
+        &compiled_grammar.glr_parser.non_terminal_map,
+        &compiled_grammar.glr_parser.terminal_map,
     );
-    // let filtered_productions = compiled_grammar.definition.productions.clone();
-
     println!("[Test] Original number of productions: {}", compiled_grammar.definition.productions.len());
     println!("[Test] Filtered number of productions: {}", filtered_productions.len());
 
-    if filtered_productions.is_empty() && !compiled_grammar.definition.productions.is_empty() {
-        // This is a critical failure if we expect the sequence to be parsable at all.
-        panic!("[Test] All productions were filtered out. This indicates the interesting symbols are not reachable or productive in the original grammar, or the filter is too aggressive for this scenario.");
+    if filtered_productions.is_empty() {
+        panic!("[Test] Filtering resulted in zero productions. Cannot proceed.");
     }
 
-    // 4. Determine the start_production_id for the filtered set.
-    // It must be the same augmented start production as in the original grammar.
-    let original_start_production = &compiled_grammar.definition.productions[compiled_grammar.definition.start_production_id];
-    let new_start_production_id = match filtered_productions.iter().position(|p| p == original_start_production) {
-        Some(id) => id,
-        None => {
-            panic!("[Test] Original start production ('{}') was filtered out. This is unexpected if the sequence is meant to be parsable by the grammar. Cannot proceed with parser rebuild.", original_start_production);
-        }
-    };
-    println!("[Test] Original start production found in filtered set at new index: {}.", new_start_production_id);
-
-    // 5. Rebuild the GLR parser using the filtered productions.
-    // Use the original terminal_map and non_terminal_map from the loaded compiled_grammar.
-    // `generate_glr_parser_with_maps` includes validation, which might panic if the filtered grammar is invalid.
+    // 4. Determine the new start_production_id for the filtered set.
+    let original_start_production = &compiled_grammar.definition.productions[compiled_grammar.definition.start_production_id.0 as usize];
+    let new_start_production_id = filtered_productions
+        .iter()
+        .position(|p| p.lhs == original_start_production.lhs)
+        .map(ProductionID)
+        .expect("[Test] Original start production's LHS not found in any filtered production. Filtered grammar is invalid.");
+    println!("[Test] Original start symbol LHS ({:?}) found in filtered set. New start production ID (index): {}.", 
+        compiled_grammar.glr_parser.non_terminal_map.get_by_left(&original_start_production.lhs).unwrap_or(&"UNKNOWN".to_string()), 
+        new_start_production_id.0
+    );
+    
+    // 5. Rebuild parser with filtered productions
     println!("[Test] Rebuilding parser with filtered productions...");
-    let filtered_definition = GrammarDefinition {
-        productions: filtered_productions.clone(),
-        start_production_id: new_start_production_id,
-        terminal_name_to_group_id: compiled_grammar.definition.terminal_name_to_group_id.clone(),
-        terminal_expr_to_group_id: compiled_grammar.definition.terminal_expr_to_group_id.clone(),
-    };
-    // For debugging the structure of the filtered parser:
-    println!("[Test] Filtered grammar structure: {}", filtered_definition);
+    
     let filtered_parser = generate_glr_parser_with_maps(
-        &filtered_productions,
-        new_start_production_id,
+        &filtered_productions, // Pass the productions directly
+        new_start_production_id, // This ID is an index into filtered_productions
         compiled_grammar.glr_parser.terminal_map.clone(),
         compiled_grammar.glr_parser.non_terminal_map.clone(),
     );
     println!("[Test] Rebuilt parser with filtered productions. New parser has {} states.", filtered_parser.stage_7_table.len());
+    // For debugging the structure of the filtered parser:
+    // This grammar definition for logging purposes. It's not used by generate_glr_parser_with_maps
+    let filtered_grammar_def_for_logging = GrammarDefinition {
+        productions: filtered_productions.clone(),
+        start_production_id: new_start_production_id,
+        terminal_name_to_group_id: compiled_grammar.definition.terminal_name_to_group_id.clone(),
+        terminal_expr_to_group_id: compiled_grammar.definition.terminal_expr_to_group_id.clone(),
+        // Add other fields if GrammarDefinition has more and they are needed for Display
+    };
+    println!("[Test] Filtered grammar structure: {}", filtered_grammar_def_for_logging);
 
     // 6. Convert the test sequence names to TerminalIDs using the *filtered_parser's* terminal_map.
-    let mut sequence_to_test_ids = Vec::new();
-    let mut all_terminals_mapped = true;
-    for name_str in &sequence_to_test_names {
-        if let Some(term_id) = filtered_parser.terminal_map.get_by_left(&Terminal(name_str.to_string())) {
-            sequence_to_test_ids.push(*term_id);
-        } else {
-            eprintln!("[Test] Error: Terminal '{}' from test sequence not found in filtered_parser's terminal_map.", name_str);
-            all_terminals_mapped = false;
-            break;
-        }
+    let actual_parse_sequence_names = vec!["STRING[0]", "STRING[0]", "\"->\""];
+    let mut actual_parse_sequence_ids = Vec::new();
+    for name_str in &actual_parse_sequence_names {
+         if name_str.starts_with("\"") && name_str.ends_with("\"") {
+             let t_name = name_str.trim_matches('\"').to_string();
+             if let Some(t_id) = filtered_parser.terminal_map.get_by_left(&Terminal(t_name.clone())) {
+                  actual_parse_sequence_ids.push(t_id.clone());
+             } else {
+                  return Err(format!("[Test] Terminal '{}' from actual_parse_sequence not found in filtered parser's terminal map.", t_name));
+             }
+         } else {
+             // If the name is not quoted, it's a non-terminal. For a direct parsing sequence,
+             // we typically need terminals. This test sequence mixes them.
+             // If this is intended for a higher-level parsing test, it might be fine,
+             // but for direct GLR step, it expects TerminalIDs.
+             // For this specific test sequence, STRING[0] is *also* a terminal.
+             if let Some(t_id) = filtered_parser.terminal_map.get_by_left(&Terminal(name_str.to_string())) {
+                 actual_parse_sequence_ids.push(t_id.clone());
+             } else {
+                 return Err(format!("[Test] Non-terminal-like name '{}' from actual_parse_sequence not found as a terminal in filtered parser's terminal map.", name_str));
+             }
+         }
     }
 
-    if !all_terminals_mapped {
-        panic!("[Test] Cannot run sequence test on filtered parser: one or more terminals from the sequence ('{:?}') were not found in its terminal_map. The filter might have removed necessary terminal definitions, or they were not part of the original grammar's terminal mapping in a way that survived filtering.", sequence_to_test_names);
-    }
-    assert_eq!(sequence_to_test_ids.len(), sequence_to_test_names.len(), "[Test] Mismatch in length between terminal names and resolved IDs for the test sequence.");
+
+    println!("[Test] Sequence to test (IDs): {:?}", actual_parse_sequence_ids.iter().map(|id| id.0).collect::<Vec<_>>());
+    println!("[Test] Sequence to test (Names): {:?}", actual_parse_sequence_names);
 
     // 7. Initialize GLRParserState for the filtered parser.
     // We use a unit accumulator `()` as this test focuses on grammar rule processing, not LLM token constraints.
@@ -1060,14 +1092,14 @@ fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::err
     println!("[Test] Initialized GLR state for filtered parser.");
 
     // 8. Step the GLRParserState with the sequence of TerminalIDs.
-    println!("[Test] Stepping filtered parser with sequence: {:?} (IDs: {:?})", sequence_to_test_names, sequence_to_test_ids.iter().map(|id| id.0).collect::<Vec<_>>());
+    println!("[Test] Stepping filtered parser with sequence: {:?} (IDs: {:?})", actual_parse_sequence_names, actual_parse_sequence_ids.iter().map(|id| id.0).collect::<Vec<_>>());
     let mut step_by_step_ok = true;
-    for (idx, &terminal_id) in sequence_to_test_ids.iter().enumerate() {
-        glr_state_filtered.step(terminal_id);
-        println!("[Test]   Stepped with '{}' (ID {}). Parser OK: {}", sequence_to_test_names[idx], terminal_id.0, glr_state_filtered.is_ok());
+    for (idx, terminal_id) in actual_parse_sequence_ids.iter().enumerate() {
+        glr_state_filtered.step(terminal_id.clone()); // Use .clone() on TerminalID
+        println!("[Test]   Stepped with '{}' (ID {}). Parser OK: {}", actual_parse_sequence_names[idx], terminal_id.0, glr_state_filtered.is_ok());
         if !glr_state_filtered.is_ok() {
             step_by_step_ok = false;
-            eprintln!("[Test]   Parser became NOT OK after stepping with '{}'. This is the failure point for the sequence with the filtered grammar.", sequence_to_test_names[idx]);
+            eprintln!("[Test]   Parser became NOT OK after stepping with '{}'. This is the failure point for the sequence with the filtered grammar.", actual_parse_sequence_names[idx]);
             // For detailed debugging, you might want to print the GSS of the failed state:
             // glr_state_filtered.log_gss("GSS at failure point", terminal_id);
             break;
@@ -1076,15 +1108,14 @@ fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::err
 
     // 9. Assert the outcome.
     if step_by_step_ok {
-        println!("[Test] Filtered parser successfully processed the sequence token by token: {:?}. Final state OK: {}", sequence_to_test_names, glr_state_filtered.is_ok());
+        println!("[Test] Filtered parser successfully processed the sequence token by token: {:?}. Final state OK: {}", actual_parse_sequence_names, glr_state_filtered.is_ok());
         // This sequence should be a valid prefix or complete parse if the grammar logic for it is correct.
-        // assert!(glr_state_filtered.is_ok(), "[Test] Filtered parser should be in OK state after processing the sequence: {:?}", sequence_to_test_names);
+        assert!(glr_state_filtered.is_ok(), "[Test] Filtered parser should be in OK state after processing the sequence: {:?}", actual_parse_sequence_names);
     } else {
         // This assertion will cause the test to fail if any step resulted in a non-OK state.
-        // assert!(step_by_step_ok, "[Test] Filtered parser FAILED to process the sequence: {:?}. Check logs above for the failing step.", sequence_to_test_names);
+        assert!(step_by_step_ok, "[Test] Filtered parser FAILED to process the sequence: {:?}. Check logs above for the failing step.", actual_parse_sequence_names);
     }
 
     println!("[Test] Test 'test_filtered_grammar_with_specific_sequence' completed successfully.");
     Ok(())
 }
-
