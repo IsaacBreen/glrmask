@@ -8,7 +8,7 @@ use crate::glr::table::{
 use crate::datastructures::gss::{GSSNode, GSSTrait, GSSStats};
 
 use bimap::BiBTreeMap;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
 use std::sync::Arc;
@@ -454,15 +454,15 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
         // Clear cycled_states at the beginning of each step, as cycle detection is per-step.
         self.cycled_states = ParseState::new();
 
-        // Change the type of `todo` to include a HashSet for visited nodes in the current reduction path.
-        let mut todo: Vec<(ParseState<A>, HashSet<Arc<GSSNode<ParseStateEdgeContent, A>>>)> = Vec::new();
+        // Change the type of `todo` to include a BTreeSet for visited nodes in the current reduction path.
+        let mut todo: Vec<(ParseState<A>, BTreeSet<Arc<GSSNode<ParseStateEdgeContent, A>>>)> = Vec::new();
 
         // Initial population of todo:
         // States from active_states are roots of new reduction chains. Their visited set is initially empty.
         let nodes: Vec<_> = vec![self.active_state.stack.clone()];
         let simplified_states = simplify_gss_forest(&nodes);
         for state_to_process in simplified_states {
-            todo.push((ParseState { stack: state_to_process }, HashSet::new()));
+            todo.push((ParseState { stack: state_to_process }, BTreeSet::new()));
         }
         
         let mut next = ParseState::new();
