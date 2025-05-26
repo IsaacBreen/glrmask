@@ -28,7 +28,8 @@ use std::time::Instant;
 use rand::prelude::IndexedRandom;
 use rand::{Rng, SeedableRng};
 use rand::seq::SliceRandom;
-use crate::glr::analyze::filter_productions_by_reachability;
+use crate::glr::analyze::{filter_productions_by_reachability, remove_productions_with_undefined_nonterminals};
+
 
 // Use concrete types for merge tests
 type TestTrieMerge = Trie<&'static str, Vec<i32>, String>;
@@ -143,7 +144,7 @@ fn test_constraint_simple() {
     // Test Serialization/Deserialization
     let json = constraint.to_json();
     let constraint_from_json = GrammarConstraint::from_json(json).unwrap();
-    assert_eq!(constraint, constraint_from_json);
+    constraint.assert_eq(&constraint_from_json); // Use the new assert_eq method
 }
 
 #[test]
@@ -230,7 +231,7 @@ fn test_constraint_expression() {
     // Test Serialization/Deserialization
     let json = constraint.to_json();
     let constraint_from_json = GrammarConstraint::from_json(json).unwrap();
-    assert_eq!(constraint, constraint_from_json);
+    constraint.assert_eq(&constraint_from_json); // Use the new assert_eq method
 }
 
 #[test]
@@ -283,7 +284,7 @@ fn test_precompute_for_python_name_token() {
         &tokenizer,
         &internal_llm_token_map_for_precompute, // Use the manually created internal map
         &BiBTreeMap::new(), // empty name‐map
-        internal_llm_token_map_for_precompute.iter().map(|(_, id)| id.0).max().unwrap(),
+        internal_llm_token_map_for_precompute.iter().map(|(_, id)| id.0).max().unwrap_or(0),
     );
     // print_precomputed(&precomputed);
     println!("Done precomputing");
@@ -312,7 +313,7 @@ fn test_precompute_explosion() {
         &tokenizer,
         &internal_llm_token_map_for_precompute, // Use the manually created internal map
         &BiBTreeMap::new(), // empty name‐map
-        internal_llm_token_map_for_precompute.iter().map(|(_, id)| id.0).max().unwrap(),
+        internal_llm_token_map_for_precompute.iter().map(|(_, id)| id.0).max().unwrap_or(0),
     );
     // print_precomputed(&precomputed);
     println!("Done precomputing");
@@ -377,7 +378,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     //     &tokenizer,
     //     &internal_token_name_map,
     //     &token_name_map,
-    //     internal_llm_token_map.iter().map(|(_, id)| *id).max().unwrap(),
+    //     internal_llm_token_map.iter().map(|(_, id)| *id).max().unwrap_or(0),
     // );
     //
     // println!("Successfully precomputed with GPT-2 vocab.");
@@ -395,7 +396,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     let parser = generate_glr_parser(&productions, 0);
 
     // Ensure that "def" is a valid initial LLM token
-    let max_llm_token_id = token_name_map.iter().map(|(_, id)| *id).max().unwrap();
+    let max_llm_token_id = token_name_map.iter().map(|(_, id)| *id).max().unwrap_or(0);
     let constraint = GrammarConstraint::new(
         tokenizer,
         parser,
@@ -990,37 +991,50 @@ fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::err
     println!("[Test] Interesting symbols for filtering: {:?}", sequence_to_test_names);
 
     // 3. Apply the filter_productions_by_reachability function
-    let filtered_productions = filter_productions_by_reachability(
+    let initially_filtered_productions = filter_productions_by_reachability(
         &compiled_grammar.definition.productions,
         &interesting_symbols,
     );
-    // let filtered_productions = compiled_grammar.definition.productions.clone();
+    println!("[Test] Productions after initial filter_productions_by_reachability: {}", initially_filtered_productions.len());
+
+    // 4. Apply remove_productions_with_undefined_nonterminals
+    let final_filtered_productions = remove_productions_with_undefined_nonterminals(&initially_filtered_productions);
+    println!("[Test] Productions after remove_productions_with_undefined_nonterminals: {}", final_filtered_productions.len());
+
 
     println!("[Test] Original number of productions: {}", compiled_grammar.definition.productions.len());
-    println!("[Test] Filtered number of productions: {}", filtered_productions.len());
+    println!("[Test] Filtered number of productions (final): {}", final_filtered_productions.len());
 
-    if filtered_productions.is_empty() && !compiled_grammar.definition.productions.is_empty() {
-        // This is a critical failure if we expect the sequence to be parsable at all.
-        panic!("[Test] All productions were filtered out. This indicates the interesting symbols are not reachable or productive in the original grammar, or the filter is too aggressive for this scenario.");
+    if final_filtered_productions.is_empty() {
+        if compiled_grammar.definition.productions.is_empty() {
+             println!("[Test] Original grammar was empty, so filtered grammar is also empty. This is expected.");
+        } else {
+            panic!("[Test] All productions were filtered out after cleanup. This indicates the interesting symbols are not reachable or productive in the original grammar, or the filter is too aggressive for this scenario, or the cleanup removed everything.");
+        }
     }
 
-    // 4. Determine the start_production_id for the filtered set.
+
+    // 5. Determine the start_production_id for the filtered set.
     // It must be the same augmented start production as in the original grammar.
     let original_start_production = &compiled_grammar.definition.productions[compiled_grammar.definition.start_production_id];
-    let new_start_production_id = match filtered_productions.iter().position(|p| p == original_start_production) {
+    let new_start_production_id = match final_filtered_productions.iter().position(|p| p == original_start_production) {
         Some(id) => id,
         None => {
+             if final_filtered_productions.is_empty() {
+                println!("[Test] Filtered productions list is empty, so original start production cannot be found. Skipping parser rebuild and sequence test.");
+                return Ok(()); // Or handle as a test failure if an empty grammar is not expected
+            }
             panic!("[Test] Original start production ('{}') was filtered out. This is unexpected if the sequence is meant to be parsable by the grammar. Cannot proceed with parser rebuild.", original_start_production);
         }
     };
     println!("[Test] Original start production found in filtered set at new index: {}.", new_start_production_id);
 
-    // 5. Rebuild the GLR parser using the filtered productions.
+    // 6. Rebuild the GLR parser using the filtered productions.
     // Use the original terminal_map and non_terminal_map from the loaded compiled_grammar.
     // `generate_glr_parser_with_maps` includes validation, which might panic if the filtered grammar is invalid.
     println!("[Test] Rebuilding parser with filtered productions...");
     let filtered_definition = GrammarDefinition {
-        productions: filtered_productions.clone(),
+        productions: final_filtered_productions.clone(), // Use the cleaned list
         start_production_id: new_start_production_id,
         terminal_name_to_group_id: compiled_grammar.definition.terminal_name_to_group_id.clone(),
         terminal_expr_to_group_id: compiled_grammar.definition.terminal_expr_to_group_id.clone(),
@@ -1028,14 +1042,14 @@ fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::err
     // For debugging the structure of the filtered parser:
     println!("[Test] Filtered grammar structure: {}", filtered_definition);
     let filtered_parser = generate_glr_parser_with_maps(
-        &filtered_productions,
+        &final_filtered_productions, // Use the cleaned list
         new_start_production_id,
         compiled_grammar.glr_parser.terminal_map.clone(),
         compiled_grammar.glr_parser.non_terminal_map.clone(),
     );
     println!("[Test] Rebuilt parser with filtered productions. New parser has {} states.", filtered_parser.stage_7_table.len());
 
-    // 6. Convert the test sequence names to TerminalIDs using the *filtered_parser's* terminal_map.
+    // 7. Convert the test sequence names to TerminalIDs using the *filtered_parser's* terminal_map.
     let mut sequence_to_test_ids = Vec::new();
     let mut all_terminals_mapped = true;
     for name_str in &sequence_to_test_names {
@@ -1053,12 +1067,12 @@ fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::err
     }
     assert_eq!(sequence_to_test_ids.len(), sequence_to_test_names.len(), "[Test] Mismatch in length between terminal names and resolved IDs for the test sequence.");
 
-    // 7. Initialize GLRParserState for the filtered parser.
+    // 8. Initialize GLRParserState for the filtered parser.
     // We use a unit accumulator `()` as this test focuses on grammar rule processing, not LLM token constraints.
     let mut glr_state_filtered = filtered_parser.init_glr_parser::<()>();
     println!("[Test] Initialized GLR state for filtered parser.");
 
-    // 8. Step the GLRParserState with the sequence of TerminalIDs.
+    // 9. Step the GLRParserState with the sequence of TerminalIDs.
     println!("[Test] Stepping filtered parser with sequence: {:?} (IDs: {:?})", sequence_to_test_names, sequence_to_test_ids.iter().map(|id| id.0).collect::<Vec<_>>());
     let mut step_by_step_ok = true;
     for (idx, &terminal_id) in sequence_to_test_ids.iter().enumerate() {
@@ -1073,7 +1087,7 @@ fn test_filtered_grammar_with_specific_sequence() -> Result<(), Box<dyn std::err
         }
     }
 
-    // 9. Assert the outcome.
+    // 10. Assert the outcome.
     if step_by_step_ok {
         println!("[Test] Filtered parser successfully processed the sequence token by token: {:?}. Final state OK: {}", sequence_to_test_names, glr_state_filtered.is_ok());
         // This sequence should be a valid prefix or complete parse if the grammar logic for it is correct.
