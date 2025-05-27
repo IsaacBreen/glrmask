@@ -1309,6 +1309,8 @@ impl<'a> GrammarConstraintState<'a> {
                         crate::debug!(3, "GLR parse state at clean end is OK");
                         final_glr_parse_state.log_gss("After clean end", TerminalID(0));
                         if let Some(existing) = self.state.get_mut(&TokenizerStateID(0)) {
+                            crate::debug!(3, "Existing GLR parse state at clean end");
+                            existing.log_gss("Before merge", TerminalID(0));
                             existing.merge_with(final_glr_parse_state.clone());
                             crate::debug!(3, "Merged GLR parse state at clean end");
                             existing.log_gss("After clean end", TerminalID(0));

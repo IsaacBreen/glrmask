@@ -250,8 +250,15 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
         }).collect()
     }
 
+    fn push_down_acc(&mut self) {
+        for pred_arc in self.predecessors.values_mut() {
+            Arc::make_mut(pred_arc).acc = pred_arc.acc.pop(&self.acc);
+        }
+    }
+
     pub fn merge(&mut self, other: &Self) {
         if self == other { return; }
+        self.push_down_acc();
         self.acc = self.acc.union(&other.acc);
 
         for (other_pred, edge_val) in &other.pop_iter() {
