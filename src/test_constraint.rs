@@ -1651,29 +1651,26 @@ fn test_minimized_grammar_causes_panic() -> Result<(), Box<dyn std::error::Error
 
     // 1. Manually define the minimized grammar
     // P0: start' -> simple_stmts
-    // P1: simple_stmts -> atom simple_stmts[0] simple_stmts[1]
-    // P2: simple_stmts[0] -> ";" atom
-    // P3: simple_stmts[0] ->
-    // P4: simple_stmts[1] -> ";"
-    // P5: elif_stmt -> IGNORE "elif" elif_stmt
-    // P6: atom -> IGNORE "..."
-    // P7: IGNORE -> IGNORE[0]
-    // P8: IGNORE[0] ->
+    // P1: simple_stmts -> yield_expr IGNORE[0] NEWLINE[0]
+    // P2: expression -> IGNORE[0]
+    // P3: yield_expr -> "yield" expression
+    // P4: factor -> "-"
+    // P5: IGNORE[0] -> IGNORE[0][0]
+    // P6: IGNORE[0] ->
     let minimized_productions = vec![
         prod("start'", vec![nt("simple_stmts")]), // P0
-        prod("simple_stmts", vec![nt("atom"), nt("simple_stmts[0]"), nt("simple_stmts[1]")]), // P1
-        prod("simple_stmts[0]", vec![t(";"), nt("atom")]), // P2
-        prod("simple_stmts[0]", vec![]), // P3
-        prod("simple_stmts[1]", vec![t(";")]), // P4
-        prod("elif_stmt", vec![nt("IGNORE"), t("elif"), nt("elif_stmt")]), // P5
-        prod("atom", vec![nt("IGNORE"), t("...")]), // P6
-        prod("IGNORE", vec![nt("IGNORE[0]")]), // P7
-        prod("IGNORE[0]", vec![]), // P8
+        prod("simple_stmts", vec![nt("yield_expr"), nt("IGNORE[0]"), t("NEWLINE[0]")]), // P1
+        prod("yield_expr", vec![t("yield"), nt("expression")]), // P3
+        prod("expression", vec![nt("factor")]), // P2
+        prod("factor", vec![t("-")]), // P4
+        prod("IGNORE[0]", vec![t("IGNORE[0][0]")]), // P5
+        prod("IGNORE[0]", vec![]), // P6
     ];
     let start_production_id_for_minimized = 0; // P0 is the start rule
 
     // 2. Define the input sequence that triggers the panic
-    let input_sequence_names = ["...", ";", "elif"];
+    // let input_sequence_names = ["...", ";", "elif"];
+    let input_sequence_names = ["\"yield\"", "IGNORE[0][0]", "NEWLINE[0]", "\"-\""];
     println!("[Test MRE] Input sequence: {:?}", input_sequence_names);
 
     // 3. Create terminal and non-terminal maps specifically for this minimized grammar
