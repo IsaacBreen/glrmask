@@ -175,8 +175,6 @@ impl JSONConvertible for PrecomputedNodeContents {
                                     .and_then(|n| BTreeMap::<GrammarTokenID, PrecomputedFinalizer>::from_json(n))?;
                 let clean_end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
                                    .and_then(Option::<LLMTokenBV>::from_json)?;
-                let active = obj.remove("active").ok_or_else(|| "Missing field active for PrecomputedNodeContents".to_string())
-                                  .and_then(LLMTokenBV::from_json)?;
                 Ok(PrecomputedNodeContents { finalizers, clean_end })
             }
             _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
@@ -1180,6 +1178,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         // Convert original LLMTokenID to internal LLMTokenID for the closure
         let internal_llm_id_val = self.parent.original_id_to_internal(llm_token_id).unwrap().0;
+        crate::debug!(4, "Committing token {} (internal ID {})", llm_token_id.0, internal_llm_id_val);
 
         let closure = |t: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
             let mut t = t.clone();
@@ -1205,7 +1204,7 @@ impl<'a> GrammarConstraintState<'a> {
             if let Some(new_node) = maybe_new_node {
                 parse_state.stack = new_node;
             }
-            !glr_state.active_state.stack.num_predecessors() == 0
+            !glr_state.active_state.stack.is_empty()
         });
 
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");

@@ -131,7 +131,7 @@ fn test_constraint_simple() {
 
     constraint_state.step_with_all_llm_tokens();
 
-    // Initially, we can match "a" (part of "ab" or "ac") or "ab).
+    // Initially, we can match "a" (part of "ab" or "ac") or "ab".
     // "a" leads to expecting "b" or "c".
     // "ab" leads to expecting "$".
     let mask = constraint_state.get_mask();
