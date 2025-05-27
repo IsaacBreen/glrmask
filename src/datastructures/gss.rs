@@ -5,8 +5,6 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
-use crate::json_serialization::{JSONConvertible, JSONNode}; // Assuming this exists elsewhere
-use std::collections::BTreeMap as StdMap;
 use deterministic_hash::DeterministicHasher;
 
 pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash + Default {
@@ -45,17 +43,6 @@ pub struct GSSNode<T, A: PathAccumulator> {
     predecessors_with_values: BTreeSet<(Arc<GSSNode<T, A>>, T)>,
     hash_key_cache: u64, // Based on predecessors_with_values' (arcs and T values) hashes only
 }
-
-// JSONConvertible for GSSNode is complex and currently marked todo!
-// impl<T: JSONConvertible, A: JSONConvertible + PathAccumulator> JSONConvertible for GSSNode<T, A> {
-//     fn to_json(&self) -> JSONNode {
-//         todo!("GSSNode to_json: Complex graph structure, requires advanced serialization strategy.")
-//     }
-
-//     fn from_json(_node: JSONNode) -> Result<Self, String> {
-//         todo!("GSSNode from_json: Complex graph structure, requires advanced deserialization strategy.")
-//     }
-// }
 
 /// An iterator over all paths leading to a GSS node.
 /// Paths are represented as `Vec<T>`, where `T` is the edge value type.
@@ -784,35 +771,6 @@ pub struct GSSStats {
     pub max_predecessors_with_values: usize,
     pub average_predecessors_with_values: f64,
 }
-impl JSONConvertible for GSSStats {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("num_roots".to_string(), self.num_roots.to_json());
-        obj.insert("unique_nodes".to_string(), self.unique_nodes.to_json());
-        obj.insert("max_depth".to_string(), self.max_depth.to_json());
-        obj.insert("average_depth".to_string(), self.average_depth.to_json());
-        obj.insert("merge_points".to_string(), self.merge_points.to_json());
-        obj.insert("max_predecessors_with_values".to_string(), self.max_predecessors_with_values.to_json());
-        obj.insert("average_predecessors_with_values".to_string(), self.average_predecessors_with_values.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                Ok(GSSStats {
-                    num_roots: usize::from_json(obj.remove("num_roots").ok_or_else(||"Missing num_roots".to_string())?)?,
-                    unique_nodes: usize::from_json(obj.remove("unique_nodes").ok_or_else(||"Missing unique_nodes".to_string())?)?,
-                    max_depth: usize::from_json(obj.remove("max_depth").ok_or_else(||"Missing max_depth".to_string())?)?,
-                    average_depth: f64::from_json(obj.remove("average_depth").ok_or_else(||"Missing average_depth".to_string())?)?,
-                    merge_points: usize::from_json(obj.remove("merge_points").ok_or_else(||"Missing merge_points".to_string())?)?,
-                    max_predecessors_with_values: usize::from_json(obj.remove("max_predecessors_with_values").ok_or_else(||"Missing max_predecessors_with_values".to_string())?)?,
-                    average_predecessors_with_values: f64::from_json(obj.remove("average_predecessors_with_values").ok_or_else(||"Missing average_predecessors_with_values".to_string())?)?,
-                })
-            }
-            _ => Err("Expected JSONNode::Object for GSSStats".to_string()),
-        }
-    }
-}
 
 pub fn gather_gss_stats<T, A: PathAccumulator>(roots: &[Arc<GSSNode<T, A>>]) -> GSSStats {
     let mut stats = GSSStats::default();
@@ -1187,35 +1145,5 @@ mod tests {
 
         assert_ne!(Arc::as_ptr(s_n4_base_arc), Arc::as_ptr(s_n4_other_arc));
         assert_ne!(Arc::as_ptr(s_d1_arc), Arc::as_ptr(&s_d2_arc));
-    }
-}
-
-// Dummy JSONConvertible for usize, f64 for GSSStats compilation
-mod json_serialization {
-    use super::StdMap;
-    pub trait JSONConvertible: Sized {
-        fn to_json(&self) -> JSONNode;
-        fn from_json(node: JSONNode) -> Result<Self, String>;
-    }
-    #[derive(Debug, Clone)]
-    pub enum JSONNode {
-        Null,
-        Boolean(bool),
-        Number(f64),
-        String(String),
-        Array(Vec<JSONNode>),
-        Object(StdMap<String, JSONNode>),
-    }
-    impl JSONConvertible for usize {
-        fn to_json(&self) -> JSONNode { JSONNode::Number(*self as f64) }
-        fn from_json(node: JSONNode) -> Result<Self, String> {
-            if let JSONNode::Number(n) = node { Ok(n as usize) } else { Err("Not a number".to_string()) }
-        }
-    }
-    impl JSONConvertible for f64 {
-        fn to_json(&self) -> JSONNode { JSONNode::Number(*self) }
-        fn from_json(node: JSONNode) -> Result<Self, String> {
-            if let JSONNode::Number(n) = node { Ok(n) } else { Err("Not a number".to_string()) }
-        }
     }
 }
