@@ -165,9 +165,8 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
         }
     }
 
-    /// For compatibility: returns predecessors in the BTreeSet<(Arc<Node>, EdgeValue)> format.
-    pub fn predecessors_with_values(&self) -> BTreeSet<(Arc<Self>, T)> {
-        self.predecessors.iter().map(|(edge_val, pred_arc)| (pred_arc.clone(), edge_val.clone())).collect()
+    pub fn predecessors_with_values(&self) -> impl ExactSizeIterator<Item = (&Arc<Self>, &T)> {
+        self.predecessors.iter().map(|(edge_val, pred_arc)| (pred_arc, edge_val))
     }
     
     /// Direct access to the internal predecessor map: BTreeMap<EdgeValue, Arc<PredecessorNode>>.
@@ -338,10 +337,10 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
     pub fn merge(&mut self, other: Self) {
         self.acc = self.acc.union(&other.acc);
         
-        for (other_edge_val, other_pred_arc) in other.predecessors {
-            match self.predecessors.entry(other_edge_val) { // other_edge_val is cloned if vacant
+        for (other_edge_val, other_pred_arc) in &other.predecessors {
+            match self.predecessors.entry(other_edge_val.clone()) { // other_edge_val is cloned if vacant
                 std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(other_pred_arc);
+                    entry.insert(other_pred_arc.clone());
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
                     // Key collision: merge the GSSNode instances pointed to by the Arcs.
@@ -349,7 +348,7 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
                     let self_pred_node_mut = Arc::make_mut(entry.get_mut());
                     // other_pred_arc is Arc<GSSNode>. Its GSSNode is *other_pred_arc or other_pred_arc.deref().
                     // GSSNode::merge takes other: Self (an owned GSSNode).
-                    self_pred_node_mut.merge((*other_pred_arc).clone());
+                    self_pred_node_mut.merge(other_pred_arc.as_ref().clone());
                 }
             }
         }
@@ -619,7 +618,7 @@ pub fn prune_and_transform_recursive_canonical<T: Clone + Ord + Hash + Debug, A:
                 }
                 new_predecessors_set_for_canonical = current_new_preds_set;
             } else { // Don't recurse, use original predecessors structure (converted to BTreeSet)
-                new_predecessors_set_for_canonical = node_arc.predecessors_with_values();
+                new_predecessors_set_for_canonical = node_arc.predecessors_with_values().map(|(pred_arc, edge_val)| (pred_arc.clone(), edge_val.clone())).collect();
             };
 
             // GSSNode::get_canonical takes BTreeSet and processes it to form its internal BTreeMap structure
