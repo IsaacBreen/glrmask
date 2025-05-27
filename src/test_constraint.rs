@@ -1648,9 +1648,25 @@ fn test_minimized_grammar_causes_panic() -> Result<(), Box<dyn std::error::Error
     println!("\n[Test MRE] Testing the manually defined minimized grammar that causes the panic.");
 
     // 1. Manually define the minimized grammar
+    // P0: start' -> simple_stmts
+    // P1: simple_stmts -> atom simple_stmts[0] simple_stmts[1]
+    // P2: simple_stmts[0] -> ";" atom
+    // P3: simple_stmts[0] ->
+    // P4: simple_stmts[1] -> ";"
+    // P5: elif_stmt -> IGNORE "elif" elif_stmt
+    // P6: atom -> IGNORE "..."
+    // P7: IGNORE -> IGNORE[0]
+    // P8: IGNORE[0] ->
     let minimized_productions = vec![
-        prod("block", vec![t("..."), t(";")]),          // P4
-        prod("elif_stmt", vec![t("elif"), nt("block"), nt("elif_stmt")]), // P5
+        prod("start'", vec![nt("simple_stmts")]), // P0
+        prod("simple_stmts", vec![nt("atom"), nt("simple_stmts[0]"), nt("simple_stmts[1]")]), // P1
+        prod("simple_stmts[0]", vec![t(";"), nt("atom")]), // P2
+        prod("simple_stmts[0]", vec![]), // P3
+        prod("simple_stmts[1]", vec![t(";")]), // P4
+        prod("elif_stmt", vec![nt("IGNORE"), t("elif"), nt("elif_stmt")]), // P5
+        prod("atom", vec![nt("IGNORE"), t("...")]), // P6
+        prod("IGNORE", vec![nt("IGNORE[0]")]), // P7
+        prod("IGNORE[0]", vec![]), // P8
     ];
     let start_production_id_for_minimized = 0; // P0 is the start rule
 
