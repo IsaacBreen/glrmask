@@ -377,7 +377,7 @@ pub trait GSSTrait<T: Clone + Hash, A: PathAccumulator> {
     fn popn(&self, n: usize) -> GSSNode<T, A> where T: Ord + Clone, A: Clone;
 }
 
-impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for GSSNode<T, A> {
+impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A> for GSSNode<T, A> {
     fn push(&self, edge_value: T) -> GSSNode<T, A> {
         self.clone().push(edge_value)
     }
