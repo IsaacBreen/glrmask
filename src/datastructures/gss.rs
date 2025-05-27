@@ -39,7 +39,7 @@ fn compute_internal_hash_key<T: Hash, A: PathAccumulator>(
 pub struct GSSNode<T, A: PathAccumulator> {
     // T is the type of value on edges leading to this node.
     // Nodes themselves do not store a singular T value.
-    pub acc: A, // Accumulator value
+    acc: A, // Accumulator value
     predecessors_with_values: BTreeSet<(Arc<GSSNode<T, A>>, T)>,
     hash_key_cache: u64, // Based on predecessors_with_values' (arcs and T values) hashes only
 }
@@ -209,97 +209,10 @@ impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + De
     ) -> Arc<Self> {
         Self::get_canonical(predecessors_with_values, cache)
     }
-
-    pub fn from_iter_canonical<I>(iter: I, cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>) -> Arc<Self>
-    where
-        I: IntoIterator<Item = (T, A)>,
-    {
-        let mut iter_val = iter.into_iter();
-        let (first_edge_val, root_acc) = iter_val.next().expect("from_iter_canonical requires at least one element");
-
-        let root_state_node = Self::new_canonical(root_acc, cache);
-        let mut current_tip_node = Self::push_onto_canonical(root_state_node, first_edge_val, cache);
-
-        for (edge_val, _acc_ignored) in iter_val {
-            current_tip_node = Self::push_onto_canonical(current_tip_node, edge_val, cache);
-        }
-        current_tip_node
-    }
-
-    pub fn push_onto_canonical(
-        current_top_node: Arc<Self>,
-        edge_value: T,
-        cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>,
-    ) -> Arc<Self> {
-        let mut predecessors_with_values = BTreeSet::new();
-        predecessors_with_values.insert((current_top_node, edge_value));
-        Self::get_canonical(predecessors_with_values, cache)
-    }
-
-    pub fn map_canonical<F_acc, F_edge, U_edge, B_acc>(
-        self_arc: Arc<Self>,
-        f_acc: F_acc,
-        f_edge: F_edge,
-        cache_u_b: &mut HashMap<BTreeSet<(Arc<GSSNode<U_edge, B_acc>>, U_edge)>, Arc<GSSNode<U_edge, B_acc>>>,
-        memo: &mut HashMap<*const GSSNode<T,A>, Arc<GSSNode<U_edge, B_acc>>>,
-    ) -> Arc<GSSNode<U_edge, B_acc>>
-    where
-        F_acc: Copy + Fn(&A) -> B_acc,
-        F_edge: Copy + Fn(&T) -> U_edge,
-        U_edge: Clone + Ord + Hash + Debug,
-        B_acc: PathAccumulator + Clone + Ord + Hash + Debug,
-    {
-        let self_ptr = Arc::as_ptr(&self_arc);
-        if let Some(mapped_arc) = memo.get(&self_ptr) {
-            return mapped_arc.clone();
-        }
-
-        let new_acc_from_closure = f_acc(&self_arc.acc);
-
-        let new_predecessors_with_values_mapped: BTreeSet<(Arc<GSSNode<U_edge, B_acc>>, U_edge)> =
-            self_arc.predecessors_with_values.iter()
-            .map(|(pred_arc_t_a, edge_val_t)| {
-                let mapped_pred_arc = GSSNode::<T, A>::map_canonical(
-                    pred_arc_t_a.clone(),
-                    f_acc,
-                    f_edge,
-                    cache_u_b,
-                    memo
-                );
-                let new_edge_val_u = f_edge(edge_val_t);
-                (mapped_pred_arc, new_edge_val_u)
-            })
-            .collect();
-
-        let new_node_arc = GSSNode::<U_edge, B_acc>::get_canonical(new_predecessors_with_values_mapped, cache_u_b);
-
-        let mut temp_arc = new_node_arc.clone();
-        let node_instance_mut = Arc::make_mut(&mut temp_arc);
-        node_instance_mut.acc = node_instance_mut.acc.union(&new_acc_from_closure);
-
-        memo.insert(self_ptr, temp_arc.clone());
-        temp_arc
-    }
 }
 
 // Public methods (mostly non-canonical)
 impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> { // Added Clone to T and A for self.clone() in push
-    pub fn from_iter<I>(iter: I) -> Self
-    where
-        I: IntoIterator<Item = (T, A)>,
-    {
-        let mut iter_val = iter.into_iter();
-        let (first_edge_val, root_acc) = iter_val.next().expect("from_iter requires at least one element");
-
-        let root_state_node = Self::new(root_acc);
-        let mut current_tip_node = root_state_node.push(first_edge_val);
-
-        for (edge_val, _acc_ignored) in iter_val {
-            current_tip_node = current_tip_node.push(edge_val);
-        }
-        current_tip_node
-    }
-
     pub fn push(self, edge_value: T) -> Self {
         let mut new_node_predecessors_with_values = BTreeSet::new();
         new_node_predecessors_with_values.insert((Arc::new(self), edge_value));

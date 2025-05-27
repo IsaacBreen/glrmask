@@ -353,7 +353,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
         // cur_t: &T was &LLMTokenInfo, now it's stack.acc
         // So, pass stack.acc as cur_acc_from_reducible_node
     ) -> Arc<GSSNode<ParseStateEdgeContent, A>> { // Returns list of new stack tops
-        let cur_acc_from_reducible_node = &stack.acc; // Get it from the stack being reduced
+        let cur_acc_from_reducible_node = &stack.acc(); // Get it from the stack being reduced
 
         let parent = Arc::new(if len == 0 {
             edge_src.push(edge_content.clone())
@@ -384,7 +384,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
 
                     let mut new_gss_node_arc = new_parent_idk.push(goto_node_content);
                     // Now, explicitly set its acc to the computed intersection
-                    new_gss_node_arc.acc = new_acc_for_goto_child;
+                    *new_gss_node_arc.acc_mut() = new_acc_for_goto_child;
 
                     out.merge(new_gss_node_arc);
                 }
