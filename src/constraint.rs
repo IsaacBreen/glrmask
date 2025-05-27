@@ -1144,6 +1144,11 @@ impl<'a> GrammarConstraintState<'a> {
                 managed_parse_state1.merge_with(managed_parse_state2);
             },
             |node, current_glr_parse_state| {
+                // Simplify the GSS forest
+                let nodes: Vec<_> = vec![current_glr_parse_state.active_state.stack.clone()];
+                let simplified_states = simplify_gss_forest(&nodes);
+                current_glr_parse_state.active_state.stack = simplified_states[0].clone();
+
                 let mut active_llm_tokens = HybridBitset::new();
                 active_llm_tokens |= &current_glr_parse_state.active_state.stack.acc.active;
                 let node_ptr = std::ptr::addr_of!(*node);
