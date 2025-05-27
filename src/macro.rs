@@ -21,7 +21,7 @@ macro_rules! debug {
     ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {{
         // --- Configuration ---
         // Define the compile-time debug level (adjust as needed)
-        const MACRO_DEBUG_LEVEL: usize = 4;
+        const MACRO_DEBUG_LEVEL: usize = 2;
         // List of filenames (not full paths) to allow debug messages from.
         // If empty, all files are allowed (respecting MACRO_DEBUG_LEVEL).
         // Example: &["parser.rs", "constraint.rs"]
@@ -67,7 +67,8 @@ macro_rules! debug {
     ($level:expr, $msg:expr) => {{
         // --- Configuration ---
         // Define the compile-time debug level (adjust as needed)
-        const MACRO_DEBUG_LEVEL: usize = 4;
+        const MACRO_DEBUG_LEVEL: usize = 2
+        ;
         // List of filenames (not full paths) to allow debug messages from.
         // If empty, all files are allowed (respecting MACRO_DEBUG_LEVEL).
         // Example: &["parser.rs", "constraint.rs"]
