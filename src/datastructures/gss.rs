@@ -32,7 +32,7 @@ fn compute_internal_hash_key<T: Hash, A: PathAccumulator>(
     predecessors_with_values: &BTreeSet<(Arc<GSSNode<T, A>>, T)>
 ) -> u64 {
     // TODO: delete this
-    return 0;
+    // return 0;
     let mut hasher = DeterministicHasher::new(DefaultHasher::new());
     // The BTreeSet ensures predecessors_with_values are iterated in a canonical order.
     // Order depends on Arc pointer addresses and T values.
@@ -948,7 +948,7 @@ fn simplify_node_recursive<T: Clone + Ord + Hash + Debug, A: PathAccumulator + C
     canonicalization_cache: &mut NodeCache<T, A>,
 ) -> Arc<GSSNode<T, A>> {
     // TODO: delete this
-    return original_node_arc.clone();
+    // return original_node_arc.clone();
     let original_node_ptr = Arc::as_ptr(original_node_arc);
     if let Some(canonical_arc) = memo.get(&original_node_ptr) {
         return canonical_arc.clone();
@@ -981,7 +981,7 @@ pub fn simplify_gss_forest<T: Clone + Ord + Hash + Debug, A: PathAccumulator + C
     roots: &[Arc<GSSNode<T, A>>],
 ) -> Vec<Arc<GSSNode<T, A>>> {
     // TODO: delete this
-    return roots.to_vec();
+    // return roots.to_vec();
     let mut memo: HashMap<*const GSSNode<T, A>, Arc<GSSNode<T, A>>> = HashMap::new();
     let mut canonicalization_cache: NodeCache<T, A> = NodeCache::new();
     let mut simplified_roots_vec = Vec::with_capacity(roots.len());
