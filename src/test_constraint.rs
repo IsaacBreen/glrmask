@@ -1660,9 +1660,9 @@ fn test_minimized_grammar_causes_panic() -> Result<(), Box<dyn std::error::Error
     let minimized_productions = vec![
         prod("start'", vec![nt("simple_stmts")]), // P0
         prod("simple_stmts", vec![nt("yield_expr"), nt("IGNORE[0]"), t("NEWLINE[0]")]), // P1
-        prod("yield_expr", vec![t("yield"), nt("expression")]), // P3
-        prod("expression", vec![nt("factor")]), // P2
-        prod("factor", vec![t("-")]), // P4
+        prod("expression", vec![nt("IGNORE[0]")]), // P2
+        prod("yield_expr", vec![t("\"yield\""), nt("expression")]), // P3
+        prod("factor", vec![t("\"-\"")]), // P4
         prod("IGNORE[0]", vec![t("IGNORE[0][0]")]), // P5
         prod("IGNORE[0]", vec![]), // P6
     ];
