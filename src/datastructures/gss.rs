@@ -254,7 +254,7 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
         if self == other { return; }
         self.acc = self.acc.union(&other.acc);
 
-        for (edge_val, other_pred) in &other.predecessors {
+        for (other_pred, edge_val) in &other.pop_iter() {
             match self.predecessors.entry(edge_val.clone()) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     entry.insert(other_pred.clone());
