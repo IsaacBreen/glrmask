@@ -453,8 +453,8 @@ impl<T: Ord + Hash + PartialEq, A: PathAccumulator + PartialEq> PartialEq for GS
     fn eq(&self, other: &Self) -> bool {
         if std::ptr::eq(self, other) { return true; }
         self.hash_key_cache == other.hash_key_cache &&
-        self.predecessors_with_values == other.predecessors_with_values &&
-        self.acc == other.acc
+        self.acc == other.acc &&
+        self.predecessors_with_values == other.predecessors_with_values
     }
 }
 
@@ -465,8 +465,8 @@ impl<T: Ord + Hash + PartialOrd, A: PathAccumulator + PartialOrd> PartialOrd for
         if std::ptr::eq(self, other) { return Some(Ordering::Equal); }
         match self.hash_key_cache.partial_cmp(&other.hash_key_cache) {
             Some(Ordering::Equal) => {
-                match self.predecessors_with_values.partial_cmp(&other.predecessors_with_values) {
-                    Some(Ordering::Equal) => self.acc.partial_cmp(&other.acc),
+                match self.acc.partial_cmp(&other.acc) {
+                    Some(Ordering::Equal) => self.predecessors_with_values.partial_cmp(&other.predecessors_with_values),
                     other_ordering => other_ordering,
                 }
             }
@@ -479,8 +479,8 @@ impl<T: Ord + Hash, A: PathAccumulator + Ord> Ord for GSSNode<T, A> { // T needs
     fn cmp(&self, other: &Self) -> Ordering {
         if std::ptr::eq(self, other) { return Ordering::Equal; }
         self.hash_key_cache.cmp(&other.hash_key_cache)
-            .then_with(|| self.predecessors_with_values.cmp(&other.predecessors_with_values))
             .then_with(|| self.acc.cmp(&other.acc))
+            .then_with(|| self.predecessors_with_values.cmp(&other.predecessors_with_values))
     }
 }
 
