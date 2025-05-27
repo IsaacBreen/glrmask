@@ -496,8 +496,12 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 
         for (nonterminal, next_item_set) in row.gotos {
             let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
-            let goto = item_set_map.get_by_left(&next_item_set).map_or(Goto::Accept, |&next_state_id| Goto::State(next_state_id));
-            gotos.insert(non_terminal_id, goto);
+            if item_set.is_empty() {
+                gotos.insert(non_terminal_id, Goto::Accept);
+            } else {
+                let goto_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
+                gotos.insert(non_terminal_id, Goto::State(goto_state_id));
+            };
         }
 
         stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos });
