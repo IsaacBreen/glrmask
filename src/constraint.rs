@@ -641,7 +641,7 @@ impl<'r> Precomputer<'r> {
         // Pass 2: Filter edges based on the completable tokens and prune empty edges.
         // This pass modifies the graph in-place.
         let mut visited_nodes_for_pruning_pass = HashSet::new();
-        for root_arc in self.roots.values() {
+        for root_arc in self.roots.clone().values() {
             self.filter_and_prune_edges_recursive(root_arc, &mut visited_nodes_for_pruning_pass, &completable_cache);
         }
         crate::debug!(3, "Completed pass 2 (filter and prune edges).");
@@ -685,7 +685,7 @@ impl<'r> Precomputer<'r> {
         }
 
         // Collect all children Arcs before recursing to avoid holding the lock during recursive calls.
-        let children_arcs_to_visit: Vec<Arc<Mutex<PrecomputeNode>>> = node_guard.children.values()
+        let children_arcs_to_visit: Vec<Arc<Mutex<PrecomputeNode>>> = node_guard.children().values()
             .flat_map(|destinations_map| destinations_map.keys().map(|arc_ptr_wrapper| arc_ptr_wrapper.as_arc().clone()))
             .collect();
         
@@ -721,7 +721,7 @@ impl<'r> Precomputer<'r> {
         // as the iteration depends on the current state of children.
         let children_to_visit_recursively: Vec<Arc<Mutex<PrecomputeNode>>> = {
             let node_guard = node_arc.lock().expect("Mutex poisoned: filter_and_prune_edges_recursive lock (read children)");
-            node_guard.children.values()
+            node_guard.children().values()
                 .flat_map(|destinations_map| destinations_map.keys().map(|arc_ptr_wrapper| arc_ptr_wrapper.as_arc().clone()))
                 .collect()
         }; // Lock is released here.
@@ -731,7 +731,7 @@ impl<'r> Precomputer<'r> {
             let mut node_guard = node_arc.lock().expect("Mutex poisoned: filter_and_prune_edges_recursive lock (modify children)");
             
             // Take ownership of the current children map to build a new one.
-            let original_children_map = std::mem::take(&mut node_guard.children);
+            let original_children_map = std::mem::take(node_guard.children_mut());
             let mut new_children_map_for_current_node = BTreeMap::new();
 
             for (edge_key, destinations_map) in original_children_map {
@@ -756,7 +756,7 @@ impl<'r> Precomputer<'r> {
                         new_destinations_for_this_edge_key.insert(child_arc_ptr_wrapper.clone(), filtered_edge_value);
                     } else {
                         // Edge becomes empty, so it's pruned.
-                        self.stats.edges_pruned_total += 1; 
+                        self.stats.final_edges_pruned_total += 1;
                     }
                 }
                 // If there are any destinations left for this edge key, add them to the new children map.
@@ -765,7 +765,7 @@ impl<'r> Precomputer<'r> {
                 }
             }
             // Replace the node's children with the new, filtered map.
-            node_guard.children = new_children_map_for_current_node;
+            *node_guard.children_mut() = new_children_map_for_current_node;
         } // Lock is released here.
 
         // Step 3: Recurse on the children collected in Step 1.
