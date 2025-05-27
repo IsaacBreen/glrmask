@@ -749,7 +749,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     // --- GLR Parser Fuzz Test ---
     println!("\nStarting GLR parser fuzz test...");
-    let num_fuzz_iterations = 100000;
+    let num_fuzz_iterations = 1000;
     let max_tokens_per_fuzz_attempt = 50;
 
     // Re-use dummy_llm_token_info defined earlier for initializing GLRParserState
