@@ -1213,8 +1213,8 @@ impl<'a> GrammarConstraintState<'a> {
         // Simplify the GSS forest
         let mut roots = Vec::new();
         let mut tokenizer_state_id_to_root_pos = BTreeMap::new();
-        for (i, (tokenizer_state_id, glr_state)) in self.state.iter().enumerate() { // Renamed tokenizer_state_id
-            let root = glr_state.active_state.stack.clone();
+        for (i, (tokenizer_state_id, glr_state)) in self.state.iter_mut().enumerate() { // Renamed tokenizer_state_id
+            let root = &mut glr_state.active_state.stack;
             roots.push(root);
             tokenizer_state_id_to_root_pos.insert(*tokenizer_state_id, i);
         }
@@ -1222,15 +1222,10 @@ impl<'a> GrammarConstraintState<'a> {
         let mut i = 0;
         GSSNode::simplify_together(&mut roots);
         crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&roots));
-        GSSNode::simplify_together(&mut roots);
-        crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&roots));
-        GSSNode::simplify_together(&mut roots);
-        crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&roots));
-        for (tokenizer_state_id, glr_state) in self.state.iter_mut() {
-            let simplified_root = roots[tokenizer_state_id_to_root_pos[&tokenizer_state_id]].clone();
-            glr_state.active_state.stack = simplified_root;
-            i += 1;
-        }
+        // GSSNode::simplify_together(&mut roots);
+        // crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&roots));
+        // GSSNode::simplify_together(&mut roots);
+        // crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&roots));
 
         // Print each GSS
         for (tokenizer_state_id, glr_state) in self.state.iter() {

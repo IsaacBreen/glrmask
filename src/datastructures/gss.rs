@@ -677,25 +677,25 @@ pub struct GSSStats {
     pub average_predecessors_with_values: f64,
 }
 
-pub fn gather_gss_stats<T, A: PathAccumulator>(roots: &[Arc<GSSNode<T, A>>]) -> GSSStats {
+pub fn gather_gss_stats<T, A: PathAccumulator>(roots: &[impl AsRef<GSSNode<T, A>>]) -> GSSStats {
     let mut stats = GSSStats::default();
     stats.num_roots = roots.len();
 
     let mut q_visited: HashSet<*const GSSNode<T, A>> = HashSet::new(); // Tracks nodes added to queue
     let mut processed_nodes: HashSet<*const GSSNode<T, A>> = HashSet::new(); // Tracks nodes fully processed by BFS
-    let mut queue: VecDeque<(Arc<GSSNode<T, A>>, usize)> = VecDeque::new();
+    let mut queue: VecDeque<(&GSSNode<T, A>, usize)> = VecDeque::new();
 
     let mut total_depth_sum: u64 = 0;
     let mut total_preds_w_vals_sum: u64 = 0;
 
-    for root_arc in roots {
-        if q_visited.insert(Arc::as_ptr(root_arc)) {
-            queue.push_back((root_arc.clone(), 0));
+    for root_deref in roots {
+        if q_visited.insert(root_deref.as_ref()) {
+            queue.push_back((root_deref.as_ref(), 0));
         }
     }
 
     while let Some((current_node_arc, current_depth)) = queue.pop_front() {
-        if !processed_nodes.insert(Arc::as_ptr(&current_node_arc)) {
+        if !processed_nodes.insert(current_node_arc) {
             continue;
         }
 
@@ -714,8 +714,8 @@ pub fn gather_gss_stats<T, A: PathAccumulator>(roots: &[Arc<GSSNode<T, A>>]) -> 
         }
 
         for (pred_arc, _edge_val) in &current_node_arc.predecessors_with_values {
-            if q_visited.insert(Arc::as_ptr(pred_arc)) {
-                queue.push_back((pred_arc.clone(), current_depth + 1));
+            if q_visited.insert(pred_arc.as_ref()) {
+                queue.push_back((pred_arc.as_ref(), current_depth + 1));
             }
         }
     }
@@ -890,11 +890,11 @@ impl<T: Ord + Hash + Clone + Debug, A: PathAccumulator + Clone> GSSNode<T, A> {
         *this = simplify_node_recursive(&Arc::new(this.as_ref().clone()), memo, canonicalization_cache);
     }
 
-    pub fn simplify_together(nodes: &mut [Arc<GSSNode<T, A>>]) {
+    pub fn simplify_together(nodes: &mut [&mut Arc<GSSNode<T, A>>]) {
         let mut memo: HashMap<*const GSSNode<T, A>, Arc<GSSNode<T, A>>> = HashMap::new();
         let mut canonicalization_cache: HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>> = HashMap::<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>::new();
         for node in nodes {
-            *node = simplify_node_recursive(node, &mut memo, &mut canonicalization_cache);
+            **node = simplify_node_recursive(node, &mut memo, &mut canonicalization_cache);
         }
     }
 }
