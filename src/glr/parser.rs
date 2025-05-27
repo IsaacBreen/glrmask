@@ -386,7 +386,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
                     // Now, explicitly set its acc to the computed intersection
                     *new_gss_node_arc.acc_mut() = new_acc_for_goto_child;
 
-                    out.merge(new_gss_node_arc);
+                    out.merge(&new_gss_node_arc);
                 }
                 Goto::Accept => {
                     // No action needed for Accept
@@ -597,7 +597,7 @@ impl<A: PathAccumulator> ParseState<A> { // Generic over Accumulator A
     /// Merges `other` into `self`. Assumes `self.key() == other.key()`.
     /// Merges the GSS structures and combines the `acc` value at the top node using `PathAccumulator::union`.
     pub fn merge(&mut self, other: ParseState<A>) {
-        Arc::make_mut(&mut self.stack).merge(Arc::unwrap_or_clone(other.stack));
+        Arc::make_mut(&mut self.stack).merge(&other.stack);
     }
 }
 

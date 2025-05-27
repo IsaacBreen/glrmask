@@ -110,7 +110,7 @@ fn process_incoming_predecessors<T: Ord + Hash + Clone, A: PathAccumulator + Clo
             for other_arc in iter {
                 // GSSNode::merge takes other: Self (an owned GSSNode).
                 // We get GSSNode by dereferencing other_arc and cloning.
-                merged_node_owned.merge((*other_arc).clone());
+                merged_node_owned.merge(&other_arc);
             }
             // Store the Arc to the newly created/merged GSSNode.
             final_predecessors_map.insert(edge_val, Arc::new(merged_node_owned));
@@ -278,7 +278,7 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
     pub fn pop_into(&self, mut result: GSSNode<T, A>) -> GSSNode<T, A> {
         // Iterates over (Arc<Node>, T) pairs using the compatibility method.
         for (pred_arc, _edge_val) in self.predecessors_with_values() {
-            result.merge(pred_arc.as_ref().clone());
+            result.merge(&pred_arc);
         }
         result
     }
@@ -334,7 +334,7 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
         PathsIter { queue }
     }
 
-    pub fn merge(&mut self, other: Self) {
+    pub fn merge(&mut self, other: &Self) {
         self.acc = self.acc.union(&other.acc);
         
         for (other_edge_val, other_pred_arc) in &other.predecessors {
@@ -348,7 +348,7 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
                     let self_pred_node_mut = Arc::make_mut(entry.get_mut());
                     // other_pred_arc is Arc<GSSNode>. Its GSSNode is *other_pred_arc or other_pred_arc.deref().
                     // GSSNode::merge takes other: Self (an owned GSSNode).
-                    self_pred_node_mut.merge(other_pred_arc.as_ref().clone());
+                    self_pred_node_mut.merge(&other_pred_arc);
                 }
             }
         }
@@ -359,7 +359,7 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
 
     pub fn merged(self, other: Self) -> Self {
         let mut merged_node = self.clone(); // Clone self to start
-        merged_node.merge(other); // Merge other into it
+        merged_node.merge(&other); // Merge other into it
         merged_node
     }
 
@@ -486,7 +486,7 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for GSSNo
         // This node_representing_new_link will have `self` as its predecessor via `edge_value`,
         // and its accumulator will be `self.acc`.
         // Merging this into `dest` adds this path and updates `dest.acc`.
-        dest.merge(node_representing_new_link);
+        dest.merge(&node_representing_new_link);
     }
 
     fn pop(&self) -> GSSNode<T, A> {
@@ -508,7 +508,7 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for Arc<G
     fn push_to(&self, _edge_value: T, dest: &mut GSSNode<T, A>) {
         // This matches the original peculiar implementation for Arc<GSSNode>,
         // which ignores edge_value and does a specific acc adjustment.
-        dest.merge(self.as_ref().clone()); // Merge the GSSNode data from self (Arc)
+        dest.merge(&self.as_ref().clone()); // Merge the GSSNode data from self (Arc)
         dest.acc = dest.acc.pop(&self.acc); // Adjust accumulator
     }
 
@@ -543,7 +543,7 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A>
                 // Consistent with Arc's push_to: merge a default node and pop its acc.
                 // edge_value is unused here, as in Arc's push_to.
                 let default_node = GSSNode::new(A::default());
-                dest.merge(default_node.clone()); 
+                dest.merge(&default_node);
                 dest.acc = dest.acc.pop(&default_node.acc); 
             }
         }

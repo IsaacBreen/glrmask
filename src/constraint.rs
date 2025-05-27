@@ -69,7 +69,7 @@ impl Default for LLMTokenInfo {
 impl PathAccumulator for LLMTokenInfo {
     fn union(&self, other: &Self) -> Self {
         let mut terminals = self.terminals.clone();
-        Arc::make_mut(&mut terminals).merge(other.terminals.as_ref().clone());
+        Arc::make_mut(&mut terminals).merge(&other.terminals);
         Self {
             active:       &self.active | &other.active,
             intersection: &self.intersection & &other.intersection, // Intersection field becomes stricter (AND)
