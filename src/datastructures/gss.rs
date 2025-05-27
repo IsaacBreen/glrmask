@@ -18,17 +18,13 @@ impl PathAccumulator for () {
 }
 
 // Helper function to compute a node's hash_key_cache.
-// This is used by both canonical and non-canonical node creation.
 // T is the type of the value on the edge.
 fn compute_internal_hash_key<T: Hash, A: PathAccumulator>(
-    predecessors_with_values: &BTreeSet<(Arc<GSSNode<T, A>>, T)>
+    predecessors: &BTreeMap<T, Arc<GSSNode<T, A>>>
 ) -> u64 {
-    // TODO: delete this
-    // return 0;
     let mut hasher = DeterministicHasher::new(DefaultHasher::new());
-    // The BTreeSet ensures predecessors_with_values are iterated in a canonical order.
-    // Order depends on Arc pointer addresses and T values.
-    for (pred_arc, edge_val) in predecessors_with_values {
+    // The BTreeMap ensures predecessors are iterated in a canonical order based on T.
+    for (edge_val, pred_arc) in predecessors {
         edge_val.hash(&mut hasher);
         pred_arc.hash_key_cache.hash(&mut hasher); // Hash predecessor's hash
     }
@@ -37,11 +33,11 @@ fn compute_internal_hash_key<T: Hash, A: PathAccumulator>(
 
 #[derive(Debug, Clone)]
 pub struct GSSNode<T, A: PathAccumulator> {
-    // T is the type of value on edges leading to this node.
-    // Nodes themselves do not store a singular T value.
     acc: A, // Accumulator value
-    predecessors_with_values: BTreeSet<(Arc<GSSNode<T, A>>, T)>,
-    hash_key_cache: u64, // Based on predecessors_with_values' (arcs and T values) hashes only
+    // Predecessors are stored as a map from edge value to the predecessor node.
+    // For a given edge value T, there's one (potentially merged) predecessor node.
+    predecessors: BTreeMap<T, Arc<GSSNode<T, A>>>,
+    hash_key_cache: u64, // Based on predecessors' (T values and Arcs) hashes only
 }
 
 /// An iterator over all paths leading to a GSS node.
@@ -61,14 +57,15 @@ impl<'a, T: Clone, A: PathAccumulator> Iterator for PathsIter<'a, T, A> {
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some((current_node_ref, mut path_suffix_reversed)) = self.queue.pop_front() {
-            if current_node_ref.predecessors_with_values.is_empty() {
+            if current_node_ref.predecessors.is_empty() {
                 // This node is a root for the current path.
                 // The path is complete. Reverse it to get the correct order.
                 path_suffix_reversed.reverse();
                 return Some(path_suffix_reversed);
             } else {
                 // This node has predecessors. Add them to the queue for further exploration.
-                for (pred_arc, edge_val) in &current_node_ref.predecessors_with_values {
+                // Iterate over BTreeMap: (edge_val, pred_arc)
+                for (edge_val, pred_arc) in &current_node_ref.predecessors {
                     let mut new_path_suffix_reversed = path_suffix_reversed.clone();
                     // The edge_val leads from pred_arc to current_node_ref.
                     // So, it's the next segment when tracing the path "upwards".
@@ -83,16 +80,57 @@ impl<'a, T: Clone, A: PathAccumulator> Iterator for PathsIter<'a, T, A> {
     }
 }
 
+// Helper function to process incoming predecessors from a BTreeSet format
+// into the internal BTreeMap format, merging nodes if multiple predecessors
+// arrive with the same edge value.
+// T needs Ord for BTreeMap key, Hash for GSSNode (indirectly), Clone for map storage.
+// A needs PathAccumulator + Clone for GSSNode::merge and Arc::new.
+fn process_incoming_predecessors<T: Ord + Hash + Clone, A: PathAccumulator + Clone>(
+    incoming_preds_set: &BTreeSet<(Arc<GSSNode<T, A>>, T)>
+) -> BTreeMap<T, Arc<GSSNode<T, A>>> {
+    let mut grouped_by_edge_val: BTreeMap<T, Vec<Arc<GSSNode<T, A>>>> = BTreeMap::new();
+    for (pred_arc, edge_val) in incoming_preds_set {
+        // Clone edge_val for key, pred_arc for vec storage
+        grouped_by_edge_val.entry(edge_val.clone()).or_default().push(pred_arc.clone());
+    }
+
+    let mut final_predecessors_map: BTreeMap<T, Arc<GSSNode<T, A>>> = BTreeMap::new();
+    for (edge_val, pred_arcs_list) in grouped_by_edge_val {
+        if pred_arcs_list.is_empty() { continue; } // Should not happen if built from BTreeSet
+
+        let mut iter = pred_arcs_list.into_iter();
+        let first_arc = iter.next().unwrap(); // Safe due to is_empty check and or_default
+
+        if iter.len() == 0 { // Only one predecessor Arc for this edge_val
+            final_predecessors_map.insert(edge_val, first_arc);
+        } else { // Multiple predecessor Arcs for this edge_val, their GSSNodes need to be merged
+            // Start with the GSSNode from the first_arc (cloned, as we'll modify it via merge)
+            let mut merged_node_owned = (*first_arc).clone();
+            // Merge GSSNodes from subsequent Arcs into it
+            for other_arc in iter {
+                // GSSNode::merge takes other: Self (an owned GSSNode).
+                // We get GSSNode by dereferencing other_arc and cloning.
+                merged_node_owned.merge((*other_arc).clone());
+            }
+            // Store the Arc to the newly created/merged GSSNode.
+            final_predecessors_map.insert(edge_val, Arc::new(merged_node_owned));
+        }
+    }
+    final_predecessors_map
+}
+
 
 // Methods for creating non-canonical GSSNode instances
-impl<T: Ord + Hash, A: PathAccumulator> GSSNode<T, A> { // T needs Ord for BTreeSet key part, Hash for hash_key_cache
+// T needs Ord + Hash + Clone for BTreeMap key and GSSNode requirements.
+// A needs PathAccumulator + Clone for GSSNode storage and operations.
+impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
     /// Creates a new root GSSNode (no predecessors).
     pub fn new(acc: A) -> Self {
-        let predecessors_with_values = BTreeSet::new();
-        let hash_key_cache = compute_internal_hash_key::<T, A>(&predecessors_with_values);
+        let predecessors = BTreeMap::new();
+        let hash_key_cache = compute_internal_hash_key::<T, A>(&predecessors);
         Self {
             acc,
-            predecessors_with_values,
+            predecessors,
             hash_key_cache,
         }
     }
@@ -101,86 +139,110 @@ impl<T: Ord + Hash, A: PathAccumulator> GSSNode<T, A> { // T needs Ord for BTree
         Self::new(A::default())
     }
 
-    /// Creates a new GSSNode with specified predecessors and edge values.
-    /// The accumulator `acc` is derived from the union of predecessor accumulators.
-    pub fn new_with_predecessors(predecessors_with_values: BTreeSet<(Arc<Self>, T)>) -> Self {
-        let unioned_acc = if predecessors_with_values.is_empty() {
+    /// Creates a new GSSNode. Predecessors are provided as a BTreeSet of (Arc<Node>, EdgeValue).
+    /// If multiple predecessors in the set have the same edge value, their pointed-to GSSNodes are merged.
+    /// The accumulator `acc` is derived from the union of (merged) predecessor accumulators.
+    pub fn new_with_predecessors(predecessors_with_values_set: BTreeSet<(Arc<Self>, T)>) -> Self {
+        // Process the input set into the BTreeMap structure, merging nodes as needed.
+        let processed_predecessors_map = process_incoming_predecessors(&predecessors_with_values_set);
+
+        let unioned_acc = if processed_predecessors_map.is_empty() {
             A::default()
         } else {
-            let mut iter = predecessors_with_values.iter();
-            // .unwrap() is safe because predecessors_with_values is not empty in this branch.
-            let mut acc_val = iter.next().unwrap().0.acc.clone(); // .0 accesses the Arc<GSSNode>
-            for (pred_arc, _) in iter {
+            let mut iter = processed_predecessors_map.values();
+            // .unwrap() is safe because processed_predecessors_map is not empty in this branch.
+            let mut acc_val = iter.next().unwrap().acc.clone(); // .acc from Arc<GSSNode>
+            for pred_arc in iter {
                 acc_val = acc_val.union(&pred_arc.acc);
             }
             acc_val
         };
-        let hash_key_cache = compute_internal_hash_key::<T, A>(&predecessors_with_values);
+        let hash_key_cache = compute_internal_hash_key::<T, A>(&processed_predecessors_map);
         Self {
             acc: unioned_acc,
-            predecessors_with_values,
+            predecessors: processed_predecessors_map,
             hash_key_cache,
         }
     }
 
-    pub fn predecessors_with_values(&self) -> &BTreeSet<(Arc<Self>, T)> {
-        &self.predecessors_with_values
+    /// For compatibility: returns predecessors in the BTreeSet<(Arc<Node>, EdgeValue)> format.
+    pub fn predecessors_with_values(&self) -> BTreeSet<(Arc<Self>, T)> {
+        self.predecessors.iter().map(|(edge_val, pred_arc)| (pred_arc.clone(), edge_val.clone())).collect()
+    }
+    
+    /// Direct access to the internal predecessor map: BTreeMap<EdgeValue, Arc<PredecessorNode>>.
+    pub fn predecessors(&self) -> &BTreeMap<T, Arc<Self>> {
+        &self.predecessors
     }
 
     pub fn is_empty(&self) -> bool {
-        self.predecessors_with_values.is_empty()
+        self.predecessors.is_empty()
     }
 }
 
 // Methods involving canonicalization
+// T needs Clone + Ord + Hash + Debug. A needs PathAccumulator + Clone + Ord + Hash + Debug.
 impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug> GSSNode<T, A> {
     /// Internal method to get/create a canonical Arc<GSSNode<T, A>>.
-    /// A node is defined by its set of (predecessor_node, edge_value_T) pairs.
+    /// A node is defined by its set of (edge_value_T, predecessor_node) pairs.
+    /// Input `predecessors_with_values_set` defines the structure.
     fn get_canonical(
-        predecessors_with_values: BTreeSet<(Arc<Self>, T)>, // Consumed
-        cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>,
+        predecessors_with_values_set: BTreeSet<(Arc<Self>, T)>, // Consumed (effectively, as processed)
+        cache: &mut HashMap<BTreeMap<T, Arc<GSSNode<T, A>>>, Arc<GSSNode<T, A>>>, // Cache key is BTreeMap
     ) -> Arc<Self> {
-        let key_for_lookup = predecessors_with_values.clone();
+        // Process the input BTreeSet into the canonical BTreeMap structure.
+        // This map will be used as the cache key.
+        let key_for_lookup_map = process_incoming_predecessors(&predecessors_with_values_set);
 
-        let current_context_unioned_acc = if predecessors_with_values.is_empty() {
+        // Calculate the accumulator based on the structure defined by key_for_lookup_map.
+        // This accumulator represents the combined state flowing from predecessors.
+        let current_context_unioned_acc = if key_for_lookup_map.is_empty() {
             A::default()
         } else {
-            let mut iter = predecessors_with_values.iter();
-            let mut acc_val = iter.next().unwrap().0.acc.clone();
-            for (pred_arc, _) in iter {
+            let mut iter = key_for_lookup_map.values();
+            let mut acc_val = iter.next().unwrap().acc.clone();
+            for pred_arc in iter {
                 acc_val = acc_val.union(&pred_arc.acc);
             }
             acc_val
         };
 
-        if let Some(entry_arc) = cache.get_mut(&key_for_lookup) {
+        if let Some(entry_arc) = cache.get_mut(&key_for_lookup_map) {
+            // Node with this structure already exists. Union accumulator.
             let new_potential_acc = entry_arc.acc.union(&current_context_unioned_acc);
             if new_potential_acc != entry_arc.acc {
-                let mut temp_arc = entry_arc.clone();
+                // Accumulator changed. Need to update the GSSNode inside the Arc.
+                // Arc::make_mut will clone the GSSNode if entry_arc is shared.
+                let mut temp_arc = entry_arc.clone(); 
                 let node_instance_mut = Arc::make_mut(&mut temp_arc);
                 node_instance_mut.acc = new_potential_acc;
-                *entry_arc = temp_arc.clone();
+                *entry_arc = temp_arc.clone(); // Update cache with the (potentially new) Arc
                 return temp_arc;
             }
-            return entry_arc.clone();
+            return entry_arc.clone(); // Return existing Arc if acc didn't change
         }
 
-        let hash_key_cache = compute_internal_hash_key::<T, A>(&predecessors_with_values);
+        // Node not in cache, create a new canonical one.
+        let hash_key_cache = compute_internal_hash_key::<T, A>(&key_for_lookup_map);
         let new_node = GSSNode {
-            acc: current_context_unioned_acc,
-            predecessors_with_values,
+            acc: current_context_unioned_acc, // Use the just-computed unioned acc
+            predecessors: key_for_lookup_map.clone(), // Store the processed map
             hash_key_cache,
         };
         let new_node_arc = Arc::new(new_node);
-        cache.insert(key_for_lookup, new_node_arc.clone());
+        cache.insert(key_for_lookup_map, new_node_arc.clone());
         new_node_arc
     }
 
     /// Creates a new canonical root GSSNode (no predecessors) with a specific initial accumulator.
-    pub fn new_canonical(initial_acc: A, cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>) -> Arc<Self> {
-        let predecessors_with_values = BTreeSet::new();
-        let key = predecessors_with_values.clone();
-        if let Some(entry_arc) = cache.get_mut(&key) {
+    pub fn new_canonical(
+        initial_acc: A, 
+        cache: &mut HashMap<BTreeMap<T, Arc<GSSNode<T, A>>>, Arc<GSSNode<T, A>>> // Cache key is BTreeMap
+    ) -> Arc<Self> {
+        let predecessors_map_key = BTreeMap::new(); // Empty map for root node key
+        
+        if let Some(entry_arc) = cache.get_mut(&predecessors_map_key) {
+            // Root node (by structure) exists. Union with initial_acc.
             let new_potential_acc = entry_arc.acc.union(&initial_acc);
              if new_potential_acc != entry_arc.acc {
                 let mut temp_arc = entry_arc.clone();
@@ -192,34 +254,37 @@ impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + De
             return entry_arc.clone();
         }
 
-        let hash_key_cache = compute_internal_hash_key::<T, A>(&predecessors_with_values);
+        // Create new canonical root node.
+        let hash_key_cache = compute_internal_hash_key::<T, A>(&predecessors_map_key);
         let new_node_arc = Arc::new(GSSNode {
-            acc: initial_acc,
-            predecessors_with_values,
+            acc: initial_acc, // Use provided initial_acc
+            predecessors: predecessors_map_key.clone(), // Empty map
             hash_key_cache,
         });
-        cache.insert(key, new_node_arc.clone());
+        cache.insert(predecessors_map_key, new_node_arc.clone());
         new_node_arc
     }
 }
 
 // Public methods (mostly non-canonical)
-impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> { // Added Clone to T and A for self.clone() in push
+impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
     pub fn push(self, edge_value: T) -> Self {
+        // Create a BTreeSet representing the new predecessor link.
         let mut new_node_predecessors_with_values = BTreeSet::new();
         new_node_predecessors_with_values.insert((Arc::new(self), edge_value));
+        // new_with_predecessors handles processing this set into BTreeMap.
         Self::new_with_predecessors(new_node_predecessors_with_values)
     }
 
     pub fn pop_into(&self, mut result: GSSNode<T, A>) -> GSSNode<T, A> {
-        for (pred_arc, edge_val) in self.predecessors_with_values() {
+        // Iterates over (Arc<Node>, T) pairs using the compatibility method.
+        for (pred_arc, _edge_val) in self.predecessors_with_values() {
             result.merge(pred_arc.as_ref().clone());
         }
         result
     }
 
     pub fn pop(&self) -> GSSNode<T, A> {
-        // self.clone()
         self.pop_into(GSSNode::new_default())
     }
 
@@ -245,11 +310,12 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> { // Added
         q_flatten.push_back((self, Vec::new()));
 
         while let Some((current_node_ref, mut path_suffix)) = q_flatten.pop_front() {
-            if current_node_ref.predecessors_with_values.is_empty() {
-                path_suffix.reverse();
+            if current_node_ref.predecessors.is_empty() {
+                path_suffix.reverse(); // Path built in reverse, correct it.
                 result_paths.push(path_suffix);
             } else {
-                for (pred_arc, edge_val) in &current_node_ref.predecessors_with_values {
+                // Iterate BTreeMap: (edge_val, pred_arc)
+                for (edge_val, pred_arc) in &current_node_ref.predecessors {
                     let mut new_path_suffix = path_suffix.clone();
                     new_path_suffix.push((edge_val.clone(), current_node_ref.acc.clone()));
                     q_flatten.push_back((pred_arc.as_ref(), new_path_suffix));
@@ -263,66 +329,87 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> { // Added
         nodes.iter().flat_map(|node_arc| node_arc.as_ref().flatten()).collect()
     }
 
-    /// Returns an iterator over all paths that terminate at this GSS node.
-    ///
-    /// Each path is a `Vec<T>` containing the sequence of edge values from a root
-    /// of the GSS graph to this node. The paths are yielded as they are found by
-    /// a breadth-first search-like traversal upwards from this node.
-    ///
-    /// Example: If node C has a predecessor B with edge value `val_bc`, and B has
-    /// a predecessor A (a root) with edge value `val_ab`, then one path yielded
-    /// for `C.iter_paths()` would be `vec![val_ab, val_bc]`.
     pub fn iter_paths(&self) -> PathsIter<'_, T, A> {
         let mut queue = VecDeque::new();
-        // Start traversal from `self` with an empty path suffix.
-        queue.push_back((self, Vec::new()));
+        queue.push_back((self, Vec::new())); // Start with self, empty path suffix
         PathsIter { queue }
     }
 
-    pub fn merge(&mut self, mut other: Self) {
+    pub fn merge(&mut self, other: Self) {
         self.acc = self.acc.union(&other.acc);
-        self.predecessors_with_values.append(&mut other.predecessors_with_values);
-        self.hash_key_cache = compute_internal_hash_key::<T, A>(&self.predecessors_with_values);
+        
+        for (other_edge_val, other_pred_arc) in other.predecessors {
+            match self.predecessors.entry(other_edge_val) { // other_edge_val is cloned if vacant
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(other_pred_arc);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    // Key collision: merge the GSSNode instances pointed to by the Arcs.
+                    // Arc::make_mut ensures we have a mutable reference, cloning GSSNode if necessary.
+                    let self_pred_node_mut = Arc::make_mut(entry.get_mut());
+                    // other_pred_arc is Arc<GSSNode>. Its GSSNode is *other_pred_arc or other_pred_arc.deref().
+                    // GSSNode::merge takes other: Self (an owned GSSNode).
+                    self_pred_node_mut.merge((*other_pred_arc).clone());
+                }
+            }
+        }
+        // Recompute hash key cache as predecessors might have changed structurally,
+        // Arcs might have been replaced, or GSSNodes inside Arcs might have changed.
+        self.hash_key_cache = compute_internal_hash_key::<T, A>(&self.predecessors);
     }
 
     pub fn merged(self, other: Self) -> Self {
-        let mut merged = self.clone();
-        merged.merge(other);
-        merged
+        let mut merged_node = self.clone(); // Clone self to start
+        merged_node.merge(other); // Merge other into it
+        merged_node
     }
 
     pub fn map<F_edge, U_edge>(&self, f_edge: F_edge) -> GSSNode<U_edge, A>
     where
         F_edge: Copy + Fn(&T) -> U_edge,
-        U_edge: Ord + Hash + Clone, // Clone for BTreeSet if U_edge is part of key
-        A: PathAccumulator + Clone,
+        U_edge: Ord + Hash + Clone, // U_edge needs these for BTreeMap key and GSSNode reqs
+        A: PathAccumulator + Clone, // A remains the same type
     {
-        let new_predecessors_with_values: BTreeSet<(Arc<GSSNode<U_edge, A>>, U_edge)> =
-            self.predecessors_with_values.iter()
-            .map(|(pred_arc_t_a, edge_val_t)| {
+        // Produces a BTreeSet<(Arc<GSSNode<U_edge, A>>, U_edge)>
+        // This set will be processed by new_with_predecessors into BTreeMap.
+        let new_predecessors_as_set: BTreeSet<(Arc<GSSNode<U_edge, A>>, U_edge)> =
+            self.predecessors.iter() // Iterate current BTreeMap<T, Arc<GSSNode<T,A>>>
+            .map(|(edge_val_t, pred_arc_t_a)| { // Item is (&T, &Arc<GSSNode<T,A>>)
+                // Recursively map the predecessor node.
                 let mapped_pred_arc = Arc::new(pred_arc_t_a.as_ref().map(f_edge));
+                // Transform the current edge value.
                 let new_edge_val_u = f_edge(edge_val_t);
+                // Create tuple for the BTreeSet: (Arc<GSSNode<U,A>>, U_edge)
                 (mapped_pred_arc, new_edge_val_u)
             })
             .collect();
 
-        GSSNode::<U_edge, A>::new_with_predecessors(new_predecessors_with_values)
+        // Create new GSSNode of type GSSNode<U_edge, A> using the set.
+        GSSNode::<U_edge, A>::new_with_predecessors(new_predecessors_as_set)
     }
 }
 
 impl<T, A: PathAccumulator> Drop for GSSNode<T, A> {
     fn drop(&mut self) {
-        let predecessors_to_process_further = std::mem::take(&mut self.predecessors_with_values);
-        let mut worklist: Vec<Arc<GSSNode<T, A>>> = predecessors_to_process_further
+        // Take ownership of the predecessor Arcs from the BTreeMap
+        let predecessors_map = std::mem::take(&mut self.predecessors);
+        // Collect Arcs from the map's values into the worklist
+        let mut worklist: Vec<Arc<GSSNode<T, A>>> = predecessors_map
             .into_iter()
-            .map(|(p_arc, _)| p_arc)
+            .map(|(_edge_val, pred_arc)| pred_arc) // Extract Arcs
             .collect();
 
+        // Iteratively try to break cycles / drop unreferenced nodes
         while let Some(node_arc) = worklist.pop() {
+            // If this Arc is the last strong reference to the GSSNode
             if Arc::strong_count(&node_arc) == 1 {
+                // Try to obtain mutable ownership of the GSSNode.
+                // This succeeds if node_arc was indeed the last strong reference.
                 if let Ok(mut inner_node) = Arc::try_unwrap(node_arc) {
-                    let inner_preds = std::mem::take(&mut inner_node.predecessors_with_values);
-                    worklist.extend(inner_preds.into_iter().map(|(p,_)| p));
+                    // Take inner node's predecessors (which is a BTreeMap)
+                    let inner_preds_map = std::mem::take(&mut inner_node.predecessors);
+                    // Extend worklist with Arcs from this map's values
+                    worklist.extend(inner_preds_map.into_iter().map(|(_, p_arc)| p_arc));
                 }
             }
         }
@@ -335,24 +422,31 @@ impl<T: Hash, A: PathAccumulator> Hash for GSSNode<T, A> {
     }
 }
 
-impl<T: Ord + Hash + PartialEq, A: PathAccumulator + PartialEq> PartialEq for GSSNode<T, A> { // T needs Ord for BTreeSet
+// T needs Ord + Hash for BTreeMap keys and GSSNode requirements.
+// PartialEq for T and Arc<GSSNode> (which means GSSNode needs PartialEq).
+impl<T: Ord + Hash + PartialEq, A: PathAccumulator + PartialEq> PartialEq for GSSNode<T, A> {
     fn eq(&self, other: &Self) -> bool {
-        if std::ptr::eq(self, other) { return true; }
+        if std::ptr::eq(self, other) { return true; } // Same instance
+        // hash_key_cache is a primary distinguisher for structure.
+        // acc and predecessors (BTreeMap) must also match.
+        // BTreeMap's PartialEq compares keys and then values. Arc<GSSNode> values are compared by pointer.
+        // This is suitable for canonical GSS where identical structures should yield pointer-equal Arcs.
         self.hash_key_cache == other.hash_key_cache &&
         self.acc == other.acc &&
-        self.predecessors_with_values == other.predecessors_with_values
+        self.predecessors == other.predecessors
     }
 }
 
-impl<T: Ord + Hash + Eq, A: PathAccumulator + Eq> Eq for GSSNode<T, A> {} // T needs Ord for BTreeSet
+impl<T: Ord + Hash + Eq, A: PathAccumulator + Eq> Eq for GSSNode<T, A> {} // Marker trait
 
-impl<T: Ord + Hash + PartialOrd, A: PathAccumulator + PartialOrd> PartialOrd for GSSNode<T, A> { // T needs Ord for BTreeSet
+// T needs Ord + Hash for BTreeMap keys. PartialOrd for T and Arc<GSSNode>.
+impl<T: Ord + Hash + PartialOrd, A: PathAccumulator + PartialOrd> PartialOrd for GSSNode<T, A> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         if std::ptr::eq(self, other) { return Some(Ordering::Equal); }
         match self.hash_key_cache.partial_cmp(&other.hash_key_cache) {
             Some(Ordering::Equal) => {
                 match self.acc.partial_cmp(&other.acc) {
-                    Some(Ordering::Equal) => self.predecessors_with_values.partial_cmp(&other.predecessors_with_values),
+                    Some(Ordering::Equal) => self.predecessors.partial_cmp(&other.predecessors),
                     other_ordering => other_ordering,
                 }
             }
@@ -361,65 +455,62 @@ impl<T: Ord + Hash + PartialOrd, A: PathAccumulator + PartialOrd> PartialOrd for
     }
 }
 
-impl<T: Ord + Hash, A: PathAccumulator + Ord> Ord for GSSNode<T, A> { // T needs Ord for BTreeSet
+// T needs Ord + Hash. A needs Ord. Arc<GSSNode> needs Ord (pointer comparison).
+impl<T: Ord + Hash, A: PathAccumulator + Ord> Ord for GSSNode<T, A> {
     fn cmp(&self, other: &Self) -> Ordering {
         if std::ptr::eq(self, other) { return Ordering::Equal; }
         self.hash_key_cache.cmp(&other.hash_key_cache)
             .then_with(|| self.acc.cmp(&other.acc))
-            .then_with(|| self.predecessors_with_values.cmp(&other.predecessors_with_values))
+            .then_with(|| self.predecessors.cmp(&other.predecessors)) // BTreeMap cmp
     }
 }
 
 pub trait GSSTrait<T: Clone + Hash, A: PathAccumulator> {
-    // type Peek<'a> where A: 'a, Self: 'a;
-    // fn peek(&self) -> Self::Peek<'_>;
-    fn push(&self, edge_value: T) -> GSSNode<T, A> where T: Ord + Clone, A: Clone; // Added Clone for GSSNode::push(self_owned_clone)
-    fn push_to(&self, edge_value: T, dest: &mut GSSNode<T, A>) where T: Ord + Clone, A: Clone; // Added Clone for GSSNode::push(self_owned_clone)
-    fn pop(&self) -> GSSNode<T, A> where T: Ord + Clone, A: Clone; // Added Clone for popn's GSSNode::popn
-    fn popn(&self, n: usize) -> GSSNode<T, A> where T: Ord + Clone, A: Clone; // Added Clone for popn's GSSNode::popn
+    fn push(&self, edge_value: T) -> GSSNode<T, A> where T: Ord + Clone, A: Clone;
+    fn push_to(&self, edge_value: T, dest: &mut GSSNode<T, A>) where T: Ord + Clone, A: Clone;
+    fn pop(&self) -> GSSNode<T, A> where T: Ord + Clone, A: Clone;
+    fn popn(&self, n: usize) -> GSSNode<T, A> where T: Ord + Clone, A: Clone;
 }
 
 impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for GSSNode<T, A> {
-    // type Peek<'a> = &'a A where A: 'a, T: 'a;
-
-    // fn peek(&self) -> Self::Peek<'_> {
-    //     &self.acc
-    // }
-
     fn push(&self, edge_value: T) -> GSSNode<T, A> {
-        let self_owned_clone = self.clone();
+        let self_owned_clone = self.clone(); // GSSNode::push takes self by value
         GSSNode::push(self_owned_clone, edge_value)
     }
 
     fn push_to(&self, edge_value: T, dest: &mut GSSNode<T, A>) {
-        GSSNode::push_to(&self, edge_value, dest)
+        // This interprets "push_to" as making `self` a predecessor of `dest` via `edge_value`.
+        // A new node representing this link is created and merged into `dest`.
+        let pred_arc = Arc::new(self.clone());
+        let new_link_set = BTreeSet::from([(pred_arc, edge_value)]);
+        let node_representing_new_link = GSSNode::new_with_predecessors(new_link_set);
+        // This node_representing_new_link will have `self` as its predecessor via `edge_value`,
+        // and its accumulator will be `self.acc`.
+        // Merging this into `dest` adds this path and updates `dest.acc`.
+        dest.merge(node_representing_new_link);
     }
 
     fn pop(&self) -> GSSNode<T, A> {
-        GSSNode::pop(self)
+        GSSNode::pop(self) // GSSNode::pop takes &self
     }
 
     fn popn(&self, n: usize) -> GSSNode<T, A> {
-        GSSNode::popn(self, n)
+        GSSNode::popn(self, n) // GSSNode::popn takes &self
     }
 }
 
 impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for Arc<GSSNode<T, A>> {
-    // type Peek<'a> = &'a A where A: 'a, T: 'a;
-    //
-    // fn peek(&self) -> Self::Peek<'_> {
-    //     &self.acc
-    // }
-
     fn push(&self, edge_value: T) -> GSSNode<T, A> {
-        let mut new_preds_with_values = BTreeSet::new();
-        new_preds_with_values.insert((self.clone(), edge_value));
-        GSSNode::new_with_predecessors(new_preds_with_values)
+        let mut new_preds_with_values_set = BTreeSet::new();
+        new_preds_with_values_set.insert((self.clone(), edge_value)); // self is Arc, clone it.
+        GSSNode::new_with_predecessors(new_preds_with_values_set)
     }
 
-    fn push_to(&self, edge_value: T, dest: &mut GSSNode<T, A>) {
-        dest.merge(self.as_ref().clone());
-        dest.acc.pop(&self.acc);
+    fn push_to(&self, _edge_value: T, dest: &mut GSSNode<T, A>) {
+        // This matches the original peculiar implementation for Arc<GSSNode>,
+        // which ignores edge_value and does a specific acc adjustment.
+        dest.merge(self.as_ref().clone()); // Merge the GSSNode data from self (Arc)
+        dest.acc = dest.acc.pop(&self.acc); // Adjust accumulator
     }
 
     fn pop(&self) -> GSSNode<T, A> {
@@ -432,28 +523,29 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for Arc<G
 }
 
 impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A> for Option<Arc<GSSNode<T, A>>> {
-    // type Peek<'a> = Option<&'a A> where A: 'a, T: 'a;
-    //
-    // fn peek(&self) -> Self::Peek<'_> {
-    //     self.as_ref().map(|node_arc| node_arc.peek())
-    // }
-
     fn push(&self, edge_value: T) -> GSSNode<T, A> {
         match self {
-            Some(arc_node) => arc_node.push(edge_value),
+            Some(arc_node) => arc_node.push(edge_value), // Arc's push
             None => {
-                let root_state = GSSNode::new(A::default());
-                root_state.push(edge_value)
+                // If None, push from a new default root.
+                // The resulting node will have this new root as its sole predecessor via edge_value.
+                let root_state_arc = Arc::new(GSSNode::new(A::default()));
+                let mut new_preds_set = BTreeSet::new();
+                new_preds_set.insert((root_state_arc, edge_value));
+                GSSNode::new_with_predecessors(new_preds_set)
             }
         }
     }
 
     fn push_to(&self, edge_value: T, dest: &mut GSSNode<T, A>) {
         match self {
-            Some(arc_node) => arc_node.push_to(edge_value, dest),
+            Some(arc_node) => arc_node.push_to(edge_value, dest), // Arc's push_to
             None => {
-                let root_state = GSSNode::new(A::default());
-                root_state.push_to(edge_value, dest)
+                // Consistent with Arc's push_to: merge a default node and pop its acc.
+                // edge_value is unused here, as in Arc's push_to.
+                let default_node = GSSNode::new(A::default());
+                dest.merge(default_node.clone()); 
+                dest.acc = dest.acc.pop(&default_node.acc); 
             }
         }
     }
@@ -468,15 +560,9 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A>
 }
 
 impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A> for Option<GSSNode<T, A>> {
-    //  type Peek<'a> = Option<&'a A> where A: 'a, T: 'a;
-    //
-    // fn peek(&self) -> Self::Peek<'_> {
-    //     self.as_ref().map(|node| node.peek())
-    // }
-
     fn push(&self, edge_value: T) -> GSSNode<T, A> {
         match self {
-            Some(node) => node.clone().push(edge_value),
+            Some(node) => node.clone().push(edge_value), // GSSNode's push
             None => {
                 let root_state = GSSNode::new(A::default());
                 root_state.push(edge_value)
@@ -486,10 +572,10 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A>
 
     fn push_to(&self, edge_value: T, dest: &mut GSSNode<T, A>) {
         match self {
-            Some(node) => node.push_to(edge_value, dest),
+            Some(node) => node.push_to(edge_value, dest), // GSSNode's push_to
             None => {
                 let root_state = GSSNode::new(A::default());
-                root_state.push_to(edge_value, dest)
+                root_state.push_to(edge_value, dest) 
             }
         }
     }
@@ -503,21 +589,11 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A>
     }
 }
 
-/*
-// BulkMerge trait and its implementation are commented out as they relied on `node.value: T`.
-// A redesign is needed, specifying new grouping criteria suitable for edge-valued GSS.
-pub trait BulkMerge<T_NodeVal, T_EdgeVal, A: PathAccumulator> {
-    fn bulk_merge(&mut self);
-}
-// ... implementations ...
-pub fn bulk_merge_canonical ...
-*/
-
 pub fn prune_and_transform_recursive_canonical<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug>(
     node_arc: &Arc<GSSNode<T, A>>,
     closure: &impl Fn(&A) -> Option<(A, bool)>,
     memo: &mut HashMap<*const GSSNode<T, A>, Option<Arc<GSSNode<T, A>>>>,
-    cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>,
+    cache: &mut HashMap<BTreeMap<T, Arc<GSSNode<T, A>>>, Arc<GSSNode<T, A>>>, // Cache key type changed
 ) -> Option<Arc<GSSNode<T, A>>> {
     let node_ptr = Arc::as_ptr(node_arc);
     if let Some(cached_result) = memo.get(&node_ptr) {
@@ -525,30 +601,37 @@ pub fn prune_and_transform_recursive_canonical<T: Clone + Ord + Hash + Debug, A:
     }
 
     match closure(&node_arc.acc) {
-        None => {
+        None => { // Prune this node
             memo.insert(node_ptr, None);
             None
         }
-        Some((new_acc_for_this_node, continue_recursion)) => {
-            let new_predecessors_with_values: BTreeSet<(Arc<GSSNode<T, A>>, T)>;
+        Some((new_acc_for_this_node_part, continue_recursion)) => {
+            // This will be a BTreeSet<(Arc<ProcessedPred>, T_edge)> to pass to get_canonical.
+            let new_predecessors_set_for_canonical: BTreeSet<(Arc<GSSNode<T, A>>, T)>; 
             if continue_recursion {
-                let mut current_new_preds_w_vals = BTreeSet::new();
-                for (pred_arc, edge_val) in &node_arc.predecessors_with_values {
+                let mut current_new_preds_set = BTreeSet::new();
+                // Iterate over BTreeMap<T, Arc<GSSNode>> of current node_arc
+                for (edge_val, pred_arc) in &node_arc.predecessors {
                     if let Some(new_pred_arc) = prune_and_transform_recursive_canonical(pred_arc, closure, memo, cache) {
-                        current_new_preds_w_vals.insert((new_pred_arc, edge_val.clone()));
+                        // Collect (Arc<SimplifiedPred>, EdgeVal)
+                        current_new_preds_set.insert((new_pred_arc, edge_val.clone()));
                     }
                 }
-                new_predecessors_with_values = current_new_preds_w_vals;
-            } else {
-                new_predecessors_with_values = node_arc.predecessors_with_values.clone();
+                new_predecessors_set_for_canonical = current_new_preds_set;
+            } else { // Don't recurse, use original predecessors structure (converted to BTreeSet)
+                new_predecessors_set_for_canonical = node_arc.predecessors_with_values();
             };
 
-            let new_node_arc = GSSNode::get_canonical(new_predecessors_with_values, cache);
+            // GSSNode::get_canonical takes BTreeSet and processes it to form its internal BTreeMap structure
+            // and uses that BTreeMap as cache key.
+            let canonical_new_node_arc = GSSNode::get_canonical(new_predecessors_set_for_canonical, cache);
 
-            let mut temp_arc = new_node_arc.clone();
+            // The accumulator of canonical_new_node_arc is already based on its (new) structure.
+            // We need to union the specific accumulator part from the closure for *this* transformation context.
+            let mut temp_arc = canonical_new_node_arc.clone(); 
             let node_instance_mut = Arc::make_mut(&mut temp_arc);
-            node_instance_mut.acc = node_instance_mut.acc.union(&new_acc_for_this_node);
-
+            node_instance_mut.acc = node_instance_mut.acc.union(&new_acc_for_this_node_part);
+            
             memo.insert(node_ptr, Some(temp_arc.clone()));
             Some(temp_arc)
         }
@@ -560,15 +643,11 @@ pub fn prune_and_transform_recursive<T: Clone + Ord + Hash + Debug, A: PathAccum
     closure: &impl Fn(&A) -> Option<(A, bool)>,
     memo: &mut HashMap<*const GSSNode<T, A>, Option<Arc<GSSNode<T, A>>>>,
 ) -> Option<Arc<GSSNode<T, A>>> {
-    let mut cache = HashMap::<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>::new();
+    // Cache for GSSNode::get_canonical uses BTreeMap as key type
+    let mut cache = HashMap::<BTreeMap<T, Arc<GSSNode<T, A>>>, Arc<GSSNode<T, A>>>::new();
     prune_and_transform_recursive_canonical(node_arc, closure, memo, &mut cache)
 }
 
-// Helper recursive function for find_longest_path.
-// It computes the longest path consisting of (edge_value, node_reached_by_edge) pairs,
-// ending with `node_arc` being the node reached by the last edge in the path.
-// T: Edge value type, must be Cloneable (for path construction), Ord + Hash (GSSNode requirements).
-// A: PathAccumulator type.
 fn find_longest_path_ending_at_node_recursive<T: Clone + Ord + Hash, A: PathAccumulator>(
     node_arc: &Arc<GSSNode<T, A>>,
     memo: &mut HashMap<*const GSSNode<T, A>, Vec<(T, Arc<GSSNode<T, A>>)>>,
@@ -579,13 +658,12 @@ fn find_longest_path_ending_at_node_recursive<T: Clone + Ord + Hash, A: PathAccu
     if let Some(cached_path) = memo.get(&node_ptr) {
         return cached_path.clone();
     }
-    if !visited_recursion.insert(node_ptr) {
-        return Vec::new(); // Cycle detected, return empty path for this branch
+    if !visited_recursion.insert(node_ptr) { // Cycle detected
+        return Vec::new(); 
     }
 
-    // Base case: If node_arc has no predecessors, it's a "root" in the GSS structure.
-    // No edge leads to it, so the path of (edge, node) pairs ending here is empty.
-    if node_arc.predecessors_with_values.is_empty() {
+    // Base case: Node has no predecessors.
+    if node_arc.predecessors.is_empty() {
         visited_recursion.remove(&node_ptr);
         memo.insert(node_ptr, Vec::new());
         return Vec::new();
@@ -593,15 +671,15 @@ fn find_longest_path_ending_at_node_recursive<T: Clone + Ord + Hash, A: PathAccu
 
     let mut longest_path_found: Vec<(T, Arc<GSSNode<T, A>>)> = Vec::new();
 
-    // Iterate over all predecessors to find the one that contributes to the longest path to current node_arc
-    for (pred_arc, edge_val_to_current_node) in &node_arc.predecessors_with_values {
+    // Iterate over BTreeMap: (&EdgeValue, &Arc<PredecessorNode>)
+    for (edge_val_to_current_node, pred_arc) in &node_arc.predecessors {
         let path_from_pred_recursive = find_longest_path_ending_at_node_recursive(
             pred_arc,
             memo,
             visited_recursion,
         );
 
-        // Construct the candidate path: path to predecessor + (edge_to_current, current_node)
+        // Construct candidate path: path to predecessor + (edge_to_current, current_node_arc)
         let mut current_candidate_path = path_from_pred_recursive;
         current_candidate_path.push((edge_val_to_current_node.clone(), node_arc.clone()));
 
@@ -615,26 +693,20 @@ fn find_longest_path_ending_at_node_recursive<T: Clone + Ord + Hash, A: PathAccu
     longest_path_found
 }
 
-/// Finds the longest path leading to the predecessors of the given `root_node`.
-/// The path is a sequence of (edge_value, node_reached_by_edge) tuples.
-/// The `root_node` itself is not part of the returned path.
-/// If `root_node` has no predecessors, or if all paths are empty, returns `None` or `Some(Vec::new())`.
 pub fn find_longest_path<T: Clone + Ord + Hash, A: PathAccumulator>(root_node: &GSSNode<T, A>) -> Option<Vec<(T, Arc<GSSNode<T, A>>)>> {
-    if root_node.predecessors_with_values.is_empty() {
-        return None; // No predecessors, so no path leading to it.
+    if root_node.predecessors.is_empty() { // No predecessors, so no path leading to it.
+        return None; 
     }
 
     let mut memo: HashMap<*const GSSNode<T, A>, Vec<(T, Arc<GSSNode<T, A>>)>> = HashMap::new();
     let mut longest_overall_path: Option<Vec<(T, Arc<GSSNode<T, A>>)>> = None;
 
-    // Iterate over direct predecessors of root_node. The path we seek ends at one of these predecessors.
-    for (pred_arc, _edge_val_to_pred) in root_node.predecessors_with_values() {
-        let mut visited_recursion = HashSet::new(); // Fresh for each DFS traversal from a direct predecessor
+    // Iterate over direct predecessors of root_node (BTreeMap: (&EdgeValue, &Arc<PredecessorNode>)).
+    // The path we seek ends at one of these predecessors.
+    for (_edge_val_to_pred, pred_arc) in root_node.predecessors() {
+        let mut visited_recursion = HashSet::new(); // Fresh for each DFS from a direct predecessor
         let path_ending_at_pred = find_longest_path_ending_at_node_recursive(pred_arc, &mut memo, &mut visited_recursion);
 
-        // If this path is longer than any found so far, update longest_overall_path.
-        // This handles the first path found (longest_overall_path is None) and subsequent longer paths.
-        // An empty path_ending_at_pred can become the longest_overall_path if it's the first one considered.
         if longest_overall_path.as_ref().map_or(true, |current_longest| path_ending_at_pred.len() > current_longest.len()) {
             longest_overall_path = Some(path_ending_at_pred);
         }
@@ -649,63 +721,68 @@ pub struct GSSStats {
     pub max_depth: usize,
     pub average_depth: f64,
     pub merge_points: usize,
-    pub max_predecessors_with_values: usize,
-    pub average_predecessors_with_values: f64,
+    pub max_predecessors_with_values: usize, // Field name kept for compatibility
+    pub average_predecessors_with_values: f64, // Field name kept for compatibility
 }
 
 pub fn gather_gss_stats<T, A: PathAccumulator>(roots: &[impl AsRef<GSSNode<T, A>>]) -> GSSStats {
     let mut stats = GSSStats::default();
     stats.num_roots = roots.len();
 
-    let mut q_visited: HashSet<*const GSSNode<T, A>> = HashSet::new(); // Tracks nodes added to queue
-    let mut processed_nodes: HashSet<*const GSSNode<T, A>> = HashSet::new(); // Tracks nodes fully processed by BFS
-    let mut queue: VecDeque<(&GSSNode<T, A>, usize)> = VecDeque::new();
+    let mut q_visited: HashSet<*const GSSNode<T, A>> = HashSet::new(); // Tracks node *pointers* added to queue
+    let mut processed_nodes: HashSet<*const GSSNode<T, A>> = HashSet::new(); // Tracks node *pointers* fully processed
+    let mut queue: VecDeque<(&GSSNode<T, A>, usize)> = VecDeque::new(); // Stores (&Node, depth)
 
     let mut total_depth_sum: u64 = 0;
-    let mut total_preds_w_vals_sum: u64 = 0;
+    let mut total_preds_sum: u64 = 0;
 
-    for root_deref in roots {
-        if q_visited.insert(root_deref.as_ref()) {
-            queue.push_back((root_deref.as_ref(), 0));
+    for root_as_ref in roots {
+        let root_node_ref = root_as_ref.as_ref();
+        // Use raw pointer for HashSet keys
+        if q_visited.insert(root_node_ref as *const GSSNode<T,A>) {
+            queue.push_back((root_node_ref, 0));
         }
     }
 
-    while let Some((current_node_arc, current_depth)) = queue.pop_front() {
-        if !processed_nodes.insert(current_node_arc) {
-            continue;
+    while let Some((current_node_ref, current_depth)) = queue.pop_front() {
+        if !processed_nodes.insert(current_node_ref as *const GSSNode<T,A>) {
+            continue; // Already processed this node
         }
 
         stats.unique_nodes += 1;
         stats.max_depth = stats.max_depth.max(current_depth);
         total_depth_sum += current_depth as u64;
 
-        let num_preds_w_vals = current_node_arc.predecessors_with_values.len();
-        stats.max_predecessors_with_values = stats.max_predecessors_with_values.max(num_preds_w_vals);
-        total_preds_w_vals_sum += num_preds_w_vals as u64;
+        let num_preds = current_node_ref.predecessors.len(); // Use .predecessors (BTreeMap)
+        stats.max_predecessors_with_values = stats.max_predecessors_with_values.max(num_preds);
+        total_preds_sum += num_preds as u64;
 
-        let unique_pred_nodes: HashSet<*const GSSNode<T,A>> = current_node_arc.predecessors_with_values.iter()
-            .map(|(p, _)| Arc::as_ptr(p)).collect();
-        if unique_pred_nodes.len() > 1 {
+        // A merge point has multiple distinct predecessor nodes.
+        let unique_pred_node_ptrs: HashSet<*const GSSNode<T,A>> = current_node_ref.predecessors.values()
+            .map(|p_arc| Arc::as_ptr(p_arc)).collect();
+        if unique_pred_node_ptrs.len() > 1 {
             stats.merge_points += 1;
         }
 
-        for (pred_arc, _edge_val) in &current_node_arc.predecessors_with_values {
-            if q_visited.insert(pred_arc.as_ref()) {
-                queue.push_back((pred_arc.as_ref(), current_depth + 1));
+        // Iterate BTreeMap: (&EdgeValue, &Arc<PredecessorNode>)
+        for (_edge_val, pred_arc) in &current_node_ref.predecessors {
+            let pred_node_ref = pred_arc.as_ref();
+            if q_visited.insert(pred_node_ref as *const GSSNode<T,A>) {
+                queue.push_back((pred_node_ref, current_depth + 1));
             }
         }
     }
 
     if stats.unique_nodes > 0 {
         stats.average_depth = total_depth_sum as f64 / stats.unique_nodes as f64;
-        stats.average_predecessors_with_values = total_preds_w_vals_sum as f64 / stats.unique_nodes as f64;
+        stats.average_predecessors_with_values = total_preds_sum as f64 / stats.unique_nodes as f64;
     }
     stats
 }
 
 fn print_gss_node_recursive<T: Debug, A: PathAccumulator>(
     node_arc: &Arc<GSSNode<T, A>>,
-    visited: &mut HashSet<*const GSSNode<T, A>>,
+    visited: &mut HashSet<*const GSSNode<T, A>>, // Stores raw pointers
     indent: usize,
     node_count: &mut usize,
     max_nodes_to_print: usize,
@@ -728,16 +805,16 @@ fn print_gss_node_recursive<T: Debug, A: PathAccumulator>(
 
     writeln!(output, "{}- Node {:p}: (Acc: {:?})", prefix, node_ptr, node_arc.acc)?;
 
-    if !node_arc.predecessors_with_values.is_empty() {
-        writeln!(output, "{}  Predecessors (Edge Value, Pred Node Ptr):", prefix)?;
-        for (pred_arc, edge_val) in &node_arc.predecessors_with_values {
-            // Limit recursion depth for printing if necessary, or rely on max_nodes_to_print
-            writeln!(output, "{}    - Edge: {:?}, Pred_Node: {:p}", prefix, edge_val, Arc::as_ptr(pred_arc))?;
-            if *node_count < max_nodes_to_print { // Check before recursive call
+    if !node_arc.predecessors.is_empty() {
+        writeln!(output, "{}  Predecessors (Edge Value -> Pred Node Ptr):", prefix)?;
+        // Iterate BTreeMap: (&EdgeValue, &Arc<PredecessorNode>)
+        for (edge_val, pred_arc) in &node_arc.predecessors {
+            writeln!(output, "{}    - Edge: {:?} -> Pred_Node: {:p}", prefix, edge_val, Arc::as_ptr(pred_arc))?;
+            if *node_count < max_nodes_to_print { 
                  print_gss_node_recursive(pred_arc, visited, indent + 2, node_count, max_nodes_to_print, output)?;
             }
-            if *node_count >= max_nodes_to_print { // Check after, to stop further iteration if limit reached in recursion
-                return Ok(());
+            if *node_count >= max_nodes_to_print { 
+                return Ok(()); // Stop further iteration if limit reached in recursion
             }
         }
     }
@@ -745,7 +822,7 @@ fn print_gss_node_recursive<T: Debug, A: PathAccumulator>(
 }
 
 pub fn print_gss_forest<T: Debug, A: PathAccumulator>(roots: &[Arc<GSSNode<T, A>>], max_nodes_to_print: usize) -> String {
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::new(); // Stores raw pointers
     let mut node_count = 0;
     let mut output = String::new();
 
@@ -758,65 +835,61 @@ pub fn print_gss_forest<T: Debug, A: PathAccumulator>(roots: &[Arc<GSSNode<T, A>
         writeln!(&mut output, "Root {}: {:p}", i, Arc::as_ptr(root_arc)).unwrap();
         match print_gss_node_recursive(root_arc, &mut visited, 1, &mut node_count, max_nodes_to_print, &mut output) {
             Ok(_) => {
-                if node_count >= max_nodes_to_print && i < roots.len() -1 {
+                if node_count >= max_nodes_to_print && i < roots.len() -1 { // If truncated and more roots exist
                     writeln!(&mut output, "... (Truncated: Reached max nodes {})", max_nodes_to_print).unwrap();
-                    break;
+                    break; 
                 }
             }
             Err(e) => {
-                eprintln!("Error writing GSS structure to string: {}", e);
-                return format!("Error generating GSS string: {}", e);
+                // eprintln is okay for auxiliary error info, but function should return error string.
+                return format!("Error writing GSS structure to string: {}", e);
             }
         }
     }
+    // Check if total unique nodes visited (even if not fully printed) exceeds count due to truncation.
     if node_count >= max_nodes_to_print && visited.len() > node_count {
          writeln!(&mut output, "... (More nodes exist but not printed due to max_nodes_to_print limit)").unwrap();
     }
     output
 }
 
+// T, A need full constraints for canonicalization and simplification.
 fn simplify_node_recursive<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug>(
     original_node_arc: &Arc<GSSNode<T, A>>,
-    memo: &mut HashMap<*const GSSNode<T, A>, Arc<GSSNode<T, A>>>,
-    canonicalization_cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>,
+    memo: &mut HashMap<*const GSSNode<T, A>, Arc<GSSNode<T, A>>>, // Memoizes original_ptr -> simplified_Arc
+    canonicalization_cache: &mut HashMap<BTreeMap<T, Arc<GSSNode<T, A>>>, Arc<GSSNode<T, A>>>, // Cache for get_canonical
 ) -> Arc<GSSNode<T, A>> {
-    // TODO: delete this
-    // return original_node_arc.clone();
     let original_node_ptr = Arc::as_ptr(original_node_arc);
-    if let Some(canonical_arc) = memo.get(&original_node_ptr) {
-        return canonical_arc.clone();
+    if let Some(simplified_arc) = memo.get(&original_node_ptr) {
+        return simplified_arc.clone();
     }
 
-    let mut new_predecessors_with_values: BTreeSet<(Arc<GSSNode<T, A>>, T)> = BTreeSet::new();
-    for (original_pred_arc, edge_val) in &original_node_arc.predecessors_with_values {
+    // Recursively simplify predecessors and collect them for GSSNode::get_canonical.
+    // get_canonical expects a BTreeSet<(Arc<SimplifiedPred>, EdgeVal)>.
+    let mut simplified_predecessors_as_set: BTreeSet<(Arc<GSSNode<T, A>>, T)> = BTreeSet::new();
+    // Iterate original node's BTreeMap: (&EdgeVal, &Arc<OriginalPred>)
+    for (edge_val, original_pred_arc) in &original_node_arc.predecessors {
         let simplified_pred_arc = simplify_node_recursive(
             original_pred_arc,
             memo,
             canonicalization_cache,
         );
-        new_predecessors_with_values.insert((simplified_pred_arc, edge_val.clone()));
+        simplified_predecessors_as_set.insert((simplified_pred_arc, edge_val.clone()));
     }
-
-    let mut predecessors_grouped: BTreeMap<T, Arc<GSSNode<T, A>>> = BTreeMap::new();
-    for (pred_arc, edge_val) in &new_predecessors_with_values {
-        // Key by everything except the predecessor's acc
-        if let Some(existing) = predecessors_grouped.get_mut(edge_val) {
-            Arc::make_mut(existing).merge(pred_arc.as_ref().clone());
-        } else {
-            predecessors_grouped.insert(edge_val.clone(), pred_arc.clone());
-        }
-    }
-    let mut new_predecessors_with_values: BTreeSet<(Arc<GSSNode<T, A>>, T)> = BTreeSet::new();
-    for (edge_val, pred_arc) in predecessors_grouped {
-        new_predecessors_with_values.insert((pred_arc, edge_val));
-    }
+    
+    // The `predecessors_grouped` logic from the original `simplify_node_recursive` is effectively
+    // handled by `GSSNode::get_canonical`'s internal call to `process_incoming_predecessors`
+    // when it converts the `simplified_predecessors_as_set` into its BTreeMap cache key and internal structure.
 
     let canonical_arc = GSSNode::get_canonical(
-        new_predecessors_with_values,
+        simplified_predecessors_as_set, // Pass the BTreeSet of (SimplifiedPredArc, EdgeVal)
         canonicalization_cache,
     );
 
-    let mut temp_arc = canonical_arc.clone();
+    // The accumulator of `original_node_arc` needs to be unioned into the `canonical_arc`.
+    // `GSSNode::get_canonical` sets acc based on the structure it's given.
+    // We union `original_node_arc.acc` to preserve its specific accumulator state.
+    let mut temp_arc = canonical_arc.clone(); // Clone Arc for make_mut
     let node_instance_mut = Arc::make_mut(&mut temp_arc);
     node_instance_mut.acc = node_instance_mut.acc.union(&original_node_arc.acc);
 
@@ -827,50 +900,65 @@ fn simplify_node_recursive<T: Clone + Ord + Hash + Debug, A: PathAccumulator + C
 fn simplify_gss_forest<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug>(
     roots: &[Arc<GSSNode<T, A>>],
 ) -> Vec<Arc<GSSNode<T, A>>> {
-    // TODO: delete this
-    // return roots.to_vec();
     let mut memo: HashMap<*const GSSNode<T, A>, Arc<GSSNode<T, A>>> = HashMap::new();
-    let mut canonicalization_cache: HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>> = HashMap::<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>::new();
-    let mut simplified_roots_vec = Vec::with_capacity(roots.len());
+    // Cache for GSSNode::get_canonical (used by simplify_node_recursive)
+    let mut canonicalization_cache = HashMap::<BTreeMap<T, Arc<GSSNode<T, A>>>, Arc<GSSNode<T, A>>>::new();
+    let mut simplified_roots_vec: Vec<Arc<GSSNode<T,A>>> = Vec::with_capacity(roots.len());
 
     for root_arc in roots {
         simplified_roots_vec.push(simplify_node_recursive(
-            root_arc,
+            root_arc, // Pass &Arc<GSSNode>
             &mut memo,
             &mut canonicalization_cache,
         ));
     }
-
-    // Deduplicate root Arcs if multiple original roots simplify to the same canonical Arc
+    
+    // Deduplicate root Arcs: if multiple original roots simplify to the same canonical GSSNode structure,
+    // ensure they all point to the *same* Arc instance in the returned Vec.
     let mut unique_simplified_roots_map: HashMap<*const GSSNode<T,A>, Arc<GSSNode<T,A>>> = HashMap::new();
-    for r_arc in simplified_roots_vec.iter_mut() { // Use _vec to avoid conflict with original roots name
-        let unique_r_arc =unique_simplified_roots_map.entry(Arc::as_ptr(&r_arc)).or_insert(r_arc.clone());
-        *r_arc = unique_r_arc.clone();
-
+    for r_arc_mut_ref in simplified_roots_vec.iter_mut() { // r_arc_mut_ref is &mut Arc<GSSNode<T,A>>
+        // Arc::as_ptr(r_arc_mut_ref) gives the pointer to the GSSNode data.
+        // Use this pointer to check if we've already stored an Arc for this GSSNode.
+        let entry = unique_simplified_roots_map.entry(Arc::as_ptr(r_arc_mut_ref)).or_insert_with(|| r_arc_mut_ref.clone());
+        // Update the Arc in simplified_roots_vec to be the one from the map.
+        *r_arc_mut_ref = entry.clone(); 
     }
+    // The number of roots should remain the same.
     assert_eq!(roots.len(), simplified_roots_vec.len());
     simplified_roots_vec
 }
 
-impl<T: Ord + Hash + Clone + Debug, A: PathAccumulator + Clone> GSSNode<T, A> {
+// T, A need full constraints for simplification.
+impl<T: Ord + Hash + Clone + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug> GSSNode<T, A> {
     pub fn simplify(&mut self) {
-        let simplified_roots = simplify_gss_forest(&[Arc::new(self.clone())]);
-        *self = simplified_roots[0].as_ref().clone();
+        // To simplify `self` (a GSSNode), we need an Arc to it to pass to recursive functions.
+        // Clone `self`, wrap in Arc, simplify, then replace `self`'s content.
+        let self_clone_arc = Arc::new(self.clone());
+        let mut memo = HashMap::new();
+        let mut canonical_cache = HashMap::new(); // BTreeMap key
+        let simplified_arc = simplify_node_recursive(&self_clone_arc, &mut memo, &mut canonical_cache);
+        
+        // Replace self's content with the GSSNode data from the simplified_arc.
+        *self = (*simplified_arc).clone(); 
     }
 
     pub fn simplify_recursive(
-        this: &mut Arc<GSSNode<T, A>>,
+        this_arc: &mut Arc<GSSNode<T, A>>, // Input is a mutable reference to an Arc
         memo: &mut HashMap<*const GSSNode<T,A>, Arc<GSSNode<T,A>>>,
-        canonicalization_cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>,
+        canonicalization_cache: &mut HashMap<BTreeMap<T, Arc<GSSNode<T, A>>>, Arc<GSSNode<T, A>>>,
     ) {
-        *this = simplify_node_recursive(&Arc::new(this.as_ref().clone()), memo, canonicalization_cache);
+        // simplify_node_recursive takes &Arc, returns simplified Arc.
+        // Update the Arc pointed to by this_arc.
+        *this_arc = simplify_node_recursive(this_arc, memo, canonicalization_cache);
     }
 
     pub fn simplify_together(nodes: &mut [&mut Arc<GSSNode<T, A>>]) {
         let mut memo: HashMap<*const GSSNode<T, A>, Arc<GSSNode<T, A>>> = HashMap::new();
-        let mut canonicalization_cache: HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>> = HashMap::<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>::new();
-        for node in nodes {
-            **node = simplify_node_recursive(node, &mut memo, &mut canonicalization_cache);
+        let mut canonicalization_cache = HashMap::<BTreeMap<T, Arc<GSSNode<T, A>>>, Arc<GSSNode<T, A>>>::new();
+        for node_arc_mut_ref in nodes { // node_arc_mut_ref is &mut Arc<GSSNode<T,A>>
+            // Pass the Arc itself (dereferenced from &mut Arc) to simplify_node_recursive.
+            // Update the Arc through the mutable reference.
+            **node_arc_mut_ref = simplify_node_recursive(*node_arc_mut_ref, &mut memo, &mut canonicalization_cache);
         }
     }
 }
@@ -913,37 +1001,44 @@ mod tests {
     }
 
     type MockGSSNode = GSSNode<i32, MockPathAccumulator>;
-    type MockNodeCache = HashMap<BTreeSet<(Arc<GSSNode<i32, MockPathAccumulator>>, i32)>, Arc<GSSNode<i32, MockPathAccumulator>>>;
+    // Cache key for canonical nodes is now BTreeMap<T, Arc<Node>>
+    type MockNodeCache = HashMap<BTreeMap<i32, Arc<MockGSSNode>>, Arc<MockGSSNode>>;
 
+    // nc_node_arc creates a non-canonical node.
+    // Its input `preds_with_vals_vec` is Vec<(Arc<MockGSSNode>, i32)>.
+    // This is converted to BTreeSet for new_with_predecessors.
     fn nc_node_arc(
-        _initial_acc_for_new_node: MockPathAccumulator,
+        _initial_acc_for_new_node: MockPathAccumulator, // This param is effectively ignored if acc is always derived.
         preds_with_vals_vec: Vec<(Arc<MockGSSNode>, i32)>
     ) -> Arc<MockGSSNode> {
         let pred_set: BTreeSet<(Arc<MockGSSNode>, i32)> = preds_with_vals_vec.into_iter().collect();
-        let mut node = MockGSSNode::new_with_predecessors(pred_set);
-        // If _initial_acc_for_new_node is meant to override derived, do it here:
-        // node.acc = _initial_acc_for_new_node; // Or node.acc = node.acc.union(&_initial_acc_for_new_node);
+        // new_with_predecessors derives accumulator from predecessors.
+        // If _initial_acc_for_new_node was meant to augment, it would need explicit unioning here.
+        // Assuming derived accumulator is intended for this helper.
+        let node = MockGSSNode::new_with_predecessors(pred_set);
         Arc::new(node)
     }
 
     fn nc_root_node_arc(acc: MockPathAccumulator) -> Arc<MockGSSNode> {
-         Arc::new(MockGSSNode::new(acc))
+         Arc::new(MockGSSNode::new(acc)) // new() sets acc directly.
     }
 
-    fn c_root_node_arc(acc: MockPathAccumulator, cache: &mut MockNodeCache) -> Arc<MockGSSNode> { // Canonical root
+    // c_root_node_arc creates a canonical root node.
+    fn c_root_node_arc(acc: MockPathAccumulator, cache: &mut MockNodeCache) -> Arc<MockGSSNode> {
         MockGSSNode::new_canonical(acc, cache)
     }
 
     fn collect_arcs_recursive(
         node_arc: &Arc<MockGSSNode>,
-        collected_arcs: &mut HashMap<*const MockGSSNode, Arc<MockGSSNode>>,
+        collected_arcs: &mut HashMap<*const MockGSSNode, Arc<MockGSSNode>>, // Map raw_ptr to Arc
     ) {
         let ptr = Arc::as_ptr(node_arc);
         if collected_arcs.contains_key(&ptr) {
             return;
         }
         collected_arcs.insert(ptr, node_arc.clone());
-        for (pred_arc, _edge_val) in &node_arc.predecessors_with_values {
+        // Iterate BTreeMap: (&EdgeVal, &Arc<PredNode>)
+        for (_edge_val, pred_arc) in &node_arc.predecessors { 
             collect_arcs_recursive(pred_arc, collected_arcs);
         }
     }
@@ -953,92 +1048,97 @@ mod tests {
         let acc_base = MockPathAccumulator { active: BTreeSet::from([0]), intersection: BTreeSet::from([0]) };
         let acc_other = MockPathAccumulator { active: BTreeSet::from([1]), intersection: BTreeSet::from([1]) };
 
-        let n4_base_nc = nc_root_node_arc(acc_base.clone());
+        // Non-canonical graph construction
+        let n4_base_nc = nc_root_node_arc(acc_base.clone()); 
         let d1_orig_nc = nc_node_arc(MockPathAccumulator::default(), vec![(n4_base_nc.clone(), 40)]);
 
-        let n4_other_nc = nc_root_node_arc(acc_other.clone());
+        let n4_other_nc = nc_root_node_arc(acc_other.clone()); 
         let d2_orig_nc = nc_node_arc(MockPathAccumulator::default(), vec![(n4_other_nc.clone(), 40)]);
-
+        
         let c1_orig_nc = nc_node_arc(MockPathAccumulator::default(), vec![(d1_orig_nc.clone(), 30)]);
         let b1_orig_nc = nc_node_arc(MockPathAccumulator::default(), vec![(c1_orig_nc.clone(), 20)]);
 
+        // a1_orig_nc will have two (Arc, EdgeVal=10) items in the BTreeSet passed to new_with_predecessors.
+        // process_incoming_predecessors will merge the GSSNodes pointed to by b1_orig_nc and d2_orig_nc
+        // because they share the same edge value 10.
+        // So, a1_orig_nc.predecessors will be {10: Arc<merged_b1_d2_node>}.
         let a1_preds_nc = vec![
-            (b1_orig_nc.clone(), 10),
-            (d2_orig_nc.clone(), 10)
+            (b1_orig_nc.clone(), 10), 
+            (d2_orig_nc.clone(), 10)  
         ];
         let a1_orig_nc = nc_node_arc(MockPathAccumulator::default(), a1_preds_nc);
 
         let roots_nc = vec![a1_orig_nc.clone()];
-        println!("Before simplifying GSS forest: {}", print_gss_forest(&roots_nc, usize::MAX));
+        println!("Before simplifying GSS forest (non-canonical, BTreeMap based): {}", print_gss_forest(&roots_nc, usize::MAX));
+        
         let simplified_roots = simplify_gss_forest(&roots_nc);
         println!("After simplifying GSS forest: {}", print_gss_forest(&simplified_roots, usize::MAX));
+        
         assert_eq!(simplified_roots.len(), 1);
         let s_a1 = simplified_roots[0].clone();
 
+        // Expected structure after simplification with BTreeMap and merging:
+        // s_a1 --(10)--> s_pred_of_a1 (this is a canonical node representing merged b1 and d2)
+        //   s_pred_of_a1.predecessors = {20: s_c1, 40: s_n4_other} (from b1's pred and d2's pred)
+        //     s_c1 --(30)--> s_d1 --(40)--> s_n4_base (root)
+        //     s_n4_other (root)
+        // Unique canonical nodes: s_a1, s_pred_of_a1, s_c1, s_d1, s_n4_base, s_n4_other. Total 6 nodes.
+        
         let mut collected_arcs = HashMap::new();
         collect_arcs_recursive(&s_a1, &mut collected_arcs);
-        assert_eq!(collected_arcs.len(), 7, "Expected 7 unique Arcs after simplification");
+        assert_eq!(collected_arcs.len(), 6, "Expected 6 unique Arcs after simplification with BTreeMap structure.");
 
-        assert_eq!(s_a1.predecessors_with_values.len(), 2);
-        let acc_expected_a1 = d1_orig_nc.acc.union(&d2_orig_nc.acc); // More precisely, B1.acc U D2.acc
-                                                                    // B1.acc is from C1.acc, from D1.acc, from N4_base.acc
-                                                                    // D2.acc is from N4_other.acc
-        let expected_a1_acc_manual = acc_base.union(&acc_other);
-        assert_eq!(s_a1.acc, expected_a1_acc_manual);
+        // s_a1 has one predecessor entry (for edge 10), pointing to the merged node.
+        assert_eq!(s_a1.predecessors.len(), 1); 
+        let (edge_val_to_pred, s_merged_pred_arc) = s_a1.predecessors.iter().next().unwrap();
+        assert_eq!(*edge_val_to_pred, 10);
 
+        // Accumulator checks:
+        // s_a1.acc should be acc of s_merged_pred_arc (due to simplify_node_recursive logic and get_canonical).
+        // s_merged_pred_arc.acc should be union of original b1.acc and d2.acc,
+        // plus acc from its own simplified structure.
+        // Original b1.acc (derived from n4_base.acc = acc_base).
+        // Original d2.acc (derived from n4_other.acc = acc_other).
+        // The simplify_node_recursive ensures original node's acc is unioned into canonical form.
+        // So, s_merged_pred_arc.acc should contain acc_base.union(acc_other).
+        // And s_a1.acc should also contain this.
+        let expected_merged_acc_component = acc_base.union(&acc_other);
+        // Check if s_merged_pred_arc.acc contains this (it might be unioned with more)
+        // For this test, it should be exactly this due to how nc_node_arc derives acc.
+        assert_eq!(s_merged_pred_arc.acc, expected_merged_acc_component);
+        assert_eq!(s_a1.acc, expected_merged_acc_component); 
 
-        let s_b1_arc_opt = s_a1.predecessors_with_values.iter()
-            .find_map(|(p, edge_val)| {
-                // B1 is pred of A1 via edge 10. B1's pred is C1. C1's pred is D1. D1's pred is N4_base.
-                // Check if this path has acc_base at its root.
-                if *edge_val == 10 && p.predecessors_with_values.len() == 1 { // p is B1
-                    let (c1_arc, _) = p.predecessors_with_values.iter().next().unwrap();
-                    if c1_arc.predecessors_with_values.len() == 1 { // c1_arc is C1
-                        let (d1_arc, _) = c1_arc.predecessors_with_values.iter().next().unwrap();
-                        if d1_arc.predecessors_with_values.len() == 1 { // d1_arc is D1
-                             let (n4_arc, _) = d1_arc.predecessors_with_values.iter().next().unwrap();
-                             if n4_arc.acc == acc_base { Some(p.clone())} else {None}
-                        } else {None}
-                    } else {None}
-                } else { None }
-            });
-        let s_b1_arc = s_b1_arc_opt.expect("Simplified B1 node not found");
-        assert_eq!(s_b1_arc.acc, acc_base);
+        // Structure of s_merged_pred_arc:
+        // Predecessors are { (s_c1, edge 20), (s_n4_other, edge 40) }
+        assert_eq!(s_merged_pred_arc.predecessors.len(), 2);
 
-        let s_d2_arc_opt = s_a1.predecessors_with_values.iter()
-            .find_map(|(p, edge_val)| {
-                // D2 is pred of A1 via edge 10. D2's pred is N4_other.
-                if *edge_val == 10 && p.predecessors_with_values.len() == 1 { // p is D2
-                    let (n4_arc, _) = p.predecessors_with_values.iter().next().unwrap();
-                    if n4_arc.acc == acc_other { Some(p.clone()) } else { None }
-                } else { None }
-            });
-        let s_d2_arc = s_d2_arc_opt.expect("Simplified D2 node not found");
-        assert_eq!(s_d2_arc.acc, acc_other);
+        let s_c1_arc = s_merged_pred_arc.predecessors.get(&20).expect("Simplified C1 node not found as pred of merged node via edge 20");
+        let s_n4_other_arc_as_pred = s_merged_pred_arc.predecessors.get(&40).expect("Simplified N4_other node not found as pred of merged node via edge 40");
+        
+        // s_c1 path leads to n4_base, so its acc should be acc_base.
+        assert_eq!(s_c1_arc.acc, acc_base); 
+        // s_n4_other_arc_as_pred is the canonical root node s_n4_other, its acc is acc_other.
+        assert_eq!(s_n4_other_arc_as_pred.acc, acc_other);
 
-        assert_eq!(s_b1_arc.predecessors_with_values.len(), 1);
-        let (s_c1_arc, edge_val_c1) = s_b1_arc.predecessors_with_values.iter().next().unwrap();
-        assert_eq!(*edge_val_c1, 20);
-        assert_eq!(s_c1_arc.acc, acc_base);
-
-        assert_eq!(s_c1_arc.predecessors_with_values.len(), 1);
-        let (s_d1_arc, edge_val_d1) = s_c1_arc.predecessors_with_values.iter().next().unwrap();
-        assert_eq!(*edge_val_d1, 30);
+        // Trace s_c1 path:
+        assert_eq!(s_c1_arc.predecessors.len(), 1); // s_c1 --(30)--> s_d1
+        let (edge_val_to_d1, s_d1_arc) = s_c1_arc.predecessors.iter().next().unwrap();
+        assert_eq!(*edge_val_to_d1, 30);
         assert_eq!(s_d1_arc.acc, acc_base);
 
-        assert_eq!(s_d1_arc.predecessors_with_values.len(), 1);
-        let (s_n4_base_arc, edge_val_n4_base) = s_d1_arc.predecessors_with_values.iter().next().unwrap();
-        assert_eq!(*edge_val_n4_base, 40);
-        assert!(s_n4_base_arc.predecessors_with_values.is_empty());
+        assert_eq!(s_d1_arc.predecessors.len(), 1); // s_d1 --(40)--> s_n4_base
+        let (edge_val_to_n4_base, s_n4_base_arc) = s_d1_arc.predecessors.iter().next().unwrap();
+        assert_eq!(*edge_val_to_n4_base, 40);
         assert_eq!(s_n4_base_arc.acc, acc_base);
+        assert!(s_n4_base_arc.predecessors.is_empty()); // s_n4_base is a root
 
-        assert_eq!(s_d2_arc.predecessors_with_values.len(), 1);
-        let (s_n4_other_arc, edge_val_n4_other) = s_d2_arc.predecessors_with_values.iter().next().unwrap();
-        assert_eq!(*edge_val_n4_other, 40);
-        assert!(s_n4_other_arc.predecessors_with_values.is_empty());
-        assert_eq!(s_n4_other_arc.acc, acc_other);
+        // Trace s_n4_other_arc_as_pred path (it's a root):
+        assert!(s_n4_other_arc_as_pred.predecessors.is_empty());
 
-        assert_ne!(Arc::as_ptr(s_n4_base_arc), Arc::as_ptr(s_n4_other_arc));
-        assert_ne!(Arc::as_ptr(s_d1_arc), Arc::as_ptr(&s_d2_arc));
+        // Ensure distinct root nodes were preserved and are indeed different Arcs:
+        assert_ne!(Arc::as_ptr(s_n4_base_arc), Arc::as_ptr(s_n4_other_arc_as_pred));
+        // s_d1_arc and s_n4_other_arc_as_pred are structurally different.
+        assert_ne!(Arc::as_ptr(s_d1_arc), Arc::as_ptr(s_n4_other_arc_as_pred));
     }
 }
+
