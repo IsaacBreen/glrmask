@@ -9,7 +9,7 @@ local_system:
     - src/glr/tests.rs
     - src/interface/interface.rs
     - src/test_constraint.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/glr/analyze.rs: |+
@@ -16231,6 +16231,661 @@ messages:
               ```
 
       This should give you more powerful minimization. Remember that `simplify_and_inline_unit_nonterminal_rules` already iterates internally until no more `A->B` inlines can be done. The new `inline_sole_productions_pass` also iterates internally. The outer loop for the deterministic phase ensures that these two types of inlining can enable each other.
+    metadata:
+  - user: |
+      Using model 'gemini/gemini-2.5-flash-preview-05-20' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/test_constraint.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/test_constraint.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/test_constraint.rs
+    metadata:
+  - user: |-
+      Diff of src/glr/analyze.rs since previous turn:
+      ```diff
+      --- original version of src/glr/analyze.rs+++ current version of src/glr/analyze.rs@@ -245,25 +245,25 @@ ///
+       /// This is useful for cleaning up grammars before further analysis or parser generation,
+       /// especially if the grammar might contain references to non-terminals that have no rules.
+      -pub fn remove_productions_with_undefined_nonterminals(initial_productions: &[Production]) -> Vec<Production> {
+      -    let mut current_productions = initial_productions.to_vec();
+      +pub fn remove_productions_with_undefined_nonterminals(initial_productions: &[Production], exempt: &[usize]) -> Vec<Production> {
+      +    let mut current_productions: Vec<(usize, Production)> = initial_productions.into_iter().cloned().enumerate().collect();
+       
+           loop {
+               let mut defined_lhs_nonterminals: BTreeSet<NonTerminal> = BTreeSet::new();
+      -        for prod in &current_productions {
+      +        for (i, prod) in &current_productions {
+                   defined_lhs_nonterminals.insert(prod.lhs.clone());
+               }
+      -        let mut removed_productions = Vec::new();
+      -        let mut kept_productions = Vec::new();
+      -        for prod in current_productions {
+      +        let mut removed_productions: Vec<(usize, Production)> = Vec::new();
+      +        let mut kept_productions: Vec<(usize, Production)> = Vec::new();
+      +        for (i, prod) in current_productions {
+                   let keep = prod.rhs.iter().all(|symbol| match symbol {
+                       Symbol::Terminal(_) => true, // Terminals are always defined
+                       Symbol::NonTerminal(nt) => defined_lhs_nonterminals.contains(nt),
+      -            });
+      +            }) || exempt.contains(&i);
+                   if keep {
+      -                kept_productions.push(prod);
+      +                kept_productions.push((i, prod));
+                   } else {
+      -                removed_productions.push(prod);
+      +                removed_productions.push((i, prod));
+                   }
+               }
+               current_productions = kept_productions;
+      @@ -271,7 +271,7 @@             break;
+               }
+               crate::debug!(2, "Removing {} productions with undefined non-terminals.", removed_productions.len());
+      -        let all_rhs_nonterminals: BTreeSet<NonTerminal> = removed_productions.iter().flat_map(|prod| prod.rhs.iter().filter_map(|symbol| match symbol {
+      +        let all_rhs_nonterminals: BTreeSet<NonTerminal> = removed_productions.iter().flat_map(|(i, prod)| prod.rhs.iter().filter_map(|symbol| match symbol {
+                   Symbol::NonTerminal(nt) => Some(nt.clone()),
+                   _ => None,
+               })).collect();
+      @@ -280,12 +280,12 @@             crate::debug!(2, "  {}", nt.0);
+               }
+               crate::debug!(2, "Removed productions:");
+      -        for prod in removed_productions {
+      +        for (i, prod) in removed_productions {
+                   crate::debug!(2, "  {}", prod);
+               }
+           }
+       
+      -    current_productions
+      +    current_productions.into_iter().map(|(_, prod)| prod).collect()
+       }
+       
+       // TODO: This function is marked as broken and is not modified by this request.
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+      --- original version of src/glr/table.rs+++ current version of src/glr/table.rs@@ -473,11 +473,11 @@     (stage_7_table, item_set_map, start_state_id)
+       }
+       
+      -pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
+      +pub fn generate_glr_parser_with_maps(productions: &[Production], mut start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
+           let original_productions = productions.to_vec();
+       
+           crate::debug!(2, "Removing productions with undefined non-terminals");
+      -    let productions = remove_productions_with_undefined_nonterminals(productions);
+      +    let mut productions = remove_productions_with_undefined_nonterminals(productions, &[start_production_id]);
+       
+           crate::debug!(2, "Validating");
+           validate(&productions).expect("Validation error");
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/tests.rs since previous turn:
+      ```diff
+      --- original version of src/glr/tests.rs+++ current version of src/glr/tests.rs@@ -319,7 +319,7 @@     let expected = vec![
+               prod("C", vec![t("c")]),
+           ];
+      -    let result = remove_productions_with_undefined_nonterminals(&productions);
+      +    let result = remove_productions_with_undefined_nonterminals(&productions, &[]);
+           assert_eq!(result, expected);
+       }
+       
+      @@ -338,7 +338,7 @@     let expected = vec![
+               prod("D", vec![t("d")]),
+           ];
+      -    let result = remove_productions_with_undefined_nonterminals(&productions);
+      +    let result = remove_productions_with_undefined_nonterminals(&productions, &[]);
+           assert_eq!(result, expected);
+       }
+       
+      @@ -351,13 +351,13 @@         prod("A", vec![t("a")]),
+           ];
+           let expected = productions.clone();
+      -    let result = remove_productions_with_undefined_nonterminals(&productions);
+      +    let result = remove_productions_with_undefined_nonterminals(&productions, &[]);
+           assert_eq!(result, expected);
+       }
+       
+       #[test]
+       fn test_remove_undefined_empty_input() {
+      -    assert!(remove_productions_with_undefined_nonterminals(&[]).is_empty());
+      +    assert!(remove_productions_with_undefined_nonterminals(&[], &[]).is_empty());
+       }
+       // --- Tests Demonstrating GLR Capabilities / Limitations ---
+       
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/interface/interface.rs since previous turn:
+      ```diff
+      --- original version of src/interface/interface.rs+++ current version of src/interface/interface.rs@@ -187,6 +187,17 @@     }
+       }
+       
+      +pub fn display_productions(productions: &[Production]) -> String {
+      +    let mut result = String::new();
+      +    for prod in productions {
+      +        result.push_str(&format!("{} -> {}\n", prod.lhs.0, prod.rhs.iter().map(|symbol| match symbol {
+      +            Symbol::Terminal(t) => t.0.clone(),
+      +            Symbol::NonTerminal(nt) => nt.0.clone(),
+      +        }).collect::<Vec<_>>().join(" ")));
+      +    }
+      +    result
+      +}
+      +
+       impl GrammarDefinition {
+           /// Generates a unique indexed name (e.g., Base[0], Base[1]) avoiding collisions.
+           fn generate_unique_indexed_name(
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/test_constraint.rs since previous turn:
+      ```diff
+      --- original version of src/test_constraint.rs+++ current version of src/test_constraint.rs@@ -6,7 +6,7 @@ use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
+       use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
+       use std::hash::{Hash, Hasher};
+      -use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast, eat_string_fast, choice_fast, eat_bytestring_fast, repeat1_fast, CompiledGrammar, GrammarDefinition}; // Added eat_any_fast, CompiledGrammar
+      +use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast, eat_string_fast, choice_fast, eat_bytestring_fast, repeat1_fast, CompiledGrammar, GrammarDefinition, display_productions}; // Added eat_any_fast, CompiledGrammar
+       use crate::glr::analyze; // Import the analyze module
+       
+       use std::fs::{self, File};
+      @@ -288,7 +288,7 @@         &BiBTreeMap::new(), // empty name‐map
+               internal_llm_token_map_for_precompute.iter().map(|(_, id)| id.0).max().unwrap_or(0),
+           );
+      -    // print_precomputed(&precomputed);
+      +    // print_precomputed(&_precomputed);
+           println!("Done precomputing");
+       }
+       
+      @@ -317,7 +317,7 @@         &BiBTreeMap::new(), // empty name‐map
+               internal_llm_token_map_for_precompute.iter().map(|(_, id)| id.0).max().unwrap_or(0),
+           );
+      -    // print_precomputed(&precomputed);
+      +    // print_precomputed(&_precomputed);
+           println!("Done precomputing");
+       }
+       
+      @@ -1139,6 +1139,8 @@         }
+           }
+       
+      +    println!("[Test MRE] Productions to test: {}", display_productions(&productions_to_test));
+      +
+           let result = panic::catch_unwind(AssertUnwindSafe(|| {
+               let parser = generate_glr_parser_with_maps(
+                   productions_to_test,
+      @@ -1199,6 +1201,31 @@             prod_ref_mut.rhs = new_rhs; // Assign the new RHS
+               }
+           }
+      +}
+      +
+      +fn get_all_terminals_in_grammar(productions: &[Production]) -> BTreeSet<Terminal> {
+      +    let mut terminals = BTreeSet::new();
+      +    for prod in productions {
+      +        for symbol in &prod.rhs {
+      +            if let Symbol::Terminal(t) = symbol {
+      +                terminals.insert(t.clone());
+      +            }
+      +        }
+      +    }
+      +    terminals
+      +}
+      +
+      +fn get_all_nonterminals_in_grammar(productions: &[Production]) -> BTreeSet<NonTerminal> {
+      +    let mut nonterminals = BTreeSet::new();
+      +    for prod in productions {
+      +        nonterminals.insert(prod.lhs.clone());
+      +        for symbol in &prod.rhs {
+      +            if let Symbol::NonTerminal(nt) = symbol {
+      +                nonterminals.insert(nt.clone());
+      +            }
+      +        }
+      +    }
+      +    nonterminals
+       }
+       
+       /// Final simplification pass: Inlines rules of the form A -> B (single non-terminal RHS)
+      @@ -1295,8 +1322,8 @@                 productions = temp_productions_after_inlining; // Commit the change
+                       made_change_in_this_iteration = true;
+                   } else {
+      -                println!("[Simplifier] Inlining {} -> {} removed the target panic. Reverting this step.", 
+      -                         a_nt_to_inline.0, b_nt_replacement.0);
+      +                println!("[Simplifier] Inlining {} removed the target panic. Reverting this step.", 
+      +                         a_nt_to_inline.0);
+                   }
+               }
+       
+      @@ -1312,6 +1339,122 @@     }
+           println!("[Simplifier] Final unit non-terminal inlining pass finished.");
+           productions
+      +}
+      +
+      +fn inline_sole_productions_pass(
+      +    mut productions: Vec<Production>, // Takes ownership
+      +    augmented_start_rule_lhs: &NonTerminal,
+      +    sequence_to_test_names: &[&str],
+      +    panic_substring: &str,
+      +) -> (Vec<Production>, bool) { // Returns new productions and bool indicating if a change was made
+      +    let mut made_change_this_outer_iteration = false;
+      +    loop { // Keep iterating until a full pass makes no changes
+      +        let mut changed_in_current_scan = false;
+      +        
+      +        let mut nts_to_productions_info: BTreeMap<NonTerminal, Vec<(usize, Production)>> = BTreeMap::new();
+      +        for (idx, p) in productions.iter().enumerate() {
+      +            nts_to_productions_info.entry(p.lhs.clone()).or_default().push((idx, p.clone()));
+      +        }
+      +
+      +        let mut candidate_to_inline_info: Option<(NonTerminal, Vec<Symbol>, usize)> = None;
+      +
+      +        // Find a candidate NT to inline
+      +        for (nt_candidate, defining_rules_with_indices) in &nts_to_productions_info {
+      +            if nt_candidate == augmented_start_rule_lhs { continue; }
+      +
+      +            if defining_rules_with_indices.len() == 1 {
+      +                let (original_prod_idx, single_prod_rule) = &defining_rules_with_indices[0];
+      +                
+      +                let is_used_in_rhs_of_other_rules = productions.iter().any(|p| {
+      +                    // Only consider it "used" if it's in the RHS of a *different* NT's rule,
+      +                    // or in a different rule for the same NT (if it had multiple rules, which it doesn't here)
+      +                    // OR if it's used in the RHS of the augmented start rule.
+      +                    (p.lhs != *nt_candidate || p.lhs == *augmented_start_rule_lhs) && 
+      +                    p.rhs.iter().any(|s| match s {
+      +                        Symbol::NonTerminal(nt_in_rhs) => nt_in_rhs == nt_candidate,
+      +                        _ => false,
+      +                    })
+      +                });
+      +
+      +                let is_recursive_in_its_own_sole_rule = single_prod_rule.rhs.iter().any(|s| match s {
+      +                    Symbol::NonTerminal(nt_in_rhs) => nt_in_rhs == nt_candidate,
+      +                    _ => false,
+      +                });
+      +
+      +                // Only inline if it's used and not directly recursive in its sole definition
+      +                // (e.g. A -> alpha A beta)
+      +                if is_used_in_rhs_of_other_rules && !is_recursive_in_its_own_sole_rule {
+      +                    candidate_to_inline_info = Some((nt_candidate.clone(), single_prod_rule.rhs.clone(), *original_prod_idx));
+      +                    break; 
+      +                }
+      +            }
+      +        }
+      +
+      +        if let Some((nt_to_inline, alpha_rhs_to_substitute, original_prod_idx_to_remove)) = candidate_to_inline_info {
+      +            println!("[Simplifier-Sole] Attempting to inline {} -> {:?} (from P{})", 
+      +                     nt_to_inline.0, alpha_rhs_to_substitute.iter().map(|s| match s { Symbol::Terminal(t) => t.0.clone(), Symbol::NonTerminal(n) => n.0.clone() }).collect::<Vec<_>>(), original_prod_idx_to_remove);
+      +
+      +            let mut temp_productions_after_inlining = Vec::new();
+      +            for (idx, p) in productions.iter().enumerate() {
+      +                if idx != original_prod_idx_to_remove {
+      +                    temp_productions_after_inlining.push(p.clone());
+      +                }
+      +            }
+      +
+      +            for prod_being_modified in temp_productions_after_inlining.iter_mut() {
+      +                let mut new_rhs_for_this_prod = Vec::new();
+      +                let mut current_prod_rhs_changed = false;
+      +                for symbol_in_rhs in prod_being_modified.rhs.iter() {
+      +                    if let Symbol::NonTerminal(nt_in_rhs_val) = symbol_in_rhs {
+      +                        if *nt_in_rhs_val == nt_to_inline {
+      +                            new_rhs_for_this_prod.extend_from_slice(&alpha_rhs_to_substitute);
+      +                            current_prod_rhs_changed = true;
+      +                        } else {
+      +                            new_rhs_for_this_prod.push(symbol_in_rhs.clone());
+      +                        }
+      +                    } else {
+      +                        new_rhs_for_this_prod.push(symbol_in_rhs.clone());
+      +                    }
+      +                }
+      +                if current_prod_rhs_changed {
+      +                    prod_being_modified.rhs = new_rhs_for_this_prod;
+      +                }
+      +            }
+      +            
+      +            if temp_productions_after_inlining.is_empty() || 
+      +               !temp_productions_after_inlining.iter().any(|p| p.lhs == *augmented_start_rule_lhs) {
+      +                println!("[Simplifier-Sole] Inlining {} would remove augmented start or empty grammar. Skipping this specific inlining.", nt_to_inline.0);
+      +                // To avoid getting stuck on this problematic candidate, we remove its defining rule
+      +                // from the main `productions` list and continue the outer loop.
+      +                // This ensures progress if this candidate is the only one found.
+      +                // This is a bit of a hack; a cleaner way would be to mark it "tried and failed".
+      +                // For now, let's just not set changed_in_current_scan and let the outer loop break.
+      +                // The current logic: if a candidate is bad, we just don't apply it.
+      +                // The next iteration of the `loop` will search for other candidates.
+      +                // If this was the *only* type of candidate, `changed_in_current_scan` remains false, and the loop terminates.
+      +            } else if causes_specific_panic(
+      +                &temp_productions_after_inlining,
+      +                augmented_start_rule_lhs,
+      +                sequence_to_test_names,
+      +                panic_substring,
+      +            ) {
+      +                println!("[Simplifier-Sole] Successfully inlined {}. Productions count: {} -> {}", 
+      +                         nt_to_inline.0, productions.len(), temp_productions_after_inlining.len());
+      +                productions = temp_productions_after_inlining; 
+      +                changed_in_current_scan = true;
+      +                made_change_this_outer_iteration = true; 
+      +                break; // Restart scan from the beginning with the new production set
+      +            } else {
+      +                println!("[Simplifier-Sole] Inlining {} removed target panic. Reverting this attempt.", nt_to_inline.0);
+      +            }
+      +        } // end if let Some(candidate_to_inline_info)
+      +        
+      +        if !changed_in_current_scan {
+      +            break; // No change made in a full scan over NTs, exit the outer `loop {}`
+      +        }
+      +    } // end outer loop for iterative application
+      +
+      +    (productions, made_change_this_outer_iteration)
+       }
+       
+       #[test]
+      @@ -1461,6 +1604,120 @@             println!();
+               }
+       
+      +                // --- Strategy 3: Try replacing a Non-Terminal in RHS with Epsilon ---
+      +                let mut nt_rhs_locations: Vec<(usize, usize)> = Vec::new(); // (prod_idx, symbol_idx_in_rhs)
+      +                for (prod_idx, prod) in current_productions.iter().enumerate() {
+      +                    for (symbol_idx, symbol) in prod.rhs.iter().enumerate() {
+      +                        if matches!(symbol, Symbol::NonTerminal(_)) {
+      +                            nt_rhs_locations.push((prod_idx, symbol_idx));
+      +                        }
+      +                    }
+      +                }
+      +
+      +                if !nt_rhs_locations.is_empty() {
+      +                    print!("[Minimizer] Pass {}: Trying NT-to-Epsilon in RHS ({} attempts)...", pass_num, ATTEMPTS_PER_STRATEGY_PASS);
+      +                    std::io::stdout().flush().unwrap();
+      +                    for attempt in 0..ATTEMPTS_PER_STRATEGY_PASS {
+      +                        if let Some(&(prod_idx_to_modify, symbol_idx_to_remove)) = nt_rhs_locations.choose(&mut rng) {
+      +                            let mut temp_productions = current_productions.clone();
+      +                            temp_productions[prod_idx_to_modify].rhs.remove(symbol_idx_to_remove);
+      +
+      +                            if temp_productions.is_empty() || !temp_productions.iter().any(|p| p.lhs == augmented_start_rule_lhs) {
+      +                                continue;
+      +                            }
+      +
+      +                            if causes_specific_panic(
+      +                                &temp_productions,
+      +                                &augmented_start_rule_lhs,
+      +                                &sequence_to_test_names,
+      +                                PANIC_SUBSTRING_TO_FIND,
+      +                            ) {
+      +                                if attempt % (ATTEMPTS_PER_STRATEGY_PASS / 10 + 1) == 0 { print!("ε"); std::io::stdout().flush().unwrap(); }
+      +                                current_productions = temp_productions;
+      +                                made_change_in_this_pass = true;
+      +                                println!("\n[Minimizer] Reduced by NT-to-Epsilon. New count: {}", current_productions.len());
+      +                                continue 'pass_loop;
+      +                            }
+      +                        }
+      +                    }
+      +                    println!();
+      +                }
+      +
+      +                // --- Strategy 4: Try substituting a Terminal in RHS ---
+      +                let all_terminals_in_grammar = get_all_terminals_in_grammar(&current_productions);
+      +                let mut t_rhs_locations: Vec<(usize, usize)> = Vec::new(); // (prod_idx, symbol_idx_in_rhs)
+      +                for (prod_idx, prod) in current_productions.iter().enumerate() {
+      +                    for (symbol_idx, symbol) in prod.rhs.iter().enumerate() {
+      +                        if matches!(symbol, Symbol::Terminal(_)) {
+      +                            t_rhs_locations.push((prod_idx, symbol_idx));
+      +                        }
+      +                    }
+      +                }
+      +
+      +                if !all_terminals_in_grammar.is_empty() && !t_rhs_locations.is_empty() {
+      +                    print!("[Minimizer] Pass {}: Trying Terminal substitution in RHS ({} attempts)...", pass_num, ATTEMPTS_PER_STRATEGY_PASS);
+      +                    std::io::stdout().flush().unwrap();
+      +                    for attempt in 0..ATTEMPTS_PER_STRATEGY_PASS {
+      +                        if let Some(&(prod_idx_to_modify, symbol_idx_to_modify)) = t_rhs_locations.choose(&mut rng) {
+      +                            if let Some(t_new) = all_terminals_in_grammar.iter().collect::<Vec<_>>().choose(&mut rng) {
+      +                                let mut temp_productions = current_productions.clone();
+      +                                temp_productions[prod_idx_to_modify].rhs[symbol_idx_to_modify] = Symbol::Terminal((*t_new).clone());
+      +
+      +                                if temp_productions.is_empty() || !temp_productions.iter().any(|p| p.lhs == augmented_start_rule_lhs) {
+      +                                    continue;
+      +                                }
+      +                                if causes_specific_panic(
+      +                                    &temp_productions,
+      +                                    &augmented_start_rule_lhs,
+      +                                    &sequence_to_test_names,
+      +                                    PANIC_SUBSTRING_TO_FIND,
+      +                                ) {
+      +                                    if attempt % (ATTEMPTS_PER_STRATEGY_PASS / 10 + 1) == 0 { print!("T"); std::io::stdout().flush().unwrap(); }
+      +                                    current_productions = temp_productions;
+      +                                    made_change_in_this_pass = true;
+      +                                    println!("\n[Minimizer] Reduced by Terminal substitution. New count: {}", current_productions.len());
+      +                                    continue 'pass_loop;
+      +                                }
+      +                            }
+      +                        }
+      +                    }
+      +                    println!();
+      +                }
+      +
+      +                // --- Strategy 5: Try substituting a Non-Terminal in RHS ---
+      +                let all_nonterminals_in_grammar = get_all_nonterminals_in_grammar(&current_productions);
+      +                // nt_rhs_locations is already populated from Strategy 3
+      +
+      +                if !all_nonterminals_in_grammar.is_empty() && !nt_rhs_locations.is_empty() {
+      +                    print!("[Minimizer] Pass {}: Trying Non-Terminal substitution in RHS ({} attempts)...", pass_num, ATTEMPTS_PER_STRATEGY_PASS);
+      +                    std::io::stdout().flush().unwrap();
+      +                    for attempt in 0..ATTEMPTS_PER_STRATEGY_PASS {
+      +                        if let Some(&(prod_idx_to_modify, symbol_idx_to_modify)) = nt_rhs_locations.choose(&mut rng) {
+      +                            if let Some(nt_new) = all_nonterminals_in_grammar.iter().collect::<Vec<_>>().choose(&mut rng) {
+      +                                let mut temp_productions = current_productions.clone();
+      +                                temp_productions[prod_idx_to_modify].rhs[symbol_idx_to_modify] = Symbol::NonTerminal((*nt_new).clone());
+      +                                
+      +                                if temp_productions.is_empty() || !temp_productions.iter().any(|p| p.lhs == augmented_start_rule_lhs) {
+      +                                    continue;
+      +                                }
+      +                                if causes_specific_panic(
+      +                                    &temp_productions,
+      +                                    &augmented_start_rule_lhs,
+      +                                    &sequence_to_test_names,
+      +                                    PANIC_SUBSTRING_TO_FIND,
+      +                                ) {
+      +                                    if attempt % (ATTEMPTS_PER_STRATEGY_PASS / 10 + 1) == 0 { print!("N"); std::io::stdout().flush().unwrap(); }
+      +                                    current_productions = temp_productions;
+      +                                    made_change_in_this_pass = true;
+      +                                    println!("\n[Minimizer] Reduced by Non-Terminal substitution. New count: {}", current_productions.len());
+      +                                    continue 'pass_loop;
+      +                                }
+      +                            }
+      +                        }
+      +                    }
+      +                    println!();
+      +                }
+      +
+               if !made_change_in_this_pass {
+                   println!("[Minimizer] Pass {}: No further reductions found in this stochastic pass.", pass_num);
+                   break 'pass_loop;
+      @@ -1471,12 +1728,44 @@     println!("[Minimizer] Productions after stochastic phase: {}", current_productions.len());
+       
+           // --- Final Simplification Pass: Inline A -> B rules ---
+      -    current_productions = simplify_and_inline_unit_nonterminal_rules(
+      -        current_productions,
+      -        &augmented_start_rule_lhs,
+      -        &sequence_to_test_names,
+      -        PANIC_SUBSTRING_TO_FIND,
+      -    );
+      +    println!("\n[Minimizer] Deterministic simplification phase starting.");
+      +    loop {
+      +        let prods_count_before_deterministic_iter = current_productions.len();
+      +        let mut changed_anything_in_deterministic_iter = false;
+      +
+      +        // Apply A -> B inlining (iterates to fixed point internally)
+      +        let prev_len_before_unit_inline = current_productions.len();
+      +        current_productions = simplify_and_inline_unit_nonterminal_rules(
+      +            current_productions, // Takes ownership
+      +            &augmented_start_rule_lhs,
+      +            &sequence_to_test_names,
+      +            PANIC_SUBSTRING_TO_FIND,
+      +        );
+      +        if current_productions.len() != prev_len_before_unit_inline {
+      +            changed_anything_in_deterministic_iter = true;
+      +            println!("[Minimizer-Determ] simplify_and_inline_unit_nonterminal_rules changed productions: {} -> {}", prev_len_before_unit_inline, current_productions.len());
+      +        }
+      +        
+      +        // Apply A -> alpha (sole production) inlining (iterates to fixed point internally)
+      +        let prev_len_before_sole_inline = current_productions.len();
+      +        let (next_prods_after_sole_inline, sole_inlined_overall) = inline_sole_productions_pass(
+      +            current_productions, // Takes ownership
+      +            &augmented_start_rule_lhs,
+      +            &sequence_to_test_names,
+      +            PANIC_SUBSTRING_TO_FIND,
+      +        );
+      +        current_productions = next_prods_after_sole_inline;
+      +        if sole_inlined_overall { // sole_inlined_overall indicates if *any* change was made by that pass
+      +            changed_anything_in_deterministic_iter = true;
+      +             println!("[Minimizer-Determ] inline_sole_productions_pass changed productions: {} -> {}", prev_len_before_sole_inline, current_productions.len());
+      +        }
+      +
+      +        if !changed_anything_in_deterministic_iter {
+      +            println!("[Minimizer] Deterministic simplification phase converged. Final production count: {}", current_productions.len());
+      +            break;
+      +        }
+      +        println!("[Minimizer] Deterministic iteration made changes. Productions: {} -> {}. Repeating deterministic loop.", prods_count_before_deterministic_iter, current_productions.len());
+      +    }
+       
+           // --- Output Final Minimized Grammar ---
+           println!("\n[Minimizer] Final number of productions after all simplifications: {}", current_productions.len());
+
+      ```
+    metadata:
+  - user: Now it seems to keep looping forever, never finishing.
+    metadata:
+  - assistant: |-
+      The infinite loop is likely occurring in the deterministic simplification phase, where the two types of inlining (`A -> B` and `A -> alpha (sole)`) might be making changes that allow the other pass to make further changes, without strictly reducing the grammar to a fixed point recognizable by the previous loop condition.
+
+      The previous loop condition for the deterministic phase was:
+      ```rust
+      if !changed_anything_in_deterministic_iter { break; }
+      ```
+      where `changed_anything_in_deterministic_iter` was true if either the production count changed OR if `inline_sole_productions_pass` reported it made an internal change (even if production count didn't change). This could lead to cycles if structural changes happen without length changes but are still reported as "changes".
+
+      A more robust way to check for convergence in the deterministic phase is to see if the `Vec<Production>` itself is identical to what it was at the start of the iteration. If it is, no further application of these deterministic rules will alter it.
+
+      Here's how to modify `src/test_constraint.rs`:
+
+      **In `src/test_constraint.rs`, within the `test_minimize_grammar_for_goto_panic` function:**
+
+      1.  **Modify the deterministic simplification loop's convergence check.**
+          Locate this block:
+          ```rust
+              println!("\n[Minimizer] Deterministic simplification phase starting.");
+              loop {
+                  let prods_count_before_deterministic_iter = current_productions.len();
+                  let mut changed_anything_in_deterministic_iter = false;
+
+                  // Apply A -> B inlining (iterates to fixed point internally)
+                  let prev_len_before_unit_inline = current_productions.len();
+                  current_productions = simplify_and_inline_unit_nonterminal_rules(
+                      current_productions, // Takes ownership
+                      &augmented_start_rule_lhs,
+                      &sequence_to_test_names,
+                      PANIC_SUBSTRING_TO_FIND,
+                  );
+                  if current_productions.len() != prev_len_before_unit_inline {
+                      changed_anything_in_deterministic_iter = true;
+                      println!("[Minimizer-Determ] simplify_and_inline_unit_nonterminal_rules changed productions: {} -> {}", prev_len_before_unit_inline, current_productions.len());
+                  }
+                  
+                  // Apply A -> alpha (sole production) inlining (iterates to fixed point internally)
+                  let prev_len_before_sole_inline = current_productions.len();
+                  let (next_prods_after_sole_inline, sole_inlined_overall) = inline_sole_productions_pass(
+                      current_productions, // Takes ownership
+                      &augmented_start_rule_lhs,
+                      &sequence_to_test_names,
+                      PANIC_SUBSTRING_TO_FIND,
+                  );
+                  current_productions = next_prods_after_sole_inline;
+                  if sole_inlined_overall { // sole_inlined_overall indicates if *any* change was made by that pass
+                      changed_anything_in_deterministic_iter = true;
+                       println!("[Minimizer-Determ] inline_sole_productions_pass changed productions: {} -> {}", prev_len_before_sole_inline, current_productions.len());
+                  }
+
+                  if !changed_anything_in_deterministic_iter {
+                      println!("[Minimizer] Deterministic simplification phase converged. Final production count: {}", current_productions.len());
+                      break;
+                  }
+                  println!("[Minimizer] Deterministic iteration made changes. Productions: {} -> {}. Repeating deterministic loop.", prods_count_before_deterministic_iter, current_productions.len());
+              }
+          ```
+
+          Replace it with the following:
+          ```rust
+              println!("\n[Minimizer] Deterministic simplification phase starting.");
+              loop {
+                  let productions_at_start_of_deterministic_iter = current_productions.clone();
+
+                  // Apply A -> B inlining (iterates to fixed point internally)
+                  let prev_len_unit_inline = current_productions.len();
+                  current_productions = simplify_and_inline_unit_nonterminal_rules(
+                      current_productions, // Takes ownership
+                      &augmented_start_rule_lhs,
+                      &sequence_to_test_names,
+                      PANIC_SUBSTRING_TO_FIND,
+                  );
+                  if current_productions.len() != prev_len_unit_inline {
+                       println!("[Minimizer-Determ] simplify_and_inline_unit_nonterminal_rules changed productions: {} -> {}", prev_len_unit_inline, current_productions.len());
+                  }
+                  
+                  // Apply A -> alpha (sole production) inlining (iterates to fixed point internally)
+                  let prev_len_sole_inline = current_productions.len();
+                  let (next_prods_after_sole_inline, _sole_inlined_overall) = inline_sole_productions_pass( // We don't strictly need sole_inlined_overall for this new check
+                      current_productions, // Takes ownership
+                      &augmented_start_rule_lhs,
+                      &sequence_to_test_names,
+                      PANIC_SUBSTRING_TO_FIND,
+                  );
+                  current_productions = next_prods_after_sole_inline;
+                  if current_productions.len() != prev_len_sole_inline {
+                      println!("[Minimizer-Determ] inline_sole_productions_pass changed productions: {} -> {}", prev_len_sole_inline, current_productions.len());
+                  }
+
+                  // Check for convergence by comparing the entire set of productions
+                  if current_productions == productions_at_start_of_deterministic_iter {
+                      println!("[Minimizer] Deterministic simplification phase converged. Final production count: {}", current_productions.len());
+                      break;
+                  }
+                  println!("[Minimizer] Deterministic iteration made changes. Productions count: {} -> {}. Repeating deterministic loop.", productions_at_start_of_deterministic_iter.len(), current_productions.len());
+              }
+          ```
+
+      This change ensures that the deterministic simplification loop terminates if and only if a full pass of both `simplify_and_inline_unit_nonterminal_rules` and `inline_sole_productions_pass` results in no change to the actual list of productions. `Production` derives `PartialEq` and `Eq`, so comparing `Vec<Production>` instances works as expected.
     metadata:
   - user: |
       Using model 'gemini/gemini-2.5-flash-preview-05-20' for code completion.

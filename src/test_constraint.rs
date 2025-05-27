@@ -1297,19 +1297,10 @@ fn simplify_and_inline_unit_nonterminal_rules(
                 }
             }
             
-            // 3. Verify that the augmented start rule still exists and the grammar is valid for panic check
             if temp_productions_after_inlining.is_empty() || 
                !temp_productions_after_inlining.iter().any(|p| p.lhs == *augmented_start_rule_lhs) {
-                println!("[Simplifier] Inlining {} -> {} would remove the augmented start rule or empty the grammar. Reverting.", 
-                         a_nt_to_inline.0, b_nt_replacement.0);
-                // This specific inlining is problematic, effectively skip it for this iteration.
-                // The outer loop will continue, but this candidate won't be picked again in this state
-                // if it leads to this invalid grammar.
-                // To be safer, we could mark this (A,B) pair as "not to be inlined" for future iterations,
-                // but the current greedy "take first good one" should eventually stabilize or exhaust options.
-                // For now, we just don't make a change and the loop will eventually terminate.
-                // To ensure progress, we must ensure that if an inlining is bad, `made_change_in_this_iteration` remains false.
-                // The current structure does this.
+                println!("[Simplifier] Inlining {} would remove the augmented start rule or empty the grammar. Reverting.", 
+                         a_nt_to_inline.0);
             } else if causes_specific_panic(
                 &temp_productions_after_inlining,
                 augmented_start_rule_lhs,
@@ -1333,8 +1324,6 @@ fn simplify_and_inline_unit_nonterminal_rules(
                  println!("[Simplifier] No more valid unit non-terminal inlinings found in this iteration.");
                 break; // Exit the simplification loop
             }
-            // If production count changed but made_change_in_this_iteration is false, it implies an issue.
-            // However, successful inlining sets it to true.
         }
     }
     println!("[Simplifier] Final unit non-terminal inlining pass finished.");
@@ -1424,14 +1413,6 @@ fn inline_sole_productions_pass(
             if temp_productions_after_inlining.is_empty() || 
                !temp_productions_after_inlining.iter().any(|p| p.lhs == *augmented_start_rule_lhs) {
                 println!("[Simplifier-Sole] Inlining {} would remove augmented start or empty grammar. Skipping this specific inlining.", nt_to_inline.0);
-                // To avoid getting stuck on this problematic candidate, we remove its defining rule
-                // from the main `productions` list and continue the outer loop.
-                // This ensures progress if this candidate is the only one found.
-                // This is a bit of a hack; a cleaner way would be to mark it "tried and failed".
-                // For now, let's just not set changed_in_current_scan and let the outer loop break.
-                // The current logic: if a candidate is bad, we just don't apply it.
-                // The next iteration of the `loop` will search for other candidates.
-                // If this was the *only* type of candidate, `changed_in_current_scan` remains false, and the loop terminates.
             } else if causes_specific_panic(
                 &temp_productions_after_inlining,
                 augmented_start_rule_lhs,
@@ -1730,41 +1711,39 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
     // --- Final Simplification Pass: Inline A -> B rules ---
     println!("\n[Minimizer] Deterministic simplification phase starting.");
     loop {
-        let prods_count_before_deterministic_iter = current_productions.len();
-        let mut changed_anything_in_deterministic_iter = false;
+        let productions_at_start_of_deterministic_iter = current_productions.clone();
 
         // Apply A -> B inlining (iterates to fixed point internally)
-        let prev_len_before_unit_inline = current_productions.len();
+        let prev_len_unit_inline = current_productions.len();
         current_productions = simplify_and_inline_unit_nonterminal_rules(
             current_productions, // Takes ownership
             &augmented_start_rule_lhs,
             &sequence_to_test_names,
             PANIC_SUBSTRING_TO_FIND,
         );
-        if current_productions.len() != prev_len_before_unit_inline {
-            changed_anything_in_deterministic_iter = true;
-            println!("[Minimizer-Determ] simplify_and_inline_unit_nonterminal_rules changed productions: {} -> {}", prev_len_before_unit_inline, current_productions.len());
+        if current_productions.len() != prev_len_unit_inline {
+             println!("[Minimizer-Determ] simplify_and_inline_unit_nonterminal_rules changed productions: {} -> {}", prev_len_unit_inline, current_productions.len());
         }
         
         // Apply A -> alpha (sole production) inlining (iterates to fixed point internally)
-        let prev_len_before_sole_inline = current_productions.len();
-        let (next_prods_after_sole_inline, sole_inlined_overall) = inline_sole_productions_pass(
+        let prev_len_sole_inline = current_productions.len();
+        let (next_prods_after_sole_inline, _sole_inlined_overall) = inline_sole_productions_pass( // We don't strictly need sole_inlined_overall for this new check
             current_productions, // Takes ownership
             &augmented_start_rule_lhs,
             &sequence_to_test_names,
             PANIC_SUBSTRING_TO_FIND,
         );
         current_productions = next_prods_after_sole_inline;
-        if sole_inlined_overall { // sole_inlined_overall indicates if *any* change was made by that pass
-            changed_anything_in_deterministic_iter = true;
-             println!("[Minimizer-Determ] inline_sole_productions_pass changed productions: {} -> {}", prev_len_before_sole_inline, current_productions.len());
+        if current_productions.len() != prev_len_sole_inline {
+            println!("[Minimizer-Determ] inline_sole_productions_pass changed productions: {} -> {}", prev_len_sole_inline, current_productions.len());
         }
 
-        if !changed_anything_in_deterministic_iter {
+        // Check for convergence by comparing the entire set of productions
+        if current_productions == productions_at_start_of_deterministic_iter {
             println!("[Minimizer] Deterministic simplification phase converged. Final production count: {}", current_productions.len());
             break;
         }
-        println!("[Minimizer] Deterministic iteration made changes. Productions: {} -> {}. Repeating deterministic loop.", prods_count_before_deterministic_iter, current_productions.len());
+        println!("[Minimizer] Deterministic iteration made changes. Productions count: {} -> {}. Repeating deterministic loop.", productions_at_start_of_deterministic_iter.len(), current_productions.len());
     }
 
     // --- Output Final Minimized Grammar ---
