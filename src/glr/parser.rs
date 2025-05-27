@@ -470,10 +470,9 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
         // States from active_states are roots of new reduction chains. Their visited set is initially empty.
         let nodes: Vec<_> = vec![self.active_state.stack.clone()];
         let simplified_states = simplify_gss_forest(&nodes);
-        for state_to_process in simplified_states {
-            todo.push((ParseState { stack: state_to_process }, BTreeSet::new()));
-        }
-        
+        self.active_state.stack = simplified_states[0].clone();
+        todo.push((ParseState { stack: self.active_state.stack.clone() }, BTreeSet::new()));
+
         let mut next = ParseState::new();
         let mut not_found = ParseState::new();
 
