@@ -15,7 +15,31 @@ type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
 type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
 type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
 type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Row>;
-type Stage5Table = Stage4Row;
+type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
+type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
+pub type Stage7Table = BTreeMap<StateID, Stage7Row>;
+
+
+type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
+#[derive(Debug)]
+struct Stage2Row {
+    shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+    gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+    reduces: BTreeSet<Item>,
+}
+#[derive(Debug)]
+struct Stage3Row {
+    shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+    gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+    reduces: BTreeMap<Terminal, BTreeSet<Item>>,
+}
+#[derive(Debug)]
+struct Stage4Row {
+    shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+    gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+    reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+}
+type Stage5Row = Stage4Row;
 #[derive(Debug)]
 struct Stage6Row {
     shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
@@ -205,7 +229,7 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
     let mut stage_2_table = BTreeMap::new();
     for (item_set, transitions) in stage_1_table {
         let mut shifts = BTreeMap::new();
-        let mut gotos = BTreeSet::new();
+        let mut gotos = BTreeMap::new();
         let mut reduces = BTreeSet::new();
 
         let closure = compute_closure(&item_set, productions);
@@ -449,105 +473,39 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
     (stage_7_table, item_set_map, start_state_id)
 }
 
-pub fn generate_glr_parser_with_maps(
-    productions_user: &[Production],
-    start_production_id_user: usize,
-    terminal_map: BiBTreeMap<Terminal, TerminalID>,
-    mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
-) -> GLRParser {
-    crate::debug!(2, "Initial user productions: {}", productions_user.len());
+pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
+    let original_productions = productions.to_vec();
 
     crate::debug!(2, "Removing productions with undefined non-terminals");
-    let productions_processed_user = remove_productions_with_undefined_nonterminals(productions_user);
-    crate::debug!(2, "Productions after undefined removal: {}", productions_processed_user.len());
+    let productions = remove_productions_with_undefined_nonterminals(productions);
 
-    if productions_processed_user.is_empty() {
-        panic!("Grammar is empty after removing productions with undefined non-terminals. Cannot proceed.");
-    }
-    // Also, ensure start_production_id_user is valid for the processed list
-    if start_production_id_user >= productions_processed_user.len() {
-        panic!("User start_production_id {} is out of bounds for processed user productions (len {})", start_production_id_user, productions_processed_user.len());
-    }
+    crate::debug!(2, "Validating");
+    validate(&productions).expect("Validation error");
 
-    crate::debug!(2, "Validating processed user grammar");
-    validate(&productions_processed_user).expect("Validation error on processed user grammar");
-
-    // --- Augmentation ---
-    let user_start_symbol_lhs = productions_processed_user[start_production_id_user].lhs.clone();
-
-    // Create a unique name for the augmented start symbol.
-    let base_aug_name = format!("{}'", user_start_symbol_lhs.0); // e.g. "block'"
-    let mut aug_name_candidate = base_aug_name.clone();
-    let mut i = 0;
-    // Ensure augmented start symbol name is unique by checking against existing non-terminals
-    // both in the map and in the productions list (in case some NTs are not in the map yet, though they should be).
-    while non_terminal_map.contains_left(&NonTerminal(aug_name_candidate.clone())) ||
-          productions_processed_user.iter().any(|p| p.lhs.0 == aug_name_candidate || p.rhs.iter().any(|s| matches!(s, Symbol::NonTerminal(nt) if nt.0 == aug_name_candidate))) {
-        aug_name_candidate = format!("{}_{}", base_aug_name, i); // e.g., "block'_0", "block'_1"
-        i += 1;
-    }
-    let augmented_start_nt = NonTerminal(aug_name_candidate);
-    crate::debug!(2, "Augmented start non-terminal: {}", augmented_start_nt.0);
-
-
-    // Add augmented_start_nt to non_terminal_map
-    if !non_terminal_map.contains_left(&augmented_start_nt) {
-        // Find the next available NonTerminalID
-        let next_nt_id_val = non_terminal_map.values().map(|id| id.0).max().map_or(0, |max_id| max_id + 1);
-        non_terminal_map.insert(augmented_start_nt.clone(), NonTerminalID(next_nt_id_val));
-    }
-
-    let augmented_production = Production {
-        lhs: augmented_start_nt.clone(), // The new augmented start symbol
-        rhs: vec![Symbol::NonTerminal(user_start_symbol_lhs)], // RHS is the user's original start symbol
-    };
-
-    // Create the internal list of productions, including the new augmented rule.
-    // It's conventional to place the augmented rule at index 0.
-    let mut productions_internal = productions_processed_user; // This is already a Vec from remove_productions_with_undefined_nonterminals
-    productions_internal.insert(0, augmented_production);
-    let start_production_id_internal = 0; // The augmented production is now the true start for table generation
-    crate::debug!(2, "Internal productions (augmented): {}", productions_internal.len());
-
-
-    // --- Table generation using augmented grammar ---
-    crate::debug!(2, "Stage 1 (using augmented grammar)");
-    let stage_1_table = stage_1(&productions_internal, start_production_id_internal);
+    crate::debug!(2, "Stage 1");
+    let stage_1_table = stage_1(&productions, start_production_id);
     crate::debug!(6, &stage_1_table);
     crate::debug!(2, "Stage 2");
-    let stage_2_table = stage_2(stage_1_table, &productions_internal);
+    let stage_2_table = stage_2(stage_1_table, &productions);
     crate::debug!(6, &stage_2_table);
     crate::debug!(2, "Stage 3");
-    let stage_3_table = stage_3(stage_2_table, &productions_internal);
+    let stage_3_table = stage_3(stage_2_table, &productions);
     crate::debug!(6, &stage_3_table);
     crate::debug!(2, "Stage 4");
-    let stage_4_table = stage_4(stage_3_table, &productions_internal);
+    let stage_4_table = stage_4(stage_3_table, &productions);
     crate::debug!(6, &stage_4_table);
     crate::debug!(2, "Stage 5");
-    let stage_5_table = stage_5(stage_4_table, &productions_internal);
+    let stage_5_table = stage_5(stage_4_table, &productions);
     crate::debug!(6, &stage_5_table);
     crate::debug!(2, "Stage 6");
     let stage_6_table = stage_6(stage_5_table);
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
-    let (stage_7_table, item_set_map, start_state_id) = stage_7(
-        stage_6_table,
-        &productions_internal,
-        start_production_id_internal,
-        &terminal_map,
-        &non_terminal_map,
-    );
+    let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
     crate::debug!(2, "Done generating GLR parser");
 
-    GLRParser::new(
-        stage_7_table,
-        productions_internal,
-        terminal_map,
-        non_terminal_map,
-        item_set_map,
-        start_state_id,
-    )
+    GLRParser::new(stage_7_table, original_productions, terminal_map, non_terminal_map, item_set_map, start_state_id)
 }
 
 pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
@@ -591,3 +549,4 @@ pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerm
     }
     non_terminal_map
 }
+
