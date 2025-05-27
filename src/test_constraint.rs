@@ -1459,7 +1459,7 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
     let augmented_start_rule_lhs = compiled_grammar.definition.productions
         [compiled_grammar.definition.start_production_id].lhs.clone();
     // let sequence_to_test_names = ["\"...\"", "\";\"", "\"elif\""];
-    let sequence_to_test_names = ["\"yield\"", "IGNORE[0][0]", "NEWLINE[0]"];
+    let sequence_to_test_names = ["\"yield\"", "IGNORE[0][0]", "NEWLINE[0]", "\"-\""];
 
     println!("[Minimizer] Starting stochastic minimization for panic substring: '{}'", PANIC_SUBSTRING_TO_FIND);
     println!("[Minimizer] Initial number of productions: {}", initial_productions.len());
