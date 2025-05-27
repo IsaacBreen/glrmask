@@ -1122,7 +1122,9 @@ mod tests {
         let a1_orig_nc = nc_node_arc(MockPathAccumulator::default(), a1_preds_nc);
 
         let roots_nc = vec![a1_orig_nc.clone()];
+        println!("Before simplifying GSS forest: {:?}", gather_gss_stats(&roots_nc));
         let simplified_roots = simplify_gss_forest(&roots_nc);
+        println!("After simplifying GSS forest: {:?}", gather_gss_stats(&simplified_roots));
         assert_eq!(simplified_roots.len(), 1);
         let s_a1 = simplified_roots[0].clone();
 
