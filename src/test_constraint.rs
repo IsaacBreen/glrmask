@@ -786,7 +786,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             for (i, terminal_id) in current_fuzz_sequence_ids.iter().enumerate() {
                 // The core of the fuzz test: step and see if it panics.
                 // We don't care about glr_state.is_ok() here.
-                let seen_so_far: Vec<_> = current_fuzz_sequence_names[..i].iter().cloned().collect();
+                let seen_so_far: Vec<_> = current_fuzz_sequence_names[..=i].iter().cloned().collect();
                 println!("    Stepping with token {}/{}: '{}' (Terminal {}). Seen so far: {:?}", i + 1, num_tokens_this_attempt, current_fuzz_sequence_names[i], terminal_id.0, seen_so_far);
                 glr_state.step(*terminal_id);
             }
@@ -1458,7 +1458,8 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
     let initial_productions = compiled_grammar.definition.productions.clone();
     let augmented_start_rule_lhs = compiled_grammar.definition.productions
         [compiled_grammar.definition.start_production_id].lhs.clone();
-    let sequence_to_test_names = ["\"...\"", "\";\"", "\"elif\""];
+    // let sequence_to_test_names = ["\"...\"", "\";\"", "\"elif\""];
+    let sequence_to_test_names = ["\"yield\"", "IGNORE[0][0]", "NEWLINE[0]"];
 
     println!("[Minimizer] Starting stochastic minimization for panic substring: '{}'", PANIC_SUBSTRING_TO_FIND);
     println!("[Minimizer] Initial number of productions: {}", initial_productions.len());
