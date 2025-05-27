@@ -196,8 +196,7 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
         production: productions[start_production_id].clone(),
         dot_position: 0,
     };
-    let initial_kernel_set = BTreeSet::from([initial_item]);
-    let initial_closure = compute_closure(&initial_kernel_set, productions);
+    let initial_closure = BTreeSet::from([initial_item]);
     let mut worklist = VecDeque::from([initial_closure.clone()]);
 
     let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
@@ -207,17 +206,17 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
             continue;
         }
 
-        let splits = split_on_dot(&items);
+        let closure = compute_closure(&items, productions);
+        let splits = split_on_dot(&closure);
         let mut row = BTreeMap::new();
 
-        for (symbol, items_in_split) in splits {
+        for (symbol, items) in splits {
             if symbol.is_none() {
                 continue;
             }
-            let target_kernel_set = compute_goto(&items_in_split);
-            let target_closure_set = compute_closure(&target_kernel_set, productions);
-            row.insert(symbol.clone(), target_closure_set.clone());
-            worklist.push_back(target_closure_set);
+            let goto_set = compute_goto(&items);
+            row.insert(symbol.clone(), goto_set.clone());
+            worklist.push_back(goto_set);
         }
 
         transitions.insert(items.clone(), row);
@@ -550,3 +549,4 @@ pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerm
     }
     non_terminal_map
 }
+
