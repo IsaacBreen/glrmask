@@ -358,7 +358,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
         let parent;
         let predecessors_with_values;
         if len == 0 {
-            parent = stack.clone();
+            parent = Arc::new(edge_src.push(edge_content.clone()));
             predecessors_with_values = vec![(edge_src.clone(), edge_content.clone())].into_iter().collect();
         } else {
             parent = Arc::new(edge_src.popn(len - 1));
