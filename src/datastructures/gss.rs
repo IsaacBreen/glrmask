@@ -11,7 +11,7 @@ type NodeCache<T, A> = HashMap<BTreeMap<T, Arc<GSSNode<T, A>>>, Arc<GSSNode<T, A
 type NodeMap<T, A> = BTreeMap<T, Arc<GSSNode<T, A>>>;
 type NodeSet<T, A> = BTreeSet<(Arc<GSSNode<T, A>>, T)>;
 
-pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash + Default {
+pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
     fn union(&self, other: &Self) -> Self;
     fn pop(&self, right: &Self) -> Self;
 }
@@ -62,7 +62,7 @@ impl<'a, T: Clone, A: PathAccumulator> Iterator for PathsIter<'a, T, A> {
     }
 }
 
-fn process_predecessors<T: Ord + Hash + Clone, A: PathAccumulator + Clone>(
+fn process_predecessors<T: Ord + Hash + Clone, A: PathAccumulator + Clone + Default>(
     incoming: &NodeSet<T, A>
 ) -> NodeMap<T, A> {
     let mut grouped: BTreeMap<T, Vec<Arc<GSSNode<T, A>>>> = BTreeMap::new();
@@ -91,7 +91,7 @@ fn process_predecessors<T: Ord + Hash + Clone, A: PathAccumulator + Clone>(
 }
 
 // Basic node creation and manipulation
-impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
+impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone + Default> GSSNode<T, A> {
     pub fn new(acc: A) -> Self {
         let predecessors = NodeMap::new();
         let hash_key_cache = compute_hash_key(&predecessors);
@@ -145,7 +145,7 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
 }
 
 // Canonicalization methods
-impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug> GSSNode<T, A> {
+impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug + Default> GSSNode<T, A> {
     fn get_canonical(predecessors_set: NodeSet<T, A>, cache: &mut NodeCache<T, A>) -> Arc<Self> {
         let key = process_predecessors(&predecessors_set);
 
@@ -210,7 +210,7 @@ impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + De
 }
 
 // Core manipulation methods
-impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
+impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone + Default> GSSNode<T, A> {
     pub fn push(self, edge_value: T) -> Self {
         let predecessors_set = NodeSet::from([(Arc::new(self), edge_value)]);
         Self::new_with_predecessors(predecessors_set)
@@ -376,7 +376,7 @@ pub trait GSSTrait<T: Clone + Hash, A: PathAccumulator> {
     fn popn(&self, n: usize) -> GSSNode<T, A> where T: Ord + Clone, A: Clone;
 }
 
-impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for GSSNode<T, A> {
+impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A> for GSSNode<T, A> {
     fn push(&self, edge_value: T) -> GSSNode<T, A> {
         self.clone().push(edge_value)
     }
@@ -397,7 +397,7 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for GSSNo
     }
 }
 
-impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone> GSSTrait<T, A> for Arc<GSSNode<T, A>> {
+impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A> for Arc<GSSNode<T, A>> {
     fn push(&self, edge_value: T) -> GSSNode<T, A> {
         GSSNode::new_with_predecessors(NodeSet::from([(self.clone(), edge_value)]))
     }
@@ -472,7 +472,7 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A>
 }
 
 // Utility functions
-pub fn prune_and_transform_recursive_canonical<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug>(
+pub fn prune_and_transform_recursive_canonical<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug + Default>(
     node_arc: &Arc<GSSNode<T, A>>,
     closure: &impl Fn(&A) -> Option<(A, bool)>,
     memo: &mut HashMap<*const GSSNode<T, A>, Option<Arc<GSSNode<T, A>>>>,
@@ -512,7 +512,7 @@ pub fn prune_and_transform_recursive_canonical<T: Clone + Ord + Hash + Debug, A:
     }
 }
 
-pub fn prune_and_transform_recursive<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug>(
+pub fn prune_and_transform_recursive<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug + Default>(
     node_arc: &Arc<GSSNode<T, A>>,
     closure: &impl Fn(&A) -> Option<(A, bool)>,
     memo: &mut HashMap<*const GSSNode<T, A>, Option<Arc<GSSNode<T, A>>>>,
@@ -521,14 +521,14 @@ pub fn prune_and_transform_recursive<T: Clone + Ord + Hash + Debug, A: PathAccum
     prune_and_transform_recursive_canonical(node_arc, closure, memo, &mut cache)
 }
 
-pub fn find_longest_path<T: Clone + Ord + Hash, A: PathAccumulator>(
+pub fn find_longest_path<T: Clone + Ord + Hash, A: PathAccumulator + Default>(
     root_node: &GSSNode<T, A>
 ) -> Option<Vec<(T, Arc<GSSNode<T, A>>)>> {
     if root_node.predecessors.is_empty() {
         return None;
     }
 
-    fn find_longest_recursive<T: Clone + Ord + Hash, A: PathAccumulator>(
+    fn find_longest_recursive<T: Clone + Ord + Hash, A: PathAccumulator + Default>(
         node_arc: &Arc<GSSNode<T, A>>,
         memo: &mut HashMap<*const GSSNode<T, A>, Vec<(T, Arc<GSSNode<T, A>>)>>,
         visited: &mut HashSet<*const GSSNode<T, A>>,
@@ -709,7 +709,7 @@ pub fn print_gss_forest<T: Debug, A: PathAccumulator>(
 }
 
 // Simplification methods
-fn simplify_node_recursive<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug>(
+fn simplify_node_recursive<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug + Default>(
     node_arc: &Arc<GSSNode<T, A>>,
     memo: &mut HashMap<*const GSSNode<T, A>, Arc<GSSNode<T, A>>>,
     cache: &mut NodeCache<T, A>,
@@ -734,7 +734,7 @@ fn simplify_node_recursive<T: Clone + Ord + Hash + Debug, A: PathAccumulator + C
     temp_arc
 }
 
-fn simplify_gss_forest<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug>(
+fn simplify_gss_forest<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug + Default>(
     roots: &[Arc<GSSNode<T, A>>],
 ) -> Vec<Arc<GSSNode<T, A>>> {
     let mut memo = HashMap::new();
@@ -755,7 +755,7 @@ fn simplify_gss_forest<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone
     simplified
 }
 
-impl<T: Ord + Hash + Clone + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug> GSSNode<T, A> {
+impl<T: Ord + Hash + Clone + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug + Default> GSSNode<T, A> {
     pub fn simplify(&mut self) {
         let self_arc = Arc::new(self.clone());
         let mut memo = HashMap::new();

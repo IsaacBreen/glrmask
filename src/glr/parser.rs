@@ -48,7 +48,7 @@ pub struct ParseState<A: PathAccumulator> { // Generic over Accumulator A
 }
 // No JSONConvertible for ParseState<A> directly (depends on GSSNode).
 
-impl<A: PathAccumulator> ParseState<A> {
+impl<A: PathAccumulator + Default> ParseState<A> {
     pub fn new() -> Self {
         ParseState { stack: Arc::new(GSSNode::new(A::default())) }
     }
@@ -154,11 +154,11 @@ impl GLRParser {
         }
     }
 
-    pub fn init_glr_parser<A: PathAccumulator>(&self) -> GLRParserState<A> {
+    pub fn init_glr_parser<A: PathAccumulator + Default>(&self) -> GLRParserState<A> {
         self.init_glr_parser_with_acc(A::default())
     }
 
-    pub fn init_glr_parser_with_acc<A: PathAccumulator>(&self, initial_acc: A) -> GLRParserState<A> {
+    pub fn init_glr_parser_with_acc<A: PathAccumulator + Default>(&self, initial_acc: A) -> GLRParserState<A> {
         let initial_parse_state = self.init_parse_state_with_acc(initial_acc);
         GLRParserState {
             parser: self,
@@ -167,7 +167,7 @@ impl GLRParser {
             cycled_states: ParseState::new(),
         }
     }
-    pub fn init_glr_parser_from_parse_state<A: PathAccumulator>(&self, parse_state: ParseState<A>) -> GLRParserState<A> {
+    pub fn init_glr_parser_from_parse_state<A: PathAccumulator + Default>(&self, parse_state: ParseState<A>) -> GLRParserState<A> {
         GLRParserState {
             parser: self,
             active_state: parse_state,
@@ -176,11 +176,11 @@ impl GLRParser {
         }
     }
 
-    pub fn init_parse_state<A: PathAccumulator>(&self) -> ParseState<A> {
+    pub fn init_parse_state<A: PathAccumulator + Default>(&self) -> ParseState<A> {
         self.init_parse_state_with_acc(A::default())
     }
 
-    pub fn init_parse_state_with_acc<A: PathAccumulator>(&self, initial_acc: A) -> ParseState<A> {
+    pub fn init_parse_state_with_acc<A: PathAccumulator + Default>(&self, initial_acc: A) -> ParseState<A> {
         let initial_content = ParseStateEdgeContent {
             state_id: self.start_state_id,
         };
@@ -316,14 +316,14 @@ impl Display for GLRParser {
 }
 
 #[derive(Debug, Clone)]
-pub struct GLRParserState<'a, A: PathAccumulator> { // Generic over Accumulator A
+pub struct GLRParserState<'a, A: PathAccumulator + Default> { // Generic over Accumulator A
     pub parser: &'a GLRParser,
     pub active_state: ParseState<A>,
     pub action_not_found_states: ParseState<A>,
     pub cycled_states: ParseState<A>,
 }
 
-impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
+impl<'a, A: PathAccumulator + Default> GLRParserState<'a, A> {
     /* -------------------------------------------------
      * Helper utilities to make `step` compact and clear
      * ------------------------------------------------- */
@@ -593,7 +593,7 @@ pub struct ParseStateKey {
     // Removed action_stack
 }
 
-impl<A: PathAccumulator> ParseState<A> { // Generic over Accumulator A
+impl<A: PathAccumulator + Default> ParseState<A> { // Generic over Accumulator A
     /// Merges `other` into `self`. Assumes `self.key() == other.key()`.
     /// Merges the GSS structures and combines the `acc` value at the top node using `PathAccumulator::union`.
     pub fn merge(&mut self, other: ParseState<A>) {
