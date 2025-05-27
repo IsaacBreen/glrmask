@@ -392,6 +392,9 @@ impl GrammarConstraint {
         // 2.  Run the DFS over the vocabulary prefix tree.
         helper.run_dfs();
 
+        // New step: Prune the precomputed graph
+        helper.prune_precomputed_graph();
+
         // 3. Merge nodes.
         helper.merge_nodes();
 
@@ -619,6 +622,158 @@ impl<'r> Precomputer<'r> {
         // pb2.finish_with_message("Rewritten all roots to unique representatives");
     }
 
+    fn prune_precomputed_graph(&mut self) {
+        crate::debug!(2, "Starting precomputed graph pruning.");
+
+        // Pass 1: Compute completable tokens for all nodes.
+        // This cache will store the set of LLM tokens that can complete a parse
+        // starting from or passing through each node.
+        let mut completable_cache: HashMap<*const Mutex<PrecomputeNode>, LLMTokenBV> = HashMap::new();
+
+        // Iterate over all root nodes and recursively compute completable tokens.
+        // The recursion handles shared nodes and cycles.
+        for root_arc in self.roots.values() {
+            let mut recursion_stack_for_pass1 = HashSet::new();
+            self.compute_completable_tokens_recursive(root_arc, &mut recursion_stack_for_pass1, &mut completable_cache);
+        }
+        crate::debug!(3, "Completed pass 1 (compute completable tokens). Cache size: {}", completable_cache.len());
+
+        // Pass 2: Filter edges based on the completable tokens and prune empty edges.
+        // This pass modifies the graph in-place.
+        let mut visited_nodes_for_pruning_pass = HashSet::new();
+        for root_arc in self.roots.values() {
+            self.filter_and_prune_edges_recursive(root_arc, &mut visited_nodes_for_pruning_pass, &completable_cache);
+        }
+        crate::debug!(3, "Completed pass 2 (filter and prune edges).");
+
+        crate::debug!(2, "Finished precomputed graph pruning.");
+    }
+
+    fn compute_completable_tokens_recursive(
+        &self,
+        node_arc: &Arc<Mutex<PrecomputeNode>>,
+        recursion_stack: &mut HashSet<*const Mutex<PrecomputeNode>>,
+        completable_cache: &mut HashMap<*const Mutex<PrecomputeNode>, LLMTokenBV>
+    ) -> LLMTokenBV {
+        let node_ptr = Arc::as_ptr(node_arc);
+
+        // If already computed, return cached value.
+        if let Some(cached_completable_tokens) = completable_cache.get(&node_ptr) {
+            return cached_completable_tokens.clone();
+        }
+
+        // Check for cycles in the current computation path.
+        if recursion_stack.contains(&node_ptr) {
+            // Cycle detected. Tokens from this specific path through the cycle
+            // don't contribute *new* completable tokens beyond what's already
+            // being computed by the cycle members themselves.
+            return LLMTokenBV::new(); // Return empty set.
+        }
+
+        recursion_stack.insert(node_ptr);
+
+        // Lock the node to access its data.
+        let node_guard = node_arc.lock().expect("Mutex poisoned during compute_completable_tokens_recursive lock");
+        
+        // Initialize completable tokens with those from clean_end and finalizers of the current node.
+        let mut current_node_completable = node_guard.value.clean_end.as_ref().cloned().unwrap_or_else(LLMTokenBV::new);
+
+        for finalizer in node_guard.value.finalizers.values() {
+            for llm_token_bv_in_finalizer in finalizer.content.values() {
+                current_node_completable |= llm_token_bv_in_finalizer;
+            }
+        }
+
+        // Collect all children Arcs before recursing to avoid holding the lock during recursive calls.
+        let children_arcs_to_visit: Vec<Arc<Mutex<PrecomputeNode>>> = node_guard.children.values()
+            .flat_map(|destinations_map| destinations_map.keys().map(|arc_ptr_wrapper| arc_ptr_wrapper.as_arc().clone()))
+            .collect();
+        
+        drop(node_guard); // Release the lock before making recursive calls.
+
+        // Recursively compute for children and union their completable tokens.
+        for child_arc in children_arcs_to_visit {
+            let child_completable_tokens = self.compute_completable_tokens_recursive(&child_arc, recursion_stack, completable_cache);
+            current_node_completable |= &child_completable_tokens; // Union with child's completable tokens.
+        }
+
+        recursion_stack.remove(&node_ptr); // Backtrack: remove from current recursion path.
+        
+        // Cache the result for this node.
+        completable_cache.insert(node_ptr, current_node_completable.clone());
+        current_node_completable
+    }
+
+    fn filter_and_prune_edges_recursive(
+        &mut self, // Changed to &mut self to allow modifying self.stats
+        node_arc: &Arc<Mutex<PrecomputeNode>>,
+        visited_for_pruning: &mut HashSet<*const Mutex<PrecomputeNode>>,
+        completable_cache: &HashMap<*const Mutex<PrecomputeNode>, LLMTokenBV>
+    ) {
+        let node_ptr = Arc::as_ptr(node_arc);
+        // If this node has already been visited and processed in this pruning pass, skip.
+        if !visited_for_pruning.insert(node_ptr) {
+            return;
+        }
+
+        // Step 1: Collect all children Arcs that will need to be visited recursively.
+        // This must be done before modifying the current node's children structure,
+        // as the iteration depends on the current state of children.
+        let children_to_visit_recursively: Vec<Arc<Mutex<PrecomputeNode>>> = {
+            let node_guard = node_arc.lock().expect("Mutex poisoned: filter_and_prune_edges_recursive lock (read children)");
+            node_guard.children.values()
+                .flat_map(|destinations_map| destinations_map.keys().map(|arc_ptr_wrapper| arc_ptr_wrapper.as_arc().clone()))
+                .collect()
+        }; // Lock is released here.
+
+        // Step 2: Modify the current node's children: filter edge values and prune empty edges.
+        {
+            let mut node_guard = node_arc.lock().expect("Mutex poisoned: filter_and_prune_edges_recursive lock (modify children)");
+            
+            // Take ownership of the current children map to build a new one.
+            let original_children_map = std::mem::take(&mut node_guard.children);
+            let mut new_children_map_for_current_node = BTreeMap::new();
+
+            for (edge_key, destinations_map) in original_children_map {
+                let mut new_destinations_for_this_edge_key = BTreeMap::new();
+                for (child_arc_ptr_wrapper, current_edge_value) in destinations_map {
+                    let child_arc = child_arc_ptr_wrapper.as_arc();
+                    let child_ptr = Arc::as_ptr(child_arc);
+
+                    // Get the precomputed completable tokens for the child node.
+                    // If a child is not in the cache (e.g., part of a non-contributing cycle),
+                    // its completable set is effectively empty for filtering.
+                    let completable_tokens_for_child = completable_cache.get(&child_ptr)
+                                                      .cloned()
+                                                      .unwrap_or_else(LLMTokenBV::new);
+                    
+                    // Filter the current edge's LLMTokenBV by ANDing with the child's completable tokens.
+                    let mut filtered_edge_value = current_edge_value.clone(); // Clone to modify
+                    filtered_edge_value &= &completable_tokens_for_child;
+
+                    // If the filtered edge value is not empty, keep the edge.
+                    if !filtered_edge_value.is_empty() {
+                        new_destinations_for_this_edge_key.insert(child_arc_ptr_wrapper.clone(), filtered_edge_value);
+                    } else {
+                        // Edge becomes empty, so it's pruned.
+                        self.stats.edges_pruned_total += 1; 
+                    }
+                }
+                // If there are any destinations left for this edge key, add them to the new children map.
+                if !new_destinations_for_this_edge_key.is_empty() {
+                    new_children_map_for_current_node.insert(edge_key.clone(), new_destinations_for_this_edge_key);
+                }
+            }
+            // Replace the node's children with the new, filtered map.
+            node_guard.children = new_children_map_for_current_node;
+        } // Lock is released here.
+
+        // Step 3: Recurse on the children collected in Step 1.
+        for child_arc_to_recurse_on in children_to_visit_recursively {
+            self.filter_and_prune_edges_recursive(&child_arc_to_recurse_on, visited_for_pruning, completable_cache);
+        }
+    }
+    
     // -------------------------------------------------------------------------
     // Finalise: stats, cycle check, unwrap Arcs -> Precomputed
     // -------------------------------------------------------------------------
