@@ -360,7 +360,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
         } else {
             edge_src.popn(len - 1)
         });
-        println!("Parent: {}", print_gss_forest(&[parent.clone()], usize::MAX));
+        // println!("Parent: {}", print_gss_forest(&[parent.clone()], usize::MAX));
         let mut out = GSSNode::new_default();
         crate::debug!(4, "Popped with {} predecessors...", parent.predecessors_with_values().len());
 
@@ -379,9 +379,10 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
 
                     let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id };
 
-                    // Create the new GSSNode (child of parent_arc)
-                    // parent_arc.push will give it parent_arc.acc by default (via new_with_predecessors)
-                    let mut new_gss_node_arc = parent.push(goto_node_content);
+                    // TODO: what the heck
+                    let new_parent_idk = predecessor.push(edge_value.clone());
+
+                    let mut new_gss_node_arc = new_parent_idk.push(goto_node_content);
                     // Now, explicitly set its acc to the computed intersection
                     new_gss_node_arc.acc = new_acc_for_goto_child;
 
@@ -392,7 +393,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
                 }
             }
         }
-        println!("{}", print_gss_forest(&[Arc::new(out.clone())], usize::MAX));
+        // println!("{}", print_gss_forest(&[Arc::new(out.clone())], usize::MAX));
         Arc::new(out)
     }
 
@@ -469,7 +470,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
         let nodes: Vec<_> = vec![self.active_state.stack.clone()];
         let simplified_states = simplify_gss_forest(&nodes);
         self.active_state.stack = simplified_states[0].clone();
-        self.log_gss("Simplified GSS after initial step", token_id);
+        // self.log_gss("Simplified GSS after initial step", token_id);
         todo.push((ParseState { stack: self.active_state.stack.clone() }, BTreeSet::new()));
 
         let mut next = ParseState::new();
