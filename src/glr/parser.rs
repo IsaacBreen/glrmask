@@ -1,5 +1,5 @@
 use crate::datastructures::gss::print_gss_forest;
-use crate::datastructures::gss::{gather_gss_stats, find_longest_path, PathAccumulator, simplify_gss_forest, prune_and_transform_recursive}; // Import PathAccumulator and prune_and_transform_recursive
+use crate::datastructures::gss::{gather_gss_stats, find_longest_path, PathAccumulator, prune_and_transform_recursive}; // Import PathAccumulator and prune_and_transform_recursive
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID};
@@ -458,9 +458,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
         /* ---------- logging & preparation ---------- */
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
 
-        let nodes: Vec<_> = vec![self.active_state.stack.clone()];
-        let simplified_states = simplify_gss_forest(&nodes);
-        self.active_state.stack = simplified_states[0].clone();
+        Arc::make_mut(&mut self.active_state.stack).simplify();
 
         self.log_gss("Step-start", token_id);
 

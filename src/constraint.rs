@@ -14,7 +14,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, print_precompute_stats, PrecomputeStats};
 use crate::datastructures::charmap::TrieMap;
-use crate::datastructures::gss::{gather_gss_stats, print_gss_forest, prune_and_transform_recursive, prune_and_transform_recursive_canonical, simplify_gss_forest, GSSNode, PathAccumulator}; // Import PathAccumulator
+use crate::datastructures::gss::{gather_gss_stats, print_gss_forest, prune_and_transform_recursive, prune_and_transform_recursive_canonical, GSSNode, PathAccumulator}; // Import PathAccumulator
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -1145,9 +1145,10 @@ impl<'a> GrammarConstraintState<'a> {
             },
             |node, current_glr_parse_state| {
                 // Simplify the GSS forest
-                let nodes: Vec<_> = vec![current_glr_parse_state.active_state.stack.clone()];
-                let simplified_states = simplify_gss_forest(&nodes);
-                current_glr_parse_state.active_state.stack = simplified_states[0].clone();
+                // let nodes: Vec<_> = vec![current_glr_parse_state.active_state.stack.clone()];
+                // let simplified_states = simplify_gss_forest(&nodes);
+                // current_glr_parse_state.active_state.stack = simplified_states[0].clone();
+                Arc::make_mut(&mut current_glr_parse_state.active_state.stack).simplify();
 
                 let mut active_llm_tokens = HybridBitset::new();
                 active_llm_tokens |= &current_glr_parse_state.active_state.stack.acc().active;
@@ -1219,14 +1220,14 @@ impl<'a> GrammarConstraintState<'a> {
         }
         crate::debug!(2, "Before simplifying GSS forest: {:?}", gather_gss_stats(&roots));
         let mut i = 0;
-        let simplified_roots = simplify_gss_forest(&roots);
-        crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&simplified_roots));
-        let simplified_roots = simplify_gss_forest(&simplified_roots);
-        crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&simplified_roots));
-        let simplified_roots = simplify_gss_forest(&simplified_roots);
-        crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&simplified_roots));
+        GSSNode::simplify_together(&mut roots);
+        crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&roots));
+        GSSNode::simplify_together(&mut roots);
+        crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&roots));
+        GSSNode::simplify_together(&mut roots);
+        crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&roots));
         for (tokenizer_state_id, glr_state) in self.state.iter_mut() {
-            let simplified_root = simplified_roots[tokenizer_state_id_to_root_pos[&tokenizer_state_id]].clone();
+            let simplified_root = roots[tokenizer_state_id_to_root_pos[&tokenizer_state_id]].clone();
             glr_state.active_state.stack = simplified_root;
             i += 1;
         }

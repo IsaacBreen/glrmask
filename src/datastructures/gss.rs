@@ -848,7 +848,7 @@ fn simplify_node_recursive<T: Clone + Ord + Hash + Debug, A: PathAccumulator + C
     temp_arc
 }
 
-pub fn simplify_gss_forest<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug>(
+fn simplify_gss_forest<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug>(
     roots: &[Arc<GSSNode<T, A>>],
 ) -> Vec<Arc<GSSNode<T, A>>> {
     // TODO: delete this
@@ -880,6 +880,22 @@ impl<T: Ord + Hash + Clone + Debug, A: PathAccumulator + Clone> GSSNode<T, A> {
     pub fn simplify(&mut self) {
         let simplified_roots = simplify_gss_forest(&[Arc::new(self.clone())]);
         *self = simplified_roots[0].as_ref().clone();
+    }
+
+    pub fn simplify_recursive(
+        &mut self,
+        memo: &mut HashMap<*const GSSNode<T,A>, Arc<GSSNode<T,A>>>,
+        canonicalization_cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>,
+    ) {
+        *self = simplify_node_recursive(&Arc::new(self.clone()), memo, canonicalization_cache).as_ref().clone();
+    }
+
+    pub fn simplify_together(nodes: &mut [Arc<GSSNode<T, A>>]) {
+        let mut memo: HashMap<*const GSSNode<T, A>, Arc<GSSNode<T, A>>> = HashMap::new();
+        let mut canonicalization_cache: HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>> = HashMap::<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>::new();
+        for node in nodes {
+            *node = Arc::new(simplify_node_recursive(node, &mut memo, &mut canonicalization_cache).as_ref().clone());
+        }
     }
 }
 
