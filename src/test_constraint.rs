@@ -288,7 +288,7 @@ fn test_precompute_for_python_name_token() {
         &BiBTreeMap::new(), // empty name‐map
         internal_llm_token_map_for_precompute.iter().map(|(_, id)| id.0).max().unwrap_or(0),
     );
-    // print_precomputed(&precomputed);
+    // print_precomputed(&_precomputed);
     println!("Done precomputing");
 }
 
@@ -317,7 +317,7 @@ fn test_precompute_explosion() {
         &BiBTreeMap::new(), // empty name‐map
         internal_llm_token_map_for_precompute.iter().map(|(_, id)| id.0).max().unwrap_or(0),
     );
-    // print_precomputed(&precomputed);
+    // print_precomputed(&_precomputed);
     println!("Done precomputing");
 }
 
@@ -1201,6 +1201,31 @@ fn remove_symbols_at_locations_destructive(
     }
 }
 
+fn get_all_terminals_in_grammar(productions: &[Production]) -> BTreeSet<Terminal> {
+    let mut terminals = BTreeSet::new();
+    for prod in productions {
+        for symbol in &prod.rhs {
+            if let Symbol::Terminal(t) = symbol {
+                terminals.insert(t.clone());
+            }
+        }
+    }
+    terminals
+}
+
+fn get_all_nonterminals_in_grammar(productions: &[Production]) -> BTreeSet<NonTerminal> {
+    let mut nonterminals = BTreeSet::new();
+    for prod in productions {
+        nonterminals.insert(prod.lhs.clone());
+        for symbol in &prod.rhs {
+            if let Symbol::NonTerminal(nt) = symbol {
+                nonterminals.insert(nt.clone());
+            }
+        }
+    }
+    nonterminals
+}
+
 /// Final simplification pass: Inlines rules of the form A -> B (single non-terminal RHS)
 /// if the inlining preserves the target panic.
 fn simplify_and_inline_unit_nonterminal_rules(
@@ -1295,8 +1320,8 @@ fn simplify_and_inline_unit_nonterminal_rules(
                 productions = temp_productions_after_inlining; // Commit the change
                 made_change_in_this_iteration = true;
             } else {
-                println!("[Simplifier] Inlining {} -> {} removed the target panic. Reverting this step.", 
-                         a_nt_to_inline.0, b_nt_replacement.0);
+                println!("[Simplifier] Inlining {} removed the target panic. Reverting this step.", 
+                         a_nt_to_inline.0);
             }
         }
 
@@ -1312,6 +1337,122 @@ fn simplify_and_inline_unit_nonterminal_rules(
     }
     println!("[Simplifier] Final unit non-terminal inlining pass finished.");
     productions
+}
+
+fn inline_sole_productions_pass(
+    mut productions: Vec<Production>, // Takes ownership
+    augmented_start_rule_lhs: &NonTerminal,
+    sequence_to_test_names: &[&str],
+    panic_substring: &str,
+) -> (Vec<Production>, bool) { // Returns new productions and bool indicating if a change was made
+    let mut made_change_this_outer_iteration = false;
+    loop { // Keep iterating until a full pass makes no changes
+        let mut changed_in_current_scan = false;
+        
+        let mut nts_to_productions_info: BTreeMap<NonTerminal, Vec<(usize, Production)>> = BTreeMap::new();
+        for (idx, p) in productions.iter().enumerate() {
+            nts_to_productions_info.entry(p.lhs.clone()).or_default().push((idx, p.clone()));
+        }
+
+        let mut candidate_to_inline_info: Option<(NonTerminal, Vec<Symbol>, usize)> = None;
+
+        // Find a candidate NT to inline
+        for (nt_candidate, defining_rules_with_indices) in &nts_to_productions_info {
+            if nt_candidate == augmented_start_rule_lhs { continue; }
+
+            if defining_rules_with_indices.len() == 1 {
+                let (original_prod_idx, single_prod_rule) = &defining_rules_with_indices[0];
+                
+                let is_used_in_rhs_of_other_rules = productions.iter().any(|p| {
+                    // Only consider it "used" if it's in the RHS of a *different* NT's rule,
+                    // or in a different rule for the same NT (if it had multiple rules, which it doesn't here)
+                    // OR if it's used in the RHS of the augmented start rule.
+                    (p.lhs != *nt_candidate || p.lhs == *augmented_start_rule_lhs) && 
+                    p.rhs.iter().any(|s| match s {
+                        Symbol::NonTerminal(nt_in_rhs) => nt_in_rhs == nt_candidate,
+                        _ => false,
+                    })
+                });
+
+                let is_recursive_in_its_own_sole_rule = single_prod_rule.rhs.iter().any(|s| match s {
+                    Symbol::NonTerminal(nt_in_rhs) => nt_in_rhs == nt_candidate,
+                    _ => false,
+                });
+
+                // Only inline if it's used and not directly recursive in its sole definition
+                // (e.g. A -> alpha A beta)
+                if is_used_in_rhs_of_other_rules && !is_recursive_in_its_own_sole_rule {
+                    candidate_to_inline_info = Some((nt_candidate.clone(), single_prod_rule.rhs.clone(), *original_prod_idx));
+                    break; 
+                }
+            }
+        }
+
+        if let Some((nt_to_inline, alpha_rhs_to_substitute, original_prod_idx_to_remove)) = candidate_to_inline_info {
+            println!("[Simplifier-Sole] Attempting to inline {} -> {:?} (from P{})", 
+                     nt_to_inline.0, alpha_rhs_to_substitute.iter().map(|s| match s { Symbol::Terminal(t) => t.0.clone(), Symbol::NonTerminal(n) => n.0.clone() }).collect::<Vec<_>>(), original_prod_idx_to_remove);
+
+            let mut temp_productions_after_inlining = Vec::new();
+            for (idx, p) in productions.iter().enumerate() {
+                if idx != original_prod_idx_to_remove {
+                    temp_productions_after_inlining.push(p.clone());
+                }
+            }
+
+            for prod_being_modified in temp_productions_after_inlining.iter_mut() {
+                let mut new_rhs_for_this_prod = Vec::new();
+                let mut current_prod_rhs_changed = false;
+                for symbol_in_rhs in prod_being_modified.rhs.iter() {
+                    if let Symbol::NonTerminal(nt_in_rhs_val) = symbol_in_rhs {
+                        if *nt_in_rhs_val == nt_to_inline {
+                            new_rhs_for_this_prod.extend_from_slice(&alpha_rhs_to_substitute);
+                            current_prod_rhs_changed = true;
+                        } else {
+                            new_rhs_for_this_prod.push(symbol_in_rhs.clone());
+                        }
+                    } else {
+                        new_rhs_for_this_prod.push(symbol_in_rhs.clone());
+                    }
+                }
+                if current_prod_rhs_changed {
+                    prod_being_modified.rhs = new_rhs_for_this_prod;
+                }
+            }
+            
+            if temp_productions_after_inlining.is_empty() || 
+               !temp_productions_after_inlining.iter().any(|p| p.lhs == *augmented_start_rule_lhs) {
+                println!("[Simplifier-Sole] Inlining {} would remove augmented start or empty grammar. Skipping this specific inlining.", nt_to_inline.0);
+                // To avoid getting stuck on this problematic candidate, we remove its defining rule
+                // from the main `productions` list and continue the outer loop.
+                // This ensures progress if this candidate is the only one found.
+                // This is a bit of a hack; a cleaner way would be to mark it "tried and failed".
+                // For now, let's just not set changed_in_current_scan and let the outer loop break.
+                // The current logic: if a candidate is bad, we just don't apply it.
+                // The next iteration of the `loop` will search for other candidates.
+                // If this was the *only* type of candidate, `changed_in_current_scan` remains false, and the loop terminates.
+            } else if causes_specific_panic(
+                &temp_productions_after_inlining,
+                augmented_start_rule_lhs,
+                sequence_to_test_names,
+                panic_substring,
+            ) {
+                println!("[Simplifier-Sole] Successfully inlined {}. Productions count: {} -> {}", 
+                         nt_to_inline.0, productions.len(), temp_productions_after_inlining.len());
+                productions = temp_productions_after_inlining; 
+                changed_in_current_scan = true;
+                made_change_this_outer_iteration = true; 
+                break; // Restart scan from the beginning with the new production set
+            } else {
+                println!("[Simplifier-Sole] Inlining {} removed target panic. Reverting this attempt.", nt_to_inline.0);
+            }
+        } // end if let Some(candidate_to_inline_info)
+        
+        if !changed_in_current_scan {
+            break; // No change made in a full scan over NTs, exit the outer `loop {}`
+        }
+    } // end outer loop for iterative application
+
+    (productions, made_change_this_outer_iteration)
 }
 
 #[test]
@@ -1461,6 +1602,120 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
             println!();
         }
 
+                // --- Strategy 3: Try replacing a Non-Terminal in RHS with Epsilon ---
+                let mut nt_rhs_locations: Vec<(usize, usize)> = Vec::new(); // (prod_idx, symbol_idx_in_rhs)
+                for (prod_idx, prod) in current_productions.iter().enumerate() {
+                    for (symbol_idx, symbol) in prod.rhs.iter().enumerate() {
+                        if matches!(symbol, Symbol::NonTerminal(_)) {
+                            nt_rhs_locations.push((prod_idx, symbol_idx));
+                        }
+                    }
+                }
+
+                if !nt_rhs_locations.is_empty() {
+                    print!("[Minimizer] Pass {}: Trying NT-to-Epsilon in RHS ({} attempts)...", pass_num, ATTEMPTS_PER_STRATEGY_PASS);
+                    std::io::stdout().flush().unwrap();
+                    for attempt in 0..ATTEMPTS_PER_STRATEGY_PASS {
+                        if let Some(&(prod_idx_to_modify, symbol_idx_to_remove)) = nt_rhs_locations.choose(&mut rng) {
+                            let mut temp_productions = current_productions.clone();
+                            temp_productions[prod_idx_to_modify].rhs.remove(symbol_idx_to_remove);
+
+                            if temp_productions.is_empty() || !temp_productions.iter().any(|p| p.lhs == augmented_start_rule_lhs) {
+                                continue;
+                            }
+
+                            if causes_specific_panic(
+                                &temp_productions,
+                                &augmented_start_rule_lhs,
+                                &sequence_to_test_names,
+                                PANIC_SUBSTRING_TO_FIND,
+                            ) {
+                                if attempt % (ATTEMPTS_PER_STRATEGY_PASS / 10 + 1) == 0 { print!("ε"); std::io::stdout().flush().unwrap(); }
+                                current_productions = temp_productions;
+                                made_change_in_this_pass = true;
+                                println!("\n[Minimizer] Reduced by NT-to-Epsilon. New count: {}", current_productions.len());
+                                continue 'pass_loop;
+                            }
+                        }
+                    }
+                    println!();
+                }
+
+                // --- Strategy 4: Try substituting a Terminal in RHS ---
+                let all_terminals_in_grammar = get_all_terminals_in_grammar(&current_productions);
+                let mut t_rhs_locations: Vec<(usize, usize)> = Vec::new(); // (prod_idx, symbol_idx_in_rhs)
+                for (prod_idx, prod) in current_productions.iter().enumerate() {
+                    for (symbol_idx, symbol) in prod.rhs.iter().enumerate() {
+                        if matches!(symbol, Symbol::Terminal(_)) {
+                            t_rhs_locations.push((prod_idx, symbol_idx));
+                        }
+                    }
+                }
+
+                if !all_terminals_in_grammar.is_empty() && !t_rhs_locations.is_empty() {
+                    print!("[Minimizer] Pass {}: Trying Terminal substitution in RHS ({} attempts)...", pass_num, ATTEMPTS_PER_STRATEGY_PASS);
+                    std::io::stdout().flush().unwrap();
+                    for attempt in 0..ATTEMPTS_PER_STRATEGY_PASS {
+                        if let Some(&(prod_idx_to_modify, symbol_idx_to_modify)) = t_rhs_locations.choose(&mut rng) {
+                            if let Some(t_new) = all_terminals_in_grammar.iter().collect::<Vec<_>>().choose(&mut rng) {
+                                let mut temp_productions = current_productions.clone();
+                                temp_productions[prod_idx_to_modify].rhs[symbol_idx_to_modify] = Symbol::Terminal((*t_new).clone());
+
+                                if temp_productions.is_empty() || !temp_productions.iter().any(|p| p.lhs == augmented_start_rule_lhs) {
+                                    continue;
+                                }
+                                if causes_specific_panic(
+                                    &temp_productions,
+                                    &augmented_start_rule_lhs,
+                                    &sequence_to_test_names,
+                                    PANIC_SUBSTRING_TO_FIND,
+                                ) {
+                                    if attempt % (ATTEMPTS_PER_STRATEGY_PASS / 10 + 1) == 0 { print!("T"); std::io::stdout().flush().unwrap(); }
+                                    current_productions = temp_productions;
+                                    made_change_in_this_pass = true;
+                                    println!("\n[Minimizer] Reduced by Terminal substitution. New count: {}", current_productions.len());
+                                    continue 'pass_loop;
+                                }
+                            }
+                        }
+                    }
+                    println!();
+                }
+
+                // --- Strategy 5: Try substituting a Non-Terminal in RHS ---
+                let all_nonterminals_in_grammar = get_all_nonterminals_in_grammar(&current_productions);
+                // nt_rhs_locations is already populated from Strategy 3
+
+                if !all_nonterminals_in_grammar.is_empty() && !nt_rhs_locations.is_empty() {
+                    print!("[Minimizer] Pass {}: Trying Non-Terminal substitution in RHS ({} attempts)...", pass_num, ATTEMPTS_PER_STRATEGY_PASS);
+                    std::io::stdout().flush().unwrap();
+                    for attempt in 0..ATTEMPTS_PER_STRATEGY_PASS {
+                        if let Some(&(prod_idx_to_modify, symbol_idx_to_modify)) = nt_rhs_locations.choose(&mut rng) {
+                            if let Some(nt_new) = all_nonterminals_in_grammar.iter().collect::<Vec<_>>().choose(&mut rng) {
+                                let mut temp_productions = current_productions.clone();
+                                temp_productions[prod_idx_to_modify].rhs[symbol_idx_to_modify] = Symbol::NonTerminal((*nt_new).clone());
+                                
+                                if temp_productions.is_empty() || !temp_productions.iter().any(|p| p.lhs == augmented_start_rule_lhs) {
+                                    continue;
+                                }
+                                if causes_specific_panic(
+                                    &temp_productions,
+                                    &augmented_start_rule_lhs,
+                                    &sequence_to_test_names,
+                                    PANIC_SUBSTRING_TO_FIND,
+                                ) {
+                                    if attempt % (ATTEMPTS_PER_STRATEGY_PASS / 10 + 1) == 0 { print!("N"); std::io::stdout().flush().unwrap(); }
+                                    current_productions = temp_productions;
+                                    made_change_in_this_pass = true;
+                                    println!("\n[Minimizer] Reduced by Non-Terminal substitution. New count: {}", current_productions.len());
+                                    continue 'pass_loop;
+                                }
+                            }
+                        }
+                    }
+                    println!();
+                }
+
         if !made_change_in_this_pass {
             println!("[Minimizer] Pass {}: No further reductions found in this stochastic pass.", pass_num);
             break 'pass_loop;
@@ -1471,12 +1726,44 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
     println!("[Minimizer] Productions after stochastic phase: {}", current_productions.len());
 
     // --- Final Simplification Pass: Inline A -> B rules ---
-    current_productions = simplify_and_inline_unit_nonterminal_rules(
-        current_productions,
-        &augmented_start_rule_lhs,
-        &sequence_to_test_names,
-        PANIC_SUBSTRING_TO_FIND,
-    );
+    println!("\n[Minimizer] Deterministic simplification phase starting.");
+    loop {
+        let prods_count_before_deterministic_iter = current_productions.len();
+        let mut changed_anything_in_deterministic_iter = false;
+
+        // Apply A -> B inlining (iterates to fixed point internally)
+        let prev_len_before_unit_inline = current_productions.len();
+        current_productions = simplify_and_inline_unit_nonterminal_rules(
+            current_productions, // Takes ownership
+            &augmented_start_rule_lhs,
+            &sequence_to_test_names,
+            PANIC_SUBSTRING_TO_FIND,
+        );
+        if current_productions.len() != prev_len_before_unit_inline {
+            changed_anything_in_deterministic_iter = true;
+            println!("[Minimizer-Determ] simplify_and_inline_unit_nonterminal_rules changed productions: {} -> {}", prev_len_before_unit_inline, current_productions.len());
+        }
+        
+        // Apply A -> alpha (sole production) inlining (iterates to fixed point internally)
+        let prev_len_before_sole_inline = current_productions.len();
+        let (next_prods_after_sole_inline, sole_inlined_overall) = inline_sole_productions_pass(
+            current_productions, // Takes ownership
+            &augmented_start_rule_lhs,
+            &sequence_to_test_names,
+            PANIC_SUBSTRING_TO_FIND,
+        );
+        current_productions = next_prods_after_sole_inline;
+        if sole_inlined_overall { // sole_inlined_overall indicates if *any* change was made by that pass
+            changed_anything_in_deterministic_iter = true;
+             println!("[Minimizer-Determ] inline_sole_productions_pass changed productions: {} -> {}", prev_len_before_sole_inline, current_productions.len());
+        }
+
+        if !changed_anything_in_deterministic_iter {
+            println!("[Minimizer] Deterministic simplification phase converged. Final production count: {}", current_productions.len());
+            break;
+        }
+        println!("[Minimizer] Deterministic iteration made changes. Productions: {} -> {}. Repeating deterministic loop.", prods_count_before_deterministic_iter, current_productions.len());
+    }
 
     // --- Output Final Minimized Grammar ---
     println!("\n[Minimizer] Final number of productions after all simplifications: {}", current_productions.len());
@@ -1495,6 +1782,7 @@ fn test_minimized_grammar_causes_panic() -> Result<(), Box<dyn std::error::Error
 
     // 1. Manually define the minimized grammar
     let minimized_productions = vec![
+        prod("start", vec![nt("start'''")]), // P0
         prod("block", vec![t("..."), t(";")]),          // P4
         prod("elif_stmt", vec![t("elif"), nt("block"), nt("elif_stmt")]), // P5
     ];

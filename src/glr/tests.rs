@@ -319,7 +319,7 @@ fn test_remove_undefined_simple() {
     let expected = vec![
         prod("C", vec![t("c")]),
     ];
-    let result = remove_productions_with_undefined_nonterminals(&productions);
+    let result = remove_productions_with_undefined_nonterminals(&productions, &[]);
     assert_eq!(result, expected);
 }
 
@@ -338,7 +338,7 @@ fn test_remove_undefined_iterative() {
     let expected = vec![
         prod("D", vec![t("d")]),
     ];
-    let result = remove_productions_with_undefined_nonterminals(&productions);
+    let result = remove_productions_with_undefined_nonterminals(&productions, &[]);
     assert_eq!(result, expected);
 }
 
@@ -351,13 +351,13 @@ fn test_remove_undefined_no_change() {
         prod("A", vec![t("a")]),
     ];
     let expected = productions.clone();
-    let result = remove_productions_with_undefined_nonterminals(&productions);
+    let result = remove_productions_with_undefined_nonterminals(&productions, &[]);
     assert_eq!(result, expected);
 }
 
 #[test]
 fn test_remove_undefined_empty_input() {
-    assert!(remove_productions_with_undefined_nonterminals(&[]).is_empty());
+    assert!(remove_productions_with_undefined_nonterminals(&[], &[]).is_empty());
 }
 // --- Tests Demonstrating GLR Capabilities / Limitations ---
 

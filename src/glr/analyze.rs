@@ -245,25 +245,25 @@ pub fn validate(productions: &[Production]) -> Result<(), String> {
 ///
 /// This is useful for cleaning up grammars before further analysis or parser generation,
 /// especially if the grammar might contain references to non-terminals that have no rules.
-pub fn remove_productions_with_undefined_nonterminals(initial_productions: &[Production]) -> Vec<Production> {
-    let mut current_productions = initial_productions.to_vec();
+pub fn remove_productions_with_undefined_nonterminals(initial_productions: &[Production], exempt: &[usize]) -> Vec<Production> {
+    let mut current_productions: Vec<(usize, Production)> = initial_productions.into_iter().cloned().enumerate().collect();
 
     loop {
         let mut defined_lhs_nonterminals: BTreeSet<NonTerminal> = BTreeSet::new();
-        for prod in &current_productions {
+        for (i, prod) in &current_productions {
             defined_lhs_nonterminals.insert(prod.lhs.clone());
         }
-        let mut removed_productions = Vec::new();
-        let mut kept_productions = Vec::new();
-        for prod in current_productions {
+        let mut removed_productions: Vec<(usize, Production)> = Vec::new();
+        let mut kept_productions: Vec<(usize, Production)> = Vec::new();
+        for (i, prod) in current_productions {
             let keep = prod.rhs.iter().all(|symbol| match symbol {
                 Symbol::Terminal(_) => true, // Terminals are always defined
                 Symbol::NonTerminal(nt) => defined_lhs_nonterminals.contains(nt),
-            });
+            }) || exempt.contains(&i);
             if keep {
-                kept_productions.push(prod);
+                kept_productions.push((i, prod));
             } else {
-                removed_productions.push(prod);
+                removed_productions.push((i, prod));
             }
         }
         current_productions = kept_productions;
@@ -271,7 +271,7 @@ pub fn remove_productions_with_undefined_nonterminals(initial_productions: &[Pro
             break;
         }
         crate::debug!(2, "Removing {} productions with undefined non-terminals.", removed_productions.len());
-        let all_rhs_nonterminals: BTreeSet<NonTerminal> = removed_productions.iter().flat_map(|prod| prod.rhs.iter().filter_map(|symbol| match symbol {
+        let all_rhs_nonterminals: BTreeSet<NonTerminal> = removed_productions.iter().flat_map(|(i, prod)| prod.rhs.iter().filter_map(|symbol| match symbol {
             Symbol::NonTerminal(nt) => Some(nt.clone()),
             _ => None,
         })).collect();
@@ -280,12 +280,12 @@ pub fn remove_productions_with_undefined_nonterminals(initial_productions: &[Pro
             crate::debug!(2, "  {}", nt.0);
         }
         crate::debug!(2, "Removed productions:");
-        for prod in removed_productions {
+        for (i, prod) in removed_productions {
             crate::debug!(2, "  {}", prod);
         }
     }
 
-    current_productions
+    current_productions.into_iter().map(|(_, prod)| prod).collect()
 }
 
 // TODO: This function is marked as broken and is not modified by this request.
