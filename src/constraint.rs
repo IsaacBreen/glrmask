@@ -1222,10 +1222,10 @@ impl<'a> GrammarConstraintState<'a> {
         let mut i = 0;
         GSSNode::simplify_together(&mut roots);
         crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&roots));
-        // GSSNode::simplify_together(&mut roots);
-        // crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&roots));
-        // GSSNode::simplify_together(&mut roots);
-        // crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&roots));
+        GSSNode::simplify_together(&mut roots);
+        crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&roots));
+        GSSNode::simplify_together(&mut roots);
+        crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&roots));
 
         // Print each GSS
         for (tokenizer_state_id, glr_state) in self.state.iter() {
