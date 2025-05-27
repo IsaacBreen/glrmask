@@ -201,14 +201,6 @@ impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + De
         cache.insert(key, new_node_arc.clone());
         new_node_arc
     }
-
-    /// Creates a new canonical GSSNode with specified predecessors and edge values.
-    pub fn new_with_predecessors_canonical(
-        predecessors_with_values: BTreeSet<(Arc<Self>, T)>,
-        cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>
-    ) -> Arc<Self> {
-        Self::get_canonical(predecessors_with_values, cache)
-    }
 }
 
 // Public methods (mostly non-canonical)
@@ -884,6 +876,12 @@ pub fn simplify_gss_forest<T: Clone + Ord + Hash + Debug, A: PathAccumulator + C
     simplified_roots_vec
 }
 
+impl<T: Ord + Hash + Clone + Debug, A: PathAccumulator + Clone> GSSNode<T, A> {
+    pub fn simplify(&mut self) {
+        let simplified_roots = simplify_gss_forest(&[Arc::new(self.clone())]);
+        *self = simplified_roots[0].as_ref().clone();
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -938,14 +936,6 @@ mod tests {
 
     fn nc_root_node_arc(acc: MockPathAccumulator) -> Arc<MockGSSNode> {
          Arc::new(MockGSSNode::new(acc))
-    }
-
-    fn c_node_arc( // Canonical node from predecessors
-        preds_with_vals_vec: Vec<(Arc<MockGSSNode>, i32)>,
-        cache: &mut MockNodeCache
-    ) -> Arc<MockGSSNode> {
-        let pred_set: BTreeSet<(Arc<MockGSSNode>, i32)> = preds_with_vals_vec.into_iter().collect();
-        MockGSSNode::new_with_predecessors_canonical(pred_set, cache)
     }
 
     fn c_root_node_arc(acc: MockPathAccumulator, cache: &mut MockNodeCache) -> Arc<MockGSSNode> { // Canonical root
