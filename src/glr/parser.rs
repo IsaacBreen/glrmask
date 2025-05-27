@@ -369,9 +369,9 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
 
         for (_predecessor, edge_value) in predecessors_with_values { // parent_arc is Arc<GSSNode<ParseStateNodeContent, A>>
             // This is ParseStateNodeContent { state_id }
-            // let goto = self.parser.stage_7_table[&top_of_parent_value.state_id].gotos[&nt];
-            // let goto = *self.parser.stage_7_table.get(&top_of_parent_value.state_id).expect(format!("State {} not found in stage_7_table", top_of_parent_value.state_id.0).as_str()).gotos.get(&nt).expect(format!("Non-terminal {} not found in gotos", nt.0).as_str());
-            let goto = self.parser.stage_7_table.get(&edge_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", edge_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor {:p})", nt.0, edge_value.state_id, Arc::as_ptr(&_predecessor))), |state_id| Ok(*state_id))).unwrap();
+            let goto = self.parser.stage_7_table[&edge_value.state_id].gotos[&nt];
+            // let goto = *self.parser.stage_7_table.get(&edge_value.state_id).expect(format!("State {} not found in stage_7_table", top_of_parent_value.state_id.0).as_str()).gotos.get(&nt).expect(format!("Non-terminal {} not found in gotos", nt.0).as_str());
+            // let goto = self.parser.stage_7_table.get(&edge_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", edge_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor {:p})", nt.0, edge_value.state_id, Arc::as_ptr(&_predecessor))), |state_id| Ok(*state_id))).unwrap();
             match goto {
                 Goto::State(goto_state_id) => {
                     crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&_predecessor), goto_state_id.0);
