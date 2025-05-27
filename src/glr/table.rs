@@ -473,11 +473,20 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
     (stage_7_table, item_set_map, start_state_id)
 }
 
-pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
+pub fn generate_glr_parser_with_maps(productions: &[Production], mut start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
     let original_productions = productions.to_vec();
 
+    // Set the start production aside
+    let start_production = productions[start_production_id].clone();
+
     crate::debug!(2, "Removing productions with undefined non-terminals");
-    let productions = remove_productions_with_undefined_nonterminals(productions);
+    let mut productions = remove_productions_with_undefined_nonterminals(productions);
+
+    // Ensure the start production is still there
+    if productions.iter().find(|prod| prod.lhs == start_production.lhs).is_none() {
+        productions.insert(0, start_production);
+        start_production_id = 0;
+    }
 
     crate::debug!(2, "Validating");
     validate(&productions).expect("Validation error");
