@@ -139,6 +139,7 @@ fn test_constraint_simple() {
 
     // Commit "ab" (LLMTokenID 0)
     constraint_state.commit(LLMTokenID(0));
+    assert!(constraint_state.is_active());
     constraint_state.step_with_all_llm_tokens();
     let mask = constraint_state.get_mask();
     assert_eq!(mask, HybridBitset::from_iter(vec![2])); // Expect "$" (EOF)
