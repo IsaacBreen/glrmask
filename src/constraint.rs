@@ -1217,8 +1217,10 @@ impl<'a> GrammarConstraintState<'a> {
             roots.push(root);
             tokenizer_state_id_to_root_pos.insert(*tokenizer_state_id, i);
         }
+        crate::debug!(2, "Before simplifying GSS forest: {:?}", gather_gss_stats(&roots));
         let mut i = 0;
         let simplified_roots = simplify_gss_forest(&roots);
+        crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&simplified_roots));
         for (tokenizer_state_id, glr_state) in self.state.iter_mut() {
             let simplified_root = simplified_roots[tokenizer_state_id_to_root_pos[&tokenizer_state_id]].clone();
             glr_state.active_state.stack = simplified_root;
