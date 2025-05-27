@@ -14,7 +14,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, print_precompute_stats, PrecomputeStats};
 use crate::datastructures::charmap::TrieMap;
-use crate::datastructures::gss::{print_gss_forest, prune_and_transform_recursive, prune_and_transform_recursive_canonical, simplify_gss_forest, GSSNode, PathAccumulator}; // Import PathAccumulator
+use crate::datastructures::gss::{gather_gss_stats, print_gss_forest, prune_and_transform_recursive, prune_and_transform_recursive_canonical, simplify_gss_forest, GSSNode, PathAccumulator}; // Import PathAccumulator
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -1120,7 +1120,7 @@ impl<'a> GrammarConstraintState<'a> {
             initial_nodes_and_values,
             |glr_parse_state, grammar_token_id_opt, edge_llm_tokens, child_node| { // Renamed grammar_token_id to grammar_token_id_opt
                 let node_ptr = std::ptr::addr_of!(*child_node);
-                crate::debug!(3, "Processing grammar node {:p} token {:?}", node_ptr, grammar_token_id_opt.map(|gtid| gtid.0)); // Use grammar_token_id_opt
+                crate::debug!(3, "Processing grammar node {:p} token {:?}. Terminals: {:?}", node_ptr, grammar_token_id_opt.map(|gtid| gtid.0), gather_gss_stats(&[glr_parse_state.active_state.stack.acc.terminals.clone()])); // Use grammar_token_id_opt
                 let mut cloned_glr_parse_state = glr_parse_state.clone();
                 let current_active_tokens = cloned_glr_parse_state.active_state.stack.acc.active.clone();
                 Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc.intersection &= &current_active_tokens;
