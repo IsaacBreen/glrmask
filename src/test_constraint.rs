@@ -1494,14 +1494,6 @@ fn test_minimized_grammar_causes_panic() -> Result<(), Box<dyn std::error::Error
     println!("\n[Test MRE] Testing the manually defined minimized grammar that causes the panic.");
 
     // 1. Manually define the minimized grammar
-    // P0: start' -> start'''
-    // P1: simple_stmts -> atom simple_stmts[1] NEWLINE
-    // P2: simple_stmts[0] ->
-    // P3: simple_stmts[1] -> ";"
-    // P4: block -> NEWLINE simple_stmts
-    // P5: elif_stmt -> "elif" block elif_stmt
-    // P6: atom -> "..."
-    // P7: NEWLINE ->
     let minimized_productions = vec![
         prod("block", vec![t("..."), t(";")]),          // P4
         prod("elif_stmt", vec![t("elif"), nt("block"), nt("elif_stmt")]), // P5
