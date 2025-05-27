@@ -136,10 +136,11 @@ impl JSONConvertible for Goto {
         match self {
             Goto::State(state_id) => {
                 obj.insert("variant".to_string(), JSONNode::String("State".to_string()));
-                obj.insert("state_id".to_string(), state_id.to_json());
+                obj.insert("value".to_string(), state_id.to_json());
             }
             Goto::Accept => {
                 obj.insert("variant".to_string(), JSONNode::String("Accept".to_string()));
+                // No value needed for Accept
             }
         }
         JSONNode::Object(obj)
@@ -147,19 +148,19 @@ impl JSONConvertible for Goto {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for Goto".to_string())
-                                   .and_then(String::from_json)?;
+                let variant = obj.remove("variant")
+                    .ok_or_else(|| "Missing field 'variant' for Goto".to_string())
+                    .and_then(String::from_json)?;
                 match variant.as_str() {
                     "State" => {
-                        let state_id = obj.remove("state_id").ok_or_else(|| "Missing field state_id for State".to_string())
-                                          .and_then(StateID::from_json)?;
-                        Ok(Goto::State(state_id))
+                        let value_node = obj.remove("value").ok_or_else(|| "Missing field 'value' for Goto::State".to_string())?;
+                        StateID::from_json(value_node).map(Goto::State)
                     }
                     "Accept" => Ok(Goto::Accept),
-                    _ => Err(format!("Unknown variant {} for Goto", variant)),
+                    _ => Err(format!("Unknown variant '{}' for Goto", variant)),
                 }
             }
-            _ => Err(format!("Expected JSONNode::Object for Goto, got {:?}", node)),
+            _ => Err("Expected JSONNode::Object for Goto".to_string()),
         }
     }
 }
