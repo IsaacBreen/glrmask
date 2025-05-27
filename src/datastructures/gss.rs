@@ -9,12 +9,6 @@ use crate::json_serialization::{JSONConvertible, JSONNode}; // Assuming this exi
 use std::collections::BTreeMap as StdMap;
 use deterministic_hash::DeterministicHasher;
 
-// Type alias for the canonicalization cache key
-// Key is the set of (predecessor_node_arc, edge_value_T_leading_to_this_node)
-type NodeCacheKey<T, A> = BTreeSet<(Arc<GSSNode<T, A>>, T)>;
-// Type alias for the canonicalization cache
-pub type NodeCache<T, A> = HashMap<NodeCacheKey<T, A>, Arc<GSSNode<T, A>>>;
-
 pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash + Default {
     fn union(&self, other: &Self) -> Self;
     fn pop(&self, right: &Self) -> Self;
@@ -157,7 +151,7 @@ impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + De
     /// A node is defined by its set of (predecessor_node, edge_value_T) pairs.
     fn get_canonical(
         predecessors_with_values: BTreeSet<(Arc<Self>, T)>, // Consumed
-        cache: &mut NodeCache<T, A>,
+        cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>,
     ) -> Arc<Self> {
         let key_for_lookup = predecessors_with_values.clone();
 
@@ -196,7 +190,7 @@ impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + De
     }
 
     /// Creates a new canonical root GSSNode (no predecessors) with a specific initial accumulator.
-    pub fn new_canonical(initial_acc: A, cache: &mut NodeCache<T, A>) -> Arc<Self> {
+    pub fn new_canonical(initial_acc: A, cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>) -> Arc<Self> {
         let predecessors_with_values = BTreeSet::new();
         let key = predecessors_with_values.clone();
         if let Some(entry_arc) = cache.get_mut(&key) {
@@ -224,12 +218,12 @@ impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + De
     /// Creates a new canonical GSSNode with specified predecessors and edge values.
     pub fn new_with_predecessors_canonical(
         predecessors_with_values: BTreeSet<(Arc<Self>, T)>,
-        cache: &mut NodeCache<T, A>
+        cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>
     ) -> Arc<Self> {
         Self::get_canonical(predecessors_with_values, cache)
     }
 
-    pub fn from_iter_canonical<I>(iter: I, cache: &mut NodeCache<T, A>) -> Arc<Self>
+    pub fn from_iter_canonical<I>(iter: I, cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>) -> Arc<Self>
     where
         I: IntoIterator<Item = (T, A)>,
     {
@@ -248,7 +242,7 @@ impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + De
     pub fn push_onto_canonical(
         current_top_node: Arc<Self>,
         edge_value: T,
-        cache: &mut NodeCache<T, A>,
+        cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>,
     ) -> Arc<Self> {
         let mut predecessors_with_values = BTreeSet::new();
         predecessors_with_values.insert((current_top_node, edge_value));
@@ -259,7 +253,7 @@ impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + De
         self_arc: Arc<Self>,
         f_acc: F_acc,
         f_edge: F_edge,
-        cache_u_b: &mut NodeCache<U_edge, B_acc>,
+        cache_u_b: &mut HashMap<BTreeSet<(Arc<GSSNode<U_edge, B_acc>>, U_edge)>, Arc<GSSNode<U_edge, B_acc>>>,
         memo: &mut HashMap<*const GSSNode<T,A>, Arc<GSSNode<U_edge, B_acc>>>,
     ) -> Arc<GSSNode<U_edge, B_acc>>
     where
@@ -631,7 +625,7 @@ pub fn prune_and_transform_recursive_canonical<T: Clone + Ord + Hash + Debug, A:
     node_arc: &Arc<GSSNode<T, A>>,
     closure: &impl Fn(&A) -> Option<(A, bool)>,
     memo: &mut HashMap<*const GSSNode<T, A>, Option<Arc<GSSNode<T, A>>>>,
-    cache: &mut NodeCache<T, A>,
+    cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>,
 ) -> Option<Arc<GSSNode<T, A>>> {
     let node_ptr = Arc::as_ptr(node_arc);
     if let Some(cached_result) = memo.get(&node_ptr) {
@@ -672,7 +666,7 @@ pub fn prune_and_transform_recursive_canonical<T: Clone + Ord + Hash + Debug, A:
 pub fn prune_and_transform_roots_canonical<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug>(
     roots: &[Arc<GSSNode<T, A>>],
     closure: &impl Fn(&A) -> Option<(A, bool)>,
-    cache: &mut NodeCache<T, A>,
+    cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>,
 ) -> Vec<Option<Arc<GSSNode<T, A>>>> {
     let mut memo = HashMap::new();
     roots
@@ -686,7 +680,7 @@ pub fn prune_and_transform_recursive<T: Clone + Ord + Hash + Debug, A: PathAccum
     closure: &impl Fn(&A) -> Option<(A, bool)>,
     memo: &mut HashMap<*const GSSNode<T, A>, Option<Arc<GSSNode<T, A>>>>,
 ) -> Option<Arc<GSSNode<T, A>>> {
-    let mut cache = NodeCache::new();
+    let mut cache = HashMap::<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>::new();
     prune_and_transform_recursive_canonical(node_arc, closure, memo, &mut cache)
 }
 
@@ -695,7 +689,7 @@ pub fn prune_and_transform_roots<T: Clone + Ord + Hash + Debug, A: PathAccumulat
     closure: &impl Fn(&A) -> Option<(A, bool)>,
 ) -> Vec<Option<Arc<GSSNode<T, A>>>> {
     let mut memo = HashMap::new();
-    let mut cache = NodeCache::new();
+    let mut cache = HashMap::<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>::new();
     roots
         .iter()
         .map(|root| prune_and_transform_recursive_canonical(root, closure, &mut memo, &mut cache))
@@ -945,7 +939,7 @@ pub fn print_gss_forest<T: Debug, A: PathAccumulator>(roots: &[Arc<GSSNode<T, A>
 fn simplify_node_recursive<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug>(
     original_node_arc: &Arc<GSSNode<T, A>>,
     memo: &mut HashMap<*const GSSNode<T, A>, Arc<GSSNode<T, A>>>,
-    canonicalization_cache: &mut NodeCache<T, A>,
+    canonicalization_cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>,
 ) -> Arc<GSSNode<T, A>> {
     // TODO: delete this
     // return original_node_arc.clone();
@@ -997,7 +991,7 @@ pub fn simplify_gss_forest<T: Clone + Ord + Hash + Debug, A: PathAccumulator + C
     // TODO: delete this
     // return roots.to_vec();
     let mut memo: HashMap<*const GSSNode<T, A>, Arc<GSSNode<T, A>>> = HashMap::new();
-    let mut canonicalization_cache: NodeCache<T, A> = NodeCache::new();
+    let mut canonicalization_cache: HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>> = HashMap::<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>::new();
     let mut simplified_roots_vec = Vec::with_capacity(roots.len());
 
     for root_arc in roots {
@@ -1058,7 +1052,7 @@ mod tests {
     }
 
     type MockGSSNode = GSSNode<i32, MockPathAccumulator>;
-    type MockNodeCache = NodeCache<i32, MockPathAccumulator>;
+    type MockNodeCache = HashMap<BTreeSet<(Arc<GSSNode<i32, MockPathAccumulator>>, i32)>, Arc<GSSNode<i32, MockPathAccumulator>>>;
 
     fn nc_node_arc(
         _initial_acc_for_new_node: MockPathAccumulator,
@@ -1122,9 +1116,9 @@ mod tests {
         let a1_orig_nc = nc_node_arc(MockPathAccumulator::default(), a1_preds_nc);
 
         let roots_nc = vec![a1_orig_nc.clone()];
-        println!("Before simplifying GSS forest: {:?}", print_gss_forest(&roots_nc, usize::MAX));
+        println!("Before simplifying GSS forest: {}", print_gss_forest(&roots_nc, usize::MAX));
         let simplified_roots = simplify_gss_forest(&roots_nc);
-        println!("After simplifying GSS forest: {:?}", print_gss_forest(&simplified_roots, usize::MAX));
+        println!("After simplifying GSS forest: {}", print_gss_forest(&simplified_roots, usize::MAX));
         assert_eq!(simplified_roots.len(), 1);
         let s_a1 = simplified_roots[0].clone();
 
