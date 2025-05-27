@@ -1205,7 +1205,7 @@ impl<'a> GrammarConstraintState<'a> {
             if let Some(new_node) = maybe_new_node {
                 parse_state.stack = new_node;
             }
-            !glr_state.active_state.stack.predecessors_with_values().len() == 0
+            !glr_state.active_state.stack.num_predecessors() == 0
         });
 
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");

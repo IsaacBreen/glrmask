@@ -123,13 +123,17 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone + Default> GSSNode<T, A> 
         Self { acc, predecessors, hash_key_cache }
     }
 
-    pub fn predecessors_with_values(&self) -> impl ExactSizeIterator<Item = (&Arc<Self>, &T)> {
+    fn predecessors_with_values(&self) -> impl IntoIterator<Item = (&Arc<Self>, &T)> {
         self.predecessors.iter().map(|(edge_val, pred_arc)| (pred_arc, edge_val))
     }
 
-    pub fn predecessors(&self) -> &NodeMap<T, A> {
+    fn predecessors(&self) -> &NodeMap<T, A> {
         &self.predecessors
     }
+
+    pub fn num_predecessors(&self) -> usize {
+        self.predecessors.len()
+            }
 
     pub fn is_empty(&self) -> bool {
         self.predecessors.is_empty()
@@ -236,6 +240,14 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
         } else {
             self.pop().popn(n - 1)
         }
+    }
+
+    pub fn pop_iter(&self) -> Vec<(Arc<Self>, T)> {
+        self.predecessors.iter().map(|(edge_val, pred_arc)| {
+            let mut new_arc = pred_arc.clone();
+            Arc::make_mut(&mut new_arc).acc = PathAccumulator::pop(&self.acc, &new_arc.acc);
+            (new_arc, edge_val.clone())
+        }).collect()
     }
 
     pub fn merge(&mut self, other: &Self) {
@@ -498,7 +510,7 @@ pub fn prune_and_transform_recursive_canonical<T: Clone + Ord + Hash + Debug, A:
                     })
                     .collect()
             } else {
-                node_arc.predecessors_with_values()
+                node_arc.predecessors_with_values().into_iter()
                     .map(|(pred_arc, edge_val)| (pred_arc.clone(), edge_val.clone()))
                     .collect()
             };

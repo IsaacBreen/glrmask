@@ -362,9 +362,9 @@ impl<'a, A: PathAccumulator + Default> GLRParserState<'a, A> {
         });
         // println!("Parent: {}", print_gss_forest(&[parent.clone()], usize::MAX));
         let mut out = GSSNode::new_default();
-        crate::debug!(4, "Popped with {} predecessors...", parent.predecessors_with_values().len());
+        crate::debug!(4, "Popped with {} predecessors...", parent.num_predecessors());
 
-        for (predecessor, edge_value) in parent.predecessors_with_values() { // parent_arc is Arc<GSSNode<ParseStateNodeContent, A>>
+        for (predecessor, edge_value) in parent.pop_iter() { // parent_arc is Arc<GSSNode<ParseStateNodeContent, A>>
             // This is ParseStateNodeContent { state_id }
             // let goto = self.parser.stage_7_table[&edge_value.state_id].gotos[&nt];
             // let goto = *self.parser.stage_7_table.get(&edge_value.state_id).expect(format!("State {} not found in stage_7_table", top_of_parent_value.state_id.0).as_str()).gotos.get(&nt).expect(format!("Non-terminal {} not found in gotos", nt.0).as_str());
@@ -458,7 +458,7 @@ impl<'a, A: PathAccumulator + Default> GLRParserState<'a, A> {
         /* ---------- logging & preparation ---------- */
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
 
-        Arc::make_mut(&mut self.active_state.stack).simplify();
+        // Arc::make_mut(&mut self.active_state.stack).simplify();
 
         self.log_gss("Step-start", token_id);
 
@@ -499,7 +499,7 @@ impl<'a, A: PathAccumulator + Default> GLRParserState<'a, A> {
 
             // Use state.stack for operations.
             let stack_arc_for_operations = &state.stack; // This is &Arc<GSSNode<...>>
-            for (parent_arc, top) in state.stack.predecessors_with_values() {
+            for (parent_arc, top) in state.stack.pop_iter() {
                 let temp_idk = Arc::new(parent_arc.push(top.clone()));
                 let row = &self.parser.stage_7_table[&top.state_id];
 
@@ -519,7 +519,7 @@ impl<'a, A: PathAccumulator + Default> GLRParserState<'a, A> {
                          }) => {
                         crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", top.state_id.0, token_id.0, nt.0, len);
                         // Use stack_arc_for_operations
-                        let s_new_arc = self.pop_and_goto(&stack_arc_for_operations, top, parent_arc, *len, *nt);
+                        let s_new_arc = self.pop_and_goto(&stack_arc_for_operations, &top, &parent_arc, *len, *nt);
                         // Add to worklist for current step, passing the cloned updated visited set.
                         todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
                     }
@@ -540,7 +540,7 @@ impl<'a, A: PathAccumulator + Default> GLRParserState<'a, A> {
                             for (nt, _prod_ids) in nts {
                                 // Use stack_arc_for_operations
                                 crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
-                                let s_new_arc = self.pop_and_goto(&stack_arc_for_operations, top, parent_arc, *len, *nt);
+                                let s_new_arc = self.pop_and_goto(&stack_arc_for_operations, &top, &parent_arc, *len, *nt);
                                 // Add to worklist for current step, passing the cloned updated visited set.
                                 todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
                             }
