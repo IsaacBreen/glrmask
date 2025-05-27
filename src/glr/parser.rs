@@ -455,6 +455,10 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
     }
 
     pub fn step(&mut self, token_id: TerminalID) {
+        let nodes: Vec<_> = vec![self.active_state.stack.clone()];
+        let simplified_states = simplify_gss_forest(&nodes);
+        self.active_state.stack = simplified_states[0].clone();
+
         /* ---------- logging & preparation ---------- */
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
         self.log_gss("Step-start", token_id);
@@ -467,9 +471,6 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
 
         // Initial population of todo:
         // States from active_states are roots of new reduction chains. Their visited set is initially empty.
-        let nodes: Vec<_> = vec![self.active_state.stack.clone()];
-        let simplified_states = simplify_gss_forest(&nodes);
-        self.active_state.stack = simplified_states[0].clone();
         // self.log_gss("Simplified GSS after initial step", token_id);
         todo.push((ParseState { stack: self.active_state.stack.clone() }, BTreeSet::new()));
 
