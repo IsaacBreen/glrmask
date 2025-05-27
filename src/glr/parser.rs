@@ -500,6 +500,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
             // Use state.stack for operations.
             let stack_arc_for_operations = &state.stack; // This is &Arc<GSSNode<...>>
             for (parent_arc, top) in state.stack.predecessors_with_values() {
+                let temp_idk = Arc::new(parent_arc.push(top.clone()));
                 let row = &self.parser.stage_7_table[&top.state_id];
 
                 match row.shifts_and_reduces.get(&token_id) {
@@ -507,7 +508,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
                     Some(Stage7ShiftsAndReduces::Shift(to)) => {
                         crate::debug!(4, "Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
                         // Use stack_arc_for_operations
-                        let new_parse_state = self.push_state(&stack_arc_for_operations, *to);
+                        let new_parse_state = self.push_state(&temp_idk, *to);
                         next.merge(new_parse_state);
                     }
 
@@ -530,7 +531,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
                         if let Some(to) = shift {
                             crate::debug!(4, " Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
                             // Use stack_arc_for_operations
-                            let new_parse_state = self.push_state(&stack_arc_for_operations, *to);
+                            let new_parse_state = self.push_state(&temp_idk, *to);
                             next.merge(new_parse_state);
                         }
                         // every reduce alternative
