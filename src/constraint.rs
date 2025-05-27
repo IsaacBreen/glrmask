@@ -59,7 +59,7 @@ impl Default for LLMTokenInfo {
         // For now, let's use HybridBitset::new() for both, acknowledging the limitation.
         // The correct initialization in GrammarConstraint::init provides the ALL_ONES intersection.
         Self {
-            active:       Default::default(), // Empty set
+            active:       HybridBitset::new(), // Empty set
             intersection: HybridBitset::max_ones(),
             terminals:    Arc::new(GSSNode::new_default()),
         }
@@ -1269,6 +1269,7 @@ impl<'a> GrammarConstraintState<'a> {
                 let mut cloned_glr_parse_state = glr_parse_state.clone();
                 Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc_mut().active &= edge_llm_tokens;
                 Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc_mut().intersection &= edge_llm_tokens;
+                crate::debug!(3, "GLR parse state stack: {}", print_gss_forest(&[cloned_glr_parse_state.active_state.stack.clone()], usize::MAX));
                 if let Some(gtid) = grammar_token_id_opt { // Use grammar_token_id_opt
                     *step_counts.borrow_mut().entry(*gtid).or_insert(0) += 1;
                 }
