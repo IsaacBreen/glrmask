@@ -124,11 +124,50 @@ impl JSONConvertible for Stage7ShiftsAndReduces {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Goto {
+    State(StateID),
+    Accept,
+}
+
+impl JSONConvertible for Goto {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        match self {
+            Goto::State(state_id) => {
+                obj.insert("variant".to_string(), JSONNode::String("State".to_string()));
+                obj.insert("state_id".to_string(), state_id.to_json());
+            }
+            Goto::Accept => {
+                obj.insert("variant".to_string(), JSONNode::String("Accept".to_string()));
+            }
+        }
+        JSONNode::Object(obj)
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for Goto".to_string())
+                                   .and_then(String::from_json)?;
+                match variant.as_str() {
+                    "State" => {
+                        let state_id = obj.remove("state_id").ok_or_else(|| "Missing field state_id for State".to_string())
+                                          .and_then(StateID::from_json)?;
+                        Ok(Goto::State(state_id))
+                    }
+                    "Accept" => Ok(Goto::Accept),
+                    _ => Err(format!("Unknown variant {} for Goto", variant)),
+                }
+            }
+            _ => Err("Expected JSONNode::Object for Goto".to_string()),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stage7Row {
     pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
-    pub gotos: BTreeMap<NonTerminalID, StateID>,
+    pub gotos: BTreeMap<NonTerminalID, Goto>,
 }
 
 // Manual impl for Stage7Row (could be derived)
@@ -145,7 +184,7 @@ impl JSONConvertible for Stage7Row {
                 let shifts_and_reduces = obj.remove("shifts_and_reduces").ok_or_else(|| "Missing field shifts_and_reduces for Stage7Row".to_string())
                                             .and_then(|n| BTreeMap::<TerminalID, Stage7ShiftsAndReduces>::from_json(n))?;
                 let gotos = obj.remove("gotos").ok_or_else(|| "Missing field gotos for Stage7Row".to_string())
-                               .and_then(|n| BTreeMap::<NonTerminalID, StateID>::from_json(n))?;
+                               .and_then(|n| BTreeMap::<NonTerminalID, Goto>::from_json(n))?;
                 Ok(Stage7Row { shifts_and_reduces, gotos })
             }
             _ => Err("Expected JSONNode::Object for Stage7Row".to_string()),
@@ -200,8 +239,6 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
     let mut worklist = VecDeque::from([initial_closure.clone()]);
 
     let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
-
-    transitions.insert(BTreeSet::new(), BTreeMap::new());
 
     while let Some(items) = worklist.pop_front() {
         if transitions.contains_key(&items) {
@@ -429,13 +466,6 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
         let mut shifts_and_reduces = BTreeMap::new();
         let mut gotos = BTreeMap::new();
 
-        // Determine if this state is an accepting state
-        let is_accepting_state = item_set.iter().any(|item| {
-            item.production == productions[start_production_id] && item.dot_position == item.production.rhs.len()
-        });
-
-
-
         for (terminal, action) in row.shifts_and_reduces {
             let terminal_id = *terminal_map.get_by_left(&terminal).expect(format!("{:?} not found in terminal map {:?}", terminal, terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
             let converted_action = match action {
@@ -466,8 +496,8 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 
         for (nonterminal, next_item_set) in row.gotos {
             let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
-            let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
-            gotos.insert(non_terminal_id, next_state_id);
+            let goto = item_set_map.get_by_left(&next_item_set).map_or(Goto::Accept, |&next_state_id| Goto::State(next_state_id));
+            gotos.insert(non_terminal_id, goto);
         }
 
         stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos });

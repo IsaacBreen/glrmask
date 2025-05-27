@@ -2,9 +2,7 @@ use crate::datastructures::gss::print_gss_forest;
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, PathAccumulator, simplify_gss_forest, prune_and_transform_recursive}; // Import PathAccumulator and prune_and_transform_recursive
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
-use crate::glr::table::{
-    NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID,
-};
+use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID};
 use crate::datastructures::gss::{GSSNode, GSSTrait, GSSStats};
 
 use bimap::BiBTreeMap;
@@ -295,7 +293,11 @@ impl Display for GLRParser {
             writeln!(f, "    Gotos:")?;
             for (&non_terminal_id, &next_state_id) in &row.gotos {
                 let non_terminal = non_terminal_map.get_by_right(&non_terminal_id).unwrap();
-                writeln!(f, "      - {} -> {}", non_terminal.0, next_state_id.0)?;
+                let goto_str = match &next_state_id {
+                    Goto::State(state_id) => format!("{}", state_id.0),
+                    Goto::Accept => "accept".to_string(),
+                };
+                writeln!(f, "      - {} -> {}", non_terminal.0, goto_str)?;
             }
         }
 
@@ -367,24 +369,31 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
 
         for (_predecessor, edge_value) in predecessors_with_values { // parent_arc is Arc<GSSNode<ParseStateNodeContent, A>>
             // This is ParseStateNodeContent { state_id }
-            // let goto_state_id = self.parser.stage_7_table[&top_of_parent_value.state_id].gotos[&nt];
-            // let goto_state_id = *self.parser.stage_7_table.get(&top_of_parent_value.state_id).expect(format!("State {} not found in stage_7_table", top_of_parent_value.state_id.0).as_str()).gotos.get(&nt).expect(format!("Non-terminal {} not found in gotos", nt.0).as_str());
-            let goto_state_id = self.parser.stage_7_table.get(&edge_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", edge_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor {:p})", nt.0, edge_value.state_id, Arc::as_ptr(&_predecessor))), |state_id| Ok(*state_id))).unwrap();
-            crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&_predecessor), goto_state_id.0);
+            // let goto = self.parser.stage_7_table[&top_of_parent_value.state_id].gotos[&nt];
+            // let goto = *self.parser.stage_7_table.get(&top_of_parent_value.state_id).expect(format!("State {} not found in stage_7_table", top_of_parent_value.state_id.0).as_str()).gotos.get(&nt).expect(format!("Non-terminal {} not found in gotos", nt.0).as_str());
+            let goto = self.parser.stage_7_table.get(&edge_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", edge_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor {:p})", nt.0, edge_value.state_id, Arc::as_ptr(&_predecessor))), |state_id| Ok(*state_id))).unwrap();
+            match goto {
+                Goto::State(goto_state_id) => {
+                    crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&_predecessor), goto_state_id.0);
 
-            // Calculate acc for the new GOTO state's GSS node
-            // It's the parent's acc intersected with the accumulator from the node being reduced.
-            let new_acc_for_goto_child = parent.acc().pop(cur_acc_from_reducible_node); // Use parent_arc.acc()
+                    // Calculate acc for the new GOTO state's GSS node
+                    // It's the parent's acc intersected with the accumulator from the node being reduced.
+                    let new_acc_for_goto_child = parent.acc().pop(cur_acc_from_reducible_node); // Use parent_arc.acc()
 
-            let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id };
+                    let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id };
 
-            // Create the new GSSNode (child of parent_arc)
-            // parent_arc.push will give it parent_arc.acc by default (via new_with_predecessors)
-            let mut new_gss_node_arc = parent.push(goto_node_content);
-            // Now, explicitly set its acc to the computed intersection
-            new_gss_node_arc.acc = new_acc_for_goto_child;
+                    // Create the new GSSNode (child of parent_arc)
+                    // parent_arc.push will give it parent_arc.acc by default (via new_with_predecessors)
+                    let mut new_gss_node_arc = parent.push(goto_node_content);
+                    // Now, explicitly set its acc to the computed intersection
+                    new_gss_node_arc.acc = new_acc_for_goto_child;
 
-            out.merge(new_gss_node_arc);
+                    out.merge(new_gss_node_arc);
+                }
+                Goto::Accept => {
+                    // No action needed for Accept
+                }
+            }
         }
         Arc::new(out)
     }
