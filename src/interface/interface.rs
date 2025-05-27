@@ -187,6 +187,17 @@ impl Display for GrammarDefinition {
     }
 }
 
+pub fn display_productions(productions: &[Production]) -> String {
+    let mut result = String::new();
+    for prod in productions {
+        result.push_str(&format!("{} -> {}\n", prod.lhs.0, prod.rhs.iter().map(|symbol| match symbol {
+            Symbol::Terminal(t) => t.0.clone(),
+            Symbol::NonTerminal(nt) => nt.0.clone(),
+        }).collect::<Vec<_>>().join(" ")));
+    }
+    result
+}
+
 impl GrammarDefinition {
     /// Generates a unique indexed name (e.g., Base[0], Base[1]) avoiding collisions.
     fn generate_unique_indexed_name(

@@ -6,7 +6,7 @@ use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal
 use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
 use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
 use std::hash::{Hash, Hasher};
-use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast, eat_string_fast, choice_fast, eat_bytestring_fast, repeat1_fast, CompiledGrammar, GrammarDefinition}; // Added eat_any_fast, CompiledGrammar
+use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast, eat_string_fast, choice_fast, eat_bytestring_fast, repeat1_fast, CompiledGrammar, GrammarDefinition, display_productions}; // Added eat_any_fast, CompiledGrammar
 use crate::glr::analyze; // Import the analyze module
 
 use std::fs::{self, File};
@@ -1138,6 +1138,8 @@ fn causes_specific_panic(
             return false;
         }
     }
+
+    println!("[Test MRE] Productions to test: {}", display_productions(&productions_to_test));
 
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
         let parser = generate_glr_parser_with_maps(
