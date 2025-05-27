@@ -1265,7 +1265,7 @@ impl<'a> GrammarConstraintState<'a> {
             initial_nodes_and_values,
             |glr_parse_state, grammar_token_id_opt, edge_llm_tokens, child_node| { // Renamed grammar_token_id to grammar_token_id_opt
                 let node_ptr = std::ptr::addr_of!(*child_node);
-                crate::debug!(3, "Processing grammar node {:p} token {:?}. Terminals: {:?}", node_ptr, grammar_token_id_opt.map(|gtid| gtid.0), gather_gss_stats(&[glr_parse_state.active_state.stack.acc().terminals.clone()])); // Use grammar_token_id_opt
+                crate::debug!(3, "Processing grammar node {:p} token {:?}. Active LLM tokens: {:?}. LLM tokens allowed on edge: {:?}", node_ptr, grammar_token_id_opt.map(|gtid| gtid.0), gather_gss_stats(&[glr_parse_state.active_state.stack.acc().active.clone()]), gather_gss_stats(&[edge_llm_tokens])); // Use grammar_token_id_opt
                 let mut cloned_glr_parse_state = glr_parse_state.clone();
                 let current_active_tokens = cloned_glr_parse_state.active_state.stack.acc().active.clone();
                 Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc_mut().intersection &= &current_active_tokens;
@@ -1281,7 +1281,7 @@ impl<'a> GrammarConstraintState<'a> {
                     crate::debug!(3, "No active states after processing grammar token {:?}", grammar_token_id_opt.map(|gtid| gtid.0)); // Use grammar_token_id_opt
                     return None;
                 } else {
-                    crate::debug!(3, "Processed grammar token {:?}.", grammar_token_id_opt.map(|gtid| gtid.0)); // Use grammar_token_id_opt
+                    crate::debug!(3, "Processed grammar token {:?}. Active LLM tokens: {:?}", grammar_token_id_opt.map(|gtid| gtid.0), gather_gss_stats(&[cloned_glr_parse_state.active_state.stack.acc().active.clone()])); // Use grammar_token_id_opt
                     Some(cloned_glr_parse_state)
                 }
             },

@@ -125,7 +125,7 @@ fn test_constraint_simple() {
         token_name_map,
         3, // max_llm_token_id should be 3 for 0, 1, 2
     );
-    // constraint.dump_precomputed(); // Commented out dump for cleaner test output
+    constraint.dump_precomputed(); // Commented out dump for cleaner test output
 
     let mut constraint_state = constraint.init();
 
