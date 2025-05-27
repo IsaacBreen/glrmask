@@ -455,12 +455,13 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
     }
 
     pub fn step(&mut self, token_id: TerminalID) {
+        /* ---------- logging & preparation ---------- */
+        crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
+
         let nodes: Vec<_> = vec![self.active_state.stack.clone()];
         let simplified_states = simplify_gss_forest(&nodes);
         self.active_state.stack = simplified_states[0].clone();
 
-        /* ---------- logging & preparation ---------- */
-        crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
         self.log_gss("Step-start", token_id);
 
         // Clear cycled_states at the beginning of each step, as cycle detection is per-step.
