@@ -1267,9 +1267,8 @@ impl<'a> GrammarConstraintState<'a> {
                 let node_ptr = std::ptr::addr_of!(*child_node);
                 crate::debug!(3, "Processing grammar node {:p} token {:?}. Active LLM tokens: {:?}. LLM tokens allowed on edge: {:?}", node_ptr, grammar_token_id_opt.map(|gtid| gtid.0), glr_parse_state.active_state.stack.acc().active, edge_llm_tokens);
                 let mut cloned_glr_parse_state = glr_parse_state.clone();
-                let current_active_tokens = cloned_glr_parse_state.active_state.stack.acc().active.clone();
-                Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc_mut().intersection &= &current_active_tokens;
                 Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc_mut().active &= edge_llm_tokens;
+                Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc_mut().intersection &= edge_llm_tokens;
                 if let Some(gtid) = grammar_token_id_opt { // Use grammar_token_id_opt
                     *step_counts.borrow_mut().entry(*gtid).or_insert(0) += 1;
                 }
@@ -1302,8 +1301,8 @@ impl<'a> GrammarConstraintState<'a> {
                 if let Some(clean_end) = &node.value.clean_end { // clean_end has internal IDs
                     let mut final_glr_parse_state = current_glr_parse_state.clone();
                     let current_active_tokens = final_glr_parse_state.active_state.stack.acc().active.clone();
-                    Arc::make_mut(&mut final_glr_parse_state.active_state.stack).acc_mut().intersection &= &current_active_tokens;
                     Arc::make_mut(&mut final_glr_parse_state.active_state.stack).acc_mut().active &= clean_end; // clean_end is internal
+                    Arc::make_mut(&mut final_glr_parse_state.active_state.stack).acc_mut().intersection &= clean_end; // clean_end is internal
 
                     crate::debug!(3, "At clean end state");
                     if final_glr_parse_state.is_ok() {
@@ -1336,8 +1335,8 @@ impl<'a> GrammarConstraintState<'a> {
                         for (tokenizer_state_id, llm_tokens_from_finalizer) in &precomputed_finalizer.content { // llm_tokens_from_finalizer are internal
                             let mut glr_parse_state_filtered = current_glr_parse_state.clone(); // Start from current_glr_parse_state for filtering
                             let current_active_tokens = glr_parse_state_filtered.active_state.stack.acc().active.clone();
-                            Arc::make_mut(&mut glr_parse_state_filtered.active_state.stack).acc_mut().intersection &= &current_active_tokens;
                             Arc::make_mut(&mut glr_parse_state_filtered.active_state.stack).acc_mut().active &= llm_tokens_from_finalizer; // llm_tokens_from_finalizer are internal
+                            Arc::make_mut(&mut glr_parse_state_filtered.active_state.stack).acc_mut().intersection &= llm_tokens_from_finalizer; // llm_tokens_from_finalizer are internal
 
                             crate::debug!(3, "Processing finalizer for token_state_id {:?}", tokenizer_state_id);
                             if glr_parse_state_filtered.is_ok() { // This is current_glr_parse_state filtered by finalizer's llm_tokens

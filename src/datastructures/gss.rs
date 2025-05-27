@@ -108,9 +108,15 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
         let acc = if predecessors.is_empty() {
             A::default()
         } else {
-            predecessors.values()
-                .map(|arc| &arc.acc)
-                .fold(A::default(), |acc, other| acc.union(other))
+            // predecessors.values()
+            //     .map(|arc| &arc.acc)
+            //     .fold(A::default(), |acc, other| acc.union(other))
+            let mut iter = predecessors.iter();
+            let mut acc = iter.next().unwrap().1.acc.clone();
+            for (_, arc) in iter {
+                acc = acc.union(&arc.acc);
+            }
+            acc
         };
 
         let hash_key_cache = compute_hash_key(&predecessors);
@@ -146,9 +152,15 @@ impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + De
         let current_acc = if key.is_empty() {
             A::default()
         } else {
-            key.values()
-                .map(|arc| &arc.acc)
-                .fold(A::default(), |acc, other| acc.union(other))
+            // key.values()
+            //     .map(|arc| &arc.acc)
+            //     .fold(A::default(), |acc, other| acc.union(other))
+            let mut iter = key.iter();
+            let mut acc = iter.next().unwrap().1.acc.clone();
+            for (_, arc) in iter {
+                acc = acc.union(&arc.acc);
+            }
+            acc
         };
 
         if let Some(entry) = cache.get_mut(&key) {
