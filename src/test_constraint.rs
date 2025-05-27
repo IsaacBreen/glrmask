@@ -1495,6 +1495,7 @@ fn test_minimized_grammar_causes_panic() -> Result<(), Box<dyn std::error::Error
 
     // 1. Manually define the minimized grammar
     let minimized_productions = vec![
+        prod("start", vec![nt("block")]), // P0
         prod("block", vec![t("..."), t(";")]),          // P4
         prod("elif_stmt", vec![t("elif"), nt("block"), nt("elif_stmt")]), // P5
     ];
