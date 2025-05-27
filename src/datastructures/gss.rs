@@ -555,18 +555,6 @@ pub fn prune_and_transform_recursive_canonical<T: Clone + Ord + Hash + Debug, A:
     }
 }
 
-pub fn prune_and_transform_roots_canonical<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug>(
-    roots: &[Arc<GSSNode<T, A>>],
-    closure: &impl Fn(&A) -> Option<(A, bool)>,
-    cache: &mut HashMap<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>,
-) -> Vec<Option<Arc<GSSNode<T, A>>>> {
-    let mut memo = HashMap::new();
-    roots
-        .iter()
-        .map(|root| prune_and_transform_recursive_canonical(root, closure, &mut memo, cache))
-        .collect()
-}
-
 pub fn prune_and_transform_recursive<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug>(
     node_arc: &Arc<GSSNode<T, A>>,
     closure: &impl Fn(&A) -> Option<(A, bool)>,
@@ -574,18 +562,6 @@ pub fn prune_and_transform_recursive<T: Clone + Ord + Hash + Debug, A: PathAccum
 ) -> Option<Arc<GSSNode<T, A>>> {
     let mut cache = HashMap::<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>::new();
     prune_and_transform_recursive_canonical(node_arc, closure, memo, &mut cache)
-}
-
-pub fn prune_and_transform_roots<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + Debug>(
-    roots: &[Arc<GSSNode<T, A>>],
-    closure: &impl Fn(&A) -> Option<(A, bool)>,
-) -> Vec<Option<Arc<GSSNode<T, A>>>> {
-    let mut memo = HashMap::new();
-    let mut cache = HashMap::<BTreeSet<(Arc<GSSNode<T, A>>, T)>, Arc<GSSNode<T, A>>>::new();
-    roots
-        .iter()
-        .map(|root| prune_and_transform_recursive_canonical(root, closure, &mut memo, &mut cache))
-        .collect()
 }
 
 // Helper recursive function for find_longest_path.
