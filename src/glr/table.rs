@@ -159,7 +159,7 @@ impl JSONConvertible for Goto {
                     _ => Err(format!("Unknown variant {} for Goto", variant)),
                 }
             }
-            _ => Err("Expected JSONNode::Object for Goto".to_string()),
+            _ => Err(format!("Expected JSONNode::Object for Goto, got {:?}", node)),
         }
     }
 }
