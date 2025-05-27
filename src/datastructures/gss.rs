@@ -224,6 +224,7 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
     }
 
     pub fn merge(&mut self, other: &Self) {
+        if self == other { return; }
         self.acc = self.acc.union(&other.acc);
 
         for (edge_val, other_pred) in &other.predecessors {
