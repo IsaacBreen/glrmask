@@ -252,6 +252,13 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
             }
         }
 
+        for item in &closure {
+            // e.g. start rules
+            if item.dot_position == 0 && !gotos.contains_key(&item.production.lhs) {
+                gotos.insert(item.production.lhs.clone(), BTreeSet::new());
+            }
+        }
+
         stage_2_table.insert(
             item_set,
             Stage2Row {
