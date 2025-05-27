@@ -748,7 +748,8 @@ fn simplify_node_recursive<T: Clone + Ord + Hash + Debug, A: PathAccumulator + C
 
     let canonical_arc = GSSNode::get_canonical(simplified_predecessors, cache);
     let mut temp_arc = canonical_arc.clone();
-    Arc::make_mut(&mut temp_arc).acc = temp_arc.acc.union(&node_arc.acc);
+    // Arc::make_mut(&mut temp_arc).acc = temp_arc.acc.union(&node_arc.acc);
+    Arc::make_mut(&mut temp_arc).acc = node_arc.acc.clone();
 
     memo.insert(node_ptr, temp_arc.clone());
     temp_arc
