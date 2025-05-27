@@ -62,7 +62,7 @@ impl<'a, T: Clone, A: PathAccumulator> Iterator for PathsIter<'a, T, A> {
     }
 }
 
-fn process_predecessors<T: Ord + Hash + Clone, A: PathAccumulator + Clone + Default>(
+fn process_predecessors<T: Ord + Hash + Clone, A: PathAccumulator + Clone >(
     incoming: &NodeSet<T, A>
 ) -> NodeMap<T, A> {
     let mut grouped: BTreeMap<T, Vec<Arc<GSSNode<T, A>>>> = BTreeMap::new();
@@ -210,13 +210,13 @@ impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + De
 }
 
 // Core manipulation methods
-impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone + Default> GSSNode<T, A> {
-    pub fn push(self, edge_value: T) -> Self {
+impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
+    pub fn push(self, edge_value: T) -> Self where A: Default {
         let predecessors_set = NodeSet::from([(Arc::new(self), edge_value)]);
         Self::new_with_predecessors(predecessors_set)
     }
 
-    pub fn pop_into(&self, mut result: Self) -> Self {
+    pub fn pop_into(&self, mut result: Self) -> Self where A: Default {
         for (pred_arc, _) in self.predecessors_with_values() {
             let mut pred_arc = pred_arc.clone();
             *Arc::make_mut(&mut pred_arc).acc_mut() = pred_arc.acc().pop(&result.acc);
@@ -226,11 +226,11 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone + Default> GSSNode<T, A> 
         result
     }
 
-    pub fn pop(&self) -> Self {
+    pub fn pop(&self) -> Self where A: Default {
         self.pop_into(Self::new_default())
     }
 
-    pub fn popn(&self, n: usize) -> Self {
+    pub fn popn(&self, n: usize) -> Self where A: Default {
         if n == 0 {
             self.clone()
         } else {
@@ -294,6 +294,7 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone + Default> GSSNode<T, A> 
     where
         F: Copy + Fn(&T) -> U,
         U: Ord + Hash + Clone,
+        A: Default,
     {
         let new_predecessors: NodeSet<U, A> = self.predecessors.iter()
             .map(|(edge_val, pred_arc)| {
