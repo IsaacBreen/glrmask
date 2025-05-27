@@ -1307,6 +1307,7 @@ impl<'a> GrammarConstraintState<'a> {
                     crate::debug!(3, "At clean end state");
                     if final_glr_parse_state.is_ok() {
                         crate::debug!(3, "GLR parse state at clean end is OK");
+                        final_glr_parse_state.log_gss("After clean end", TerminalID(0));
                         if let Some(existing) = self.state.get_mut(&TokenizerStateID(0)) {
                             existing.merge_with(final_glr_parse_state.clone());
                         } else {
@@ -1341,6 +1342,7 @@ impl<'a> GrammarConstraintState<'a> {
                             crate::debug!(3, "Processing finalizer for token_state_id {:?}", tokenizer_state_id);
                             if glr_parse_state_filtered.is_ok() { // This is current_glr_parse_state filtered by finalizer's llm_tokens
                                 crate::debug!(3, "Finalizer is compatible with current GLR state (pre-step by final_grammar_token)");
+                                glr_parse_state_filtered.log_gss("After filtering by finalizer", TerminalID(tokenizer_state_id.0));
                                 if let Some(existing) = self.state.get_mut(tokenizer_state_id) {
                                     existing.merge_with(glr_parse_state_filtered.clone());
                                 } else {
