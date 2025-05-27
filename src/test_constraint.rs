@@ -849,7 +849,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let tokenizer_vocab_tree = VocabPrefixTree::build(&vocab_tokens_for_tree);
 
     // The full text to tokenize.
-    let full_text_to_tokenize = "not not not not not not not not not not not not not not not not not not not not not not not not not not";
+    let full_text_to_tokenize = "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((";
 
     // Tokenize the full_text_to_tokenize using the VocabPrefixTree
     let mut test_token_sequence_ids = Vec::new();
@@ -890,6 +890,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     } else {
         println!("Successfully tokenized input string into {} tokens using VocabPrefixTree.", test_token_sequence_ids.len());
     }
+
+    panic!("TODO: Finish this!");
 
 
     // 5. Basic Interaction with the GrammarConstraintState
