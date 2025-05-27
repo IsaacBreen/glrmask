@@ -158,7 +158,6 @@ impl PrecomputedFinalizer {
 pub struct PrecomputedNodeContents {
     finalizers: BTreeMap<GrammarTokenID, PrecomputedFinalizer>,
     pub clean_end: Option<LLMTokenBV>,
-    pub active: LLMTokenBV, // Add this line
 }
 
 // Manual impl for PrecomputedNodeContents - unchanged
@@ -167,7 +166,6 @@ impl JSONConvertible for PrecomputedNodeContents {
         let mut obj = StdMap::new();
         obj.insert("finalizers".to_string(), self.finalizers.to_json());
         obj.insert("clean_end".to_string(), self.clean_end.to_json());
-        obj.insert("active".to_string(), self.active.to_json());
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
@@ -179,7 +177,7 @@ impl JSONConvertible for PrecomputedNodeContents {
                                    .and_then(Option::<LLMTokenBV>::from_json)?;
                 let active = obj.remove("active").ok_or_else(|| "Missing field active for PrecomputedNodeContents".to_string())
                                   .and_then(LLMTokenBV::from_json)?;
-                Ok(PrecomputedNodeContents { finalizers, clean_end, active })
+                Ok(PrecomputedNodeContents { finalizers, clean_end })
             }
             _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
         }
@@ -904,7 +902,6 @@ impl<'r> Precomputer<'r> {
         // Add this block to update the target node's active set
         {
             let mut guard = target.lock().unwrap();
-            guard.value.active |= &edge_tokens;
         }
 
 
@@ -969,7 +966,6 @@ impl<'r> Precomputer<'r> {
             // Update the `active` field of this destination_node.
             if let Some(destination_node_arc) = inserter.clone_into_option() {
                 let mut guard = destination_node_arc.lock().unwrap();
-                guard.value.active |= &edge_tokens_for_merge;
             }
         }
 
