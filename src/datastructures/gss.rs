@@ -954,18 +954,29 @@ fn simplify_node_recursive<T: Clone + Ord + Hash + Debug, A: PathAccumulator + C
         return canonical_arc.clone();
     }
 
-    let mut canonical_predecessors_with_values: BTreeSet<(Arc<GSSNode<T, A>>, T)> = BTreeSet::new();
+    let mut new_predecessors_with_values: BTreeSet<(Arc<GSSNode<T, A>>, T)> = BTreeSet::new();
     for (original_pred_arc, edge_val) in &original_node_arc.predecessors_with_values {
         let simplified_pred_arc = simplify_node_recursive(
             original_pred_arc,
             memo,
             canonicalization_cache,
         );
-        canonical_predecessors_with_values.insert((simplified_pred_arc, edge_val.clone()));
+        new_predecessors_with_values.insert((simplified_pred_arc, edge_val.clone()));
+    }
+
+    let mut predecessors_grouped: BTreeMap<_, Arc<GSSNode<T, A>>> = BTreeMap::new();
+    for (pred_arc, edge_val) in &new_predecessors_with_values {
+        // Key by everything except the predecessor's acc
+        let key = (edge_val.clone(), pred_arc.predecessors_with_values.clone());
+        if let Some(existing) = predecessors_grouped.get_mut(&key) {
+            Arc::make_mut(existing).merge(pred_arc.as_ref().clone());
+        } else {
+            predecessors_grouped.insert(key, pred_arc.clone());
+        }
     }
 
     let canonical_arc = GSSNode::get_canonical(
-        canonical_predecessors_with_values,
+        new_predecessors_with_values,
         canonicalization_cache,
     );
 
