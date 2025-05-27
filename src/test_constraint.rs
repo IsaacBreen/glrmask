@@ -193,7 +193,7 @@ fn test_constraint_expression() {
     grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(5));
 
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone()); // Start production is index 6
-    dbg!(&parser);
+    println!("Parser: {}", parser);
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
