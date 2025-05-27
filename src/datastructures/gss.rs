@@ -654,7 +654,7 @@ pub fn gather_gss_stats<T, A: PathAccumulator>(roots: &[impl AsRef<GSSNode<T, A>
 }
 
 pub fn print_gss_forest<T: Debug, A: PathAccumulator>(
-    roots: &[Arc<GSSNode<T, A>>],
+    roots: &[Arc<GSSNode<T, A>>], // This is &[Arc<GSSNode<T, A>>]
     max_nodes: usize
 ) -> String {
     fn print_node<T: Debug, A: PathAccumulator>(

@@ -1358,6 +1358,7 @@ impl<'a> GrammarConstraintState<'a> {
         let mut roots = Vec::new();
         let mut tokenizer_state_id_to_root_pos = BTreeMap::new();
         for (i, (tokenizer_state_id, glr_state)) in self.state.iter_mut().enumerate() { // Renamed tokenizer_state_id
+            glr_state.log_gss("Before simplifying GSS forest for state {}", TerminalID(tokenizer_state_id.0));
             let root = &mut glr_state.active_state.stack;
             roots.push(root);
             tokenizer_state_id_to_root_pos.insert(*tokenizer_state_id, i);
