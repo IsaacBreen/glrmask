@@ -1459,7 +1459,8 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
     let augmented_start_rule_lhs = compiled_grammar.definition.productions
         [compiled_grammar.definition.start_production_id].lhs.clone();
     // let sequence_to_test_names = ["\"...\"", "\";\"", "\"elif\""];
-    let sequence_to_test_names = ["\"yield\"", "IGNORE[0][0]", "NEWLINE[0]", "\"-\""];
+    // let sequence_to_test_names = ["\"yield\"", "IGNORE[0][0]", "NEWLINE[0]", "\"-\""];
+    let sequence_to_test_names = ["\"return\"", "\";\"", "IGNORE[0][0]", "\"[\"[0]"];
 
     println!("[Minimizer] Starting stochastic minimization for panic substring: '{}'", PANIC_SUBSTRING_TO_FIND);
     println!("[Minimizer] Initial number of productions: {}", initial_productions.len());
@@ -1650,27 +1651,26 @@ fn test_minimized_grammar_causes_panic() -> Result<(), Box<dyn std::error::Error
     println!("\n[Test MRE] Testing the manually defined minimized grammar that causes the panic.");
 
     // 1. Manually define the minimized grammar
-    // P0: start' -> simple_stmts
-    // P1: simple_stmts -> yield_expr IGNORE[0] NEWLINE[0]
-    // P2: expression -> IGNORE[0]
-    // P3: yield_expr -> "yield" expression
-    // P4: factor -> "-"
-    // P5: IGNORE[0] -> IGNORE[0][0]
-    // P6: IGNORE[0] ->
+    // P0: start' -> IGNORE[0] "return" simple_stmts[0] ";"
+    // P1: simple_stmts[0] -> ";" IGNORE[0] "return"
+    // P2: simple_stmts[0] ->
+    // P3: t_primary -> IGNORE[0] "["[0]
+    // P4: IGNORE[0] -> IGNORE[0][0]
+    // P5: IGNORE[0] ->
     let minimized_productions = vec![
-        prod("start'", vec![nt("simple_stmts")]), // P0
-        prod("simple_stmts", vec![nt("yield_expr"), nt("IGNORE[0]"), t("NEWLINE[0]")]), // P1
-        prod("expression", vec![nt("IGNORE[0]")]), // P2
-        prod("yield_expr", vec![t("\"yield\""), nt("expression")]), // P3
-        prod("factor", vec![t("\"-\"")]), // P4
-        prod("IGNORE[0]", vec![t("IGNORE[0][0]")]), // P5
-        prod("IGNORE[0]", vec![]), // P6
+        prod("start'", vec![nt("IGNORE[0]"), t("\"return\""), nt("simple_stmts[0]"), t("\";\"")]), // P0
+        prod("simple_stmts[0]", vec![t("\";\""), nt("IGNORE[0]"), t("\"return\"")]), // P1
+        prod("simple_stmts[0]", vec![]), // P2
+        prod("t_primary", vec![nt("IGNORE[0]"), t("\"[\"[0]")]), // P3
+        prod("IGNORE[0]", vec![t("IGNORE[0][0]")]), // P4
+        prod("IGNORE[0]", vec![]), // P5
     ];
     let start_production_id_for_minimized = 0; // P0 is the start rule
 
     // 2. Define the input sequence that triggers the panic
     // let input_sequence_names = ["...", ";", "elif"];
-    let input_sequence_names = ["\"yield\"", "IGNORE[0][0]", "NEWLINE[0]", "\"-\""];
+    // let input_sequence_names = ["\"yield\"", "IGNORE[0][0]", "NEWLINE[0]", "\"-\""];
+    let input_sequence_names = ["\"return\"", "\";\"", "IGNORE[0][0]", "\"[\"[0]"];
     println!("[Test MRE] Input sequence: {:?}", input_sequence_names);
 
     // 3. Create terminal and non-terminal maps specifically for this minimized grammar
