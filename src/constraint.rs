@@ -961,12 +961,6 @@ impl<'r> Precomputer<'r> {
             if inserter.clone_into_option().is_none() {
                 inserter = inserter.try_destination(merged_node_arc.clone()); // Use merged_node_arc
             }
-
-            // Now, `inserter.clone_into_option()` should contain Some(destination_node).
-            // Update the `active` field of this destination_node.
-            if let Some(destination_node_arc) = inserter.clone_into_option() {
-                let mut guard = destination_node_arc.lock().unwrap();
-            }
         }
 
         let mut out = BTreeSet::new();
