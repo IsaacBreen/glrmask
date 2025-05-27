@@ -471,6 +471,7 @@ impl<'a, A: PathAccumulator> GLRParserState<'a, A> {
         let nodes: Vec<_> = vec![self.active_state.stack.clone()];
         let simplified_states = simplify_gss_forest(&nodes);
         self.active_state.stack = simplified_states[0].clone();
+        self.log_gss("Simplified GSS after initial step", token_id);
         todo.push((ParseState { stack: self.active_state.stack.clone() }, BTreeSet::new()));
 
         let mut next = ParseState::new();
