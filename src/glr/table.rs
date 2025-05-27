@@ -201,6 +201,8 @@ fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Resu
 
     let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
 
+    transitions.insert(BTreeSet::new(), BTreeMap::new());
+
     while let Some(items) = worklist.pop_front() {
         if transitions.contains_key(&items) {
             continue;
