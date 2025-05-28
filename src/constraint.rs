@@ -1287,9 +1287,6 @@ impl<'a> GrammarConstraintState<'a> {
             },
             |node, current_glr_parse_state| {
                 // Simplify the GSS forest
-                // let nodes: Vec<_> = vec![current_glr_parse_state.active_state.stack.clone()];
-                // let simplified_states = simplify_gss_forest(&nodes);
-                // current_glr_parse_state.active_state.stack = simplified_states[0].clone();
                 Arc::make_mut(&mut current_glr_parse_state.active_state.stack).simplify();
 
                 let mut active_llm_tokens = HybridBitset::new();
