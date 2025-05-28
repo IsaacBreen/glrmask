@@ -520,7 +520,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], mut start_produ
 
     crate::debug!(2, "Removing productions with undefined non-terminals");
     let mut productions = remove_productions_with_undefined_nonterminals(productions, &[start_production_id]);
-    (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id);
+    // (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id);
 
     crate::debug!(2, "Validating");
     validate(&productions).expect("Validation error");

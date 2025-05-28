@@ -1,10 +1,10 @@
 use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, GLRParserState};
 use crate::glr::table::{generate_glr_parser, TerminalID};
-use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability}; // Import the analyze module
+use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar}; // Import the analyze module
 use bimap::BiBTreeMap;
 use std::collections::BTreeSet;
-
+use crate::interface::display_productions;
 // --- Helper Functions for Tests ---
 
 fn create_simple_parser() -> GLRParser {
@@ -732,6 +732,10 @@ fn test_standard_expression_grammar_parse() {
         prod("F", vec![t("LPAREN"), nt("E"), t("RPAREN")]),
         prod("F", vec![t("I")]),
     ];
+
+    println!("Grammar before simplification: {}", display_productions(&productions));
+    println!("Simplified grammar: {}", display_productions(&simplify_grammar(&productions, 0).0));
+
 
     // Validate the grammar
     assert!(analyze::validate(&productions).is_ok(), "Validation failed for standard expression grammar");
