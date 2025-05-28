@@ -424,6 +424,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}. Stepping with LLM token ID {}", i, a_id);
         constraint_state.step_with_all_llm_tokens();
         constraint_state.commit(LLMTokenID(a_id));
+        assert!(constraint_state.is_active(), "Constraint state should be active after committing token {} (ID {})", a_id, a_id);
     }
 
     Ok(())
