@@ -2,6 +2,7 @@
 
 use range_set_blaze::RangeSetBlaze; // Import RangeSetBlaze
 use std::convert::TryInto;
+use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator; // Needed for collect into BTreeSet in tests
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Index, IndexMut, RangeInclusive, Sub, SubAssign};
@@ -9,7 +10,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 
 // --- The Hybrid Bitset Struct ---
 // Ord and PartialOrd will now rely on RangeSetBlaze's implementation (lexicographical on ranges)
-#[derive(Debug, Clone, Ord, PartialOrd, Eq)]
+#[derive(Clone, Ord, PartialOrd, Eq)]
 pub struct HybridBitset {
     inner: RangeSetBlaze<usize>,
 }
@@ -63,6 +64,45 @@ impl JSONConvertible for HybridBitset {
     }
 }
 
+// Helper struct for custom Debug formatting of the inner RangeSetBlaze's ranges.
+// This struct is not intended for public use and is defined here for the Debug impl of HybridBitset.
+struct DebugRangesTruncated<'a> {
+    set: &'a RangeSetBlaze<usize>,
+    limit: usize,
+    is_alternate: bool, // True if the formatter is in alternate mode (e.g., {:#?})
+}
+
+impl<'a> Debug for DebugRangesTruncated<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let total_ranges = self.set.ranges_len();
+
+        // If not truncating (either few ranges, or alternate mode which usually means "show all")
+        if total_ranges <= self.limit || self.is_alternate {
+            // Use RangeSetBlaze's own Debug impl, which formats as a list of RangeInclusive<usize>
+            self.set.fmt(f)
+        } else {
+            // Truncate: format a list of the first `limit` ranges, then an ellipsis entry
+            let mut list_formatter = f.debug_list();
+            list_formatter.entries(self.set.ranges().take(self.limit));
+            list_formatter.entry(&format_args!("... and {} more ranges", total_ranges - self.limit));
+            list_formatter.finish()
+        }
+    }
+}
+
+impl Debug for HybridBitset {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        const MAX_RANGES_IN_DEBUG: usize = 10; // Threshold for truncation in normal debug mode
+
+        f.debug_struct("HybridBitset")
+            .field("inner", &DebugRangesTruncated {
+                set: &self.inner,
+                limit: MAX_RANGES_IN_DEBUG,
+                is_alternate: f.alternate(),
+            })
+            .finish()
+    }
+}
 
 // --- Core Implementation (`impl HybridBitset`) ---
 impl HybridBitset {
