@@ -1273,7 +1273,7 @@ impl<'a> GrammarConstraintState<'a> {
                     *step_counts.borrow_mut().entry(*gtid).or_insert(0) += 1;
                 }
                 grammar_token_id_opt.map(|gtid| {
-                    Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc_mut().terminals = Arc::new(cloned_glr_parse_state.active_state.stack.acc().terminals.as_ref().clone().push(gtid));
+                    // Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc_mut().terminals = Arc::new(cloned_glr_parse_state.active_state.stack.acc().terminals.as_ref().clone().push(gtid));
                     cloned_glr_parse_state.step(gtid);
                 }); // Use grammar_token_id_opt
                 if cloned_glr_parse_state.active_state.stack.is_empty() {
