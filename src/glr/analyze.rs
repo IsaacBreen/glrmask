@@ -516,3 +516,314 @@ pub fn filter_productions_by_reachability(
     kept_productions
 }
 
+/// Computes the set of non-terminals that can derive a terminal string.
+fn compute_productive_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+    let mut productive_nts = BTreeSet::new();
+    if productions.is_empty() {
+        return productive_nts;
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for prod in productions {
+            if productive_nts.contains(&prod.lhs) {
+                continue;
+            }
+
+            let rhs_is_productive = prod.rhs.iter().all(|symbol| match symbol {
+                Symbol::Terminal(_) => true,
+                Symbol::NonTerminal(nt) => productive_nts.contains(nt),
+            });
+
+            if rhs_is_productive {
+                if productive_nts.insert(prod.lhs.clone()) {
+                    changed = true;
+                }
+            }
+        }
+    }
+    productive_nts
+}
+
+/// Removes rules involving non-productive non-terminals.
+/// If the start_symbol becomes non-productive, returns an empty set of productions.
+fn remove_non_productive_rules(productions: &[Production], start_symbol: &NonTerminal) -> Vec<Production> {
+    if productions.is_empty() { return Vec::new(); }
+    let productive_nts = compute_productive_nonterminals(productions);
+
+    if !productive_nts.contains(start_symbol) && productions.iter().any(|p| p.lhs == *start_symbol) {
+        crate::debug!(2, "Simplify: Start symbol {} became non-productive. Removing all productions.", start_symbol.0);
+        return Vec::new();
+    }
+
+    productions.iter().filter(|prod| {
+        productive_nts.contains(&prod.lhs) &&
+        prod.rhs.iter().all(|symbol| match symbol {
+            Symbol::Terminal(_) => true,
+            Symbol::NonTerminal(nt) => productive_nts.contains(nt),
+        })
+    }).cloned().collect()
+}
+
+/// Computes non-terminals reachable from the start_symbol.
+fn compute_reachable_nonterminals(productions: &[Production], start_symbol: &NonTerminal) -> BTreeSet<NonTerminal> {
+    let mut reachable_nts = BTreeSet::new();
+    if productions.is_empty() || !productions.iter().any(|p| p.lhs == *start_symbol) {
+        return reachable_nts;
+    }
+
+    reachable_nts.insert(start_symbol.clone());
+    let mut worklist: VecDeque<NonTerminal> = VecDeque::new();
+    worklist.push_back(start_symbol.clone());
+
+    while let Some(nt_lhs) = worklist.pop_front() {
+        for prod in productions {
+            if prod.lhs == nt_lhs {
+                for symbol_in_rhs in &prod.rhs {
+                    if let Symbol::NonTerminal(nt_in_rhs) = symbol_in_rhs {
+                        if reachable_nts.insert(nt_in_rhs.clone()) {
+                            worklist.push_back(nt_in_rhs.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    reachable_nts
+}
+
+/// Removes rules whose LHS is not reachable from the start_symbol.
+/// If the start_symbol itself becomes unreachable, returns an empty set.
+fn remove_unreachable_rules(productions: &[Production], start_symbol: &NonTerminal) -> Vec<Production> {
+    if productions.is_empty() { return Vec::new(); }
+    let reachable_nts = compute_reachable_nonterminals(productions, start_symbol);
+
+    if !reachable_nts.contains(start_symbol) && productions.iter().any(|p| p.lhs == *start_symbol) {
+         crate::debug!(2, "Simplify: Start symbol {} became unreachable. Removing all productions.", start_symbol.0);
+        return Vec::new();
+    }
+
+    productions.iter().filter(|prod| reachable_nts.contains(&prod.lhs)).cloned().collect()
+}
+
+/// Inlines epsilon productions. For L -> X N Y where N is nullable, adds L -> X Y.
+/// Relies on subsequent cleanup to remove original N -> ε if N becomes unused/unproductive.
+fn inline_epsilon_productions(productions: &[Production]) -> (Vec<Production>, bool) {
+    let nullable_set = compute_nullable_nonterminals(productions);
+    let mut new_productions = BTreeSet::new(); // Use BTreeSet for deduplication
+    let mut made_change = false;
+
+    for prod in productions {
+        if prod.rhs.is_empty() { // Keep existing A -> ε rules for now
+            new_productions.insert(prod.clone());
+            continue;
+        }
+
+        let nullable_indices: Vec<usize> = prod.rhs.iter().enumerate()
+            .filter_map(|(i, symbol)| match symbol {
+                Symbol::NonTerminal(nt) if nullable_set.contains(nt) => Some(i),
+                _ => None,
+            }).collect();
+
+        if nullable_indices.is_empty() {
+            new_productions.insert(prod.clone());
+            continue;
+        }
+
+        // Iterate through all 2^k combinations of omitting/keeping nullable symbols
+        let num_nullable_in_rhs = nullable_indices.len();
+        for i in 0..(1 << num_nullable_in_rhs) {
+            let mut current_rhs = Vec::new();
+            let mut nullable_ptr = 0;
+            for (original_idx, symbol) in prod.rhs.iter().enumerate() {
+                if nullable_ptr < nullable_indices.len() && original_idx == nullable_indices[nullable_ptr] {
+                    // This is a nullable symbol from our list. Check the i-th bit.
+                    if (i >> nullable_ptr) & 1 == 1 { // Bit is 1: keep this occurrence
+                        current_rhs.push(symbol.clone());
+                    } else { // Bit is 0: omit this occurrence
+                        // If we omit, it's a change from the original full rule
+                    }
+                    nullable_ptr += 1;
+                } else {
+                    current_rhs.push(symbol.clone());
+                }
+            }
+
+            // Add the new production if it's not an exact copy of the original RHS AND
+            // it's not an L -> L self-loop (unless original was L -> L).
+            // An empty RHS is a valid new epsilon production.
+            let is_self_loop = current_rhs.len() == 1 && current_rhs[0] == Symbol::NonTerminal(prod.lhs.clone());
+            let original_is_self_loop = prod.rhs.len() == 1 && prod.rhs[0] == Symbol::NonTerminal(prod.lhs.clone());
+
+            if !is_self_loop || original_is_self_loop { // Avoid creating new L->L from L->N L
+                if new_productions.insert(Production { lhs: prod.lhs.clone(), rhs: current_rhs }) {
+                    // If insert is true, it's a new unique production.
+                    // We need to check if it's different from the original to claim `made_change`.
+                    // This check is tricky. Simpler: compare input set with output set at the end.
+                }
+            }
+        }
+    }
+    
+    let final_prods: Vec<Production> = new_productions.into_iter().collect();
+    let input_set: BTreeSet<_> = productions.iter().cloned().collect();
+    let final_set: BTreeSet<_> = final_prods.iter().cloned().collect();
+    if input_set != final_set {
+        made_change = true;
+    }
+
+    (final_prods, made_change)
+}
+
+/// Inlines unit productions (A -> B).
+fn inline_unit_productions(productions: &[Production]) -> (Vec<Production>, bool) {
+    let mut non_unit_productions: Vec<Production> = Vec::new();
+    let mut unit_relations: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
+    let mut all_nts = BTreeSet::new();
+
+    for prod in productions {
+        all_nts.insert(prod.lhs.clone());
+        if prod.rhs.len() == 1 && matches!(&prod.rhs[0], Symbol::NonTerminal(_)) {
+            let rhs_nt = match &prod.rhs[0] { Symbol::NonTerminal(nt) => nt, _ => unreachable!() };
+            if prod.lhs != *rhs_nt { // Not A -> A
+                unit_relations.entry(prod.lhs.clone()).or_default().insert(rhs_nt.clone());
+            } else { non_unit_productions.push(prod.clone()); } // Keep A -> A
+        } else {
+            non_unit_productions.push(prod.clone());
+        }
+    }
+
+    let mut unit_closure: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
+    for nt_lhs in all_nts.iter() {
+        let mut reachable_by_unit = BTreeSet::new();
+        let mut q: VecDeque<_> = vec![nt_lhs.clone()].into();
+        let mut visited_dfs = BTreeSet::new();
+        while let Some(curr) = q.pop_front() {
+            if !visited_dfs.insert(curr.clone()) { continue; }
+            if let Some(direct_units) = unit_relations.get(&curr) {
+                for unit_rhs in direct_units {
+                    if curr != *unit_rhs { reachable_by_unit.insert(unit_rhs.clone()); }
+                    q.push_back(unit_rhs.clone());
+                }
+            }
+        }
+        if !reachable_by_unit.is_empty() { unit_closure.insert(nt_lhs.clone(), reachable_by_unit); }
+    }
+
+    let mut result_prods = BTreeSet::new();
+    for p in &non_unit_productions { result_prods.insert(p.clone()); }
+
+    for (lhs_a, derives_bs) in &unit_closure {
+        for rhs_b in derives_bs {
+            for non_unit_prod in &non_unit_productions {
+                if non_unit_prod.lhs == *rhs_b { // B -> gamma (non-unit)
+                    result_prods.insert(Production { lhs: lhs_a.clone(), rhs: non_unit_prod.rhs.clone() });
+                }
+            }
+        }
+    }
+    
+    let final_prods: Vec<Production> = result_prods.into_iter().collect();
+    let changed = productions.iter().cloned().collect::<BTreeSet<_>>() != final_prods.iter().cloned().collect::<BTreeSet<_>>();
+    (final_prods, changed)
+}
+
+/// Substitutes non-terminals that have a single, non-recursive production.
+fn substitute_single_production_nonterminals(productions: &[Production], start_symbol: &NonTerminal) -> (Vec<Production>, bool) {
+    let mut current_productions: Vec<Production> = productions.to_vec();
+    let mut any_substitution_in_loop = false;
+
+    loop {
+        let mut prod_map: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
+        for p in &current_productions { prod_map.entry(p.lhs.clone()).or_default().push(p); }
+
+        let mut substitutable_nts: BTreeMap<NonTerminal, Vec<Symbol>> = BTreeMap::new();
+        for (nt, prods_for_nt) in &prod_map {
+            if nt == start_symbol || prods_for_nt.len() != 1 { continue; }
+            let single_prod = prods_for_nt[0];
+            if !single_prod.rhs.iter().any(|s| matches!(s, Symbol::NonTerminal(r_nt) if r_nt == nt)) {
+                substitutable_nts.insert(nt.clone(), single_prod.rhs.clone());
+            }
+        }
+
+        if substitutable_nts.is_empty() { break; }
+        any_substitution_in_loop = true;
+        let mut next_iteration_productions = Vec::new();
+        for prod_to_modify in &current_productions {
+            if substitutable_nts.contains_key(&prod_to_modify.lhs) { continue; } // Rule defining the substituted NT is dropped
+
+            let mut new_rhs = Vec::new();
+            for symbol in &prod_to_modify.rhs {
+                if let Symbol::NonTerminal(nt_in_rhs) = symbol {
+                    if let Some(sub_rhs) = substitutable_nts.get(nt_in_rhs) {
+                        new_rhs.extend_from_slice(sub_rhs);
+                        continue;
+                    }
+                }
+                new_rhs.push(symbol.clone());
+            }
+            next_iteration_productions.push(Production { lhs: prod_to_modify.lhs.clone(), rhs: new_rhs });
+        }
+        current_productions = next_iteration_productions;
+    }
+    (current_productions, any_substitution_in_loop)
+}
+
+/// Simplifies a grammar definition by applying various common techniques iteratively.
+/// Aims to improve performance by reducing productions or restructuring them.
+/// The actual parse tree generated does NOT have to be preserved, only the accepted language.
+pub fn simplify_grammar(initial_productions: &[Production], start_symbol: &NonTerminal) -> Vec<Production> {
+    if initial_productions.is_empty() || !initial_productions.iter().any(|p| p.lhs == *start_symbol) {
+        crate::debug!(1, "Simplify: Initial productions empty or start symbol {} not defined. Returning empty.", start_symbol.0);
+        return Vec::new();
+    }
+
+    let mut current_productions = initial_productions.to_vec();
+    crate::debug!(2, "Simplify: Initial {} productions.", current_productions.len());
+
+    loop {
+        let productions_at_loop_start = current_productions.clone();
+
+        current_productions = remove_non_productive_rules(&current_productions, start_symbol);
+        if current_productions.is_empty() { crate::debug!(2, "Simplify: Became empty after non-productive removal."); break; }
+        current_productions = remove_unreachable_rules(&current_productions, start_symbol);
+        if current_productions.is_empty() { crate::debug!(2, "Simplify: Became empty after unreachable removal."); break; }
+        
+        let (prods_eps, _) = inline_epsilon_productions(&current_productions);
+        current_productions = prods_eps;
+        current_productions = remove_non_productive_rules(&current_productions, start_symbol);
+        if current_productions.is_empty() { crate::debug!(2, "Simplify: Became empty after eps-inline cleanup."); break; }
+        current_productions = remove_unreachable_rules(&current_productions, start_symbol);
+        if current_productions.is_empty() { crate::debug!(2, "Simplify: Became empty after eps-inline cleanup."); break; }
+
+        let (prods_unit, _) = inline_unit_productions(&current_productions);
+        current_productions = prods_unit;
+        current_productions = remove_non_productive_rules(&current_productions, start_symbol);
+        if current_productions.is_empty() { crate::debug!(2, "Simplify: Became empty after unit-inline cleanup."); break; }
+        current_productions = remove_unreachable_rules(&current_productions, start_symbol);
+        if current_productions.is_empty() { crate::debug!(2, "Simplify: Became empty after unit-inline cleanup."); break; }
+
+        let (prods_sub, _) = substitute_single_production_nonterminals(&current_productions, start_symbol);
+        current_productions = prods_sub;
+        current_productions = remove_non_productive_rules(&current_productions, start_symbol);
+        if current_productions.is_empty() { crate::debug!(2, "Simplify: Became empty after substitute cleanup."); break; }
+        current_productions = remove_unreachable_rules(&current_productions, start_symbol);
+        if current_productions.is_empty() { crate::debug!(2, "Simplify: Became empty after substitute cleanup."); break; }
+
+        current_productions.sort();
+        let mut productions_at_loop_start_sorted = productions_at_loop_start;
+        productions_at_loop_start_sorted.sort();
+
+        if current_productions == productions_at_loop_start_sorted {
+            crate::debug!(2, "Simplify: Fixed point reached with {} productions.", current_productions.len());
+            break;
+        }
+        crate::debug!(2, "Simplify: Iteration complete. Productions count: {}. Continuing.", current_productions.len());
+    }
+
+    current_productions.sort(); // Final sort for deterministic output
+    crate::debug!(2, "Simplify: Final simplified grammar has {} productions.", current_productions.len());
+    current_productions
+}
+
