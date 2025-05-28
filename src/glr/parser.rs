@@ -350,10 +350,8 @@ impl<'a, A: PathAccumulator + Default> GLRParserState<'a, A> {
         edge_src: &Arc<GSSNode<ParseStateEdgeContent, A>>, // Parent node
         len: usize,
         nt: NonTerminalID,
-        // cur_t: &T was &LLMTokenInfo, now it's stack.acc
-        // So, pass stack.acc as cur_acc_from_reducible_node
     ) -> Arc<GSSNode<ParseStateEdgeContent, A>> { // Returns list of new stack tops
-        let cur_acc_from_reducible_node = &stack.acc(); // Get it from the stack being reduced
+        let cur_acc_from_reducible_node = stack.acc(); // Get it from the stack being reduced
 
         let parent = Arc::new(if len == 0 {
             edge_src.push(edge_content.clone())
@@ -375,8 +373,7 @@ impl<'a, A: PathAccumulator + Default> GLRParserState<'a, A> {
 
                     // Calculate acc for the new GOTO state's GSS node
                     // It's the parent's acc intersected with the accumulator from the node being reduced.
-                    let new_acc_for_goto_child = parent.acc().pop(cur_acc_from_reducible_node); // Use parent_arc.acc()
-
+                    let new_acc_for_goto_child = parent.acc().clone().pop(cur_acc_from_reducible_node.clone());
                     let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id };
 
                     // TODO: what the heck

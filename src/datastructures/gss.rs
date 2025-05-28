@@ -12,13 +12,21 @@ type NodeMap<T, A> = BTreeMap<T, Arc<GSSNode<T, A>>>;
 type NodeSet<T, A> = BTreeSet<(Arc<GSSNode<T, A>>, T)>;
 
 pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
-    fn union(&self, other: &Self) -> Self;
-    fn pop(&self, right: &Self) -> Self;
+    fn union_assign(&mut self, other: Self);
+    fn pop_assign(&mut self, right: Self);
+    fn union(mut self, other: Self) -> Self {
+        self.union_assign(other);
+        self
+    }
+    fn pop(mut self, right: Self) -> Self {
+        self.pop_assign(right);
+        self
+    }
 }
 
 impl PathAccumulator for () {
-    fn union(&self, _other: &Self) -> Self { () }
-    fn pop(&self, _right: &Self) -> Self { () }
+    fn union_assign(&mut self, _other: Self) { /* () has no state to change */ }
+    fn pop_assign(&mut self, _right: Self) { /* () has no state to change */ }
 }
 
 fn compute_hash_key<T: Hash, A: PathAccumulator>(predecessors: &NodeMap<T, A>) -> u64 {
@@ -108,13 +116,10 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone + Default> GSSNode<T, A> 
         let acc = if predecessors.is_empty() {
             A::default()
         } else {
-            // predecessors.values()
-            //     .map(|arc| &arc.acc)
-            //     .fold(A::default(), |acc, other| acc.union(other))
             let mut iter = predecessors.iter();
-            let mut acc = iter.next().unwrap().1.acc.clone();
+            let mut acc = iter.next().expect("predecessors is not empty").1.acc.clone();
             for (_, arc) in iter {
-                acc = acc.union(&arc.acc);
+                acc.union_assign(arc.acc.clone());
             }
             acc
         };
@@ -156,19 +161,16 @@ impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + De
         let current_acc = if key.is_empty() {
             A::default()
         } else {
-            // key.values()
-            //     .map(|arc| &arc.acc)
-            //     .fold(A::default(), |acc, other| acc.union(other))
             let mut iter = key.iter();
-            let mut acc = iter.next().unwrap().1.acc.clone();
+            let mut acc = iter.next().expect("key is not empty").1.acc.clone();
             for (_, arc) in iter {
-                acc = acc.union(&arc.acc);
+                acc.union_assign(arc.acc.clone());
             }
             acc
         };
 
         if let Some(entry) = cache.get_mut(&key) {
-            let new_acc = entry.acc.union(&current_acc);
+            let mut new_acc = entry.acc.clone(); new_acc.union_assign(current_acc);
             if new_acc != entry.acc {
                 let mut temp_arc = entry.clone();
                 Arc::make_mut(&mut temp_arc).acc = new_acc;
@@ -192,7 +194,8 @@ impl<T: Clone + Ord + Hash + Debug, A: PathAccumulator + Clone + Ord + Hash + De
         let key = NodeMap::new();
 
         if let Some(entry) = cache.get_mut(&key) {
-            let new_acc = entry.acc.union(&initial_acc);
+            let mut new_acc = entry.acc.clone();
+            new_acc.union_assign(initial_acc);
             if new_acc != entry.acc {
                 let mut temp_arc = entry.clone();
                 Arc::make_mut(&mut temp_arc).acc = new_acc;
@@ -223,9 +226,9 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
     pub fn pop_into(&self, mut result: Self) -> Self where A: Default {
         for (pred_arc, _) in self.predecessors_with_values() {
             let mut pred_arc = pred_arc.clone();
-            *Arc::make_mut(&mut pred_arc).acc_mut() = pred_arc.acc().pop(&result.acc);
+            Arc::make_mut(&mut pred_arc).acc_mut().pop_assign(result.acc.clone());
             result.merge(&pred_arc);
-            *result.acc_mut() = result.acc().pop(&pred_arc.acc);
+            result.acc_mut().pop_assign(pred_arc.acc.clone());
         }
         result
     }
@@ -245,21 +248,21 @@ impl<T: Ord + Hash + Clone, A: PathAccumulator + Clone> GSSNode<T, A> {
     pub fn pop_iter(&self) -> Vec<(Arc<Self>, T)> {
         self.predecessors.iter().map(|(edge_val, pred_arc)| {
             let mut new_arc = pred_arc.clone();
-            Arc::make_mut(&mut new_arc).acc = PathAccumulator::pop(&self.acc, &new_arc.acc);
+            Arc::make_mut(&mut new_arc).acc = self.acc.clone().pop(new_arc.acc.clone());
             (new_arc, edge_val.clone())
         }).collect()
     }
 
     fn push_down_acc(&mut self) {
         for pred_arc in self.predecessors.values_mut() {
-            Arc::make_mut(pred_arc).acc = pred_arc.acc.pop(&self.acc);
+            Arc::make_mut(pred_arc).acc.pop_assign(self.acc.clone());
         }
     }
 
     pub fn merge(&mut self, other: &Self) {
         if self == other { return; }
         self.push_down_acc();
-        self.acc = self.acc.union(&other.acc);
+        self.acc.union_assign(other.acc.clone());
 
         for (other_pred, edge_val) in &other.pop_iter() {
             match self.predecessors.entry(edge_val.clone()) {
@@ -424,7 +427,7 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A>
 
     fn push_to(&self, _edge_value: T, dest: &mut GSSNode<T, A>) {
         dest.merge(&self.as_ref().clone());
-        dest.acc = dest.acc.pop(&self.acc);
+        dest.acc.pop_assign(self.acc.clone());
     }
 
     fn pop(&self) -> GSSNode<T, A> {
@@ -453,7 +456,7 @@ impl<T: Clone + Ord + Hash, A: PathAccumulator + Clone + Default> GSSTrait<T, A>
             None => {
                 let default_node = GSSNode::new(A::default());
                 dest.merge(&default_node);
-                dest.acc = dest.acc.pop(&default_node.acc);
+                dest.acc.pop_assign(default_node.acc.clone());
             }
         }
     }
@@ -524,7 +527,7 @@ pub fn prune_and_transform_recursive_canonical<T: Clone + Ord + Hash + Debug, A:
 
             let canonical_arc = GSSNode::get_canonical(new_predecessors_set, cache);
             let mut temp_arc = canonical_arc.clone();
-            Arc::make_mut(&mut temp_arc).acc = temp_arc.acc.union(&new_acc);
+            Arc::make_mut(&mut temp_arc).acc.union_assign(new_acc);
 
             memo.insert(node_ptr, Some(temp_arc.clone()));
             Some(temp_arc)
@@ -748,7 +751,6 @@ fn simplify_node_recursive<T: Clone + Ord + Hash + Debug, A: PathAccumulator + C
 
     let canonical_arc = GSSNode::get_canonical(simplified_predecessors, cache);
     let mut temp_arc = canonical_arc.clone();
-    // Arc::make_mut(&mut temp_arc).acc = temp_arc.acc.union(&node_arc.acc);
     Arc::make_mut(&mut temp_arc).acc = node_arc.acc.clone();
 
     memo.insert(node_ptr, temp_arc.clone());
@@ -828,18 +830,14 @@ mod tests {
     }
 
     impl PathAccumulator for MockPathAccumulator {
-        fn union(&self, other: &Self) -> Self {
-            Self {
-                active: self.active.union(&other.active).cloned().collect(),
-                intersection: self.intersection.union(&other.intersection).cloned().collect(),
-            }
+        fn union_assign(&mut self, other: Self) {
+            self.active = self.active.union(&other.active).cloned().collect();
+            self.intersection = self.intersection.union(&other.intersection).cloned().collect();
         }
 
-        fn pop(&self, right: &Self) -> Self {
-            Self {
-                active: self.active.intersection(&right.active).cloned().collect(),
-                intersection: self.intersection.intersection(&right.intersection).cloned().collect(),
-            }
+        fn pop_assign(&mut self, right: Self) {
+            self.active = self.active.intersection(&right.active).cloned().collect();
+            self.intersection = self.intersection.intersection(&right.intersection).cloned().collect();
         }
     }
 
@@ -905,7 +903,7 @@ mod tests {
         let (edge_val, merged_pred) = s_a1.predecessors.iter().next().unwrap();
         assert_eq!(*edge_val, 10);
 
-        let expected_merged_acc = acc_base.union(&acc_other);
+        let expected_merged_acc = acc_base.union(acc_other);
         assert_eq!(merged_pred.acc, expected_merged_acc);
         assert_eq!(s_a1.acc, expected_merged_acc);
 

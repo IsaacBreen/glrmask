@@ -67,30 +67,28 @@ impl Default for LLMTokenInfo {
 }
 
 impl PathAccumulator for LLMTokenInfo {
-    fn union(&self, other: &Self) -> Self {
+    fn union_assign(&mut self, other: Self) {
         let mut terminals = self.terminals.clone();
         Arc::make_mut(&mut terminals).merge(&other.terminals);
-        Self {
-            active:       &self.active | &other.active,
-            intersection: &self.intersection & &other.intersection, // Intersection field becomes stricter (AND)
-            terminals,
-        }
+
+        self.active |= &other.active;
+        self.intersection &= &other.intersection; // Intersection field becomes stricter (AND)
+        self.terminals = terminals;
     }
 
-    fn pop(&self, right: &Self) -> Self {
+    fn pop_assign(&mut self, right: Self) {
         // Keep the right terminals
         // assert that the total number of paths in the right terminals is equal to or greater than the total number of paths in the left terminals
         // todo: put this in something that can check debug level == 3
         if false {
             let left_terminals_paths = self.terminals.iter_paths().collect::<Vec<_>>();
             let right_terminals_paths = right.terminals.iter_paths().collect::<Vec<_>>();
-            assert!(left_terminals_paths.len() <= right_terminals_paths.len());
+            assert!(left_terminals_paths.len() <= right_terminals_paths.len(), "Left terminals paths ({}) should be <= right terminals paths ({})", left_terminals_paths.len(), right_terminals_paths.len());
         }
-        Self {
-            active:       &self.active & &right.active,
-            intersection: &self.intersection & &right.intersection,
-            terminals:    right.terminals.clone(),
-        }
+
+        self.active &= &right.active;
+        self.intersection &= &right.intersection;
+        self.terminals = right.terminals;
     }
 }
 
