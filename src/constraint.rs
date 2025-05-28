@@ -1261,8 +1261,8 @@ impl<'a> GrammarConstraintState<'a> {
         fn remove_inactive_nodes(glr_parser_state: &mut GLRParserState<LLMTokenInfo>) {
             // Remove nodes for which the active LLM tokens are empty
             let closure = |t: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
-                // // TODO: WHAT THE HECK
-                // return None;
+                // TODO: WHAT THE HECK
+                return None;
                 if t.active.is_empty() {
                     return None;
                 }
@@ -1404,9 +1404,9 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(2, "After simplifying GSS forest: {:?}", gather_gss_stats(&roots));
 
         // Print each GSS
-        for (tokenizer_state_id, glr_state) in self.state.iter() {
-            glr_state.log_gss(format!("After simplifying GSS for state {}", tokenizer_state_id.0).as_str(), GrammarTokenID(0));
-        }
+        // for (tokenizer_state_id, glr_state) in self.state.iter() {
+        //     glr_state.log_gss(format!("After simplifying GSS for state {}", tokenizer_state_id.0).as_str(), GrammarTokenID(0));
+        // }
 
         // Print GLRParserState::step call counts
         let mut sorted_counts: Vec<(GrammarTokenID, usize)> = step_counts.into_inner().into_iter().collect();
