@@ -529,7 +529,7 @@ local_system:
           kept_productions
       }
 
-      pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> Vec<Production> {
+      pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {
           todo!()
       }
     src/glr/grammar.rs: |
@@ -3298,7 +3298,7 @@ local_system:
           kept_productions
       }
 
-      pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> Vec<Production> {
+      pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {
           todo!()
       }
     src/glr/grammar.rs: |
@@ -5547,7 +5547,7 @@ local_system:
       // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
       //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
 system:
   message: |2
 
@@ -5561,7 +5561,6 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - copy-all/paste
     - copy-one/paste
   code_completion_model:
     - gemini/gemini-2.5-flash-preview-05-20
@@ -6091,7 +6090,7 @@ messages:
           kept_productions
       }
 
-      pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> Vec<Production> {
+      pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {
           todo!()
       }
       ```
@@ -8380,7 +8379,290 @@ messages:
       Importantly, the actual parse tree generated does NOT have to be preserved. All that matters is that a valid parse stays a valid parse. This supports additional optimization opportunities.
       The function signature should be:
       ```rust
-      pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> Vec<Production> {}
+      pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {}
       ```
+    metadata:
+  - assistant: |-
+      Okay, I'll add the `simplify_grammar` function to `src/glr/analyze.rs` along with its helper functions. This function will apply several common grammar simplification techniques:
+
+      1.  **Remove Productions with Undefined Non-terminals**: Cleans up rules referencing non-terminals that are never defined. This is run once at the beginning.
+      2.  **Remove Unreachable Productions**: Eliminates productions whose left-hand side (LHS) non-terminal cannot be reached by any derivation path starting from the grammar's main start symbol.
+      3.  **Remove Non-productive Productions**: Removes productions that cannot ultimately derive a string of only terminal symbols. This includes rules whose LHS is non-productive or whose right-hand side (RHS) contains non-productive non-terminals.
+      4.  **Inline Single Non-recursive Productions**: If a non-terminal `B` (which is not the main start symbol) is defined by exactly one non-recursive production (e.g., `B -> β₁ β₂`), all occurrences of `B` in the RHS of other rules are replaced with `β₁ β₂`. The rule defining `B` is then removed.
+      5.  **Remove Unit Productions**: Eliminates rules of the form `A -> B` (where `A` and `B` are non-terminals). If `B` has productions `B -> γ₁ | γ₂ | ...`, then new productions `A -> γ₁ | γ₂ | ...` are added, and `A -> B` is removed. This is applied iteratively to handle chains.
+
+      These steps are applied repeatedly in a loop until no more changes can be made to the grammar. The function ensures that the original start non-terminal remains defined (if it was valid to begin with) and returns the potentially modified list of productions and the new index of a production for the original start non-terminal.
+
+      Here are the changes:
+
+      ```diff
+      --- a/src/glr/analyze.rs
+      +++ b/src/glr/analyze.rs
+      @@ -370,6 +370,210 @@
+           kept_productions
+       }
+       
+      -pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {
+      -    todo!()
+      -}
+      +/// Removes productions that are not reachable from the given start non-terminal.
+      +fn remove_unreachable_productions(productions: &[Production], start_lhs: &NonTerminal) -> Vec<Production> {
+      +    let mut reachable_nts = BTreeSet::new();
+      +    let mut worklist = VecDeque::new();
+      +
+      +    if productions.iter().any(|p| p.lhs == *start_lhs) {
+      +        reachable_nts.insert(start_lhs.clone());
+      +        worklist.push_back(start_lhs.clone());
+      +    } else {
+      +        // If the start_lhs has no productions, nothing is reachable from it.
+      +        return Vec::new();
+      +    }
+      +
+      +    // Build an adjacency list: NT_lhs -> Vec<NT_rhs>
+      +    // This maps an LHS non-terminal to all non-terminals appearing in any of its RHS.
+      +    let mut adj: BTreeMap<NonTerminal, Vec<NonTerminal>> = BTreeMap::new();
+      +    for p in productions {
+      +        for sym in &p.rhs {
+      +            if let Symbol::NonTerminal(nt_rhs) = sym {
+      +                adj.entry(p.lhs.clone()).or_default().push(nt_rhs.clone());
+      +            }
+      +        }
+      +    }
+      +     // Deduplicate entries in adjacency list to avoid redundant processing
+      +    for nt_list in adj.values_mut() {
+      +        nt_list.sort();
+      +        nt_list.dedup();
+      +    }
+      +
+      +    while let Some(nt_lhs_reachable) = worklist.pop_front() {
+      +        if let Some(directly_derivable_nts) = adj.get(&nt_lhs_reachable) {
+      +            for derived_nt in directly_derivable_nts {
+      +                if reachable_nts.insert(derived_nt.clone()) {
+      +                    worklist.push_back(derived_nt.clone());
+      +                }
+      +            }
+      +        }
+      +    }
+      +
+      +    productions.iter()
+      +        .filter(|p| reachable_nts.contains(&p.lhs))
+      +        .cloned()
+      +        .collect()
+      +}
+      +
+      +/// Removes productions that cannot derive a terminal string (non-productive).
+      +/// Also removes productions whose RHS contains non-productive non-terminals.
+      +fn remove_non_productive_productions(productions: &[Production]) -> Vec<Production> {
+      +    let mut productive_nts = BTreeSet::new();
+      +    let mut changed = true;
+      +
+      +    while changed {
+      +        changed = false;
+      +        for p in productions {
+      +            if productive_nts.contains(&p.lhs) {
+      +                continue;
+      +            }
+      +            let rhs_is_productive = p.rhs.iter().all(|sym| match sym {
+      +                Symbol::Terminal(_) => true,
+      +                Symbol::NonTerminal(nt) => productive_nts.contains(nt),
+      +            });
+      +            if rhs_is_productive {
+      +                if productive_nts.insert(p.lhs.clone()) {
+      +                    changed = true;
+      +                }
+      +            }
+      +        }
+      +    }
+      +
+      +    productions.iter()
+      +        .filter(|p| {
+      +            productive_nts.contains(&p.lhs) &&
+      +            p.rhs.iter().all(|sym| match sym {
+      +                Symbol::Terminal(_) => true,
+      +                Symbol::NonTerminal(nt) => productive_nts.contains(nt),
+      +            })
+      +        })
+      +        .cloned()
+      +        .collect()
+      +}
+      +
+      +/// Inlines non-terminals that are defined by a single, non-recursive production.
+      +/// The `start_lhs_nt_to_preserve` will not be inlined itself.
+      +fn inline_single_productions(productions: &[Production], start_lhs_nt_to_preserve: &NonTerminal) -> (Vec<Production>, bool) {
+      +    let mut lhs_counts: BTreeMap<NonTerminal, usize> = BTreeMap::new();
+      +    for p in productions {
+      +        *lhs_counts.entry(p.lhs.clone()).or_default() += 1;
+      +    }
+      +
+      +    let mut single_production_map: BTreeMap<NonTerminal, Vec<Symbol>> = BTreeMap::new();
+      +    for p in productions {
+      +        if lhs_counts.get(&p.lhs) == Some(&1) && &p.lhs != start_lhs_nt_to_preserve {
+      +            let is_recursive_in_rhs = p.rhs.iter().any(|s| match s {
+      +                Symbol::NonTerminal(nt_in_rhs) => nt_in_rhs == &p.lhs,
+      +                _ => false,
+      +            });
+      +            if !is_recursive_in_rhs {
+      +                 single_production_map.insert(p.lhs.clone(), p.rhs.clone());
+      +            }
+      +        }
+      +    }
+      +
+      +    if single_production_map.is_empty() {
+      +        return (productions.to_vec(), false);
+      +    }
+      +
+      +    let mut new_productions = Vec::new();
+      +    let mut actually_inlined_or_removed = false;
+      +
+      +    for p in productions {
+      +        if single_production_map.contains_key(&p.lhs) {
+      +            actually_inlined_or_removed = true;
+      +            continue;
+      +        }
+      +
+      +        let mut current_rhs = p.rhs.clone();
+      +        loop {
+      +            let mut next_pass_rhs = Vec::new();
+      +            let mut pass_made_change = false;
+      +            for symbol in current_rhs {
+      +                match symbol {
+      +                    Symbol::NonTerminal(nt) => {
+      +                        if let Some(inline_body) = single_production_map.get(&nt) {
+      +                            next_pass_rhs.extend_from_slice(inline_body);
+      +                            pass_made_change = true;
+      +                            actually_inlined_or_removed = true;
+      +                        } else {
+      +                            next_pass_rhs.push(Symbol::NonTerminal(nt));
+      +                        }
+      +                    }
+      +                    Symbol::Terminal(t) => {
+      +                        next_pass_rhs.push(Symbol::Terminal(t));
+      +                    }
+      +                }
+      +            }
+      +            current_rhs = next_pass_rhs;
+      +            if !pass_made_change {
+      +                break;
+      +            }
+      +        }
+      +        new_productions.push(Production { lhs: p.lhs.clone(), rhs: current_rhs });
+      +    }
+      +    
+      +    new_productions.sort();
+      +    new_productions.dedup();
+      +
+      +    (new_productions, actually_inlined_or_removed)
+      +}
+      +
+      +/// Removes unit productions of the form A -> B by substituting B's productions for A.
+      +fn remove_unit_productions(productions: &[Production]) -> (Vec<Production>, bool) {
+      +    let mut current_prods = productions.to_vec();
+      +    let mut overall_changed = false;
+      +
+      +    loop {
+      +        let mut unit_rules_to_expand: Vec<(NonTerminal, NonTerminal)> = Vec::new();
+      +        let mut non_unit_prods_this_pass: Vec<Production> = Vec::new();
+      +
+      +        for p in &current_prods {
+      +            if p.rhs.len() == 1 {
+      +                if let Symbol::NonTerminal(ref b_nt) = p.rhs[0] {
+      +                    if p.lhs != *b_nt { // A -> B, where A != B
+      +                        unit_rules_to_expand.push((p.lhs.clone(), b_nt.clone()));
+      +                        continue; // This unit rule will be expanded, not kept as is.
+      +                    }
+      +                }
+      +            }
+      +            non_unit_prods_this_pass.push(p.clone()); // Keep non-unit rules and A -> A rules.
+      +        }
+      +
+      +        if unit_rules_to_expand.is_empty() {
+      +            break; 
+      +        }
+      +        overall_changed = true;
+      +        let mut next_iteration_prods = non_unit_prods_this_pass;
+      +
+      +        for (a_nt, b_nt) in unit_rules_to_expand {
+      +            for p_for_b in &current_prods { // Search in productions from start of this pass
+      +                if p_for_b.lhs == b_nt {
+      +                    let new_prod = Production { lhs: a_nt.clone(), rhs: p_for_b.rhs.clone() };
+      +                    next_iteration_prods.push(new_prod);
+      +                }
+      +            }
+      +        }
+      +        
+      +        next_iteration_prods.sort();
+      +        next_iteration_prods.dedup();
+      +        current_prods = next_iteration_prods;
+      +    }
+      +
+      +    (current_prods, overall_changed)
+      +}
+      +
+      +pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {
+      +    let original_start_lhs = initial_productions.get(start_production_id)
+      +        .expect("Invalid initial start_production_id")
+      +        .lhs.clone();
+      +
+      +    let mut current_productions = remove_productions_with_undefined_nonterminals(initial_productions, &[]);
+      +    if !current_productions.iter().any(|p| p.lhs == original_start_lhs) {
+      +        crate::debug!(1, "Warning: Start symbol {}'s productions were removed by initial cleanup. Original grammar might be ill-defined or start symbol became undefined.", original_start_lhs.0);
+      +    }
+      +    
+      +    loop {
+      +        let productions_before_iteration = current_productions.clone();
+      +        let mut changed_this_iteration = false;
+      +
+      +        let prods_after_unreachable = remove_unreachable_productions(&current_productions, &original_start_lhs);
+      +        if prods_after_unreachable.len() != current_productions.len() {
+      +            changed_this_iteration = true;
+      +            current_productions = prods_after_unreachable;
+      +        }
+      +
+      +        let prods_after_non_productive = remove_non_productive_productions(&current_productions);
+      +        if prods_after_non_productive.len() != current_productions.len() {
+      +            changed_this_iteration = true;
+      +            current_productions = prods_after_non_productive;
+      +        }
+      +        if !current_productions.iter().any(|p| p.lhs == original_start_lhs) && !productions_before_iteration.is_empty() && changed_this_iteration {
+      +             crate::debug!(1, "Warning: Start symbol {} became non-productive or unreachable and was removed.", original_start_lhs.0);
+      +        }
+      +        
+      +        let (prods_after_inline, inlined_something) = inline_single_productions(&current_productions, &original_start_lhs);
+      +        if inlined_something {
+      +            changed_this_iteration = true;
+      +            current_productions = prods_after_inline;
+      +        }
+      +
+      +        let (prods_after_unit_removal, removed_unit_something) = remove_unit_productions(&current_productions);
+      +        if removed_unit_something {
+      +            changed_this_iteration = true;
+      +            current_productions = prods_after_unit_removal;
+      +        }
+      +
+      +        if !changed_this_iteration {
+      +            break;
+      +        }
+      +    }
+      +
+      +    let final_start_production_id = current_productions.iter().position(|p| p.lhs == original_start_lhs)
+      +        .unwrap_or_else(|| {
+      +            if current_productions.is_empty() { 0 } 
+      +            else {
+      +                panic!("Start symbol {} no longer has any productions after simplification.", original_start_lhs.0)
+      +            }
+      +        });
+      +    
+      +    (current_productions, final_start_production_id)
+      +}
+      ```
+    metadata:
+  - user: |
+      Git apply result:
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/analyze.rs
+      Applying patch to 'src/glr/analyze.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/analyze.rs.
     metadata:
 ...
