@@ -1320,10 +1320,12 @@ impl<'a> GrammarConstraintState<'a> {
                     Arc::make_mut(&mut final_glr_parse_state.active_state.stack).acc_mut().active &= clean_end; // clean_end is internal
                     Arc::make_mut(&mut final_glr_parse_state.active_state.stack).acc_mut().intersection &= clean_end; // clean_end is internal
 
+                    remove_inactive_nodes(&mut final_glr_parse_state);
+
                     crate::debug!(3, "At clean end state");
                     if final_glr_parse_state.is_ok() {
                         crate::debug!(3, "GLR parse state at clean end is OK");
-                        final_glr_parse_state.log_gss("After clean end", TerminalID(0));
+                        // final_glr_parse_state.log_gss("After clean end", TerminalID(0));
                         if let Some(existing) = self.state.get_mut(&TokenizerStateID(0)) {
                             crate::debug!(3, "Existing GLR parse state at clean end");
                             existing.log_gss("Before merge", TerminalID(0));
@@ -1359,6 +1361,8 @@ impl<'a> GrammarConstraintState<'a> {
                             let current_active_tokens = glr_parse_state_filtered.active_state.stack.acc().active.clone();
                             Arc::make_mut(&mut glr_parse_state_filtered.active_state.stack).acc_mut().active &= llm_tokens_from_finalizer; // llm_tokens_from_finalizer are internal
                             Arc::make_mut(&mut glr_parse_state_filtered.active_state.stack).acc_mut().intersection &= llm_tokens_from_finalizer; // llm_tokens_from_finalizer are internal
+
+                            remove_inactive_nodes(&mut glr_parse_state_filtered);
 
                             crate::debug!(3, "Processing finalizer for token_state_id {:?}", tokenizer_state_id);
                             if glr_parse_state_filtered.is_ok() { // This is current_glr_parse_state filtered by finalizer's llm_tokens
