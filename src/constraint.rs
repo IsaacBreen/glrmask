@@ -1264,7 +1264,8 @@ impl<'a> GrammarConstraintState<'a> {
                 if t.active.is_empty() {
                     return None;
                 }
-                let continue_recursion = t.intersection.is_empty();
+                // let continue_recursion = t.intersection.is_empty();
+                let continue_recursion = true;
                 Some((t.clone(), continue_recursion))
             };
             let maybe_new_node = prune_and_transform_recursive(&glr_parser_state.active_state.stack, &closure, &mut HashMap::new());
@@ -1328,10 +1329,10 @@ impl<'a> GrammarConstraintState<'a> {
                         // final_glr_parse_state.log_gss("After clean end", TerminalID(0));
                         if let Some(existing) = self.state.get_mut(&TokenizerStateID(0)) {
                             crate::debug!(3, "Existing GLR parse state at clean end");
-                            existing.log_gss("Before merge", TerminalID(0));
+                            // existing.log_gss("Before merge", TerminalID(0));
                             existing.merge_with(final_glr_parse_state.clone());
                             crate::debug!(3, "Merged GLR parse state at clean end");
-                            existing.log_gss("After clean end", TerminalID(0));
+                            // existing.log_gss("After clean end", TerminalID(0));
                         } else {
                             self.state.insert(TokenizerStateID(0), final_glr_parse_state.clone());
                             crate::debug!(3, "Inserted GLR parse state at clean end");

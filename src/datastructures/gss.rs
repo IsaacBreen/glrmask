@@ -527,7 +527,8 @@ pub fn prune_and_transform_recursive_canonical<T: Clone + Ord + Hash + Debug, A:
 
             let canonical_arc = GSSNode::get_canonical(new_predecessors_set, cache);
             let mut temp_arc = canonical_arc.clone();
-            Arc::make_mut(&mut temp_arc).acc.union_assign(new_acc);
+            // Arc::make_mut(&mut temp_arc).acc.union_assign(new_acc);
+            Arc::make_mut(&mut temp_arc).acc = new_acc;
 
             memo.insert(node_ptr, Some(temp_arc.clone()));
             Some(temp_arc)
