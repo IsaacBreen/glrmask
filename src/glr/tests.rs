@@ -733,10 +733,9 @@ fn test_standard_expression_grammar_parse() {
         prod("F", vec![t("I")]),
     ];
 
-    println!("Grammar before simplification: {}", display_productions(&productions));
-    println!("Simplified grammar: {}", display_productions(&simplify_grammar(&productions, 0).0));
-
-
+    // println!("Grammar before simplification: {}", display_productions(&productions));
+    // println!("Simplified grammar: {}", display_productions(&simplify_grammar(&productions, 0).0));
+    
     // Validate the grammar
     assert!(analyze::validate(&productions).is_ok(), "Validation failed for standard expression grammar");
 
