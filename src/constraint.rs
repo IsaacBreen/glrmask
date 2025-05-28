@@ -26,6 +26,11 @@ use crate::glr::parser::{
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
+
+use crate::glr::grammar::{Production as GlrProduction, Symbol as GlrSymbol};
+use crate::glr::table::{NonTerminalID as GlrNonTerminalID, TerminalID as GlrTerminalID};
+
+
 use std::collections::BTreeMap as StdMap;
 
 pub type LLMTokenBV = HybridBitset;
@@ -1202,4 +1207,124 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn is_active(&self) -> bool {
         !self.state.is_empty() && self.state.values().any(|s| !s.active_state.stack.is_empty())
     }
+}
+
+/// Simplifies a grammar by inlining single-production, non-recursive, non-start non-terminals
+/// and removing productions that become unreachable from the start symbol.
+///
+/// The simplification process iterates these steps until no further changes occur:
+/// 1. Inlining: Non-terminals that are not the start symbol, have exactly one production,
+///    and do not refer to themselves in that production's RHS are inlined.
+/// 2. Cleanup: Productions whose LHS non-terminal is unreachable from the start symbol are removed.
+///
+/// Note: This function assumes that `Production`, `Symbol`, `NonTerminalID`, and `TerminalID`
+/// are the types used by the GLR parser, typically from `crate::glr::grammar` and `crate::glr::table`.
+/// The `start_production_id` is an index into the `initial_productions` slice, and its LHS
+/// determines the start symbol of the grammar.
+pub fn simplify_grammar(initial_productions: &[GlrProduction], start_production_id: usize) -> Vec<GlrProduction> {
+    if initial_productions.is_empty() {
+        return Vec::new();
+    }
+    if start_production_id >= initial_productions.len() {
+        // Or panic, or return error. For now, return original if start_production_id is invalid.
+        return initial_productions.to_vec();
+    }
+
+    let start_symbol = initial_productions[start_production_id].lhs;
+    let mut current_productions = initial_productions.to_vec();
+
+    loop {
+        let productions_before_iteration = current_productions.clone();
+
+        // --- Inlining Pass ---
+        let mut made_change_in_inlining_step = true;
+        while made_change_in_inlining_step {
+            made_change_in_inlining_step = false;
+            let mut nt_to_production_indices: HashMap<GlrNonTerminalID, Vec<usize>> = HashMap::new();
+            for (idx, prod) in current_productions.iter().enumerate() {
+                nt_to_production_indices.entry(prod.lhs).or_default().push(idx);
+            }
+
+            let mut inlinable_map: HashMap<GlrNonTerminalID, Vec<GlrSymbol>> = HashMap::new();
+            for (nt, prod_indices) in &nt_to_production_indices {
+                if *nt == start_symbol {
+                    continue;
+                }
+                if prod_indices.len() == 1 {
+                    let prod_to_inline = &current_productions[prod_indices[0]];
+                    // Check if NT appears in its own RHS (simple non-recursion check)
+                    if !prod_to_inline.rhs.iter().any(|s| match s {
+                        GlrSymbol::NonTerminal(rhs_nt) => rhs_nt == nt,
+                        _ => false,
+                    }) {
+                        inlinable_map.insert(*nt, prod_to_inline.rhs.clone());
+                    }
+                }
+            }
+
+            if !inlinable_map.is_empty() {
+                let mut next_productions_after_inlining: Vec<GlrProduction> = Vec::new();
+                let mut actually_inlined_something_this_pass = false;
+
+                for prod in current_productions.iter() {
+                    if inlinable_map.contains_key(&prod.lhs) {
+                        // This production's LHS is an inlinable NT, so the production itself is removed.
+                        actually_inlined_something_this_pass = true;
+                        continue;
+                    }
+
+                    let mut new_rhs: Vec<GlrSymbol> = Vec::new();
+                    let mut rhs_changed = false;
+                    for symbol_in_rhs in &prod.rhs {
+                        match symbol_in_rhs {
+                            GlrSymbol::NonTerminal(nt_in_rhs) if inlinable_map.contains_key(nt_in_rhs) => {
+                                new_rhs.extend_from_slice(&inlinable_map[nt_in_rhs]);
+                                rhs_changed = true;
+                                actually_inlined_something_this_pass = true;
+                            }
+                            _ => {
+                                new_rhs.push(symbol_in_rhs.clone());
+                            }
+                        }
+                    }
+                    next_productions_after_inlining.push(GlrProduction {
+                        lhs: prod.lhs,
+                        rhs: new_rhs,
+                    });
+                }
+                current_productions = next_productions_after_inlining;
+                if actually_inlined_something_this_pass {
+                    made_change_in_inlining_step = true;
+                }
+            }
+        } // End of while loop for inlining sub-steps
+
+        // --- Remove Unreachable Productions Pass ---
+        let mut reachable_nts: HashSet<GlrNonTerminalID> = HashSet::new();
+        reachable_nts.insert(start_symbol);
+        let mut new_nts_added_in_reachability_pass = true;
+
+        while new_nts_added_in_reachability_pass {
+            new_nts_added_in_reachability_pass = false;
+            for prod in &current_productions {
+                if reachable_nts.contains(&prod.lhs) {
+                    for symbol in &prod.rhs {
+                        if let GlrSymbol::NonTerminal(nt_in_rhs) = symbol {
+                            if reachable_nts.insert(*nt_in_rhs) {
+                                new_nts_added_in_reachability_pass = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        current_productions.retain(|prod| reachable_nts.contains(&prod.lhs));
+
+        // Check for convergence
+        if current_productions == productions_before_iteration {
+            break;
+        }
+    }
+    current_productions
 }
