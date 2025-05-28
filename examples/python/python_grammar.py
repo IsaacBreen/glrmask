@@ -439,6 +439,7 @@ if __name__ == "__main__":
     print("Defining grammar...")
     grammar_definition = define_python_grammar()
 
+    grammar_definition.simplify()
     grammar = grammar_definition.compile()
     grammar.print()
 
