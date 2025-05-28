@@ -1258,6 +1258,21 @@ impl<'a> GrammarConstraintState<'a> {
 
         self.state = BTreeMap::new();
 
+        fn remove_inactive_nodes(glr_parser_state: &mut GLRParserState<LLMTokenInfo>) {
+            // Remove nodes for which the active LLM tokens are empty
+            let closure = |t: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
+                if t.active.is_empty() {
+                    return None;
+                }
+                let continue_recursion = t.intersection.is_empty();
+                Some((t.clone(), continue_recursion))
+            };
+            let maybe_new_node = prune_and_transform_recursive(&glr_parser_state.active_state.stack, &closure, &mut HashMap::new());
+            if let Some(new_node) = maybe_new_node {
+                glr_parser_state.active_state.stack = new_node;
+            }
+        }
+
         Trie::special_map(
             initial_nodes_and_values,
             |glr_parse_state, grammar_token_id_opt, edge_llm_tokens, child_node| { // Renamed grammar_token_id to grammar_token_id_opt
@@ -1266,6 +1281,9 @@ impl<'a> GrammarConstraintState<'a> {
                 let mut cloned_glr_parse_state = glr_parse_state.clone();
                 Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc_mut().active &= edge_llm_tokens;
                 Arc::make_mut(&mut cloned_glr_parse_state.active_state.stack).acc_mut().intersection &= edge_llm_tokens;
+
+                remove_inactive_nodes(&mut cloned_glr_parse_state);
+
                 crate::debug!(3, "GLR parse state stack: {}", print_gss_forest(&[cloned_glr_parse_state.active_state.stack.clone()], usize::MAX));
                 if let Some(gtid) = grammar_token_id_opt { // Use grammar_token_id_opt
                     *step_counts.borrow_mut().entry(*gtid).or_insert(0) += 1;
@@ -1287,18 +1305,7 @@ impl<'a> GrammarConstraintState<'a> {
             },
             |node, current_glr_parse_state| {
                 // Remove nodes for which the active LLM tokens are empty
-                let closure = |t: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
-                    if t.active.is_empty() {
-                        return None;
-                    }
-                    let continue_recursion = t.intersection.is_empty();
-                    Some((t.clone(), continue_recursion))
-                };
-
-                let maybe_new_node = prune_and_transform_recursive(&current_glr_parse_state.active_state.stack, &closure, &mut HashMap::new());
-                if let Some(new_node) = maybe_new_node {
-                    current_glr_parse_state.active_state.stack = new_node;
-                }
+                remove_inactive_nodes(current_glr_parse_state);
 
                 // Simplify the GSS forest
                 Arc::make_mut(&mut current_glr_parse_state.active_state.stack).simplify();
