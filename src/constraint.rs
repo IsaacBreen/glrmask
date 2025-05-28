@@ -1010,6 +1010,8 @@ impl<'a> GrammarConstraintState<'a> {
         for (tokenizer_state_id, glr_state) in self.state.iter() {
             glr_state.log_gss(format!("After committing llm_token_id {:?}, from tokenizer_state_id {:?}", llm_token_id, tokenizer_state_id).as_str(), GrammarTokenID(0));
         }
+
+        self.state.retain(|_tokenizer_state_id, glr_state| glr_state.is_ok());
     }
 
     pub fn step_with_llm_token_sequence(&mut self, llm_token_ids: &[LLMTokenID]) {
@@ -1178,6 +1180,7 @@ impl<'a> GrammarConstraintState<'a> {
             glr_state.log_gss("After simplifying GSS forest", TerminalID(0));
         }
 
+        self.state.retain(|_tokenizer_state_id, glr_state| glr_state.is_ok());
 
         let mut sorted_counts: Vec<(GrammarTokenID, usize)> = step_counts.into_inner().into_iter().collect();
         if !sorted_counts.is_empty() {
