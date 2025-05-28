@@ -93,12 +93,13 @@ impl<'a> Debug for DebugRangesTruncated<'a> {
 impl Debug for HybridBitset {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         const MAX_RANGES_IN_DEBUG: usize = 10; // Threshold for truncation in normal debug mode
+        let is_alternate_mode = f.alternate(); // Call alternate() before the mutable borrow for debug_struct
 
         f.debug_struct("HybridBitset")
             .field("inner", &DebugRangesTruncated {
                 set: &self.inner,
                 limit: MAX_RANGES_IN_DEBUG,
-                is_alternate: f.alternate(),
+                is_alternate: is_alternate_mode,
             })
             .finish()
     }
