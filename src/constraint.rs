@@ -1261,6 +1261,8 @@ impl<'a> GrammarConstraintState<'a> {
         fn remove_inactive_nodes(glr_parser_state: &mut GLRParserState<LLMTokenInfo>) {
             // Remove nodes for which the active LLM tokens are empty
             let closure = |t: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
+                // TODO: WHAT THE HECK
+                return None;
                 if t.active.is_empty() {
                     return None;
                 }
