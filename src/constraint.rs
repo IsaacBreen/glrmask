@@ -1295,10 +1295,9 @@ impl<'a> GrammarConstraintState<'a> {
                     Some((t.clone(), continue_recursion))
                 };
 
-                let parse_state = &mut current_glr_parse_state.active_state;
-                let maybe_new_node = prune_and_transform_recursive(&parse_state.stack, &closure, &mut HashMap::new());
+                let maybe_new_node = prune_and_transform_recursive(&current_glr_parse_state.active_state.stack, &closure, &mut HashMap::new());
                 if let Some(new_node) = maybe_new_node {
-                    parse_state.stack = new_node;
+                    current_glr_parse_state.active_state.stack = new_node;
                 }
 
 
