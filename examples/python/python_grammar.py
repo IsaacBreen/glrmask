@@ -247,7 +247,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
     tokens = define_tokens()
     exprs.extend(tokens)
 
-    return CompiledGrammar(exprs) # Changed Grammar to CompiledGrammar
+    return GrammarDefinition(exprs) # Changed Grammar to CompiledGrammar
 
 def define_python_grammar():
     with Path(__file__).parent / "python.gram" as f:
@@ -437,7 +437,9 @@ if __name__ == "__main__":
 #     llm_token_to_id = {token.encode(): llm_token_to_id[token] for token in ts}
 
     print("Defining grammar...")
-    grammar = define_python_grammar()
+    grammar_definition = define_python_grammar()
+
+    grammar = grammar_definition.compile()
     grammar.print()
 
     # Serialize the compiled grammar to JSON string
