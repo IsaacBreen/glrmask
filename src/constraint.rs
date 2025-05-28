@@ -1286,6 +1286,22 @@ impl<'a> GrammarConstraintState<'a> {
                 managed_parse_state1.merge_with(managed_parse_state2);
             },
             |node, current_glr_parse_state| {
+                // Remove nodes for which the active LLM tokens are empty
+                let closure = |t: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
+                    if t.active.is_empty() {
+                        return None;
+                    }
+                    let continue_recursion = t.intersection.is_empty();
+                    Some((t.clone(), continue_recursion))
+                };
+
+                let parse_state = &mut current_glr_parse_state.active_state;
+                let maybe_new_node = prune_and_transform_recursive(&parse_state.stack, &closure, &mut HashMap::new());
+                if let Some(new_node) = maybe_new_node {
+                    parse_state.stack = new_node;
+                }
+
+
                 // Simplify the GSS forest
                 Arc::make_mut(&mut current_glr_parse_state.active_state.stack).simplify();
 
