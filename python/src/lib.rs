@@ -430,6 +430,7 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRegexGroup>()?;
     m.add_class::<PyRegexGroups>()?;
     m.add_class::<PyRegex>()?;
+    m.add_class::<PyGrammarDefinition>()?;
     m.add_class::<PyCompiledGrammar>()?;
     // m.add_class::<PyGLRParser>()?; // Not exposed directly for now
     m.add_class::<PyGrammarConstraint>()?;
