@@ -304,13 +304,13 @@ impl GrammarConstraint {
         original_llm_token_map: &LLMTokenMap, // Input: Original BiBTreeMap<Vec<u8>, LLMTokenID>
     ) -> BiBTreeMap<usize, usize> // Returns original_id.0 <-> internal_id.0 bimap
     {
-        // TODO: delete this
-        // Temporarily just don't map
-        let mut original_to_internal_id_bimap = BiBTreeMap::new();
-        for (_, i) in original_llm_token_map.iter() {
-            original_to_internal_id_bimap.insert(i.0, i.0);
-        }
-        return original_to_internal_id_bimap;
+        // // TODO: delete this
+        // // Temporarily just don't map
+        // let mut original_to_internal_id_bimap = BiBTreeMap::new();
+        // for (_, i) in original_llm_token_map.iter() {
+        //     original_to_internal_id_bimap.insert(i.0, i.0);
+        // }
+        // return original_to_internal_id_bimap;
 
         // 1. Create sorted list of tokens to define internal mapping
         let mut sorted_tokens_with_original_ids: Vec<(Vec<u8>, LLMTokenID)> = original_llm_token_map
