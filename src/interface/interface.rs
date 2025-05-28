@@ -201,7 +201,7 @@ pub fn display_productions(productions: &[Production]) -> String {
 impl GrammarDefinition {
     pub fn simplify(&mut self) {
         // Simplify the grammar definition
-        self.productions = simplify_grammar(&self.productions, self.start_production_id);
+        (self.productions, self.start_production_id) = simplify_grammar(&self.productions, self.start_production_id);
     }
 }
 
