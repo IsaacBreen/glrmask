@@ -14,7 +14,7 @@ import pegen.grammar
 import pegen.grammar_parser
 import pegen.tokenizer # type: ignore
 import torch # type: ignore
-from _sep1 import RegexExpr as Regex,  CompiledGrammar,  GrammarExpr as ge,  GrammarConstraint,  GrammarConstraintState
+from _sep1 import RegexExpr as Regex,  CompiledGrammar,  GrammarExpr as ge,  GrammarConstraint,  GrammarConstraintState, GrammarDefinition
 from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
