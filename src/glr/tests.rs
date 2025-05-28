@@ -713,6 +713,71 @@ fn test_filter_productions_selectivity() {
     assert!(!filtered_set.contains(&prod_x_b), "Production 'X -> B' should have been filtered out.");
 }
 
+#[test]
+fn test_standard_expression_grammar_parse() {
+    // Grammar:
+    // S -> E EOF
+    // E -> E PLUS T
+    // E -> T
+    // T -> T TIMES F
+    // T -> F
+    // F -> LPAREN E RPAREN
+    // F -> I
+    let productions = vec![
+        prod("S", vec![nt("E"), t("EOF")]), // Start production (index 0)
+        prod("E", vec![nt("E"), t("PLUS"), nt("T")]),
+        prod("E", vec![nt("T")]),
+        prod("T", vec![nt("T"), t("TIMES"), nt("F")]),
+        prod("T", vec![nt("F")]),
+        prod("F", vec![t("LPAREN"), nt("E"), t("RPAREN")]),
+        prod("F", vec![t("I")]),
+    ];
+
+    // Validate the grammar
+    assert!(analyze::validate(&productions).is_ok(), "Validation failed for standard expression grammar");
+
+    let parser = generate_glr_parser(&productions, 0);
+    println!("Parser: {}", parser); // Useful for debugging the generated table
+
+    // Helper to tokenize space-separated terminal names
+    fn tokenize_std_expr(parser: &GLRParser, input_str: &str) -> Vec<TerminalID> {
+        input_str.split_whitespace()
+            .filter_map(|s| parser.terminal_map.get_by_left(&Terminal(s.to_string())).copied())
+            .collect()
+    }
+
+    let test_cases = [
+        // Valid inputs
+        ("I EOF", true),
+        ("I PLUS I EOF", true),
+        ("I TIMES I EOF", true),
+        ("LPAREN I RPAREN EOF", true),
+        ("I PLUS I TIMES I EOF", true), // Should handle precedence via ambiguity resolution in GLR
+        ("LPAREN I PLUS I RPAREN TIMES I EOF", true),
+        ("I PLUS LPAREN I TIMES I RPAREN EOF", true),
+        // Invalid inputs
+        ("EOF", false), // E cannot be empty
+        ("I PLUS EOF", false), // Missing operand after PLUS
+        ("PLUS I EOF", false), // Starts with operator
+        ("I I EOF", false), // Missing operator
+        ("LPAREN I EOF", false), // Unclosed parenthesis
+        ("I RPAREN EOF", false), // Unmatched closing parenthesis
+        ("I PLUS TIMES I EOF", false), // Operator sequence
+    ];
+
+    for (input_str, expected_match) in test_cases {
+        let tokens = tokenize_std_expr(&parser, input_str);
+        let mut state: GLRParserState<'_> = parser.init_glr_parser();
+        state.parse(&tokens);
+        // No separate EOF step needed as "EOF" is part of the token stream
+        assert_eq!(
+            state.is_ok(),
+            expected_match,
+            "Parse check failed for input: '{}'",
+            input_str
+        );
+    }
+}
 // --- Notes on Limitations Not Easily Tested Here ---
 // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
 //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
