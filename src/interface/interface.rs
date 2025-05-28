@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 use std::collections::BTreeMap as StdMap;
-
+use crate::glr::analyze::simplify_grammar;
 
 type LLMToken<'a> = &'a [u8];
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
@@ -196,6 +196,13 @@ pub fn display_productions(productions: &[Production]) -> String {
         }).collect::<Vec<_>>().join(" ")));
     }
     result
+}
+
+impl GrammarDefinition {
+    pub fn simplify(&mut self) {
+        // Simplify the grammar definition
+        self.productions = simplify_grammar(&self.productions, self.start_production_id);
+    }
 }
 
 impl GrammarDefinition {
