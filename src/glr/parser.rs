@@ -1,5 +1,5 @@
 use crate::datastructures::gss::print_gss_forest;
-use crate::datastructures::gss::{gather_gss_stats, find_longest_path, PathAccumulator, prune_and_transform_recursive, GSSNode, GSSTrait, GSSStats}; 
+use crate::datastructures::gss::{gather_gss_stats, find_longest_path, PathAccumulator, GSSNode, GSSTrait, GSSStats};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID};
@@ -347,7 +347,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Goto::State(goto_state_id) => {
                     crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
 
-                    let new_acc_for_goto_child = parent_gss_node.acc().intersect(cur_acc_from_reducible_node.clone());
+                    let new_acc_for_goto_child = parent_gss_node.acc().clone().intersect(cur_acc_from_reducible_node.clone());
                     let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id };
                     
                     // Push from the predecessor found via pop_iter, using the calculated acc
@@ -441,7 +441,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let stack_arc_for_operations = &state.stack; 
             for (parent_arc, top_edge_content) in state.stack.pop_iter() { // Renamed top to top_edge_content
                 // let temp_idk = Arc::new(parent_arc.push(top_edge_content.clone(), parent_arc.acc().clone())); // Acc for push
-                let current_path_acc = state.stack.acc().intersect(parent_arc.acc().clone());
+                let current_path_acc = state.stack.acc().clone().intersect(parent_arc.acc().clone());
 
 
                 let row = &self.parser.stage_7_table[&top_edge_content.state_id];

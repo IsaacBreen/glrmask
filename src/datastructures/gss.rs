@@ -196,14 +196,14 @@ impl GSSNode {
 
         for (pred_arc, _edge_val) in self.predecessors_with_values() {
             // The acc of the path *through* self to pred_arc is self.acc intersected with pred_arc.acc
-            let path_acc = self.acc.intersect(pred_arc.acc.clone());
+            let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
             result_acc.union_assign(path_acc.clone()); // Union accs of all popped paths
 
             // Merge predecessors of pred_arc into result_predecessors
             // Each merged predecessor needs its acc updated based on path_acc
             for (inner_edge, inner_pred_arc) in &pred_arc.predecessors {
                 let mut new_inner_pred_node_data = (**inner_pred_arc).clone();
-                new_inner_pred_node_data.acc = path_acc.intersect(inner_pred_arc.acc.clone());
+                new_inner_pred_node_data.acc = path_acc.clone().intersect(inner_pred_arc.acc.clone());
 
                 match result_predecessors.entry(inner_edge.clone()) {
                     std::collections::btree_map::Entry::Vacant(entry) => {
@@ -231,7 +231,7 @@ impl GSSNode {
         self.predecessors.iter().map(|(edge_val, pred_arc)| {
             // The acc for the path ending at pred_arc (after popping self)
             // is self.acc intersected with pred_arc's original acc.
-            let path_acc = self.acc.intersect(pred_arc.acc.clone());
+            let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
             let new_pred_node_data = pred_arc.as_ref().clone().with_acc(path_acc);
             (Arc::new(new_pred_node_data), edge_val.clone())
         }).collect()
@@ -828,7 +828,7 @@ mod tests {
     fn test_gss_simplification_basic() {
         let acc_base = mock_llm_token_info(0,0);
         let acc_other = mock_llm_token_info(1,1);
-        let acc_shared_pred_structure = acc_base.union(acc_other.clone());
+        let acc_shared_pred_structure = acc_base.clone().union(acc_other.clone());
 
 
         // Node N4 (leaf) - will be shared by D1 and D2 after simplification of D1/D2's predecessors
@@ -879,7 +879,7 @@ mod tests {
         
         // Acc for A1 is the union of paths leading to it.
         // Let's assume A1's acc is a union of acc_base and acc_other for this test.
-        let acc_a1 = acc_base.union(acc_other.clone());
+        let acc_a1 = acc_base.clone().union(acc_other.clone());
         let a1_orig = Arc::new(TestGSSNode::new_with_map(acc_a1.clone(), process_predecessors(&a1_preds_set)));
 
 
@@ -901,7 +901,7 @@ mod tests {
         // The merged_b1_d2_node is the result of B1 and D2 paths.
         // Its acc should be the union of B1's original acc and D2's original acc.
         // B1's original acc was acc_base. D2's original acc was acc_other.
-        let expected_merged_acc = acc_base.union(acc_other.clone());
+        let expected_merged_acc = acc_base.clone().union(acc_other.clone());
         assert_eq!(merged_b1_d2_node.acc(), &expected_merged_acc, "Merged B1/D2 node accumulator mismatch");
 
         // Structure of merged_b1_d2_node:

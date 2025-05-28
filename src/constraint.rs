@@ -14,7 +14,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, print_precompute_stats, PrecomputeStats};
 use crate::datastructures::charmap::TrieMap;
-use crate::datastructures::gss::{print_gss_forest, prune_and_transform_recursive, GSSNode, PathAccumulator, intersect_tokens_and_prune_arc, gather_gss_stats};
+use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_tokens_and_prune_arc, gather_gss_stats};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -984,36 +984,16 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) { 
-        let all_true_set = HybridBitset::ones(self.parent.internal_max_llm_token + 1);
 
         let internal_llm_id_val = self.parent.original_id_to_internal(llm_token_id).unwrap().0;
         crate::debug!(4, "Committing token {} (internal ID {})", llm_token_id.0, internal_llm_id_val);
 
-        let closure = |t: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
-            let mut t_clone = t.clone(); // Renamed t to t_clone
-            if t_clone.active.contains(internal_llm_id_val) { 
-                if t_clone.intersection == all_true_set {
-                    Some((t_clone, false))
-                } else {
-                    t_clone.active = all_true_set.clone();
-                    t_clone.intersection = all_true_set.clone();
-                    Some((t_clone, true))
-                }
-            } else { 
-                None
-            }
-        };
+        let mut singular_bitset = HybridBitset::new();
+        singular_bitset.insert(internal_llm_id_val);
 
-        let mut memo = HashMap::new();
-        self.state.retain(|_tokenizer_state_id, glr_state| {
-            let parse_state = &mut glr_state.active_state;
-            if let Some(new_node) = prune_and_transform_recursive(&parse_state.stack, &closure, &mut memo) {
-                parse_state.stack = new_node;
-                !parse_state.stack.is_empty()
-            } else {
-                false // Pruned to nothing
-            }
-        });
+        for glr_state in self.state.values_mut() {
+            intersect_tokens_and_prune_arc(&mut glr_state.active_state.stack, &singular_bitset);
+        }
 
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
         crate::debug!(4, "Committed llm_token_id {:?} to grammar constraint state", llm_token_id);

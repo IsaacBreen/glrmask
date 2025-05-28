@@ -704,7 +704,6 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         let dummy_llm_token_info = crate::constraint::LLMTokenInfo {
             active: HybridBitset::new(), // Empty bitset
             intersection: HybridBitset::new(), // Empty bitset; for PathAccumulator, this might differ from default
-            terminals: std::sync::Arc::new(crate::datastructures::gss::GSSNode::new_default()),
         };
 
         let mut glr_state = compiled_grammar.glr_parser.init_glr_parser_with_acc(dummy_llm_token_info);
@@ -758,7 +757,6 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let dummy_llm_token_info = crate::constraint::LLMTokenInfo {
         active: HybridBitset::new(),
         intersection: HybridBitset::new(),
-        terminals: std::sync::Arc::new(crate::datastructures::gss::GSSNode::new_default()),
     };
 
     let all_grammar_terminal_ids: Vec<_> = compiled_grammar.glr_parser.terminal_map.right_values().cloned().collect();
@@ -1152,7 +1150,7 @@ fn causes_specific_panic(
             current_non_terminal_map,
         );
 
-        let mut glr_state = parser.init_glr_parser::<()>();
+        let mut glr_state = parser.init_glr_parser();
 
         for &terminal_id in &sequence_terminal_ids {
             glr_state.step(terminal_id);
@@ -1711,7 +1709,7 @@ fn test_minimized_grammar_causes_panic() -> Result<(), Box<dyn std::error::Error
     println!("Parser: {}", parser);
 
     // Initialize GLRParserState (accumulator type `()` is fine for this test)
-    let mut glr_state = parser.init_glr_parser::<()>();
+    let mut glr_state = parser.init_glr_parser();
 
     // Step through the input sequence
     for (idx, &terminal_id) in input_sequence_ids.iter().enumerate() {

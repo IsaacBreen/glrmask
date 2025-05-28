@@ -78,7 +78,7 @@ fn test_simple_parse_table_generation_and_parse() {
 
     for (input, expected_match) in test_cases {
         let tokens = tokenize(&parser, input);
-        let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+        let mut state: GLRParserState<'_> = parser.init_glr_parser();
         state.parse(&tokens);
         state.step(eof); // Use step for the final EOF token
         assert_eq!(
@@ -115,7 +115,7 @@ fn test_expression_parse_table_generation_and_parse() {
 
     for (input, expected_match) in test_cases {
         let tokens = tokenize(&parser, input);
-        let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+        let mut state: GLRParserState<'_> = parser.init_glr_parser();
         state.parse(&tokens);
         state.step(eof); // Use step for the final EOF token
         assert_eq!(
@@ -391,7 +391,7 @@ fn test_ambiguous_dangling_else() {
         *parser.terminal_map.get_by_left(&Terminal("other".to_string())).unwrap(),
     ];
 
-    let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+    let mut state: GLRParserState<'_> = parser.init_glr_parser();
     state.parse(&tokens);
     state.step(eof);
 
@@ -424,7 +424,7 @@ fn test_ambiguous_arithmetic() {
         *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
     ];
 
-    let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+    let mut state: GLRParserState<'_> = parser.init_glr_parser();
     state.parse(&tokens);
     state.step(eof);
 
@@ -453,7 +453,7 @@ fn test_reduce_reduce_conflict() {
         *parser.terminal_map.get_by_left(&Terminal("x".to_string())).unwrap(),
     ];
 
-    let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+    let mut state: GLRParserState<'_> = parser.init_glr_parser();
     state.parse(&tokens);
     state.step(eof);
 
@@ -484,11 +484,11 @@ fn test_epsilon_rules_ambiguity() {
         *parser.terminal_map.get_by_left(&Terminal("x".to_string())).unwrap(),
     ];
     
-    let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+    let mut state: GLRParserState<'_> = parser.init_glr_parser();
     state.step(eof);
     assert!(state.is_ok(), "GLR parser should accept input with epsilon rules");
 
-    let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+    let mut state: GLRParserState<'_> = parser.init_glr_parser();
     state.parse(&tokens);
     state.step(eof);
 
@@ -515,7 +515,7 @@ fn test_highly_ambiguous_potentially_slow() {
         *parser.terminal_map.get_by_left(&Terminal("a".to_string())).unwrap(),
     ];
 
-    let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+    let mut state: GLRParserState<'_> = parser.init_glr_parser();
     state.parse(&tokens);
     state.step(eof);
 
@@ -561,7 +561,7 @@ fn test_hidden_left_recursion() {
 
     for (input, expected_match) in test_cases {
         let tokens = tokenize(&parser, input);
-        let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+        let mut state: GLRParserState<'_> = parser.init_glr_parser();
         state.parse(&tokens);
         state.step(eof);
         assert_eq!(state.is_ok(), expected_match, "Parse check failed for hidden left recursion input: '{}'", input);
@@ -601,7 +601,7 @@ fn test_hidden_right_recursion() {
 
     for (input, expected_match) in test_cases {
         let tokens = tokenize(&parser, input);
-        let mut state: GLRParserState<'_, ()> = parser.init_glr_parser();
+        let mut state: GLRParserState<'_> = parser.init_glr_parser();
         state.parse(&tokens);
         state.step(eof);
         assert_eq!(state.is_ok(), expected_match, "Parse check failed for hidden right recursion input: '{}'", input);
@@ -635,7 +635,7 @@ fn test_nullable_nonterminal_before_terminal() {
     // Test case 1: B -> 'd', so A -> 'd' 'c'
     // Input: "dc$"
     let tokens_dc = vec![d_token_id, c_token_id];
-    let mut state_dc: GLRParserState<'_, ()> = parser.init_glr_parser();
+    let mut state_dc: GLRParserState<'_> = parser.init_glr_parser();
     state_dc.parse(&tokens_dc);
     state_dc.step(eof_token_id);
     assert!(state_dc.is_ok(), "Parse failed for input 'dc$' (expected A -> d c)");
@@ -643,21 +643,21 @@ fn test_nullable_nonterminal_before_terminal() {
     // Test case 2: B -> epsilon, so A -> 'c'
     // Input: "c$"
     let tokens_c = vec![c_token_id];
-    let mut state_c: GLRParserState<'_, ()> = parser.init_glr_parser();
+    let mut state_c: GLRParserState<'_> = parser.init_glr_parser();
     state_c.parse(&tokens_c);
     state_c.step(eof_token_id);
     assert!(state_c.is_ok(), "Parse failed for input 'c$' (expected A -> epsilon c)");
 
     // Test case 3: Invalid input "d$" (missing 'c')
     let tokens_d_fail = vec![d_token_id];
-    let mut state_d_fail: GLRParserState<'_, ()> = parser.init_glr_parser();
+    let mut state_d_fail: GLRParserState<'_> = parser.init_glr_parser();
     state_d_fail.parse(&tokens_d_fail);
     state_d_fail.step(eof_token_id);
     assert!(!state_d_fail.is_ok(), "Parse succeeded for invalid input 'd$'");
 
     // Test case 4: Invalid input "$" (A cannot be fully empty)
     let tokens_empty_fail = vec![];
-    let mut state_empty_fail: GLRParserState<'_, ()> = parser.init_glr_parser();
+    let mut state_empty_fail: GLRParserState<'_> = parser.init_glr_parser();
     state_empty_fail.parse(&tokens_empty_fail);
     state_empty_fail.step(eof_token_id);
     assert!(!state_empty_fail.is_ok(), "Parse succeeded for invalid input '$'");

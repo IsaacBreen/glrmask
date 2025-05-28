@@ -637,12 +637,12 @@ use crate::tokenizer::{ExecuteResult, TokenizerStateID};
 #[derive(Clone)]
 pub struct IncrementalParser<'a> {
     grammar: &'a CompiledGrammar,
-    pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>>,
+    pub(crate) state: BTreeMap<TokenizerStateID, GLRParserState<'a>>,
 }
 
 impl<'a> IncrementalParser<'a> {
     pub fn new(grammar: &'a CompiledGrammar) -> Self {
-        let initial_glr_state = grammar.glr_parser().init_glr_parser::<()>();
+        let initial_glr_state = grammar.glr_parser().init_glr_parser();
         let initial_tokenizer_state = grammar.tokenizer().initial_state_id();
         let state = BTreeMap::from([(initial_tokenizer_state, initial_glr_state)]);
         Self { grammar, state }
@@ -650,8 +650,8 @@ impl<'a> IncrementalParser<'a> {
 
     pub fn feed(&mut self, bytes: &[u8]) {
         crate::debug!(3, "Processing input bytes: {:?} with {} active tokenizer states", bytes, self.state.len());
-        let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a, ()>> = BTreeMap::new();
-        let mut queue: BTreeMap<(usize, TokenizerStateID), GLRParserState<'a, ()>> = BTreeMap::new();
+        let mut next_states: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
+        let mut queue: BTreeMap<(usize, TokenizerStateID), GLRParserState<'a>> = BTreeMap::new();
 
         for (tokenizer_state_id, glr_state) in std::mem::take(&mut self.state) {
             queue.insert((0, tokenizer_state_id), glr_state);
