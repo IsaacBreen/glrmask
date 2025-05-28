@@ -312,7 +312,7 @@ class GrammarConstrainedLogitsProcessor(LogitsProcessor):
         scores = np.where(mask, scores, -np.inf)
         return torch.tensor(scores)
 
-def generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text, max_new_tokens=50):
+def generate_text(model, tokenizer, grammar_processor, pre_input_text, input_text, max_new_tokens=10):
     # TODO: We want pre_input_text to be input to the LLM that isn't passed into the grammar constraint.
     # .to(torch.int64) shouldn't be necessary here, but tokenizer.encode seems to return a torch.float32 tensor for 0-length inputs for some reason :')
     pre_input_ids = tokenizer.encode(pre_input_text, return_tensors="pt").to(torch.int64)
