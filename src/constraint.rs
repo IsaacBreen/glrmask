@@ -1300,7 +1300,6 @@ impl<'a> GrammarConstraintState<'a> {
                     current_glr_parse_state.active_state.stack = new_node;
                 }
 
-
                 // Simplify the GSS forest
                 Arc::make_mut(&mut current_glr_parse_state.active_state.stack).simplify();
 
