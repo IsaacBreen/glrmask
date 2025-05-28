@@ -111,6 +111,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         println!("Dumping Precomputed Trie Structure (showing original LLM Token IDs):");
         println!("===================================");
 
+        let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
         for (tokenizer_state_id, root_node_trie) in &self.precomputed {
             println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
 
@@ -119,7 +120,6 @@ impl GrammarConstraint { // This is in constraint_extra.rs
             // This is slightly awkward but necessary for the shared recursive logic.
             let root_node_arc = Arc::new(Mutex::new(root_node_trie.clone()));
 
-            let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
             // Pass the bimap
             dump_precompute_trie_recursive(&root_node_arc, "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap));
         }
