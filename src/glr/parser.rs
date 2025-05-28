@@ -1,9 +1,9 @@
 use crate::datastructures::gss::print_gss_forest;
-use crate::datastructures::gss::{gather_gss_stats, find_longest_path, PathAccumulator, prune_and_transform_recursive}; // Import PathAccumulator and prune_and_transform_recursive
+use crate::datastructures::gss::{gather_gss_stats, find_longest_path, PathAccumulator, prune_and_transform_recursive, GSSNode, GSSTrait, GSSStats}; 
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID};
-use crate::datastructures::gss::{GSSNode, GSSTrait, GSSStats};
+use crate::constraint::LLMTokenInfo; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,14 +15,11 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 
 
-// Remove MergeAndIntersect trait definition
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ParseStateEdgeContent { // No longer generic
+pub struct ParseStateEdgeContent { 
     pub state_id: StateID,
-    // Removed pub t: T,
 }
-// JSONConvertible for ParseStateNodeContent (now concrete type)
+// JSONConvertible for ParseStateEdgeContent
 impl JSONConvertible for ParseStateEdgeContent {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
@@ -43,14 +40,13 @@ impl JSONConvertible for ParseStateEdgeContent {
 
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ParseState<A: PathAccumulator> { // Generic over Accumulator A
-    pub stack: Arc<GSSNode<ParseStateEdgeContent, A>>,
+pub struct ParseState { // No longer generic
+    pub stack: Arc<GSSNode>, // GSSNode is now concrete
 }
-// No JSONConvertible for ParseState<A> directly (depends on GSSNode).
 
-impl<A: PathAccumulator + Default> ParseState<A> {
+impl ParseState {
     pub fn new() -> Self {
-        ParseState { stack: Arc::new(GSSNode::new(A::default())) }
+        ParseState { stack: Arc::new(GSSNode::new(LLMTokenInfo::default())) }
     }
 }
 
@@ -59,7 +55,6 @@ pub enum StopReason {
     ActionNotFound,
     GotoNotFound,
 }
-// Manual impl for StopReason (enum) - unchanged.
 impl JSONConvertible for StopReason {
     fn to_json(&self) -> JSONNode {
         let variant_name = match self {
@@ -81,8 +76,6 @@ impl JSONConvertible for StopReason {
 }
 
 
-
-// TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GLRParser {
     pub stage_7_table: Stage7Table,
@@ -154,11 +147,11 @@ impl GLRParser {
         }
     }
 
-    pub fn init_glr_parser<A: PathAccumulator + Default>(&self) -> GLRParserState<A> {
-        self.init_glr_parser_with_acc(A::default())
+    pub fn init_glr_parser(&self) -> GLRParserState { // No longer generic
+        self.init_glr_parser_with_acc(LLMTokenInfo::default())
     }
 
-    pub fn init_glr_parser_with_acc<A: PathAccumulator + Default>(&self, initial_acc: A) -> GLRParserState<A> {
+    pub fn init_glr_parser_with_acc(&self, initial_acc: LLMTokenInfo) -> GLRParserState { // No longer generic
         let initial_parse_state = self.init_parse_state_with_acc(initial_acc);
         GLRParserState {
             parser: self,
@@ -167,7 +160,7 @@ impl GLRParser {
             cycled_states: ParseState::new(),
         }
     }
-    pub fn init_glr_parser_from_parse_state<A: PathAccumulator + Default>(&self, parse_state: ParseState<A>) -> GLRParserState<A> {
+    pub fn init_glr_parser_from_parse_state(&self, parse_state: ParseState) -> GLRParserState { // No longer generic
         GLRParserState {
             parser: self,
             active_state: parse_state,
@@ -176,20 +169,21 @@ impl GLRParser {
         }
     }
 
-    pub fn init_parse_state<A: PathAccumulator + Default>(&self) -> ParseState<A> {
-        self.init_parse_state_with_acc(A::default())
+    pub fn init_parse_state(&self) -> ParseState { // No longer generic
+        self.init_parse_state_with_acc(LLMTokenInfo::default())
     }
 
-    pub fn init_parse_state_with_acc<A: PathAccumulator + Default>(&self, initial_acc: A) -> ParseState<A> {
+    pub fn init_parse_state_with_acc(&self, initial_acc: LLMTokenInfo) -> ParseState { // No longer generic
         let initial_content = ParseStateEdgeContent {
             state_id: self.start_state_id,
         };
-        let root = Arc::new(GSSNode::new(initial_acc));
-        let stack = Arc::new(root.push(initial_content));
+        let root = Arc::new(GSSNode::new(initial_acc.clone())); // initial_acc for the root
+        // Push creates a new node. Its acc should be derived from the parent (root in this case).
+        let stack = Arc::new(root.push(initial_content, initial_acc)); 
         ParseState { stack }
     }
 
-    pub fn parse<A: PathAccumulator + Default>(&self, input: &[TerminalID]) -> GLRParserState<A> {
+    pub fn parse(&self, input: &[TerminalID]) -> GLRParserState { // No longer generic
         let mut state = self.init_glr_parser();
         state.parse(input);
         state
@@ -203,7 +197,6 @@ impl Display for GLRParser {
         let non_terminal_map = &self.non_terminal_map;
         let item_set_map = &self.item_set_map;
 
-        // Import necessary items for closure computation
         use crate::glr::items::{compute_closure, Item};
         use std::collections::BTreeSet;
 
@@ -212,12 +205,9 @@ impl Display for GLRParser {
         for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
             writeln!(f, "  State {}:", state_id.0)?;
 
-            // Get the core items that define this state
             let core_item_set = item_set_map.get_by_right(&state_id).unwrap();
-            // Compute the full closure based on the core items
             let full_closure = compute_closure(core_item_set, &self.productions);
 
-            // Print Core Items
             writeln!(f, "    Core Items:")?;
             for item in core_item_set {
                 write!(f, "      - {} ->", item.production.lhs.0)?;
@@ -236,7 +226,6 @@ impl Display for GLRParser {
                 writeln!(f)?;
             }
 
-            // Print Closure Items (items in full_closure but not in core_item_set)
             let closure_only_items: BTreeSet<_> = full_closure.difference(core_item_set).cloned().collect();
             if !closure_only_items.is_empty() {
                 writeln!(f, "    Closure Items:")?;
@@ -258,7 +247,6 @@ impl Display for GLRParser {
                 }
             }
 
-            // --- Rest of the state information ---
             writeln!(f, "    Actions:")?;
             for (&terminal_id, action) in &row.shifts_and_reduces {
                 let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
@@ -266,7 +254,7 @@ impl Display for GLRParser {
                     Stage7ShiftsAndReduces::Shift(next_state_id) => {
                         writeln!(f, "      - {} -> Shift {}", terminal.0, next_state_id.0)?;
                     }
-                    Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id: nonterminal, len } => {
+                    Stage7ShiftsAndReduces::Reduce { production_id: _ , nonterminal_id: nonterminal, len } => { // production_id ignored
                         let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
                         writeln!(f, "      - {} -> Reduce {} (len {})", terminal.0, nt_name.0, len)?;
                     }
@@ -294,7 +282,7 @@ impl Display for GLRParser {
             for (&non_terminal_id, &next_state_id) in &row.gotos {
                 let non_terminal = non_terminal_map.get_by_right(&non_terminal_id).unwrap();
                 let goto_str = match &next_state_id {
-                    Goto::State(state_id) => format!("{}", state_id.0),
+                    Goto::State(state_id_val) => format!("{}", state_id_val.0), // Renamed state_id
                     Goto::Accept => "accept".to_string(),
                 };
                 writeln!(f, "      - {} -> {}", non_terminal.0, goto_str)?;
@@ -316,91 +304,70 @@ impl Display for GLRParser {
 }
 
 #[derive(Debug, Clone)]
-pub struct GLRParserState<'a, A: PathAccumulator + Default> { // Generic over Accumulator A
+pub struct GLRParserState<'a> { // No longer generic
     pub parser: &'a GLRParser,
-    pub active_state: ParseState<A>,
-    pub action_not_found_states: ParseState<A>,
-    pub cycled_states: ParseState<A>,
+    pub active_state: ParseState,
+    pub action_not_found_states: ParseState,
+    pub cycled_states: ParseState,
 }
 
-impl<'a, A: PathAccumulator + Default> GLRParserState<'a, A> {
-    /* -------------------------------------------------
-     * Helper utilities to make `step` compact and clear
-     * ------------------------------------------------- */
-
-    /// Push a new state on `stack` and wrap it in a `ParseState`.
+impl<'a> GLRParserState<'a> { // No longer generic
     fn push_state(
         &self,
-        stack: &Arc<GSSNode<ParseStateEdgeContent, A>>, // This is the parent stack Arc
+        stack: &Arc<GSSNode>, 
         next_state_id: StateID,
-        // The new node's acc will be inherited from stack.acc by stack.push()
-    ) -> ParseState<A> {
+        acc_for_new_node: LLMTokenInfo,
+    ) -> ParseState {
         let new_content = ParseStateEdgeContent { state_id: next_state_id };
-        // stack.push() is GSSTrait push for Arc<GSSNode<...>>
-        // It creates a new GSSNode instance whose `acc` is cloned from `stack.acc`.
-        let new_gss_node_instance = stack.push(new_content);
+        let new_gss_node_instance = stack.push(new_content, acc_for_new_node);
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
-    /// Pop `len` nodes, follow the goto on `nt`, and return the resulting stacks.
     fn pop_and_goto(
         &self,
-        stack: &Arc<GSSNode<ParseStateEdgeContent, A>>, // Node being reduced from
+        stack: &Arc<GSSNode>, 
         edge_content: &ParseStateEdgeContent,
-        edge_src: &Arc<GSSNode<ParseStateEdgeContent, A>>, // Parent node
+        edge_src: &Arc<GSSNode>, 
         len: usize,
         nt: NonTerminalID,
-    ) -> Arc<GSSNode<ParseStateEdgeContent, A>> { // Returns list of new stack tops
-        let cur_acc_from_reducible_node = stack.acc(); // Get it from the stack being reduced
+    ) -> Arc<GSSNode> { 
+        let cur_acc_from_reducible_node = stack.acc().clone(); // Clone before potential modification
 
-        let parent = Arc::new(if len == 0 {
-            edge_src.push(edge_content.clone())
+        let parent_gss_node = if len == 0 { // Renamed parent to parent_gss_node
+            Arc::new(edge_src.push(edge_content.clone(), edge_src.acc().clone())) // Provide acc for push
         } else {
-            edge_src.popn(len - 1)
-        });
-        // println!("Parent: {}", print_gss_forest(&[parent.clone()], usize::MAX));
-        let mut out = GSSNode::new_default();
-        crate::debug!(4, "Popped with {} predecessors...", parent.num_predecessors());
+            Arc::new(edge_src.popn(len - 1))
+        };
+        let mut out = GSSNode::new(LLMTokenInfo::default()); // Start with a default acc
+        crate::debug!(4, "Popped with {} predecessors...", parent_gss_node.num_predecessors());
 
-        for (predecessor, edge_value) in parent.pop_iter() { // parent_arc is Arc<GSSNode<ParseStateNodeContent, A>>
-            // This is ParseStateNodeContent { state_id }
-            // let goto = self.parser.stage_7_table[&edge_value.state_id].gotos[&nt];
-            // let goto = *self.parser.stage_7_table.get(&edge_value.state_id).expect(format!("State {} not found in stage_7_table", top_of_parent_value.state_id.0).as_str()).gotos.get(&nt).expect(format!("Non-terminal {} not found in gotos", nt.0).as_str());
-            let goto = self.parser.stage_7_table.get(&edge_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", edge_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor {:p})", nt.0, edge_value.state_id, Arc::as_ptr(&predecessor))), |state_id| Ok(*state_id))).unwrap();
+        for (predecessor_arc, edge_value) in parent_gss_node.pop_iter() { // Renamed predecessor to predecessor_arc
+            let goto = self.parser.stage_7_table.get(&edge_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", edge_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor {:p})", nt.0, edge_value.state_id, Arc::as_ptr(&predecessor_arc))), |state_id| Ok(*state_id))).unwrap();
             match goto {
                 Goto::State(goto_state_id) => {
-                    crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor), goto_state_id.0);
+                    crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
 
-                    // Calculate acc for the new GOTO state's GSS node
-                    // It's the parent's acc intersected with the accumulator from the node being reduced.
-                    let new_acc_for_goto_child = parent.acc().clone().pop(cur_acc_from_reducible_node.clone());
+                    let new_acc_for_goto_child = parent_gss_node.acc().intersect(cur_acc_from_reducible_node.clone());
                     let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id };
-
-                    // TODO: what the heck
-                    let new_parent_idk = predecessor.push(edge_value.clone());
-
-                    let mut new_gss_node_arc = new_parent_idk.push(goto_node_content);
-                    // Now, explicitly set its acc to the computed intersection
-                    *new_gss_node_arc.acc_mut() = new_acc_for_goto_child;
-
-                    out.merge(&new_gss_node_arc);
+                    
+                    // Push from the predecessor found via pop_iter, using the calculated acc
+                    let new_gss_node = predecessor_arc.push(goto_node_content, new_acc_for_goto_child);
+                    out.merge(&Arc::new(new_gss_node));
                 }
                 Goto::Accept => {
                     // No action needed for Accept
                 }
             }
         }
-        // println!("{}", print_gss_forest(&[Arc::new(out.clone())], usize::MAX));
         Arc::new(out)
     }
 
-    /// Debug helper so the main `step` body stays short.
     pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
         const MAX: usize = 30;
         const PANIC_THRESHOLD: usize = 1000;
 
         let roots: Vec<_> = vec![self.active_state.stack.clone()];
-        let stats = gather_gss_stats(&roots);
+        let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
         crate::debug!(3, "{} - token {} ({:?}) - nodes: {:?}",
                       phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0), stats);
 
@@ -409,12 +376,11 @@ impl<'a, A: PathAccumulator + Default> GLRParserState<'a, A> {
                 format!("GSS ({} nodes):\n{}", stats.unique_nodes,
                         print_gss_forest(&roots, max_nodes_to_print))
             } else {
-                // fall back to longest path printing
                 match find_longest_path(&self.active_state.stack) {
                     Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
                                        stats.unique_nodes,
                                        p.len(),
-                                       p.iter().map(|(ec, n)| ec.state_id.0)
+                                       p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
                                             .map(|id| id.to_string())
                                             .collect::<Vec<_>>()
                                             .join(" → ")),
@@ -452,127 +418,102 @@ impl<'a, A: PathAccumulator + Default> GLRParserState<'a, A> {
     }
 
     pub fn step(&mut self, token_id: TerminalID) {
-        /* ---------- logging & preparation ---------- */
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
-
-        // Arc::make_mut(&mut self.active_state.stack).simplify();
-
         self.log_gss("Step-start", token_id);
-
-        // Clear cycled_states at the beginning of each step, as cycle detection is per-step.
         self.cycled_states = ParseState::new();
 
-        // Change the type of `todo` to include a BTreeSet for visited nodes in the current reduction path.
-        let mut todo: Vec<(ParseState<A>, BTreeSet<Arc<GSSNode<ParseStateEdgeContent, A>>>)> = Vec::new();
-
-        // Initial population of todo:
-        // States from active_states are roots of new reduction chains. Their visited set is initially empty.
-        // self.log_gss("Simplified GSS after initial step", token_id);
+        let mut todo: Vec<(ParseState, BTreeSet<Arc<GSSNode>>)> = Vec::new();
         todo.push((ParseState { stack: self.active_state.stack.clone() }, BTreeSet::new()));
 
         let mut next = ParseState::new();
         let mut not_found = ParseState::new();
 
-        /* ---------- core loop ---------- */
-        // Modify the while loop condition and variable extraction:
-        while let Some((state, visited_on_this_path)) = todo.pop() { // Process states from the worklist
-            // `state` is the current ParseState. `state.stack` is the Arc<GSSNode> for its stack top.
-            // Check for cycle: if state.stack is already in visited_on_this_path for this reduction chain.
+        while let Some((state, visited_on_this_path)) = todo.pop() { 
             if visited_on_this_path.contains(&state.stack) {
                 crate::debug!(2, "Cycle detected: GSSNode at {:p} encountered again in reduction path while processing token {:?}.", Arc::as_ptr(&state.stack), token_id);
-                // The `state` (which includes state.stack, the Arc that forms the cycle point) is moved into cycled_states.
-                // self.cycled_states.insert_with(state.key(), state, |existing, new_s| existing.merge(new_s));
-                // continue; // Don't process this state further down this cyclic path.
-                // Print the tree.
                 print_gss_forest(&[state.stack.clone()], usize::MAX);
-                // Panic
                 panic!("Cycle detected: GSSNode at {:p} encountered again in reduction path.", Arc::as_ptr(&state.stack));
             }
 
-            // Add state.stack to the history for paths stemming from this node.
-            // This new set will be passed to children generated by reductions.
-            let mut next_visited_on_this_path = visited_on_this_path; // Takes ownership
+            let mut next_visited_on_this_path = visited_on_this_path; 
             next_visited_on_this_path.insert(state.stack.clone());
 
-            // Use state.stack for operations.
-            let stack_arc_for_operations = &state.stack; // This is &Arc<GSSNode<...>>
-            for (parent_arc, top) in state.stack.pop_iter() {
-                let temp_idk = Arc::new(parent_arc.push(top.clone()));
-                let row = &self.parser.stage_7_table[&top.state_id];
+            let stack_arc_for_operations = &state.stack; 
+            for (parent_arc, top_edge_content) in state.stack.pop_iter() { // Renamed top to top_edge_content
+                // let temp_idk = Arc::new(parent_arc.push(top_edge_content.clone(), parent_arc.acc().clone())); // Acc for push
+                let current_path_acc = state.stack.acc().intersect(parent_arc.acc().clone());
+
+
+                let row = &self.parser.stage_7_table[&top_edge_content.state_id];
 
                 match row.shifts_and_reduces.get(&token_id) {
-                    /* ------ 1. plain shift ------ */
                     Some(Stage7ShiftsAndReduces::Shift(to)) => {
-                        crate::debug!(4, "Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
-                        // Use stack_arc_for_operations
-                        let new_parse_state = self.push_state(&temp_idk, *to);
+                        crate::debug!(4, "Shift from state {} via token {} to state {}", top_edge_content.state_id.0, token_id.0, to.0);
+                        // The new state's acc should be the acc of the path leading to it.
+                        // stack_arc_for_operations.acc() is the acc of the node *before* the shift.
+                        // This acc is carried to the new node created by push_state.
+                        let new_parse_state = self.push_state(&stack_arc_for_operations, *to, stack_arc_for_operations.acc().clone());
                         next.merge(new_parse_state);
                     }
 
-                    /* ------ 2. single reduce ------ */
                     Some(Stage7ShiftsAndReduces::Reduce {
                              nonterminal_id: nt,
                              len, ..
                          }) => {
-                        crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", top.state_id.0, token_id.0, nt.0, len);
-                        // Use stack_arc_for_operations
-                        let s_new_arc = self.pop_and_goto(&stack_arc_for_operations, &top, &parent_arc, *len, *nt);
-                        // Add to worklist for current step, passing the cloned updated visited set.
-                        todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
+                        crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", top_edge_content.state_id.0, token_id.0, nt.0, len);
+                        let s_new_arc = self.pop_and_goto(&stack_arc_for_operations, &top_edge_content, &parent_arc, *len, *nt);
+                        if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
+                           todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
+                        }
                     }
 
-                    /* ------ 3. shift / reduce split ------ */
                     Some(Stage7ShiftsAndReduces::Split { shift, reduces }) => {
-                        crate::debug!(4, "Split from state {} via token {}", top.state_id.0, token_id.0);
-                        // optional shift part
+                        crate::debug!(4, "Split from state {} via token {}", top_edge_content.state_id.0, token_id.0);
                         if let Some(to) = shift {
-                            crate::debug!(4, " Shift from state {} via token {} to state {}", top.state_id.0, token_id.0, to.0);
-                            // Use stack_arc_for_operations
-                            let new_parse_state = self.push_state(&temp_idk, *to);
+                            crate::debug!(4, " Shift from state {} via token {} to state {}", top_edge_content.state_id.0, token_id.0, to.0);
+                            let new_parse_state = self.push_state(&stack_arc_for_operations, *to, stack_arc_for_operations.acc().clone());
                             next.merge(new_parse_state);
                         }
-                        // every reduce alternative
                         for (len, nts) in reduces {
-                            crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top.state_id.0, token_id.0, nts);
+                            crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top_edge_content.state_id.0, token_id.0, nts);
                             for (nt, _prod_ids) in nts {
-                                // Use stack_arc_for_operations
                                 crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
-                                let s_new_arc = self.pop_and_goto(&stack_arc_for_operations, &top, &parent_arc, *len, *nt);
-                                // Add to worklist for current step, passing the cloned updated visited set.
-                                todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
+                                let s_new_arc = self.pop_and_goto(&stack_arc_for_operations, &top_edge_content, &parent_arc, *len, *nt);
+                                if !s_new_arc.is_empty() {
+                                    todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
+                                }
                             }
                         }
                     }
 
-                    /* ------ 4. no action ------ */
                     None => {
-                        crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, top.state_id.0);
-                        // The `state` is moved into not_found.
-                        // not_found.insert_with(state.key(), state, |existing, new_s| existing.merge(new_s));
+                        crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, top_edge_content.state_id.0);
                         not_found.merge(state.clone());
                     },
                 }
             }
         }
 
-        /* ---------- finish up ---------- */
         self.active_state = next;
-        self.action_not_found_states = not_found;
+        self.action_not_found_states = not_found; // Retain for potential inspection, though current design drops them.
+        
+        // Simplify the active GSS forest at the end of the step
+        if !self.active_state.stack.is_empty() {
+            Arc::make_mut(&mut self.active_state.stack).simplify();
+        }
 
         self.log_gss("Step-end", token_id);
-        self.action_not_found_states = ParseState::new();        // current design: we drop them
+        // self.action_not_found_states = ParseState::new(); // Reset if not needed beyond the step
 
         crate::debug!(4, "----------------------------------------------------------------");
     }
 
-    /// Merging is handled implicitly when states are added to `next` in the `step` method via `BTreeMap::insert_with`.
-    /// The `ParseState::merge` method performs the actual merge logic on the GSS stacks.
     pub fn merge_active_states(&mut self) {
-        // This method is no longer necessary as merging is done on insertion.
-        // crate::debug!(3, "merge_active_states called (now a no-op due to BTreeMap usage)");
+        // No longer strictly necessary due to BTreeMap merge-on-insert, but GSS merge is explicit.
+        // This method could be used if multiple GLRParserStates are combined.
     }
 
-    pub fn merge_with(&mut self, other: GLRParserState<A>) {
+    pub fn merge_with(&mut self, other: GLRParserState) { // No longer generic
         assert!(std::ptr::eq(self.parser, other.parser));
         self.active_state.merge(other.active_state);
         self.action_not_found_states.merge(other.action_not_found_states);
@@ -587,13 +528,10 @@ impl<'a, A: PathAccumulator + Default> GLRParserState<'a, A> {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseStateKey {
     stack_state_id: StateID,
-    // Removed action_stack
 }
 
-impl<A: PathAccumulator + Default> ParseState<A> { // Generic over Accumulator A
-    /// Merges `other` into `self`. Assumes `self.key() == other.key()`.
-    /// Merges the GSS structures and combines the `acc` value at the top node using `PathAccumulator::union`.
-    pub fn merge(&mut self, other: ParseState<A>) {
+impl ParseState { // No longer generic
+    pub fn merge(&mut self, other: ParseState) {
         Arc::make_mut(&mut self.stack).merge(&other.stack);
     }
 }
