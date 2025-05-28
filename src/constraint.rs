@@ -14,7 +14,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, print_precompute_stats, PrecomputeStats};
 use crate::datastructures::charmap::TrieMap;
-use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_tokens_and_prune_arc, gather_gss_stats};
+use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_tokens_and_prune_arc, gather_gss_stats, reset_tokens};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -983,16 +983,18 @@ impl<'a> GrammarConstraintState<'a> {
         }
     }
 
-    pub fn commit(&mut self, llm_token_id: LLMTokenID) { 
-
+    pub fn commit(&mut self, llm_token_id: LLMTokenID) {
         let internal_llm_id_val = self.parent.original_id_to_internal(llm_token_id).unwrap().0;
         crate::debug!(4, "Committing token {} (internal ID {})", llm_token_id.0, internal_llm_id_val);
+
+        let full_bitset = HybridBitset::ones(self.parent.internal_max_llm_token + 1);
 
         let mut singular_bitset = HybridBitset::new();
         singular_bitset.insert(internal_llm_id_val);
 
         for glr_state in self.state.values_mut() {
             intersect_tokens_and_prune_arc(&mut glr_state.active_state.stack, &singular_bitset);
+            reset_tokens(&mut glr_state.active_state.stack, &full_bitset);
         }
 
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");

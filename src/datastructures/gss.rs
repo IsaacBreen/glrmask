@@ -489,6 +489,28 @@ pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_int
 }
 
 
+pub fn reset_tokens(root_arc: &mut Arc<GSSNode>, tokens_to_reset: &LLMTokenBV) {
+    let closure = |current_acc: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
+        let mut new_acc = current_acc.clone();
+        new_acc.active &= tokens_to_reset;
+        new_acc.intersection &= tokens_to_reset;
+        if new_acc.active.is_empty() {
+            None // Prune this node
+        } else {
+            Some((new_acc, true)) // Keep node, continue recursion
+        }
+    };
+    let mut memo = HashMap::new();
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+        *root_arc = new_root;
+    } else {
+        // The entire GSS was pruned, set root_arc to an empty GSSNode
+        let mut empty_acc = LLMTokenInfo::default();
+        empty_acc.active = LLMTokenBV::new(); // Ensure active is empty
+        *root_arc = Arc::new(GSSNode::new(empty_acc));
+    }
+}
+
 pub fn find_longest_path(
     root_node: &GSSNode
 ) -> Option<Vec<(ParseStateEdgeContent, Arc<GSSNode>)>> {
