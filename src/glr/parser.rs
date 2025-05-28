@@ -364,7 +364,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
         const MAX: usize = 30;
-        const PANIC_THRESHOLD: usize = 1000;
+        const PANIC_THRESHOLD: usize = 10000;
 
         let roots: Vec<_> = vec![self.active_state.stack.clone()];
         let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
