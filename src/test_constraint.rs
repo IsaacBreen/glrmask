@@ -135,6 +135,7 @@ fn test_constraint_simple() {
     // "a" leads to expecting "b" or "c".
     // "ab" leads to expecting "$".
     let mask = constraint_state.get_mask();
+    println!("Initial mask: {:?}", mask);
     assert_eq!(mask, HybridBitset::from_iter(vec![0, 1])); // Expect "ab" or "ac"
 
     // Commit "ab" (LLMTokenID 0)
