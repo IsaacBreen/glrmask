@@ -804,6 +804,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let cache_dir = Path::new(".cache/test_vocabs");
     let vocab_file_name = "gpt2_vocab.json";
     let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
+    let gpt2_raw_vocab = BTreeMap::from([("________________________________________________________________", 0)]);
 
     let mut llm_token_map = LLMTokenMap::new();
     let mut max_original_llm_token_id_val: usize = 0;
