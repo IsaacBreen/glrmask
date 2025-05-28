@@ -397,7 +397,7 @@ impl<'a, A: PathAccumulator + Default> GLRParserState<'a, A> {
     /// Debug helper so the main `step` body stays short.
     pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
         const MAX: usize = 30;
-        const PANIC_THRESHOLD: usize = 100;
+        const PANIC_THRESHOLD: usize = 10000;
 
         let roots: Vec<_> = vec![self.active_state.stack.clone()];
         let stats = gather_gss_stats(&roots);
