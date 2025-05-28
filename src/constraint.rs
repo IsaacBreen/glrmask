@@ -259,6 +259,14 @@ impl GrammarConstraint {
         original_llm_token_map: &LLMTokenMap,
     ) -> BiBTreeMap<usize, usize>
     {
+        // TODO: delete this
+        let mut original_to_internal_id_bimap = BiBTreeMap::new();
+        for (_, id) in original_llm_token_map.iter() {
+            original_to_internal_id_bimap.insert(id.0, id.0);
+        }
+        return original_to_internal_id_bimap;
+
+
         let mut sorted_tokens_with_original_ids: Vec<(Vec<u8>, LLMTokenID)> = original_llm_token_map
             .iter()
             .map(|(bytes, original_id)| (bytes.clone(), *original_id))
@@ -1155,16 +1163,19 @@ impl<'a> GrammarConstraintState<'a> {
         let mut roots_to_simplify: Vec<&mut Arc<GSSNode>> = Vec::new();
         for glr_state in self.state.values_mut() {
             if !glr_state.active_state.stack.is_empty() { // Only simplify non-empty stacks
+                glr_state.log_gss("Before simplifying GSS forest", TerminalID(0));
                 roots_to_simplify.push(&mut glr_state.active_state.stack);
             }
         }
-        
-        if !roots_to_simplify.is_empty() {
-            crate::debug!(2, "Before simplifying GSS forest: {:?}", gather_gss_stats(&roots_to_simplify.iter().map(|arc| arc.as_ref()).collect::<Vec<_>>()));
-            GSSNode::simplify_together(&mut roots_to_simplify);
-            crate::debug!(2, "After simplifying GSS forest (1st pass): {:?}", gather_gss_stats(&roots_to_simplify.iter().map(|arc| arc.as_ref()).collect::<Vec<_>>()));
-            GSSNode::simplify_together(&mut roots_to_simplify); // Potentially simplify again if structure changed significantly
-            crate::debug!(2, "After simplifying GSS forest (2nd pass): {:?}", gather_gss_stats(&roots_to_simplify.iter().map(|arc| arc.as_ref()).collect::<Vec<_>>()));
+
+        crate::debug!(2, "Before simplifying GSS forest: {:?}", gather_gss_stats(&roots_to_simplify.iter().map(|arc| arc.as_ref()).collect::<Vec<_>>()));
+        GSSNode::simplify_together(&mut roots_to_simplify);
+        crate::debug!(2, "After simplifying GSS forest (1st pass): {:?}", gather_gss_stats(&roots_to_simplify.iter().map(|arc| arc.as_ref()).collect::<Vec<_>>()));
+        GSSNode::simplify_together(&mut roots_to_simplify); // Potentially simplify again if structure changed significantly
+        crate::debug!(2, "After simplifying GSS forest (2nd pass): {:?}", gather_gss_stats(&roots_to_simplify.iter().map(|arc| arc.as_ref()).collect::<Vec<_>>()));
+
+        for glr_state in self.state.values_mut() {
+            glr_state.log_gss("After simplifying GSS forest", TerminalID(0));
         }
 
 
