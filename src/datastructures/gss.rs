@@ -492,8 +492,8 @@ pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_int
 pub fn reset_tokens(root_arc: &mut Arc<GSSNode>, tokens_to_reset: &LLMTokenBV) {
     let closure = |current_acc: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
         let mut new_acc = current_acc.clone();
-        new_acc.active &= tokens_to_reset;
-        new_acc.intersection &= tokens_to_reset;
+        new_acc.active = tokens_to_reset.clone();
+        new_acc.intersection = tokens_to_reset.clone();
         if new_acc.active.is_empty() {
             None // Prune this node
         } else {
