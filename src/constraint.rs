@@ -1006,10 +1006,6 @@ impl<'a> GrammarConstraintState<'a> {
                 
                 intersect_tokens_and_prune_arc(&mut glr_s.active_state.stack, edge_llm_tokens_bv);
 
-                if glr_s.active_state.stack.is_empty() {
-                    return None;
-                }
-
                 if let Some(gtid) = grammar_token_opt {
                     glr_s.step(*gtid);
                 }
