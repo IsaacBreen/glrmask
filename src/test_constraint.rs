@@ -893,128 +893,128 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     );
     println!("GrammarConstraint constructed successfully.");
     grammar_constraint.dump_precomputed();
-    //
-    // // --- TOKENIZATION AND SEQUENCE TESTING ---
-    //
-    // // Build a VocabPrefixTree from the LLM token map for tokenization
-    // let vocab_tokens_for_tree: Vec<(usize, Vec<u8>)> = grammar_constraint.llm_token_map
-    //     .iter()
-    //     .map(|(bytes, llm_id)| (llm_id.0, bytes.clone()))
-    //     .collect();
-    // let tokenizer_vocab_tree = VocabPrefixTree::build(&vocab_tokens_for_tree);
-    //
-    // // The full text to tokenize.
-    // let full_text_to_tokenize = "from typing import Any";
-    // // let full_text_to_tokenize = "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((";
-    // // let full_text_to_tokenize = "a";
-    //
-    // // Tokenize the full_text_to_tokenize using the VocabPrefixTree
-    // let mut test_token_sequence_ids = Vec::new();
-    // // This list will store the actual string content of tokens as produced by the vocab tree, primarily for logging.
-    // let mut tokenized_strs_for_logging = Vec::new();
-    // let mut text_to_process = full_text_to_tokenize.as_bytes();
-    //
-    // println!("\nTokenizing '{}' using VocabPrefixTree:", full_text_to_tokenize);
-    // while !text_to_process.is_empty() {
-    //     match tokenizer_vocab_tree.find_longest_prefix_token(text_to_process) {
-    //         Some((token_id, matched_bytes)) => {
-    //             let matched_str = String::from_utf8_lossy(matched_bytes).to_string();
-    //             println!("  Matched: '{}' (ID {})", matched_str, token_id);
-    //
-    //             test_token_sequence_ids.push(LLMTokenID(token_id));
-    //             tokenized_strs_for_logging.push(matched_str); // Store for logging
-    //
-    //             text_to_process = &text_to_process[matched_bytes.len()..];
-    //         }
-    //         None => {
-    //             // If the vocab tree cannot tokenize a part of a known-good string,
-    //             // it implies an an issue with the vocab tree or the test string itself
-    //             // relative to the loaded vocabulary.
-    //             panic!(
-    //                 "Failed to tokenize with VocabPrefixTree. No prefix token found for remaining text: {:?}. This might indicate the test string '{}' contains segments not representable by single tokens in the loaded vocabulary, or the vocabulary is missing expected tokens.",
-    //                 String::from_utf8_lossy(text_to_process),
-    //                 full_text_to_tokenize
-    //             );
-    //         }
-    //     }
-    // }
-    //
-    // if test_token_sequence_ids.is_empty() && !full_text_to_tokenize.is_empty() {
-    //     panic!("VocabPrefixTree failed to produce any tokens for the non-empty input string: '{}'. Check vocabulary content.", full_text_to_tokenize);
-    // }
-    // if test_token_sequence_ids.is_empty() && full_text_to_tokenize.is_empty() {
-    //     println!("Input string was empty, and no tokens were produced, which is expected.");
-    // } else {
-    //     println!("Successfully tokenized input string into {} tokens using VocabPrefixTree.", test_token_sequence_ids.len());
-    // }
-    //
-    // // 5. Basic Interaction with the GrammarConstraintState
-    // let mut constraint_state = grammar_constraint.init();
-    // // Initial step to populate possibilities
-    // constraint_state.step_with_all_llm_tokens();
-    // let initial_mask = constraint_state.get_mask();
-    // println!("\nInitial mask obtained ({} allowed LLM tokens).", initial_mask.iter_bits().count());
-    //
-    // println!("\nStepping through the token sequence with GrammarConstraint:");
-    // for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
-    //     // Use tokenized_strs_for_logging for logging, as it corresponds to the llm_token_id
-    //     let current_token_str = &tokenized_strs_for_logging[i];
-    //     println!(
-    //         "Processing token {}/{}: '{}' (LLMTokenID({}))",
-    //         i + 1,
-    //         test_token_sequence_ids.len(),
-    //         current_token_str,
-    //         llm_token_id.0
-    //     );
-    //
-    //     assert!(
-    //         constraint_state.is_active(),
-    //         "Constraint state should be active before processing token {} ('{}')",
-    //         i + 1, current_token_str
-    //     );
-    //
-    //     let step_start = Instant::now();
-    //     constraint_state.step_with_all_llm_tokens();
-    //     let step_duration = step_start.elapsed();
-    //     println!("  step_with_all_llm_tokens took: {:?}", step_duration);
-    //     let current_mask = constraint_state.get_mask();
-    //     println!(
-    //         "  Mask (after step_with_all_llm_tokens) allows {} tokens. Checking for current token LLMTokenID({})...",
-    //         current_mask.iter_bits().count(),
-    //         llm_token_id.0
-    //     );
-    //
-    //     assert!(
-    //         current_mask.contains(llm_token_id.0),
-    //         "Expected LLMTokenID({}) for '{}' to be in the mask. Mask (first 100 if many): {:?}",
-    //         llm_token_id.0, current_token_str, current_mask.iter_bits().take(100).collect::<Vec<_>>()
-    //     );
-    //     println!("  LLMTokenID({}) for '{}' is in the mask.", llm_token_id.0, current_token_str);
-    //
-    //     let commit_start = Instant::now();
-    //     constraint_state.commit(llm_token_id);
-    //     let commit_duration = commit_start.elapsed();
-    //     println!("  commit LLMTokenID({}) took: {:?}", llm_token_id.0, commit_duration);
-    //     println!("  Committed LLMTokenID({}) for '{}'.", llm_token_id.0, current_token_str);
-    //
-    //     assert!(
-    //         constraint_state.is_active(),
-    //         "Constraint state should be active after committing token {} ('{}')",
-    //         i + 1, current_token_str
-    //     );
-    //     println!("  Constraint state is active after commit.");
-    // }
-    //
-    // println!("\nFinished processing token sequence with GrammarConstraint.");
-    // if !test_token_sequence_ids.is_empty() { // Only assert if there were tokens to process
-    //     assert!(
-    //         constraint_state.is_active(),
-    //         "Constraint state should still be active after processing the entire sequence."
-    //     );
-    //     println!("Constraint state is active after the full sequence.");
-    // } else if full_text_to_tokenize.is_empty() {
-    //      println!("Constraint state was not stepped as the input string was empty and produced no tokens.");
-    // }
+    
+    // --- TOKENIZATION AND SEQUENCE TESTING ---
+
+    // Build a VocabPrefixTree from the LLM token map for tokenization
+    let vocab_tokens_for_tree: Vec<(usize, Vec<u8>)> = grammar_constraint.llm_token_map
+        .iter()
+        .map(|(bytes, llm_id)| (llm_id.0, bytes.clone()))
+        .collect();
+    let tokenizer_vocab_tree = VocabPrefixTree::build(&vocab_tokens_for_tree);
+
+    // The full text to tokenize.
+    let full_text_to_tokenize = "from typing import Any";
+    // let full_text_to_tokenize = "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((";
+    // let full_text_to_tokenize = "a";
+
+    // Tokenize the full_text_to_tokenize using the VocabPrefixTree
+    let mut test_token_sequence_ids = Vec::new();
+    // This list will store the actual string content of tokens as produced by the vocab tree, primarily for logging.
+    let mut tokenized_strs_for_logging = Vec::new();
+    let mut text_to_process = full_text_to_tokenize.as_bytes();
+
+    println!("\nTokenizing '{}' using VocabPrefixTree:", full_text_to_tokenize);
+    while !text_to_process.is_empty() {
+        match tokenizer_vocab_tree.find_longest_prefix_token(text_to_process) {
+            Some((token_id, matched_bytes)) => {
+                let matched_str = String::from_utf8_lossy(matched_bytes).to_string();
+                println!("  Matched: '{}' (ID {})", matched_str, token_id);
+
+                test_token_sequence_ids.push(LLMTokenID(token_id));
+                tokenized_strs_for_logging.push(matched_str); // Store for logging
+
+                text_to_process = &text_to_process[matched_bytes.len()..];
+            }
+            None => {
+                // If the vocab tree cannot tokenize a part of a known-good string,
+                // it implies an an issue with the vocab tree or the test string itself
+                // relative to the loaded vocabulary.
+                panic!(
+                    "Failed to tokenize with VocabPrefixTree. No prefix token found for remaining text: {:?}. This might indicate the test string '{}' contains segments not representable by single tokens in the loaded vocabulary, or the vocabulary is missing expected tokens.",
+                    String::from_utf8_lossy(text_to_process),
+                    full_text_to_tokenize
+                );
+            }
+        }
+    }
+
+    if test_token_sequence_ids.is_empty() && !full_text_to_tokenize.is_empty() {
+        panic!("VocabPrefixTree failed to produce any tokens for the non-empty input string: '{}'. Check vocabulary content.", full_text_to_tokenize);
+    }
+    if test_token_sequence_ids.is_empty() && full_text_to_tokenize.is_empty() {
+        println!("Input string was empty, and no tokens were produced, which is expected.");
+    } else {
+        println!("Successfully tokenized input string into {} tokens using VocabPrefixTree.", test_token_sequence_ids.len());
+    }
+
+    // 5. Basic Interaction with the GrammarConstraintState
+    let mut constraint_state = grammar_constraint.init();
+    // Initial step to populate possibilities
+    constraint_state.step_with_all_llm_tokens();
+    let initial_mask = constraint_state.get_mask();
+    println!("\nInitial mask obtained ({} allowed LLM tokens).", initial_mask.iter_bits().count());
+
+    println!("\nStepping through the token sequence with GrammarConstraint:");
+    for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
+        // Use tokenized_strs_for_logging for logging, as it corresponds to the llm_token_id
+        let current_token_str = &tokenized_strs_for_logging[i];
+        println!(
+            "Processing token {}/{}: '{}' (LLMTokenID({}))",
+            i + 1,
+            test_token_sequence_ids.len(),
+            current_token_str,
+            llm_token_id.0
+        );
+
+        assert!(
+            constraint_state.is_active(),
+            "Constraint state should be active before processing token {} ('{}')",
+            i + 1, current_token_str
+        );
+
+        let step_start = Instant::now();
+        constraint_state.step_with_all_llm_tokens();
+        let step_duration = step_start.elapsed();
+        println!("  step_with_all_llm_tokens took: {:?}", step_duration);
+        let current_mask = constraint_state.get_mask();
+        println!(
+            "  Mask (after step_with_all_llm_tokens) allows {} tokens. Checking for current token LLMTokenID({})...",
+            current_mask.iter_bits().count(),
+            llm_token_id.0
+        );
+
+        assert!(
+            current_mask.contains(llm_token_id.0),
+            "Expected LLMTokenID({}) for '{}' to be in the mask. Mask (first 100 if many): {:?}",
+            llm_token_id.0, current_token_str, current_mask.iter_bits().take(100).collect::<Vec<_>>()
+        );
+        println!("  LLMTokenID({}) for '{}' is in the mask.", llm_token_id.0, current_token_str);
+
+        let commit_start = Instant::now();
+        constraint_state.commit(llm_token_id);
+        let commit_duration = commit_start.elapsed();
+        println!("  commit LLMTokenID({}) took: {:?}", llm_token_id.0, commit_duration);
+        println!("  Committed LLMTokenID({}) for '{}'.", llm_token_id.0, current_token_str);
+
+        assert!(
+            constraint_state.is_active(),
+            "Constraint state should be active after committing token {} ('{}')",
+            i + 1, current_token_str
+        );
+        println!("  Constraint state is active after commit.");
+    }
+
+    println!("\nFinished processing token sequence with GrammarConstraint.");
+    if !test_token_sequence_ids.is_empty() { // Only assert if there were tokens to process
+        assert!(
+            constraint_state.is_active(),
+            "Constraint state should still be active after processing the entire sequence."
+        );
+        println!("Constraint state is active after the full sequence.");
+    } else if full_text_to_tokenize.is_empty() {
+         println!("Constraint state was not stepped as the input string was empty and produced no tokens.");
+    }
 
     // Ensure the parse state after stepping the constraint with all LLM tokens and committing an LLM token is the same as the parse state after stepping the parser itself tokens emitted by the tokenizer for that same LLM token.
     // In general, this should be true if all LLM tokens cleanly match grammar tokens (or, equivalently, if the only non-empty entry in the precompute tree is under the initial tokenizer state).
