@@ -30,6 +30,7 @@ use std::collections::BTreeMap as StdMap;
 
 pub type LLMTokenBV = HybridBitset;
 pub type GrammarTokenBV = BitVec;
+pub type LLMTokenInfo = Option<LLMTokenBV>;
 
 // -----------------------------------------------------------------------------
 // Small data-types used by the constraint
@@ -990,7 +991,7 @@ impl<'a> GrammarConstraintState<'a> {
             |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
                 let mut glr_s = glr_s.clone();
                 
-                intersect_tokens_and_prune_arc(&mut glr_s.active_state.stack, edge_llm_tokens_bv);
+                intersect_tokens_and_prune_arc(&mut glr_s.active_state.stack, &Some(edge_llm_tokens_bv.clone()));
 
                 if let Some(gtid) = grammar_token_opt {
                     glr_s.step(*gtid);
@@ -1140,7 +1141,7 @@ impl<'a> GrammarConstraintState<'a> {
         let all_tokens_bv = self.parent.all_internal_llm_tokens_bitset();
         let mut roots_to_simplify_arcs = Vec::new();
         for glr_parser_state in self.state.values_mut() {
-            reset_tokens(&mut glr_parser_state.active_state.stack, Some(all_tokens_bv.clone()));
+            reset_tokens(&mut glr_parser_state.active_state.stack, &None);
             if !glr_parser_state.active_state.stack.is_empty() {
                 roots_to_simplify_arcs.push(&mut glr_parser_state.active_state.stack);
             }

@@ -175,8 +175,8 @@ fn test_constraint_simple() {
     let mut comparable_parser_gss = (*parser_state_for_comp.active_state.stack).clone();
     let mut comparable_parser_active_state = ParseState { stack: Arc::new(comparable_parser_gss) };
 
-    Arc::make_mut(&mut comparable_parser_active_state.stack).reset_tokens(&HybridBitset::new());
-    Arc::make_mut(&mut actual_constraint_parser_state.active_state.stack).reset_tokens(&HybridBitset::new());
+    Arc::make_mut(&mut comparable_parser_active_state.stack).reset_tokens(&None);
+    Arc::make_mut(&mut actual_constraint_parser_state.active_state.stack).reset_tokens(&None);
 
     assert_eq!(*tokenizer_state_id_comp, tokenizer.initial_state_id(), "Tokenizer should be in initial state");
     assert_eq!(actual_constraint_parser_state.active_state, comparable_parser_active_state, "GSS structures should match");
@@ -282,8 +282,8 @@ fn test_constraint_expression() {
     let mut comparable_parser_gss = (*parser_state_for_comp.active_state.stack).clone();
     let mut comparable_parser_active_state = ParseState { stack: Arc::new(comparable_parser_gss) };
 
-    Arc::make_mut(&mut comparable_parser_active_state.stack).reset_tokens(&HybridBitset::new());
-    Arc::make_mut(&mut actual_constraint_parser_state.active_state.stack).reset_tokens(&HybridBitset::new());
+    Arc::make_mut(&mut comparable_parser_active_state.stack).reset_tokens(&None);
+    Arc::make_mut(&mut actual_constraint_parser_state.active_state.stack).reset_tokens(&None);
 
     assert_eq!(*tokenizer_state_id_comp, tokenizer.initial_state_id(), "Tokenizer should be in initial state");
     assert_eq!(actual_constraint_parser_state.active_state, comparable_parser_active_state, "GSS structures should match");
@@ -1030,8 +1030,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let mut comparable_parser_active_state_comp = ParseState { stack: Arc::new(comparable_parser_gss_comp) };
 
 
-    Arc::make_mut(&mut comparable_parser_active_state_comp.stack).reset_tokens(&HybridBitset::new());
-    Arc::make_mut(&mut actual_constraint_parser_state_comp.active_state.stack).reset_tokens(&HybridBitset::new());
+    Arc::make_mut(&mut comparable_parser_active_state_comp.stack).reset_tokens(&None);
+    Arc::make_mut(&mut actual_constraint_parser_state_comp.active_state.stack).reset_tokens(&None);
 
     assert_eq!(*tokenizer_state_id_comp, grammar_constraint.tokenizer.initial_state_id(), "Tokenizer for comparison should be in initial state");
     assert_eq!(actual_constraint_parser_state_comp.active_state, comparable_parser_active_state_comp, "GSS structures for comparison should match");

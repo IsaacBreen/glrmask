@@ -8,7 +8,6 @@ use deterministic_hash::DeterministicHasher;
 
 use crate::glr::parser::ParseStateEdgeContent;
 use crate::constraint::LLMTokenInfo;
-use crate::datastructures::hybrid_bitset::HybridBitset as LLMTokenBV;
 
 
 // Type aliases for cleaner signatures, now concrete
@@ -431,22 +430,6 @@ fn prune_and_transform_recursive(
                     .collect::<NodeSet>() // Explicit type for collect
             };
 
-            // If all predecessors were pruned, this node might also become effectively empty/pruned
-            // unless it's a root or has special meaning.
-            // However, new_with_predecessors handles empty predecessor_set by creating a default node.
-            // The closure's None for self.acc already handles pruning self.
-            
-            // If new_predecessors_set is empty AND new_acc implies it should be pruned (e.g. active is empty)
-            // this case should be handled by the closure result for the current node_arc.
-            // If new_acc is valid, but all children pruned, we get a leaf node.
-            if new_acc.active.is_empty() && !new_predecessors_set.is_empty() {
-                 // This case implies the closure allowed a node with empty active set.
-                 // This should ideally be caught by the closure itself.
-                 // For safety, if active is empty, we might force prune here unless it's a special case.
-                 // However, the request was to prune if active is empty, handled by closure.
-            }
-
-
             // Create a new node with the transformed accumulator and new predecessors
             // GSSNode::new_with_predecessors computes its own acc by union. We want new_acc.
             let new_node_predecessors_map = process_predecessors(&new_predecessors_set);
@@ -460,17 +443,12 @@ fn prune_and_transform_recursive(
 }
 
 
-/// Intersects the `active` and `intersection` fields of all `LLMTokenInfo`
-/// in the GSS with `tokens_to_intersect`. Prunes nodes where `active` becomes empty.
-/// Modifies `root_arc` in place. If the entire GSS is pruned, `root_arc` will point
-/// to a GSSNode where `is_empty()` is true and `acc.active` is empty.
-pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_intersect: &LLMTokenBV) {
+pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_intersect: &LLMTokenInfo) {
     let closure = |current_acc: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
         let mut new_acc = current_acc.clone();
-        new_acc.active &= tokens_to_intersect;
-        new_acc.intersection &= tokens_to_intersect;
+        // If unset, initialize it to
 
-        if new_acc.active.is_empty() {
+        if new_acc.is_none_or(|bv| bv.is_empty()) {
             None // Prune this node
         } else {
             Some((new_acc, true)) // Keep node, continue recursion
@@ -483,18 +461,17 @@ pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_int
     } else {
         // The entire GSS was pruned, set root_arc to an empty GSSNode
         let mut empty_acc = LLMTokenInfo::default();
-        empty_acc.active = LLMTokenBV::new(); // Ensure active is empty
+        empty_acc = LLMTokenInfo::default(); // Ensure active is empty
         *root_arc = Arc::new(GSSNode::new(empty_acc));
     }
 }
 
 
-pub fn reset_tokens(root_arc: &mut Arc<GSSNode>, tokens_to_reset: &LLMTokenBV) {
+pub fn reset_tokens(root_arc: &mut Arc<GSSNode>, tokens_to_reset: &LLMTokenInfo) {
     let closure = |current_acc: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
         let mut new_acc = current_acc.clone();
-        new_acc.active = tokens_to_reset.clone();
-        new_acc.intersection = tokens_to_reset.clone();
-        if new_acc.active.is_empty() {
+        new_acc = tokens_to_reset.clone();
+        if new_acc.is_none_or(|bv| bv.is_empty()) {
             None // Prune this node
         } else {
             Some((new_acc, true)) // Keep node, continue recursion
@@ -506,7 +483,7 @@ pub fn reset_tokens(root_arc: &mut Arc<GSSNode>, tokens_to_reset: &LLMTokenBV) {
     } else {
         // The entire GSS was pruned, set root_arc to an empty GSSNode
         let mut empty_acc = LLMTokenInfo::default();
-        empty_acc.active = LLMTokenBV::new(); // Ensure active is empty
+        empty_acc = LLMTokenInfo::default(); // Ensure active is empty
         *root_arc = Arc::new(GSSNode::new(empty_acc));
     }
 }
@@ -586,14 +563,14 @@ impl GSSNode {
 
     pub fn intersect_tokens_and_prune_arc(
         &mut self,
-        llm_tokens: &LLMTokenBV,
+        llm_tokens: &LLMTokenInfo,
     ) {
         let mut node_arc = Arc::new(self.clone());
         intersect_tokens_and_prune_arc(&mut node_arc, llm_tokens);
         *self = node_arc.as_ref().clone();
     }
 
-    pub fn reset_tokens(&mut self, tokens_to_reset: &LLMTokenBV) {
+    pub fn reset_tokens(&mut self, tokens_to_reset: &LLMTokenInfo) {
         let mut node_arc = Arc::new(self.clone());
         reset_tokens(&mut node_arc, tokens_to_reset);
         *self = node_arc.as_ref().clone();
@@ -858,6 +835,7 @@ impl GSSNode {
 
 #[cfg(test)]
 mod tests {
+    use crate::constraint::LLMTokenBV;
     use super::*;
     use crate::glr::parser::ParseStateEdgeContent;
     use crate::glr::table::StateID;
@@ -870,9 +848,7 @@ mod tests {
     fn mock_llm_token_info(active_val: usize, intersection_val: usize) -> LLMTokenInfo {
         let mut active = LLMTokenBV::new();
         active.insert(active_val);
-        let mut intersection = LLMTokenBV::new();
-        intersection.insert(intersection_val);
-        LLMTokenInfo { active, intersection }
+        Some(active)
     }
     
     fn mock_edge(id: usize) -> ParseStateEdgeContent {
