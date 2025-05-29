@@ -1186,7 +1186,7 @@ impl<'a> GrammarConstraintState<'a> {
 
             for match_info in &exec_result.matches {
                 let mut cloned_glr_s = glr_s_at_offset.clone();
-                cloned_glr_s.active_state.stack.intersect_tokens_and_prune_arc(&possible_matches[&TerminalID(match_info.id)]);
+                Arc::make_mut(&mut cloned_glr_s.active_state.stack).intersect_tokens_and_prune_arc(&possible_matches[&TerminalID(match_info.id)]);
                 cloned_glr_s.step(TerminalID(match_info.id));
 
                 if cloned_glr_s.is_ok() && !cloned_glr_s.active_state.stack.is_empty() {
