@@ -848,10 +848,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     let prop = 1.0; // Use full vocab for this test to ensure token presence
     let total_tokens = gpt2_raw_vocab.len();
-    let sample_size = ((total_tokens as f64 * prop) as usize).max(1);
-    println!("Sampling {} out of {} GPT-2 tokens for the test.", sample_size, total_tokens);
 
-    for (token_str, id_val_u32) in gpt2_raw_vocab.into_iter().take(sample_size) {
+    for (token_str, id_val_u32) in gpt2_raw_vocab.into_iter(){
         let id_val = id_val_u32 as usize;
         // Replace 'Ġ' with ' '
         let token_str = token_str.replace("Ġ", " ");
