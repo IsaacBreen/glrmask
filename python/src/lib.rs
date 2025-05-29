@@ -366,7 +366,6 @@ impl PyGrammarConstraintState {
                 constraint,
                 inner_builder: |c: &PyGrammarConstraint| {
                     let mut state = c.inner.init();
-                    state.step_with_all_llm_tokens();
                     Ok::<_, PyErr>(state)
                 },
             }
@@ -384,7 +383,6 @@ impl PyGrammarConstraintState {
         // println!("Committing token {} to grammar constraint state", llm_token_id); // Debug
         self.inner.with_inner_mut(|state| {
             state.commit(LLMTokenID(llm_token_id));
-            state.step_with_all_llm_tokens();
         });
     }
 }
