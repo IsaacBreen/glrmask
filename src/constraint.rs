@@ -999,7 +999,7 @@ impl<'a> GrammarConstraintState<'a> {
                 |current_gss_arc: &Arc<GSSNode>, // This is V from previous step/initial
                  grammar_token_opt: &Option<GrammarTokenID>, // This is EK (Edge Key)
                  edge_llm_tokens: &LLMTokenBV, // This is EV (Edge Value)
-                 _child_precompute_node_contents: &PrecomputedNodeContents| // This is Trie::value of child Trie node
+                 _child_precompute_node_contents: PrecomputedNodeContents| // This is Trie::value of child Trie node
                  -> Option<Arc<GSSNode>> { // Returns new V for child
                     crate::debug!(5, "    step_fn: grammar_token {:?}, edge_llm_tokens non-empty: {}", grammar_token_opt.map(|g|g.0), !edge_llm_tokens.is_empty());
                     let mut next_gss_arc = current_gss_arc.clone();
@@ -1135,7 +1135,7 @@ impl<'a> GrammarConstraintState<'a> {
             
             if initial_glr_state_for_commit.is_ok() && !initial_glr_state_for_commit.active_state.stack.is_empty() {
                 crate::debug!(4, "Queueing initial GLR state for tokenizer_id {} after filtering by committed token.", tokenizer_id.0);
-                pending_glr_states.push_back((0, *tokenizer_id, initial_glr_state_for_commit));
+                pending_glr_states.push_back((0, tokenizer_id, initial_glr_state_for_commit));
             } else {
                 crate::debug!(4, "GLR state for tokenizer_id {} became invalid/empty after filtering by committed token. Discarding.", tokenizer_id.0);
             }

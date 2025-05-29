@@ -166,7 +166,7 @@ impl GSSNode {
     }
 
     // Made private as requested
-    fn acc_mut(&mut self) -> &mut LLMTokenInfo {
+    pub(crate) fn acc_mut(&mut self) -> &mut LLMTokenInfo {
         &mut self.acc
     }
 
