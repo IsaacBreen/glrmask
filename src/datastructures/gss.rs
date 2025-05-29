@@ -116,26 +116,6 @@ impl GSSNode {
         Self { acc, predecessors, hash_key_cache }
     }
 
-    pub fn new_default() -> Self {
-        Self::new(LLMTokenInfo::default())
-    }
-
-    pub fn new_with_predecessors(predecessors_set: NodeSet) -> Self {
-        let predecessors_map = process_predecessors(&predecessors_set);
-
-        let acc = if predecessors_map.is_empty() {
-            LLMTokenInfo::default()
-        } else {
-            let mut iter = predecessors_map.values();
-            let mut acc_union = iter.next().expect("predecessors_map is not empty").acc.clone();
-            for arc_node in iter { // Renamed arc to arc_node
-                acc_union.union_assign(arc_node.acc.clone());
-            }
-            acc_union
-        };
-        Self::new_with_map(acc, predecessors_map)
-    }
-    
     // Helper to create a GSSNode with a single predecessor, used by push.
     fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, acc: LLMTokenInfo) -> Self {
         let mut predecessors_map = NodeMap::new();
@@ -190,7 +170,7 @@ impl GSSNode {
     // If pop_into is essential, it would need to return a new Self or take &mut Self and manage acc carefully.
 
     pub fn pop(&self) -> Self {
-        let mut result_acc = LLMTokenInfo::default();
+        let mut result_acc = Some(LLMTokenBV::new());
         let mut result_predecessors = NodeMap::new();
 
         for (pred_arc, _edge_val) in self.predecessors_with_values() {
@@ -463,9 +443,7 @@ pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_int
         *root_arc = new_root;
     } else {
         // The entire GSS was pruned, set root_arc to an empty GSSNode
-        let mut empty_acc = LLMTokenInfo::default();
-        empty_acc = LLMTokenInfo::default(); // Ensure active is empty
-        *root_arc = Arc::new(GSSNode::new(empty_acc));
+        *root_arc = Arc::new(GSSNode::new(Some(LLMTokenBV::new())));
     }
 }
 
@@ -480,8 +458,7 @@ pub fn reset_tokens(root_arc: &mut Arc<GSSNode>) {
         *root_arc = new_root;
     } else {
         // The entire GSS was pruned, set root_arc to an empty GSSNode
-        let mut empty_acc = LLMTokenInfo::default();
-        empty_acc = LLMTokenInfo::default(); // Ensure active is empty
+        let mut empty_acc = Some(LLMTokenBV::new());
         *root_arc = Arc::new(GSSNode::new(empty_acc));
     }
 }
@@ -760,7 +737,7 @@ fn simplify_node_recursive(
     let cached_structural_node = cache.entry(simplified_predecessors_map.clone())
         .or_insert_with(|| {
             let unioned_acc = if simplified_predecessors_map.is_empty() {
-                LLMTokenInfo::default()
+                Some(LLMTokenBV::new())
             } else {
                 let mut iter = simplified_predecessors_map.values();
                 let mut acc = iter.next().unwrap().acc.clone();

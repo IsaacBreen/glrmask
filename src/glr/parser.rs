@@ -3,7 +3,7 @@ use crate::datastructures::gss::{gather_gss_stats, find_longest_path, PathAccumu
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID};
-use crate::constraint::LLMTokenInfo; // Import LLMTokenInfo
+use crate::constraint::{LLMTokenBV, LLMTokenInfo}; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};
@@ -338,7 +338,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         } else {
             Arc::new(edge_src.popn(len - 1))
         };
-        let mut out = GSSNode::new(LLMTokenInfo::default()); // Start with a default acc
+        let mut out = GSSNode::new(Some(LLMTokenBV::new())); // Start with a default acc
         crate::debug!(4, "Popped with {} predecessors...", parent_gss_node.num_predecessors());
 
         for (predecessor_arc, edge_value) in parent_gss_node.pop_iter() { // Renamed predecessor to predecessor_arc
