@@ -578,5 +578,5 @@ if __name__ == "__main__":
     print("Re-initializing grammar processor with deserialized constraint state...")
     grammar_processor = GrammarConstrainedLogitsProcessor(grammar_constraint_state, llm_token_to_id)
 
-    output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text)
+    output_text = timeit(generate_text)(model, tokenizer, grammar_processor, pre_input_text, input_text, max_new_tokens=100)
     print(output_text)
