@@ -1049,7 +1049,7 @@ pub struct GrammarConstraintState<'a> {
 }
 
 impl<'a> GrammarConstraintState<'a> {
-    pub fn get_mask(&mut self) -> LLMTokenBV {
+    pub fn get_mask(&self) -> LLMTokenBV {
         let mut final_mask_internal = HybridBitset::new();
 
         if self.state.is_empty() {
