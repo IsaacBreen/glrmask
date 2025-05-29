@@ -175,8 +175,8 @@ fn test_constraint_simple() {
     let mut comparable_parser_gss = (*parser_state_for_comp.active_state.stack).clone();
     let mut comparable_parser_active_state = ParseState { stack: Arc::new(comparable_parser_gss) };
 
-    Arc::make_mut(&mut comparable_parser_active_state.stack).reset_tokens();
-    Arc::make_mut(&mut actual_constraint_parser_state.active_state.stack).reset_tokens();
+    // Arc::make_mut(&mut comparable_parser_active_state.stack).reset_tokens();
+    // Arc::make_mut(&mut actual_constraint_parser_state.active_state.stack).reset_tokens();
 
     assert_eq!(*tokenizer_state_id_comp, tokenizer.initial_state_id(), "Tokenizer should be in initial state");
     assert_eq!(actual_constraint_parser_state.active_state, comparable_parser_active_state, "GSS structures should match");
