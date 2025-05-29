@@ -453,6 +453,8 @@ impl<'r> Precomputer<'r> {
             }
         }
 
+        self.possible_matches.borrow_mut().entry(cache_key_ptr).or_default().insert(tokenizer_state_id, BTreeMap::new());
+
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
 
         for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
