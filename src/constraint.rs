@@ -424,7 +424,7 @@ impl GrammarConstraint {
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
 
         for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
-            let child_vocab_node_ref = &**child_vocab_arc; // Get &VocabPrefixTreeNode
+            let child_vocab_node_ref = child_vocab_arc; // Get &VocabPrefixTreeNode
             let exec_result = tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
 
             for token_match in &exec_result.matches {
@@ -440,7 +440,6 @@ impl GrammarConstraint {
                 let matches_possible_from_new_tokenizer_state: BTreeSet<_> = tokenizer
                     .tokens_accessible_from_state(final_tokenizer_state_id)
                     .into_iter()
-                    .map(GrammarTokenID) // Ensure comparison is between GrammarTokenID
                     .collect();
 
                 let matches_from_current_segment: BTreeSet<_> = exec_result
