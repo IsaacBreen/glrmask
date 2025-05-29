@@ -1022,7 +1022,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // let grammar_tokenss = vec![vec!["\"from\""], vec!["NAME[0]"]];
     let llm_tokens: Vec<&[u8]> = vec![b"from", b" typing", b" import", b" Any", b", ", b" List", b", "];
     let grammar_tokenss = vec![vec!["\"from\"", "NAME[0]", "\"import\"", "NAME[0]", "\",\"", "NAME[0]", "\",\""]];
-    let llm_token_ids = llm_tokens.iter().map(|llm_token| llm_token_map.get_by_left(*llm_token).unwrap()).collect::<Vec<_>>();
+    let llm_token_ids = llm_tokens.iter().map(|llm_token| llm_token_map.get_by_left(*llm_token).expect(format!("LLM token '{}' not found in llm_token_map", String::from_utf8_lossy(*llm_token)).as_str())).collect::<Vec<_>>();
     let mut constraint_state = grammar_constraint.init();
     let grammar_token_idss = grammar_tokenss.iter().map(|grammar_token_ids| grammar_token_ids.iter().map(|token| constraint_state.parent.parser.terminal_map.get_by_left(&Terminal(token.to_string())).expect(format!("Terminal '{}' not found in parser's terminal_map", token).as_str())).collect::<Vec<_>>()).collect::<Vec<_>>();
 
