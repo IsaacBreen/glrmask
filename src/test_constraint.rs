@@ -1020,7 +1020,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // In general, this should be true if all LLM tokens cleanly match grammar tokens (or, equivalently, if the only non-empty entry in the precompute tree is under the initial tokenizer state).
     // let llm_tokens: Vec<&[u8]> = vec![b"from"];
     // let grammar_tokenss = vec![vec!["\"from\""], vec!["NAME[0]"]];
-    let llm_tokens: Vec<&[u8]> = vec![b"from", b" typing", b" import", b" Any", b", ", b" List", b", "];
+    let llm_tokens: Vec<&[u8]> = vec![b"from", b" typing", b" import", b" Any", b",", b" List", b","];
     let grammar_tokenss = vec![vec!["\"from\"", "NAME[0]", "\"import\"", "NAME[0]", "\",\"", "NAME[0]", "\",\""]];
     let llm_token_ids = llm_tokens.iter().map(|llm_token| llm_token_map.get_by_left(*llm_token).expect(format!("LLM token '{}' not found in llm_token_map", String::from_utf8_lossy(*llm_token)).as_str())).collect::<Vec<_>>();
     let mut constraint_state = grammar_constraint.init();
