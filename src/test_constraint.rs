@@ -166,18 +166,17 @@ fn test_constraint_simple() {
         let grammar_token_id = grammar_token_map.get_by_left(&Terminal(grammar_token.to_string())).unwrap();
         parser_state_for_comp.step(*grammar_token_id);
     }
-    
+
     assert_eq!(constraint_state_for_comp.state().len(), 1, "Constraint state should have one tokenizer state after commit");
     let (tokenizer_state_id_comp, actual_constraint_parser_state) = constraint_state_for_comp.state().iter().next().unwrap();
-    
+    let mut actual_constraint_parser_state = actual_constraint_parser_state.clone();
+
     // For comparison, parser_state_for_comp's GSS acc needs to be "all_ones" like commit does.
-    let all_ones_acc = LLMTokenInfo {
-        active: constraint.all_internal_llm_tokens_bitset(),
-        intersection: constraint.all_internal_llm_tokens_bitset(),
-    };
     let mut comparable_parser_gss = (*parser_state_for_comp.active_state.stack).clone();
-    comparable_parser_gss = comparable_parser_gss.with_acc(all_ones_acc);
-    let comparable_parser_active_state = ParseState { stack: Arc::new(comparable_parser_gss) };
+    let mut comparable_parser_active_state = ParseState { stack: Arc::new(comparable_parser_gss) };
+
+    Arc::make_mut(&mut comparable_parser_active_state.stack).reset_tokens(&HybridBitset::new());
+    Arc::make_mut(&mut actual_constraint_parser_state.active_state.stack).reset_tokens(&HybridBitset::new());
 
     assert_eq!(*tokenizer_state_id_comp, tokenizer.initial_state_id(), "Tokenizer should be in initial state");
     assert_eq!(actual_constraint_parser_state.active_state, comparable_parser_active_state, "GSS structures should match");
