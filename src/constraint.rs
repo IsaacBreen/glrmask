@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::BitOr;
 use std::sync::{Arc, Mutex};
-use std::cell::{OnceCell, RefCell};
+use std::cell::RefCell;
 
 use bimap::BiBTreeMap;
 use bitvec::prelude::*;
@@ -391,7 +391,6 @@ struct Precomputer<'r> {
     vocab:            VocabPrefixTree,
     roots:            BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>,
     possible_matches: RefCell<BTreeMap<*const VocabPrefixTreeNode, BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>>>,
-    possible_matches_from_root_vocab_node: RefCell<BTreeMap<TokenizerStateID, BTreeSet<GrammarTokenID>>>,
     all_llm_tokens:   HybridBitset,
     merge_threshold:  usize,
     pb:               ProgressBar,
@@ -438,7 +437,6 @@ impl<'r> Precomputer<'r> {
             vocab,
             roots,
             possible_matches: RefCell::new(BTreeMap::new()),
-            possible_matches_from_root_vocab_node: RefCell::new(BTreeMap::new()),
             all_llm_tokens: HybridBitset::ones(internal_max_llm_token + 1),
             merge_threshold,
             pb,
@@ -455,8 +453,6 @@ impl<'r> Precomputer<'r> {
             }
         }
 
-        self.possible_matches.borrow_mut().entry(cache_key_ptr).or_default().insert(tokenizer_state_id, BTreeMap::new());
-
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
 
         for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
@@ -471,16 +467,9 @@ impl<'r> Precomputer<'r> {
                 let matches_here: BTreeSet<_> = exec_result.matches.iter().map(|m| GrammarTokenID(m.id)).collect();
                 let possible_new_matches = &matches_possible_from_tokenizer_state - &matches_here;
                 if !possible_new_matches.is_empty() {
-                    // Possible matches from the child vocab node (considering longer LLM tokens)
-                    let longer_token_results = self.possible_matches(child_vocab_arc, TokenizerStateID(final_state_val));
-                    for (token, bv) in longer_token_results {
+                    let next_results = self.possible_matches(child_vocab_arc, TokenizerStateID(final_state_val));
+                    for (token, bv) in next_results {
                         *result_map.entry(token).or_insert_with(LLMTokenBV::new) |= bv;
-                    }
-                    // Possible matches from the root vocab node (considering the LLM token that this vocab node represents)
-                    // If a given grammar token matches for any future LLM tokens, then the grammar token can match from the LLM token represented by *this* vocab node as well.
-                    let new_token_results = self.possible_matches_from_root_vocab_node(TokenizerStateID(final_state_val));
-                    for token in new_token_results {
-                        result_map.entry(token).or_insert_with(LLMTokenBV::new).set(child_vocab_arc.token_id(), true);
                     }
                 }
             }
@@ -489,31 +478,6 @@ impl<'r> Precomputer<'r> {
         self.possible_matches.borrow_mut().entry(cache_key_ptr).or_default().insert(tokenizer_state_id, result_map.clone());
 
         result_map
-    }
-
-    fn possible_matches_from_vocab_node(&self, tokenizer_state_id: TokenizerStateID, vocab_node: &VocabPrefixTreeNode) -> BTreeSet<GrammarTokenID> {
-        if let Some(cached_result) = self.possible_matches_from_root_vocab_node.borrow().get(&tokenizer_state_id) {
-            return cached_result.clone();
-        }
-
-        let mut result = BTreeSet::new();
-        for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
-            let exec_result = self.tokenizer.execute_from_state(segment_bytes, tokenizer_state_id);
-            for token in &exec_result.matches {
-                let grammar_token_id = GrammarTokenID(token.id);
-                result.insert(grammar_token_id);
-            }
-            if let Some(final_state_val) = exec_result.end_state {
-                result.extend(self.possible_matches_from_vocab_node(TokenizerStateID(final_state_val), child_vocab_arc));
-                result.extend(self.possible_matches_from_vocab_node(TokenizerStateID(final_state_val), &self.vocab.root));
-            }
-        }
-
-        result
-    }
-
-    fn possible_matches_from_root_vocab_node(&self, tokenizer_state_id: TokenizerStateID) -> BTreeSet<GrammarTokenID> {
-        self.possible_matches_from_vocab_node(tokenizer_state_id, &self.vocab.root)
     }
 
     fn run_dfs(&mut self) {
