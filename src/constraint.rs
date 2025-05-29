@@ -1057,67 +1057,58 @@ impl<'a> GrammarConstraintState<'a> {
         let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
         let initial_states_to_process = std::mem::take(&mut self.state);
 
+        let mut processing_queue: VecDeque<(usize, TokenizerStateID, GLRParserState<'a>)> = VecDeque::new();
         for (current_tokenizer_s_id, base_glr_s) in initial_states_to_process {
-            if base_glr_s.active_state.stack.is_empty() { // Skip if GSS is already empty
+            processing_queue.push_back((0, current_tokenizer_s_id, base_glr_s.clone()));
+        }
+
+        while let Some((offset, tokenizer_s_id_at_offset, mut glr_s_at_offset)) = processing_queue.pop_front() {
+             // If the GSS stack for glr_s_at_offset is empty, prune this path.
+            if glr_s_at_offset.active_state.stack.is_empty() {
                 continue;
             }
-            // Ensure the base_glr_s is compatible with the committed token *before* tokenizing its bytes.
-            // The `active` set of base_glr_s should allow `internal_llm_id`.
-            // This check was implicitly part of the old design where `commit` followed `step`.
-            // Now, `get_mask` would have been called, and the caller ensures `llm_token_id` is in the mask.
-            // So, we assume `base_glr_s` is compatible.
 
-            let mut processing_queue: VecDeque<(usize, TokenizerStateID, GLRParserState<'a>)> = VecDeque::new();
-            processing_queue.push_back((0, current_tokenizer_s_id, base_glr_s.clone()));
-
-            while let Some((offset, tokenizer_s_id_at_offset, mut glr_s_at_offset)) = processing_queue.pop_front() {
-                 // If the GSS stack for glr_s_at_offset is empty, prune this path.
-                if glr_s_at_offset.active_state.stack.is_empty() {
-                    continue;
+            if offset >= llm_token_bytes.len() {
+                // This path fully consumed the llm_token_bytes.
+                // The tokenizer state for the *next* LLM token will be the initial state.
+                let next_tokenizer_state_for_overall = self.parent.tokenizer.initial_state_id();
+                if let Some(existing_glr_s) = new_overall_state.get_mut(&next_tokenizer_state_for_overall) {
+                    existing_glr_s.merge_with(glr_s_at_offset);
+                } else {
+                    new_overall_state.insert(next_tokenizer_state_for_overall, glr_s_at_offset);
                 }
+                continue;
+            }
 
-                if offset >= llm_token_bytes.len() {
-                    // This path fully consumed the llm_token_bytes.
-                    // The tokenizer state for the *next* LLM token will be the initial state.
-                    let next_tokenizer_state_for_overall = self.parent.tokenizer.initial_state_id();
-                    if let Some(existing_glr_s) = new_overall_state.get_mut(&next_tokenizer_state_for_overall) {
-                        existing_glr_s.merge_with(glr_s_at_offset);
-                    } else {
-                        new_overall_state.insert(next_tokenizer_state_for_overall, glr_s_at_offset);
-                    }
-                    continue;
+            let exec_result = self.parent.tokenizer.execute_from_state(
+                &llm_token_bytes[offset..],
+                tokenizer_s_id_at_offset,
+            );
+
+            for match_info in &exec_result.matches {
+                let mut cloned_glr_s = glr_s_at_offset.clone();
+                cloned_glr_s.step(TerminalID(match_info.id));
+
+                if cloned_glr_s.is_ok() && !cloned_glr_s.active_state.stack.is_empty() {
+                    let new_offset = offset + match_info.width;
+                    // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
+                    let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
+                    processing_queue.push_back((
+                        new_offset,
+                        next_tokenizer_id_for_segment,
+                        cloned_glr_s,
+                    ));
                 }
+            }
 
-                let exec_result = self.parent.tokenizer.execute_from_state(
-                    &llm_token_bytes[offset..],
-                    tokenizer_s_id_at_offset,
-                );
-
-                for match_info in &exec_result.matches {
-                    let mut cloned_glr_s = glr_s_at_offset.clone();
-                    cloned_glr_s.step(TerminalID(match_info.id));
-
-                    if cloned_glr_s.is_ok() && !cloned_glr_s.active_state.stack.is_empty() {
-                        let new_offset = offset + match_info.width;
-                        // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
-                        let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
-                        processing_queue.push_back((
-                            new_offset,
-                            next_tokenizer_id_for_segment,
-                            cloned_glr_s,
-                        ));
-                    }
-                }
-
-                if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
-                    // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
-                    // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
-                    let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
-                    if let Some(existing_glr_s) = new_overall_state.get_mut(&final_tokenizer_state) {
-                        existing_glr_s.merge_with(glr_s_at_offset.clone());
-                    } else {
-                        new_overall_state.insert(final_tokenizer_state, glr_s_at_offset.clone());
-                    }
+            if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
+                // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
+                // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
+                let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
+                if let Some(existing_glr_s) = new_overall_state.get_mut(&final_tokenizer_state) {
+                    existing_glr_s.merge_with(glr_s_at_offset.clone());
+                } else {
+                    new_overall_state.insert(final_tokenizer_state, glr_s_at_offset.clone());
                 }
             }
         }
