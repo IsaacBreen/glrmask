@@ -359,7 +359,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let new_acc_for_goto_child = parent_gss_node.acc().clone().intersect(cur_acc_from_reducible_node.clone());
                     let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id };
 
-                    let isolated_parent_arc = Arc::new(predecessor_arc.push(edge_value.clone(), new_acc_for_goto_child.clone()));
+                    let isolated_parent_arc = Arc::new(predecessor_arc.push(edge_value, new_acc_for_goto_child.clone()));
                     let new_gss_node = isolated_parent_arc.push(goto_node_content, new_acc_for_goto_child);
                     out.merge(&Arc::new(new_gss_node));
                 }
