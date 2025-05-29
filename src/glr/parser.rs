@@ -1,1012 +1,551 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use crate::datastructures::gss::print_gss_forest;
+use crate::datastructures::gss::{gather_gss_stats, find_longest_path, PathAccumulator, GSSNode, GSSTrait, GSSStats};
+use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+use crate::glr::items::Item;
+use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID};
+use crate::constraint::LLMTokenInfo; // Import LLMTokenInfo
+
+use bimap::BiBTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{Debug, Display, Formatter};
+use std::hash::Hash;
 use std::sync::Arc;
-use std::fmt::{Debug, Write};
-use std::hash::{Hash, Hasher};
-use std::cmp::Ordering;
-use std::collections::hash_map::DefaultHasher;
-use deterministic_hash::DeterministicHasher;
-
-use crate::glr::parser::ParseStateEdgeContent;
-use crate::constraint::LLMTokenInfo;
-use crate::datastructures::hybrid_bitset::HybridBitset as LLMTokenBV;
+use crate::debug;
+use crate::json_serialization::{JSONConvertible, JSONNode};
+use std::collections::BTreeMap as StdMap;
 
 
-// Type aliases for cleaner signatures, now concrete
-type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
-type NodeMap = BTreeMap<ParseStateEdgeContent, Arc<GSSNode>>;
-type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
-
-pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
-    fn union_assign(&mut self, other: Self);
-    fn intersect_assign(&mut self, right: Self); // Renamed from pop_assign
-    fn union(mut self, other: Self) -> Self {
-        self.union_assign(other);
-        self
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ParseStateEdgeContent { 
+    pub state_id: StateID,
+}
+// JSONConvertible for ParseStateEdgeContent
+impl JSONConvertible for ParseStateEdgeContent {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("state_id".to_string(), self.state_id.to_json());
+        JSONNode::Object(obj)
     }
-    fn intersect(mut self, right: Self) -> Self { // Renamed from pop
-        self.intersect_assign(right);
-        self
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let state_id = obj.remove("state_id").ok_or_else(|| "Missing field state_id for ParseStateNodeContent".to_string())
+                                  .and_then(StateID::from_json)?;
+                Ok(ParseStateEdgeContent { state_id })
+            }
+            _ => Err("Expected JSONNode::Object for ParseStateNodeContent".to_string()),
+        }
     }
 }
 
-impl PathAccumulator for () {
-    fn union_assign(&mut self, _other: Self) { }
-    fn intersect_assign(&mut self, _right: Self) { } // Renamed from pop_assign
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ParseState { // No longer generic
+    pub stack: Arc<GSSNode>, // GSSNode is now concrete
 }
 
-fn compute_hash_key(predecessors: &NodeMap) -> u64 {
-    let mut hasher = DeterministicHasher::new(DefaultHasher::new());
-    for (edge_val, pred_arc) in predecessors {
-        edge_val.hash(&mut hasher);
-        pred_arc.hash_key_cache.hash(&mut hasher);
+impl ParseState {
+    pub fn new() -> Self {
+        ParseState { stack: Arc::new(GSSNode::new(LLMTokenInfo::default())) }
     }
-    hasher.finish()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StopReason {
+    ActionNotFound,
+    GotoNotFound,
+}
+impl JSONConvertible for StopReason {
+    fn to_json(&self) -> JSONNode {
+        let variant_name = match self {
+            StopReason::ActionNotFound => "ActionNotFound",
+            StopReason::GotoNotFound => "GotoNotFound",
+        };
+        JSONNode::String(variant_name.to_string())
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::String(s) => match s.as_str() {
+                "ActionNotFound" => Ok(StopReason::ActionNotFound),
+                "GotoNotFound" => Ok(StopReason::GotoNotFound),
+                _ => Err(format!("Unknown variant {} for StopReason", s)),
+            },
+            _ => Err("Expected JSONNode::String for StopReason".to_string()),
+        }
+    }
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GLRParser {
+    pub stage_7_table: Stage7Table,
+    pub productions: Vec<Production>,
+    pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
+    pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+    pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+    pub start_state_id: StateID,
+}
+
+impl JSONConvertible for GLRParser {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("stage_7_table".to_string(), self.stage_7_table.to_json());
+        obj.insert("productions".to_string(), self.productions.to_json());
+        obj.insert("terminal_map".to_string(), self.terminal_map.to_json());
+        obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
+        obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
+        obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
+        JSONNode::Object(obj)
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let stage_7_table = obj.remove("stage_7_table").ok_or_else(|| "Missing field stage_7_table".to_string())
+                                       .and_then(Stage7Table::from_json)?;
+                let productions = obj.remove("productions").ok_or_else(|| "Missing field productions".to_string())
+                                     .and_then(Vec::<Production>::from_json)?;
+                let terminal_map = obj.remove("terminal_map").ok_or_else(|| "Missing field terminal_map".to_string())
+                                      .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
+                let non_terminal_map = obj.remove("non_terminal_map").ok_or_else(|| "Missing field non_terminal_map".to_string())
+                                          .and_then(|n| BiBTreeMap::<NonTerminal, NonTerminalID>::from_json(n))?;
+                let item_set_map = obj.remove("item_set_map").ok_or_else(|| "Missing field item_set_map".to_string())
+                                      .and_then(|n| BiBTreeMap::<BTreeSet<Item>, StateID>::from_json(n))?;
+                let start_state_id = obj.remove("start_state_id").ok_or_else(|| "Missing field start_state_id".to_string())
+                                        .and_then(StateID::from_json)?;
+                Ok(GLRParser {
+                    stage_7_table,
+                    productions,
+                    terminal_map,
+                    non_terminal_map,
+                    item_set_map,
+                    start_state_id,
+                })
+            }
+            _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
+        }
+    }
+}
+
+
+impl GLRParser {
+    pub fn new(
+        stage_7_table: Stage7Table,
+        productions: Vec<Production>,
+        terminal_map: BiBTreeMap<Terminal, TerminalID>,
+        non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+        item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+        start_state_id: StateID,
+    ) -> Self {
+        Self {
+            stage_7_table,
+            productions,
+            terminal_map,
+            non_terminal_map,
+            item_set_map,
+            start_state_id,
+        }
+    }
+
+    pub fn init_glr_parser(&self) -> GLRParserState { // No longer generic
+        self.init_glr_parser_with_acc(LLMTokenInfo::default())
+    }
+
+    pub fn init_glr_parser_with_acc(&self, initial_acc: LLMTokenInfo) -> GLRParserState { // No longer generic
+        let initial_parse_state = self.init_parse_state_with_acc(initial_acc);
+        GLRParserState {
+            parser: self,
+            active_state: initial_parse_state,
+            action_not_found_states: ParseState::new(),
+            cycled_states: ParseState::new(),
+        }
+    }
+    pub fn init_glr_parser_from_parse_state(&self, parse_state: ParseState) -> GLRParserState { // No longer generic
+        GLRParserState {
+            parser: self,
+            active_state: parse_state,
+            action_not_found_states: ParseState::new(),
+            cycled_states: ParseState::new(),
+        }
+    }
+
+    pub fn init_parse_state(&self) -> ParseState { // No longer generic
+        self.init_parse_state_with_acc(LLMTokenInfo::default())
+    }
+
+    pub fn init_parse_state_with_acc(&self, initial_acc: LLMTokenInfo) -> ParseState { // No longer generic
+        let initial_content = ParseStateEdgeContent {
+            state_id: self.start_state_id,
+        };
+        let root = Arc::new(GSSNode::new(initial_acc.clone())); // initial_acc for the root
+        // Push creates a new node. Its acc should be derived from the parent (root in this case).
+        let stack = Arc::new(root.push(initial_content, initial_acc)); 
+        ParseState { stack }
+    }
+
+    pub fn parse(&self, input: &[TerminalID]) -> GLRParserState { // No longer generic
+        let mut state = self.init_glr_parser();
+        state.parse(input);
+        state
+    }
+}
+
+impl Display for GLRParser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let stage_7_table = &self.stage_7_table;
+        let terminal_map = &self.terminal_map;
+        let non_terminal_map = &self.non_terminal_map;
+        let item_set_map = &self.item_set_map;
+
+        use crate::glr::items::{compute_closure, Item};
+        use std::collections::BTreeSet;
+
+        writeln!(f, "Parse Table:")?;
+        writeln!(f, "  Start State: {}", self.start_state_id.0)?;
+        for (&state_id, row) in stage_7_table.iter().collect::<BTreeMap<_, _>>() {
+            writeln!(f, "  State {}:", state_id.0)?;
+
+            let core_item_set = item_set_map.get_by_right(&state_id).unwrap();
+            let full_closure = compute_closure(core_item_set, &self.productions);
+
+            writeln!(f, "    Core Items:")?;
+            for item in core_item_set {
+                write!(f, "      - {} ->", item.production.lhs.0)?;
+                for (i, symbol) in item.production.rhs.iter().enumerate() {
+                    if i == item.dot_position {
+                        write!(f, " •")?;
+                    }
+                    match symbol {
+                        Symbol::Terminal(terminal) => write!(f, " {:?}", terminal.0),
+                        Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
+                    }?;
+                }
+                if item.dot_position == item.production.rhs.len() {
+                    write!(f, " •")?;
+                }
+                writeln!(f)?;
+            }
+
+            let closure_only_items: BTreeSet<_> = full_closure.difference(core_item_set).cloned().collect();
+            if !closure_only_items.is_empty() {
+                writeln!(f, "    Closure Items:")?;
+                for item in &closure_only_items {
+                    write!(f, "      - {} ->", item.production.lhs.0)?;
+                    for (i, symbol) in item.production.rhs.iter().enumerate() {
+                        if i == item.dot_position {
+                            write!(f, " •")?;
+                        }
+                        match symbol {
+                            Symbol::Terminal(terminal) => write!(f, " {}", terminal.0),
+                            Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
+                        }?;
+                    }
+                    if item.dot_position == item.production.rhs.len() {
+                        write!(f, " •")?;
+                    }
+                    writeln!(f)?;
+                }
+            }
+
+            writeln!(f, "    Actions:")?;
+            for (&terminal_id, action) in &row.shifts_and_reduces {
+                let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
+                match action {
+                    Stage7ShiftsAndReduces::Shift(next_state_id) => {
+                        writeln!(f, "      - {} -> Shift {}", terminal.0, next_state_id.0)?;
+                    }
+                    Stage7ShiftsAndReduces::Reduce { production_id: _ , nonterminal_id: nonterminal, len } => { // production_id ignored
+                        let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
+                        writeln!(f, "      - {} -> Reduce {} (len {})", terminal.0, nt_name.0, len)?;
+                    }
+                    Stage7ShiftsAndReduces::Split { shift, reduces } => {
+                        writeln!(f, "      - {} -> Conflict:", terminal.0)?;
+                        if let Some(shift_state) = shift {
+                            writeln!(f, "        - Shift {}", shift_state.0)?;
+                        }
+                        for (len, nts) in reduces {
+                            writeln!(f, "        - Reduce (len {}):", len)?;
+                            for (nt_id, prod_ids) in nts {
+                                let nt = non_terminal_map.get_by_right(nt_id).unwrap();
+                                for prod_id_val in prod_ids {
+                                    let prod = self.productions.get(prod_id_val.0).unwrap();
+                                    writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
+                                }
+                            }
+
+                        }
+                    }
+                }
+            }
+
+            writeln!(f, "    Gotos:")?;
+            for (&non_terminal_id, &next_state_id) in &row.gotos {
+                let non_terminal = non_terminal_map.get_by_right(&non_terminal_id).unwrap();
+                let goto_str = match &next_state_id {
+                    Goto::State(state_id_val) => format!("{}", state_id_val.0), // Renamed state_id
+                    Goto::Accept => "accept".to_string(),
+                };
+                writeln!(f, "      - {} -> {}", non_terminal.0, goto_str)?;
+            }
+        }
+
+        writeln!(f, "\nTerminal Map (name to terminal ID):")?;
+        for (terminal, terminal_id) in terminal_map {
+            writeln!(f, "  {} -> {}", terminal.0, terminal_id.0)?;
+        }
+
+        writeln!(f, "\nNon-Terminal Map:")?;
+        for (non_terminal, non_terminal_id) in non_terminal_map {
+            writeln!(f, "  {} -> {}", non_terminal.0, non_terminal_id.0)?;
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
-pub struct GSSNode { // No longer generic
-    acc: LLMTokenInfo,
-    predecessors: NodeMap,
-    hash_key_cache: u64,
+pub struct GLRParserState<'a> { // No longer generic
+    pub parser: &'a GLRParser,
+    pub active_state: ParseState,
+    pub action_not_found_states: ParseState,
+    pub cycled_states: ParseState,
 }
 
-#[derive(Clone)]
-pub struct PathsIter<'a> { // No longer generic
-    queue: VecDeque<(&'a GSSNode, Vec<ParseStateEdgeContent>)>,
-}
-
-impl<'a> Iterator for PathsIter<'a> { // No longer generic
-    type Item = Vec<ParseStateEdgeContent>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some((current_node, mut path_suffix)) = self.queue.pop_front() {
-            if current_node.predecessors.is_empty() {
-                path_suffix.reverse();
-                return Some(path_suffix);
-            }
-
-            for (edge_val, pred_arc) in &current_node.predecessors {
-                let mut new_path = path_suffix.clone();
-                new_path.push(edge_val.clone());
-                self.queue.push_back((pred_arc.as_ref(), new_path));
-            }
-        }
-        None
-    }
-}
-
-fn process_predecessors(
-    incoming: &NodeSet
-) -> NodeMap {
-    let mut grouped: BTreeMap<ParseStateEdgeContent, Vec<Arc<GSSNode>>> = BTreeMap::new();
-    for (pred_arc, edge_val) in incoming {
-        grouped.entry(edge_val.clone()).or_default().push(pred_arc.clone());
+impl<'a> GLRParserState<'a> { // No longer generic
+    fn push_state(
+        &self,
+        stack: &Arc<GSSNode>, 
+        next_state_id: StateID,
+        acc_for_new_node: LLMTokenInfo,
+    ) -> ParseState {
+        let new_content = ParseStateEdgeContent { state_id: next_state_id };
+        let new_gss_node_instance = stack.push(new_content, acc_for_new_node);
+        ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
-    let mut result = NodeMap::new();
-    for (edge_val, pred_arcs) in grouped {
-        if pred_arcs.is_empty() { continue; }
+    fn pop_and_goto(
+        &self,
+        stack: &Arc<GSSNode>, 
+        edge_content: &ParseStateEdgeContent,
+        edge_src: &Arc<GSSNode>, 
+        len: usize,
+        nt: NonTerminalID,
+    ) -> Arc<GSSNode> { 
+        let cur_acc_from_reducible_node = stack.acc().clone(); // Clone before potential modification
 
-        let mut iter = pred_arcs.into_iter();
-        let first = iter.next().unwrap(); // Safe due to is_empty check
-
-        if iter.len() == 0 { // Only one predecessor for this edge value
-            result.insert(edge_val, first);
-        } else { // Multiple predecessors for this edge value, merge them
-            let mut merged_node_data = (*first).clone(); // Clone the GSSNode data
-            for other_arc in iter {
-                merged_node_data.merge(&other_arc); // Merge other GSSNode data into it
-            }
-            result.insert(edge_val, Arc::new(merged_node_data));
-        }
-    }
-    result
-}
-
-// Basic node creation and manipulation
-impl GSSNode {
-    pub fn new(acc: LLMTokenInfo) -> Self {
-        let predecessors = NodeMap::new();
-        let hash_key_cache = compute_hash_key(&predecessors);
-        Self { acc, predecessors, hash_key_cache }
-    }
-    
-    // Private constructor used by simplification and other internal methods
-    fn new_with_map(acc: LLMTokenInfo, predecessors: NodeMap) -> Self {
-        let hash_key_cache = compute_hash_key(&predecessors);
-        Self { acc, predecessors, hash_key_cache }
-    }
-
-    pub fn new_default() -> Self {
-        Self::new(LLMTokenInfo::default())
-    }
-
-    pub fn new_with_predecessors(predecessors_set: NodeSet) -> Self {
-        let predecessors_map = process_predecessors(&predecessors_set);
-
-        let acc = if predecessors_map.is_empty() {
-            LLMTokenInfo::default()
+        let parent_gss_node = if len == 0 { // Renamed parent to parent_gss_node
+            Arc::new(edge_src.push(edge_content.clone(), edge_src.acc().clone())) // Provide acc for push
         } else {
-            let mut iter = predecessors_map.values();
-            let mut acc_union = iter.next().expect("predecessors_map is not empty").acc.clone();
-            for arc_node in iter { // Renamed arc to arc_node
-                acc_union.union_assign(arc_node.acc.clone());
-            }
-            acc_union
+            Arc::new(edge_src.popn(len - 1))
         };
-        Self::new_with_map(acc, predecessors_map)
-    }
-    
-    // Helper to create a GSSNode with a single predecessor, used by push.
-    fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, acc: LLMTokenInfo) -> Self {
-        let mut predecessors_map = NodeMap::new();
-        predecessors_map.insert(edge_value, predecessor_arc);
-        Self::new_with_map(acc, predecessors_map)
-    }
+        let mut out = GSSNode::new(LLMTokenInfo::default()); // Start with a default acc
+        crate::debug!(4, "Popped with {} predecessors...", parent_gss_node.num_predecessors());
 
+        for (predecessor_arc, edge_value) in parent_gss_node.pop_iter() { // Renamed predecessor to predecessor_arc
+            let goto = self.parser.stage_7_table.get(&edge_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", edge_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor {:p})", nt.0, edge_value.state_id, Arc::as_ptr(&predecessor_arc))), |state_id| Ok(*state_id))).unwrap();
+            match goto {
+                Goto::State(goto_state_id) => {
+                    crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
 
-    fn predecessors_with_values(&self) -> impl IntoIterator<Item = (&Arc<Self>, &ParseStateEdgeContent)> {
-        self.predecessors.iter().map(|(edge_val, pred_arc)| (pred_arc, edge_val))
-    }
+                    let new_acc_for_goto_child = parent_gss_node.acc().clone().intersect(cur_acc_from_reducible_node.clone());
+                    let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id };
 
-    fn predecessors(&self) -> &NodeMap {
-        &self.predecessors
-    }
-
-    pub fn num_predecessors(&self) -> usize {
-        self.predecessors.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.predecessors.is_empty()
-    }
-
-    pub fn acc(&self) -> &LLMTokenInfo {
-        &self.acc
-    }
-
-    // Made private as requested
-    fn acc_mut(&mut self) -> &mut LLMTokenInfo {
-        &mut self.acc
-    }
-
-    // Helper to clone the node and set a new accumulator. Used internally.
-    // Make this public for constraint.rs usage
-    pub fn with_acc(mut self, acc: LLMTokenInfo) -> Self {
-        self.acc = acc;
-        self.hash_key_cache = compute_hash_key(&self.predecessors); // Recalculate hash if acc changes meaning
-        self
-    }
-}
-
-
-// Core manipulation methods
-impl GSSNode {
-    // Push now takes the acc for the new node
-    pub fn push(self, edge_value: ParseStateEdgeContent, acc_for_new_node: LLMTokenInfo) -> Self {
-        Self::new_with_single_predecessor(Arc::new(self), edge_value, acc_for_new_node)
-    }
-    
-    // pop_into is complex with private acc_mut, might need rethink or careful internal use
-    // For now, assume pop() and popn() are the main public interfaces for this.
-    // If pop_into is essential, it would need to return a new Self or take &mut Self and manage acc carefully.
-
-    pub fn pop(&self) -> Self {
-        let mut result_acc = LLMTokenInfo::default();
-        let mut result_predecessors = NodeMap::new();
-
-        for (pred_arc, _edge_val) in self.predecessors_with_values() {
-            // The acc of the path *through* self to pred_arc is self.acc intersected with pred_arc.acc
-            let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
-            result_acc.union_assign(path_acc.clone()); // Union accs of all popped paths
-
-            // Merge predecessors of pred_arc into result_predecessors
-            // Each merged predecessor needs its acc updated based on path_acc
-            for (inner_edge, inner_pred_arc) in &pred_arc.predecessors {
-                let mut new_inner_pred_node_data = (**inner_pred_arc).clone();
-                new_inner_pred_node_data.acc = path_acc.clone().intersect(inner_pred_arc.acc.clone());
-
-                match result_predecessors.entry(inner_edge.clone()) {
-                    std::collections::btree_map::Entry::Vacant(entry) => {
-                        entry.insert(Arc::new(new_inner_pred_node_data));
-                    }
-                    std::collections::btree_map::Entry::Occupied(mut entry) => {
-                        Arc::make_mut(entry.get_mut()).merge(&Arc::new(new_inner_pred_node_data));
-                    }
+                    let isolated_parent_arc = Arc::new(predecessor_arc.push(edge_value.clone(), new_acc_for_goto_child.clone()));
+                    let new_gss_node = isolated_parent_arc.push(goto_node_content, new_acc_for_goto_child);
+                    out.merge(&Arc::new(new_gss_node));
+                }
+                Goto::Accept => {
+                    // No action needed for Accept
                 }
             }
         }
-        Self::new_with_map(result_acc, result_predecessors)
+        Arc::new(out)
     }
 
+    pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
+        const MAX: usize = 30;
+        const PANIC_THRESHOLD: usize = 10000;
 
-    pub fn popn(&self, n: usize) -> Self {
-        if n == 0 {
-            self.clone()
-        } else {
-            self.pop().popn(n - 1)
-        }
-    }
+        let roots: Vec<_> = vec![self.active_state.stack.clone()];
+        let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
+        crate::debug!(3, "{} - token {} ({:?}) - nodes: {:?}",
+                      phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0), stats);
 
-    pub fn pop_iter(&self) -> Vec<(Arc<Self>, ParseStateEdgeContent)> {
-        self.predecessors.iter().map(|(edge_val, pred_arc)| {
-            // The acc for the path ending at pred_arc (after popping self)
-            // is self.acc intersected with pred_arc's original acc.
-            let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
-            let new_pred_node_data = pred_arc.as_ref().clone().with_acc(path_acc);
-            (Arc::new(new_pred_node_data), edge_val.clone())
-        }).collect()
-    }
-
-    // Internal helper, needs careful handling due to private acc_mut
-    fn push_down_acc(&mut self) {
-        for pred_arc_val in self.predecessors.values_mut() { // Renamed pred_arc
-            let mut_pred_node = Arc::make_mut(pred_arc_val);
-            mut_pred_node.acc.intersect_assign(self.acc.clone());
-            // After modifying acc, hash_key_cache might need update if acc is part of it.
-            // Current compute_hash_key does not include self.acc, only predecessors.
-            // However, if the acc of a predecessor changes, its own hash_key_cache changes.
-            mut_pred_node.hash_key_cache = compute_hash_key(&mut_pred_node.predecessors);
-        }
-        // self.hash_key_cache = compute_hash_key(&self.predecessors); // Recompute for self too
-    }
-
-    pub fn merge(&mut self, other: &Self) {
-        if self == other { return; }
-        
-        // Before unioning self.acc, ensure its current state is pushed down if necessary.
-        // This is complex. Let's assume merge is about combining structures and unioning top-level acc.
-        // self.push_down_acc(); // This might be too aggressive or incorrect here.
-
-        self.acc.union_assign(other.acc.clone());
-
-        for (other_pred_arc, edge_val) in &other.pop_iter() { // pop_iter gives arcs with correct path acc
-            match self.predecessors.entry(edge_val.clone()) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(other_pred_arc.clone());
-                }
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    Arc::make_mut(entry.get_mut()).merge(other_pred_arc);
+        let make_msg = |print_full_forest, max_nodes_to_print| {
+            if print_full_forest {
+                format!("GSS ({} nodes):\n{}", stats.unique_nodes,
+                        print_gss_forest(&roots, max_nodes_to_print))
+            } else {
+                match find_longest_path(&self.active_state.stack) {
+                    Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
+                                       stats.unique_nodes,
+                                       p.len(),
+                                       p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
+                                            .map(|id| id.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join(" → ")),
+                    None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
                 }
             }
+        };
+
+        if stats.unique_nodes > PANIC_THRESHOLD {
+            let msg = make_msg(true, usize::MAX);
+            panic!("GSS too big ({} nodes). {}", stats.unique_nodes, msg);
         }
-        self.hash_key_cache = compute_hash_key(&self.predecessors);
+
+        debug!(4, "{}", make_msg(stats.unique_nodes <= MAX, MAX));
     }
 
-    pub fn merged(mut self, other: Self) -> Self {
-        self.merge(&other);
+    pub fn parse(&mut self, input: &[TerminalID]) {
+        self.parse_part(input);
+    }
+
+    pub fn parse_part(&mut self, input: &[TerminalID]) {
+        for &token_id in input {
+            self.step(token_id);
+        }
+    }
+
+    pub fn and_step(mut self, token_id: TerminalID) -> Self {
+        self.step(token_id);
         self
     }
 
-    pub fn iter_paths(&self) -> PathsIter<'_> {
-        let mut queue = VecDeque::new();
-        queue.push_back((self, Vec::new()));
-        PathsIter { queue }
+    pub fn and_parse(mut self, input: &[TerminalID]) -> Self {
+        self.parse(input);
+        self
     }
 
-    pub fn flatten(&self) -> Vec<Vec<(ParseStateEdgeContent, LLMTokenInfo)>> {
-        let mut results = Vec::new();
-        let mut queue = VecDeque::new();
-        queue.push_back((self, Vec::new()));
+    pub fn step(&mut self, token_id: TerminalID) {
+        crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
+        self.log_gss("Step-start", token_id);
+        self.cycled_states = ParseState::new();
 
-        while let Some((node, mut path)) = queue.pop_front() {
-            if node.predecessors.is_empty() {
-                path.reverse();
-                results.push(path);
-            } else {
-                for (edge_val, pred_arc) in &node.predecessors {
-                    let mut new_path = path.clone();
-                    new_path.push((edge_val.clone(), node.acc.clone()));
-                    queue.push_back((pred_arc.as_ref(), new_path));
+        let mut todo: Vec<(ParseState, BTreeSet<Arc<GSSNode>>)> = Vec::new();
+        todo.push((ParseState { stack: self.active_state.stack.clone() }, BTreeSet::new()));
+
+        let mut next = ParseState::new();
+        let mut not_found = ParseState::new();
+
+        while let Some((state, visited_on_this_path)) = todo.pop() { 
+            if visited_on_this_path.contains(&state.stack) {
+                crate::debug!(2, "Cycle detected: GSSNode at {:p} encountered again in reduction path while processing token {:?}.", Arc::as_ptr(&state.stack), token_id);
+                print_gss_forest(&[state.stack.clone()], usize::MAX);
+                panic!("Cycle detected: GSSNode at {:p} encountered again in reduction path.", Arc::as_ptr(&state.stack));
+            }
+
+            let mut next_visited_on_this_path = visited_on_this_path; 
+            next_visited_on_this_path.insert(state.stack.clone());
+
+            let stack_arc_for_operations = &state.stack; 
+            for (parent_arc, top_edge_content) in state.stack.pop_iter() { // Renamed top to top_edge_content
+                let current_path_acc = state.stack.acc().clone().intersect(parent_arc.acc().clone());
+                let temp_idk = Arc::new(parent_arc.push(top_edge_content.clone(), current_path_acc.clone())); // Acc for push
+
+                let row = &self.parser.stage_7_table[&top_edge_content.state_id];
+
+                match row.shifts_and_reduces.get(&token_id) {
+                    Some(Stage7ShiftsAndReduces::Shift(to)) => {
+                        crate::debug!(4, "Shift from state {} via token {} to state {}", top_edge_content.state_id.0, token_id.0, to.0);
+                        let new_parse_state = self.push_state(&temp_idk, *to, stack_arc_for_operations.acc().clone());
+                        next.merge(new_parse_state);
+                    }
+
+                    Some(Stage7ShiftsAndReduces::Reduce {
+                             nonterminal_id: nt,
+                             len, ..
+                         }) => {
+                        crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", top_edge_content.state_id.0, token_id.0, nt.0, len);
+                        let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt);
+                        if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
+                           todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
+                        }
+                    }
+
+                    Some(Stage7ShiftsAndReduces::Split { shift, reduces }) => {
+                        crate::debug!(4, "Split from state {} via token {}", top_edge_content.state_id.0, token_id.0);
+                        if let Some(to) = shift {
+                            crate::debug!(4, " Shift from state {} via token {} to state {}", top_edge_content.state_id.0, token_id.0, to.0);
+                            let new_parse_state = self.push_state(&temp_idk, *to, stack_arc_for_operations.acc().clone());
+                            next.merge(new_parse_state);
+                        }
+                        for (len, nts) in reduces {
+                            crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top_edge_content.state_id.0, token_id.0, nts);
+                            for (nt, _prod_ids) in nts {
+                                crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
+                                let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt);
+                                if !s_new_arc.is_empty() {
+                                    todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
+                                }
+                            }
+                        }
+                    }
+
+                    None => {
+                        crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, top_edge_content.state_id.0);
+                        not_found.merge(state.clone());
+                    },
                 }
             }
         }
-        results
-    }
 
-    pub fn flatten_bulk(nodes: &[Arc<Self>]) -> Vec<Vec<(ParseStateEdgeContent, LLMTokenInfo)>> {
-        nodes.iter().flat_map(|node| node.flatten()).collect()
-    }
-
-    // map method is complex with non-generic GSSNode. If needed, it would be specific.
-    // For now, let's assume it's not immediately required for this refactoring.
-}
-
-// Trait implementations
-impl Hash for GSSNode {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.hash_key_cache.hash(state);
-        self.acc.hash(state); // Accumulator should be part of the hash for equality
-    }
-}
-
-impl PartialEq for GSSNode {
-    fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(self, other) || (
-            self.hash_key_cache == other.hash_key_cache && // Structural hash
-            self.acc == other.acc && // Accumulator equality
-            self.predecessors == other.predecessors // Deep predecessor equality
-        )
-    }
-}
-
-impl Eq for GSSNode {}
-
-impl PartialOrd for GSSNode {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if std::ptr::eq(self, other) { return Some(Ordering::Equal); }
-        // Order by hash_key_cache, then acc, then predecessors
-        self.hash_key_cache.partial_cmp(&other.hash_key_cache)
-            .and_then(|ord| if ord == Ordering::Equal { self.acc.partial_cmp(&other.acc) } else { Some(ord) })
-            .and_then(|ord| if ord == Ordering::Equal { self.predecessors.partial_cmp(&other.predecessors) } else { Some(ord) })
-    }
-}
-
-impl Ord for GSSNode {
-    fn cmp(&self, other: &Self) -> Ordering {
-        if std::ptr::eq(self, other) { return Ordering::Equal; }
-        self.hash_key_cache.cmp(&other.hash_key_cache)
-            .then_with(|| self.acc.cmp(&other.acc))
-            .then_with(|| self.predecessors.cmp(&other.predecessors))
-    }
-}
-
-impl Drop for GSSNode {
-    fn drop(&mut self) {
-        // Custom drop logic to break cycles if Arcs are used internally in a complex way.
-        // Standard Arc drop should handle most cases unless there are self-referential Arcs
-        // not managed by the main GSS structure (which shouldn't be the case here).
-        // The current predecessor map uses Arc, so standard drop is likely sufficient.
-        // The previous custom drop logic was to manually traverse and break cycles
-        // if Arc::try_unwrap could be used. This is complex and error-prone.
-        // Relying on Arc's standard drop is safer unless specific cycle issues are proven.
-    }
-}
-
-// Simplified trait for GSS operations
-pub trait GSSTrait { // No longer generic
-    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: LLMTokenInfo) -> GSSNode;
-    // push_to is removed as it's complex with private acc_mut and less idiomatic with Arc.
-    fn pop(&self) -> GSSNode;
-    fn popn(&self, n: usize) -> GSSNode;
-}
-
-impl GSSTrait for GSSNode {
-    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: LLMTokenInfo) -> GSSNode {
-        self.clone().push(edge_value, acc_for_new_node)
-    }
-
-    fn pop(&self) -> GSSNode {
-        GSSNode::pop(self)
-    }
-
-    fn popn(&self, n: usize) -> GSSNode {
-        GSSNode::popn(self, n)
-    }
-}
-
-impl GSSTrait for Arc<GSSNode> {
-    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: LLMTokenInfo) -> GSSNode {
-        GSSNode::new_with_single_predecessor(self.clone(), edge_value, acc_for_new_node)
-    }
-
-    fn pop(&self) -> GSSNode {
-        self.as_ref().pop()
-    }
-
-    fn popn(&self, n: usize) -> GSSNode {
-        self.as_ref().popn(n)
-    }
-}
-
-// Removed GSSTrait for Option<Arc<GSSNode>> and Option<GSSNode> for brevity,
-// can be added back if specific use cases require them.
-
-// Pruning and Transformation
-fn prune_and_transform_recursive(
-    node_arc: &Arc<GSSNode>,
-    closure: &impl Fn(&LLMTokenInfo) -> Option<(LLMTokenInfo, bool)>,
-    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
-) -> Option<Arc<GSSNode>> {
-    let node_ptr = Arc::as_ptr(node_arc);
-    if let Some(cached_result) = memo.get(&node_ptr) {
-        return cached_result.clone();
-    }
-
-    match closure(&node_arc.acc) {
-        None => { // Prune this node
-            memo.insert(node_ptr, None);
-            None
+        self.active_state = next;
+        self.action_not_found_states = not_found; // Retain for potential inspection, though current design drops them.
+        
+        // Simplify the active GSS forest at the end of the step
+        if !self.active_state.stack.is_empty() {
+            Arc::make_mut(&mut self.active_state.stack).simplify();
         }
-        Some((new_acc, continue_recursion)) => {
-            let new_predecessors_set = if continue_recursion {
-                node_arc.predecessors.iter()
-                    .filter_map(|(edge_val, pred_arc_val)| { // Renamed pred_arc
-                        prune_and_transform_recursive(pred_arc_val, closure, memo)
-                            .map(|new_pred_arc| (new_pred_arc, edge_val.clone())) // Renamed new_pred
-                    })
-                    .collect::<NodeSet>() // Explicit type for collect
-            } else { // Don't recurse, keep existing predecessors but point to original Arcs
-                node_arc.predecessors_with_values().into_iter()
-                    .map(|(pred_arc_val, edge_val)| (pred_arc_val.clone(), edge_val.clone())) // Renamed pred_arc
-                    .collect::<NodeSet>() // Explicit type for collect
-            };
 
-            // If all predecessors were pruned, this node might also become effectively empty/pruned
-            // unless it's a root or has special meaning.
-            // However, new_with_predecessors handles empty predecessor_set by creating a default node.
-            // The closure's None for self.acc already handles pruning self.
-            
-            // If new_predecessors_set is empty AND new_acc implies it should be pruned (e.g. active is empty)
-            // this case should be handled by the closure result for the current node_arc.
-            // If new_acc is valid, but all children pruned, we get a leaf node.
-            if new_acc.active.is_empty() && !new_predecessors_set.is_empty() {
-                 // This case implies the closure allowed a node with empty active set.
-                 // This should ideally be caught by the closure itself.
-                 // For safety, if active is empty, we might force prune here unless it's a special case.
-                 // However, the request was to prune if active is empty, handled by closure.
+        self.log_gss("Step-end", token_id);
+        // self.action_not_found_states = ParseState::new(); // Reset if not needed beyond the step
+
+        crate::debug!(4, "----------------------------------------------------------------");
+    }
+
+    pub fn merge_active_states(&mut self) {
+        // No longer strictly necessary due to BTreeMap merge-on-insert, but GSS merge is explicit.
+        // This method could be used if multiple GLRParserStates are combined.
+    }
+
+    pub fn merge_with(&mut self, other: GLRParserState) { // No longer generic
+        assert!(std::ptr::eq(self.parser, other.parser));
+        self.active_state.merge(other.active_state);
+        self.action_not_found_states.merge(other.action_not_found_states);
+        self.cycled_states.merge(other.cycled_states);
+    }
+
+    pub fn is_ok(&self) -> bool {
+        !self.active_state.stack.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ParseStateKey {
+    stack_state_id: StateID,
+}
+
+impl ParseState { // No longer generic
+    pub fn merge(&mut self, other: ParseState) {
+        Arc::make_mut(&mut self.stack).merge(&other.stack);
+    }
+}
+
+pub trait InsertWith<K, V> {
+    fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F);
+}
+
+impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
+    fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F) {
+        match self.entry(k) {
+            std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                let value = occupied.get_mut();
+                combine(value, v);
             }
-
-
-            // Create a new node with the transformed accumulator and new predecessors
-            // GSSNode::new_with_predecessors computes its own acc by union. We want new_acc.
-            let new_node_predecessors_map = process_predecessors(&new_predecessors_set);
-            let transformed_node = GSSNode::new_with_map(new_acc, new_node_predecessors_map);
-            
-            let result_arc = Arc::new(transformed_node);
-            memo.insert(node_ptr, Some(result_arc.clone()));
-            Some(result_arc)
-        }
-    }
-}
-
-
-/// Intersects the `active` and `intersection` fields of all `LLMTokenInfo`
-/// in the GSS with `tokens_to_intersect`. Prunes nodes where `active` becomes empty.
-/// Modifies `root_arc` in place. If the entire GSS is pruned, `root_arc` will point
-/// to a GSSNode where `is_empty()` is true and `acc.active` is empty.
-pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_intersect: &LLMTokenBV) {
-    let closure = |current_acc: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
-        let mut new_acc = current_acc.clone();
-        new_acc.active &= tokens_to_intersect;
-        new_acc.intersection &= tokens_to_intersect;
-
-        if new_acc.active.is_empty() {
-            None // Prune this node
-        } else {
-            Some((new_acc, true)) // Keep node, continue recursion
-        }
-    };
-
-    let mut memo = HashMap::new();
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
-        *root_arc = new_root;
-    } else {
-        // The entire GSS was pruned, set root_arc to an empty GSSNode
-        let mut empty_acc = LLMTokenInfo::default();
-        empty_acc.active = LLMTokenBV::new(); // Ensure active is empty
-        *root_arc = Arc::new(GSSNode::new(empty_acc));
-    }
-}
-
-
-pub fn reset_tokens(root_arc: &mut Arc<GSSNode>, tokens_to_reset: &LLMTokenBV) {
-    let closure = |current_acc: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
-        let mut new_acc = current_acc.clone();
-        new_acc.active = tokens_to_reset.clone();
-        new_acc.intersection = tokens_to_reset.clone();
-        if new_acc.active.is_empty() {
-            None // Prune this node
-        } else {
-            Some((new_acc, true)) // Keep node, continue recursion
-        }
-    };
-    let mut memo = HashMap::new();
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
-        *root_arc = new_root;
-    } else {
-        // The entire GSS was pruned, set root_arc to an empty GSSNode
-        let mut empty_acc = LLMTokenInfo::default();
-        empty_acc.active = LLMTokenBV::new(); // Ensure active is empty
-        *root_arc = Arc::new(GSSNode::new(empty_acc));
-    }
-}
-
-pub fn find_longest_path(
-    root_node: &GSSNode
-) -> Option<Vec<(ParseStateEdgeContent, Arc<GSSNode>)>> {
-    if root_node.predecessors.is_empty() {
-        return None;
-    }
-
-    fn find_longest_recursive(
-        node_arc: &Arc<GSSNode>,
-        memo: &mut HashMap<*const GSSNode, Vec<(ParseStateEdgeContent, Arc<GSSNode>)>>,
-        visited: &mut HashSet<*const GSSNode>,
-    ) -> Vec<(ParseStateEdgeContent, Arc<GSSNode>)> {
-        let node_ptr = Arc::as_ptr(node_arc);
-
-        if let Some(cached) = memo.get(&node_ptr) {
-            return cached.clone();
-        }
-        if !visited.insert(node_ptr) { // Cycle detected
-            return Vec::new();
-        }
-
-        if node_arc.predecessors.is_empty() { // Base case: leaf node in recursion
-            visited.remove(&node_ptr);
-            memo.insert(node_ptr, Vec::new());
-            return Vec::new();
-        }
-
-        let mut longest = Vec::new();
-        for (edge_val, pred_arc_val) in &node_arc.predecessors { // Renamed pred_arc
-            let mut path = find_longest_recursive(pred_arc_val, memo, visited);
-            path.push((edge_val.clone(), node_arc.clone())); // Path stores (edge, child_node_it_points_to)
-            if path.len() > longest.len() {
-                longest = path;
+            std::collections::btree_map::Entry::Vacant(vacant) => {
+                vacant.insert(v);
             }
         }
-
-        memo.insert(node_ptr, longest.clone());
-        visited.remove(&node_ptr);
-        longest
-    }
-
-    let mut memo = HashMap::new();
-    let mut longest_overall_path = Vec::new(); // Initialize with an empty path
-
-    // The root_node itself is the start of paths, its predecessors are the first step.
-    // The path should be from a leaf up to the direct children of root_node.
-    for (edge_val, pred_arc) in root_node.predecessors() {
-        let mut visited_for_this_branch = HashSet::new();
-         // Path from a leaf up to pred_arc
-        let mut path_to_pred = find_longest_recursive(pred_arc, &mut memo, &mut visited_for_this_branch);
-        path_to_pred.push((edge_val.clone(), Arc::new(root_node.clone()))); // Add the step from pred_arc to root_node
-
-        if path_to_pred.len() > longest_overall_path.len() {
-            longest_overall_path = path_to_pred;
-        }
-    }
-    if longest_overall_path.is_empty() { None } else { Some(longest_overall_path) }
-}
-
-impl GSSNode {
-    pub fn prune_and_transform_recursive(
-        &mut self,
-        closure: &impl Fn(&LLMTokenInfo) -> Option<(LLMTokenInfo, bool)>,
-        memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
-    ) {
-        let node_arc = Arc::new(self.clone());
-        if let Some(new_node_arc) = prune_and_transform_recursive(&node_arc, closure, memo) {
-            *self = new_node_arc.as_ref().clone();
-        } else {
-            *self = GSSNode::new(self.acc.clone());
-        }
-    }
-
-    pub fn intersect_tokens_and_prune_arc(
-        &mut self,
-        llm_tokens: &LLMTokenBV,
-    ) {
-        let mut node_arc = Arc::new(self.clone());
-        intersect_tokens_and_prune_arc(&mut node_arc, llm_tokens);
-        *self = node_arc.as_ref().clone();
-    }
-
-    pub fn reset_tokens(&mut self, tokens_to_reset: &LLMTokenBV) {
-        let mut node_arc = Arc::new(self.clone());
-        reset_tokens(&mut node_arc, tokens_to_reset);
-        *self = node_arc.as_ref().clone();
-    }
-
-    pub fn find_longest_path(&self) -> Option<Vec<(ParseStateEdgeContent, Arc<GSSNode>)>> {
-        find_longest_path(&self)
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct GSSStats {
-    pub num_roots: usize,
-    pub unique_nodes: usize,
-    pub max_depth: usize,
-    pub average_depth: f64,
-    pub merge_points: usize,
-    pub max_predecessors_with_values: usize,
-    pub average_predecessors_with_values: f64,
-}
-
-pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats { // Takes slice of references
-    let mut stats = GSSStats::default();
-    stats.num_roots = roots.len();
-
-    let mut visited_pointers = HashSet::new(); // To track unique nodes by pointer
-    let mut processed_pointers = HashSet::new(); // For BFS traversal
-    let mut queue = VecDeque::new();
-    let mut total_depth = 0u64;
-    let mut total_preds = 0u64;
-
-    for root_node_ref in roots { // Renamed root to root_node_ref
-        let node_ptr = *root_node_ref as *const GSSNode;
-        if visited_pointers.insert(node_ptr) { // Check against visited_pointers for uniqueness
-            queue.push_back((*root_node_ref, 0)); // Push the reference and depth
-        }
-    }
-    stats.unique_nodes = visited_pointers.len(); // Initial unique nodes are the unique roots
-
-    // Reset visited_pointers for BFS traversal if we want to count all reachable nodes
-    // Or, ensure the queue only gets truly unique items.
-    // The current logic for unique_nodes might be off if roots share children.
-    // Let's refine:
-    visited_pointers.clear(); // Clear for BFS count
-    stats.unique_nodes = 0; // Reset unique_nodes for BFS count
-
-    let mut bfs_queue = VecDeque::new();
-    for root_node_ref in roots {
-        let node_ptr = *root_node_ref as *const GSSNode;
-        if !processed_pointers.contains(&node_ptr) { // Ensure each root starts BFS once
-             bfs_queue.push_back((*root_node_ref, 0));
-             processed_pointers.insert(node_ptr); // Mark as added to queue
-        }
-    }
-    processed_pointers.clear(); // Clear for actual processing check
-
-    while let Some((node, depth)) = bfs_queue.pop_front() {
-        let node_ptr = node as *const GSSNode;
-        if !visited_pointers.insert(node_ptr) { // If already visited and processed by BFS
-            continue;
-        }
-
-        stats.unique_nodes += 1;
-        stats.max_depth = stats.max_depth.max(depth);
-        total_depth += depth as u64;
-
-        let num_preds = node.predecessors.len();
-        stats.max_predecessors_with_values = stats.max_predecessors_with_values.max(num_preds);
-        total_preds += num_preds as u64;
-
-        let unique_pred_arcs: HashSet<_> = node.predecessors.values()
-            .map(|arc_val| Arc::as_ptr(arc_val)) // Renamed arc
-            .collect();
-        if unique_pred_arcs.len() > 1 && num_preds > 1 { // A merge point has multiple distinct predecessor nodes
-            stats.merge_points += 1;
-        }
-
-        for (_, pred_arc_val) in &node.predecessors { // Renamed pred_arc
-            let pred_ptr = pred_arc_val.as_ref() as *const GSSNode;
-             // Add to queue if not yet added for BFS processing from any path
-            if !processed_pointers.contains(&pred_ptr) {
-                bfs_queue.push_back((pred_arc_val.as_ref(), depth + 1));
-                processed_pointers.insert(pred_ptr);
-            }
-        }
-    }
-
-
-    if stats.unique_nodes > 0 {
-        stats.average_depth = total_depth as f64 / stats.unique_nodes as f64;
-        stats.average_predecessors_with_values = total_preds as f64 / stats.unique_nodes as f64;
-    }
-    stats
-}
-
-
-pub fn print_gss_forest(
-    roots: &[Arc<GSSNode>], 
-    max_nodes: usize
-) -> String {
-    fn print_node_recursive( // Renamed print_node to print_node_recursive
-        node_arc: &Arc<GSSNode>,
-        visited: &mut HashSet<*const GSSNode>,
-        indent: usize,
-        node_count: &mut usize,
-        max_nodes: usize,
-        output: &mut String,
-    ) -> Result<(), std::fmt::Error> {
-        if *node_count >= max_nodes {
-            return Ok(());
-        }
-
-        let node_ptr = Arc::as_ptr(node_arc);
-        let prefix = format!("{:indent$}", "", indent = indent * 2);
-
-        if visited.contains(&node_ptr) {
-            writeln!(output, "{}- Node {:p} (Visited)", prefix, node_ptr)?;
-            return Ok(());
-        }
-
-        visited.insert(node_ptr);
-        *node_count += 1;
-
-        writeln!(output, "{}- Node {:p}: (Acc: {:?})", prefix, node_ptr, node_arc.acc)?;
-
-        if !node_arc.predecessors.is_empty() {
-            writeln!(output, "{}  Predecessors:", prefix)?;
-            for (edge_val, pred_arc_val) in &node_arc.predecessors { // Renamed pred_arc
-                writeln!(output, "{}    - Edge: {:?} -> {:p}", prefix, edge_val, Arc::as_ptr(pred_arc_val))?;
-                if *node_count < max_nodes {
-                    print_node_recursive(pred_arc_val, visited, indent + 2, node_count, max_nodes, output)?;
-                }
-                if *node_count >= max_nodes {
-                    return Ok(());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    let mut visited_nodes = HashSet::new(); // Renamed visited
-    let mut count = 0; // Renamed node_count
-    let mut out_str = String::new(); // Renamed output
-
-    if roots.is_empty() {
-        return "GSS Forest: (No roots)".to_string();
-    }
-
-    writeln!(&mut out_str, "GSS Forest (Max Nodes: {}):", max_nodes).unwrap();
-
-    for (i, root_arc_val) in roots.iter().enumerate() { // Renamed root
-        writeln!(&mut out_str, "Root {}: {:p}", i, Arc::as_ptr(root_arc_val)).unwrap();
-        if print_node_recursive(root_arc_val, &mut visited_nodes, 1, &mut count, max_nodes, &mut out_str).is_err() {
-            return format!("Error writing GSS structure");
-        }
-        if count >= max_nodes && i < roots.len() - 1 {
-            writeln!(&mut out_str, "... (Truncated)").unwrap();
-            break;
-        }
-    }
-
-    out_str
-}
-
-// Simplification methods
-// This is the main simplification routine. It uses a cache for structural sharing.
-fn simplify_node_recursive(
-    node_arc: &Arc<GSSNode>,
-    memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>, // Memoizes input Arc raw pointer to simplified Arc
-    cache: &mut NodeCache, // Cache for structural sharing: NodeMap -> Arc<GSSNode>
-) -> Arc<GSSNode> {
-    let node_ptr = Arc::as_ptr(node_arc);
-    if let Some(simplified_arc) = memo.get(&node_ptr) { // Renamed simplified
-        return simplified_arc.clone();
-    }
-
-    // Recursively simplify predecessors
-    let simplified_predecessors_set: NodeSet = node_arc.predecessors.iter()
-        .map(|(edge_val, pred_arc_val)| { // Renamed pred_arc
-            let simplified_pred_arc = simplify_node_recursive(pred_arc_val, memo, cache); // Renamed simplified_pred
-            (simplified_pred_arc, edge_val.clone())
-        })
-        .collect();
-    
-    let simplified_predecessors_map = process_predecessors(&simplified_predecessors_set);
-
-    // Get a structurally canonical Arc from the cache, or create and insert it.
-    // The acc of this cached_structural_node is the union of its predecessors' accs.
-    let cached_structural_node = cache.entry(simplified_predecessors_map.clone())
-        .or_insert_with(|| {
-            let unioned_acc = if simplified_predecessors_map.is_empty() {
-                LLMTokenInfo::default()
-            } else {
-                let mut iter = simplified_predecessors_map.values();
-                let mut acc = iter.next().unwrap().acc.clone();
-                for p_arc in iter { // Renamed p
-                    acc.union_assign(p_arc.acc.clone());
-                }
-                acc
-            };
-            Arc::new(GSSNode::new_with_map(unioned_acc, simplified_predecessors_map))
-        });
-
-    // The final simplified node has the structure of cached_structural_node,
-    // but its accumulator is the one from the original node_arc.
-    let mut final_node_data = (**cached_structural_node).clone(); // Clone GSSNode data
-    final_node_data.acc = node_arc.acc.clone(); // Set the specific acc from original node
-    // Recompute hash key for final_node_data as its acc might differ from cached_structural_node's acc
-    final_node_data.hash_key_cache = compute_hash_key(&final_node_data.predecessors);
-
-
-    let result_arc = Arc::new(final_node_data);
-    memo.insert(node_ptr, result_arc.clone());
-    result_arc
-}
-
-
-impl GSSNode {
-    pub fn simplify(&mut self) {
-        // Create a temporary Arc to self to use with simplify_node_recursive
-        // This requires `self` to be cloneable and then update `self` with the result.
-        let temp_arc = Arc::new(self.clone());
-        let mut memo = HashMap::new();
-        let mut cache = NodeCache::new(); // Cache for structural sharing
-        let simplified_arc = simplify_node_recursive(&temp_arc, &mut memo, &mut cache);
-        
-        // Update self with the simplified version's data
-        // This is safe because simplify_node_recursive returns a potentially new Arc.
-        // We take ownership of the data from the simplified Arc.
-        if Arc::ptr_eq(&temp_arc, &simplified_arc) {
-            // No change, or already canonical.
-            // However, predecessors might have changed, so self might need update.
-            // The most robust way is to replace self's content.
-        }
-        // Replace self's content with the (potentially) new simplified content
-        let new_data = Arc::try_unwrap(simplified_arc).unwrap_or_else(|arc| (*arc).clone());
-        *self = new_data;
-
-    }
-
-    // simplify_recursive is effectively what simplify_node_recursive does.
-    // pub fn simplify_recursive(
-    //     this_arc: &mut Arc<Self>,
-    //     memo: &mut HashMap<*const Self, Arc<Self>>,
-    //     cache: &mut NodeCache,
-    // ) {
-    //     *this_arc = simplify_node_recursive(this_arc, memo, cache);
-    // }
-
-    pub fn simplify_together(nodes: &mut [&mut Arc<Self>]) {
-        let mut memo = HashMap::new(); // Memoization for input node pointers
-        let mut cache = NodeCache::new(); // Cache for structural sharing of predecessor maps
-        for node_arc_ref_mut in nodes { // Renamed node_arc
-            // We need to pass a reference to the Arc to simplify_node_recursive
-            // and then update the Arc in the slice.
-            let current_arc = (*node_arc_ref_mut).clone(); // Clone the Arc to pass by value/ref
-            let simplified_arc = simplify_node_recursive(&current_arc, &mut memo, &mut cache);
-            **node_arc_ref_mut = simplified_arc; // Update the Arc in the slice
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::glr::parser::ParseStateEdgeContent;
-    use crate::glr::table::StateID;
-
-    // MockPathAccumulator is now LLMTokenInfo, use that directly or a simplified version if needed for tests.
-    // For simplicity, let's use LLMTokenInfo with basic active/intersection sets.
-
-    type TestGSSNode = GSSNode; // GSSNode is now concrete
-
-    fn mock_llm_token_info(active_val: usize, intersection_val: usize) -> LLMTokenInfo {
-        let mut active = LLMTokenBV::new();
-        active.insert(active_val);
-        let mut intersection = LLMTokenBV::new();
-        intersection.insert(intersection_val);
-        LLMTokenInfo { active, intersection }
-    }
-    
-    fn mock_edge(id: usize) -> ParseStateEdgeContent {
-        ParseStateEdgeContent { state_id: StateID(id) }
-    }
-
-
-    #[test]
-    fn test_gss_simplification_basic() {
-        let acc_base = mock_llm_token_info(0,0);
-        let acc_other = mock_llm_token_info(1,1);
-        let acc_shared_pred_structure = acc_base.clone().union(acc_other.clone());
-
-
-        // Node N4 (leaf) - will be shared by D1 and D2 after simplification of D1/D2's predecessors
-        // D1 -> 40 -> N4(acc_base)
-        // D2 -> 40 -> N4(acc_other)
-        // After simplification of D1's predecessors, N4 will be canonical.
-        // When D2's predecessors are simplified, it should reuse the canonical N4 structure.
-
-        let n4_v1 = Arc::new(TestGSSNode::new(acc_base.clone()));
-        let n4_v2 = Arc::new(TestGSSNode::new(acc_other.clone()));
-
-
-        // D1: C1 -> 30 -> D1(acc_base_pred_d1) -> 40 -> N4(acc_base)
-        // acc_base_pred_d1 is acc_base
-        let d1_orig = Arc::new(TestGSSNode::new_with_single_predecessor(
-            n4_v1.clone(), mock_edge(40), acc_base.clone()
-        ));
-
-        // D2: (no C layer) -> 10 -> D2(acc_other_pred_d2) -> 40 -> N4(acc_other)
-        // acc_other_pred_d2 is acc_other
-         let d2_orig = Arc::new(TestGSSNode::new_with_single_predecessor(
-            n4_v2.clone(), mock_edge(40), acc_other.clone()
-        ));
-
-        // C1: B1 -> 20 -> C1(acc_base_pred_c1) -> 30 -> D1
-        // acc_base_pred_c1 is acc_base
-        let c1_orig = Arc::new(TestGSSNode::new_with_single_predecessor(
-            d1_orig.clone(), mock_edge(30), acc_base.clone()
-        ));
-
-        // B1: A1 -> 10 -> B1(acc_base_pred_b1) -> 20 -> C1
-        // acc_base_pred_b1 is acc_base
-        let b1_orig = Arc::new(TestGSSNode::new_with_single_predecessor(
-            c1_orig.clone(), mock_edge(20), acc_base.clone()
-        ));
-        
-        // A1: (root)
-        // preds: B1 (via edge 10), D2 (via edge 10)
-        // acc of A1 should be union of B1.acc and D2.acc if they were direct children.
-        // Here, A1 is the root, its acc is what it is.
-        // The structure is A1 --10--> B1 ... and A1 --10--> D2 ...
-        // This means edge 10 from A1 points to two different conceptual children.
-        // Simplification should merge these if B1 and D2 become structurally equivalent *after their own acc*.
-        
-        let mut a1_preds_set = NodeSet::new();
-        a1_preds_set.insert((b1_orig.clone(), mock_edge(10)));
-        a1_preds_set.insert((d2_orig.clone(), mock_edge(10)));
-        
-        // Acc for A1 is the union of paths leading to it.
-        // Let's assume A1's acc is a union of acc_base and acc_other for this test.
-        let acc_a1 = acc_base.clone().union(acc_other.clone());
-        let a1_orig = Arc::new(TestGSSNode::new_with_map(acc_a1.clone(), process_predecessors(&a1_preds_set)));
-
-
-        let mut roots_to_simplify = vec![a1_orig.clone()];
-        let mut refs_to_simplify: Vec<&mut Arc<TestGSSNode>> = roots_to_simplify.iter_mut().collect();
-        TestGSSNode::simplify_together(&mut refs_to_simplify);
-        
-        let s_a1 = refs_to_simplify[0].clone();
-
-        // --- Verification ---
-        // A1 should have one predecessor for edge 10, which is a merged node.
-        assert_eq!(s_a1.predecessors.len(), 1, "A1 should have 1 predecessor map entry after merge");
-        let (edge10, merged_b1_d2_node) = s_a1.predecessors.iter().next().unwrap();
-        assert_eq!(edge10.state_id.0, 10, "Edge from A1 should be 10");
-
-        // Accumulator of A1 should remain as it was.
-        assert_eq!(s_a1.acc(), &acc_a1, "A1 accumulator mismatch");
-
-        // The merged_b1_d2_node is the result of B1 and D2 paths.
-        // Its acc should be the union of B1's original acc and D2's original acc.
-        // B1's original acc was acc_base. D2's original acc was acc_other.
-        let expected_merged_acc = acc_base.clone().union(acc_other.clone());
-        assert_eq!(merged_b1_d2_node.acc(), &expected_merged_acc, "Merged B1/D2 node accumulator mismatch");
-
-        // Structure of merged_b1_d2_node:
-        // It should have two distinct predecessor edges:
-        // - Edge 20 (from original B1 path) leading to a simplified C1.
-        // - Edge 40 (from original D2 path) leading to a simplified N4 (shared).
-        assert_eq!(merged_b1_d2_node.predecessors.len(), 2, "Merged B1/D2 node should have 2 predecessor map entries");
-
-        let s_c1_via_b1 = merged_b1_d2_node.predecessors.get(&mock_edge(20)).expect("Edge 20 not found");
-        let s_n4_via_d2 = merged_b1_d2_node.predecessors.get(&mock_edge(40)).expect("Edge 40 not found");
-
-        // Check acc of s_c1_via_b1 (this is the simplified C1)
-        // Original C1's acc was acc_base.
-        assert_eq!(s_c1_via_b1.acc(), &acc_base, "Simplified C1 accumulator mismatch");
-        // Structure of s_c1_via_b1: edge 30 to simplified D1
-        assert_eq!(s_c1_via_b1.predecessors.len(), 1);
-        let (_edge30, s_d1_via_c1) = s_c1_via_b1.predecessors.iter().next().unwrap();
-        assert_eq!(s_d1_via_c1.acc(), &acc_base, "Simplified D1 accumulator mismatch");
-        // Structure of s_d1_via_c1: edge 40 to simplified N4 (v1)
-        assert_eq!(s_d1_via_c1.predecessors.len(), 1);
-        let (_edge40_d1, s_n4_v1_via_d1) = s_d1_via_c1.predecessors.iter().next().unwrap();
-        assert_eq!(s_n4_v1_via_d1.acc(), &acc_base, "Simplified N4_v1 accumulator mismatch");
-        assert!(s_n4_v1_via_d1.predecessors.is_empty(), "Simplified N4_v1 should be a leaf");
-
-
-        // Check acc of s_n4_via_d2 (this is the simplified N4 from D2's path)
-        // Original N4 from D2's path (n4_v2) had acc_other.
-        assert_eq!(s_n4_via_d2.acc(), &acc_other, "Simplified N4_v2 accumulator mismatch");
-        assert!(s_n4_via_d2.predecessors.is_empty(), "Simplified N4_v2 should be a leaf");
-        
-        // Crucially, s_n4_v1_via_d1 and s_n4_via_d2 should point to different Arc<GSSNode> instances
-        // if their acc differs, even if their predecessor structure (empty) is the same.
-        // The *structural* node from cache might be shared, but then cloned and acc set.
-        // Here, their accs (acc_base vs acc_other) are different, so they must be different Arcs.
-        assert!(!Arc::ptr_eq(s_n4_v1_via_d1, s_n4_via_d2), "N4 nodes from different paths with different accs should not be the same Arc instance");
-
-        // Count total unique nodes in the simplified graph starting from s_a1
-        let mut all_nodes = HashSet::new();
-        fn collect_all_nodes(node: &Arc<TestGSSNode>, set: &mut HashSet<*const TestGSSNode>) {
-            if set.insert(Arc::as_ptr(node)) {
-                for pred_arc in node.predecessors.values() {
-                    collect_all_nodes(pred_arc, set);
-                }
-            }
-        }
-        collect_all_nodes(&s_a1, &mut all_nodes);
-        // Expected nodes: A1, merged_B1_D2, C1_from_B1, D1_from_C1, N4_from_D1(acc_base), N4_from_D2(acc_other)
-        // Total = 6 nodes
-        assert_eq!(all_nodes.len(), 6, "Incorrect number of unique nodes in simplified graph. Actual: {:?}", all_nodes.len());
     }
 }
