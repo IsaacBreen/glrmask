@@ -991,7 +991,7 @@ impl<'a> GrammarConstraintState<'a> {
             |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
                 let mut glr_s = glr_s.clone();
                 
-                intersect_tokens_and_prune_arc(&mut glr_s.active_state.stack, &Some(edge_llm_tokens_bv.clone()));
+                intersect_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv);
 
                 if let Some(gtid) = grammar_token_opt {
                     glr_s.step(*gtid);

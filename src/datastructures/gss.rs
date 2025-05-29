@@ -7,7 +7,7 @@ use std::collections::hash_map::DefaultHasher;
 use deterministic_hash::DeterministicHasher;
 
 use crate::glr::parser::ParseStateEdgeContent;
-use crate::constraint::LLMTokenInfo;
+use crate::constraint::{LLMTokenBV, LLMTokenInfo};
 
 
 // Type aliases for cleaner signatures, now concrete
@@ -443,10 +443,10 @@ fn prune_and_transform_recursive(
 }
 
 
-pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_intersect: &LLMTokenInfo) {
+pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_intersect: &LLMTokenBV) {
     let closure = |current_acc: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
         let mut new_acc = current_acc.clone();
-        // If unset, initialize it to
+
 
         if new_acc.as_ref().is_none_or(|bv| bv.is_empty()) {
             None // Prune this node
@@ -563,10 +563,10 @@ impl GSSNode {
 
     pub fn intersect_tokens_and_prune_arc(
         &mut self,
-        llm_tokens: &LLMTokenInfo,
+        llm_tokens: &LLMTokenBV,
     ) {
         let mut node_arc = Arc::new(self.clone());
-        intersect_tokens_and_prune_arc(&mut node_arc, llm_tokens);
+        intersect_tokens_and_prune_arc(&mut node_arc, &llm_tokens);
         *self = node_arc.as_ref().clone();
     }
 
