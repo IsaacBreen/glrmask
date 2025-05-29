@@ -889,9 +889,17 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let tokenizer_vocab_tree = VocabPrefixTree::build(&vocab_tokens_for_tree);
 
     // The full text to tokenize.
-    let full_text_to_tokenize = "from typing import Any";
+    // let full_text_to_tokenize = "from typing import Any";
     // let full_text_to_tokenize = "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((";
     // let full_text_to_tokenize = "a";
+    let example_code_path = "src/example_code.py";
+    let full_text_to_tokenize = match fs::read_to_string(example_code_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read example code file '{}': {}", example_code_path, e);
+            return Err(Box::new(e)); // Or handle as appropriate for your test
+        }
+    };
 
     // Tokenize the full_text_to_tokenize using the VocabPrefixTree
     let mut test_token_sequence_ids = Vec::new();
