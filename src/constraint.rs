@@ -467,9 +467,18 @@ impl<'r> Precomputer<'r> {
                 let matches_here: BTreeSet<_> = exec_result.matches.iter().map(|m| GrammarTokenID(m.id)).collect();
                 let possible_new_matches = &matches_possible_from_tokenizer_state - &matches_here;
                 if !possible_new_matches.is_empty() {
-                    let next_results = self.possible_matches(child_vocab_arc, TokenizerStateID(final_state_val));
-                    for (token, bv) in next_results {
+                    // Possible matches from the child vocab node (considering longer LLM tokens)
+                    let longer_token_results = self.possible_matches(child_vocab_arc, TokenizerStateID(final_state_val));
+                    for (token, bv) in longer_token_results {
                         *result_map.entry(token).or_insert_with(LLMTokenBV::new) |= bv;
+                    }
+                    // Possible matches from the root vocab node (considering the LLM token that this vocab node represents)
+                    // If a given grammar token matches for any future LLM tokens, then the grammar token can match from the LLM token represented by *this* vocab node as well.
+                    let new_token_results = self.possible_matches(&self.vocab.root, TokenizerStateID(final_state_val));
+                    for (token, bv) in new_token_results {
+                        if !bv.is_empty() {
+                            result_map.entry(token).or_insert_with(LLMTokenBV::new).set(child_vocab_arc.token_id(), true);
+                        }
                     }
                 }
             }
