@@ -1018,11 +1018,10 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     // Ensure the parse state after stepping the constraint with all LLM tokens and committing an LLM token is the same as the parse state after stepping the parser itself tokens emitted by the tokenizer for that same LLM token.
     // In general, this should be true if all LLM tokens cleanly match grammar tokens (or, equivalently, if the only non-empty entry in the precompute tree is under the initial tokenizer state).
-    let llm_tokens = vec![b"from".to_vec()];
+    let llm_tokens: Vec<&[u8]> = vec![b"from", b" typing"];
     let grammar_tokenss = vec![vec!["\"from\""], vec!["NAME[0]"]];
-    let llm_token_ids = llm_tokens.iter().map(|llm_token| llm_token_map.get_by_left(llm_token).unwrap()).collect::<Vec<_>>();
+    let llm_token_ids = llm_tokens.iter().map(|llm_token| llm_token_map.get_by_left(*llm_token).unwrap()).collect::<Vec<_>>();
     let mut constraint_state = grammar_constraint.init();
-    dbg!(&constraint_state.parent.parser.terminal_map);
     let grammar_token_idss = grammar_tokenss.iter().map(|grammar_token_ids| grammar_token_ids.iter().map(|token| constraint_state.parent.parser.terminal_map.get_by_left(&Terminal(token.to_string())).unwrap()).collect::<Vec<_>>()).collect::<Vec<_>>();
 
     for llm_token_id in llm_token_ids {
