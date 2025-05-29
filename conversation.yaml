@@ -1096,11 +1096,12 @@ local_system:
 
                   let mut possible_matches = BTreeMap::new();
                   if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
-                      possible_matches = self.possible_matches(&self.parent.tokenizer, final_tokenizer_s_id_for_llm_token_segment);
+                      possible_matches = self.parent.possible_matches[&TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment)].clone();
                   }
 
                   for match_info in &exec_result.matches {
                       let mut cloned_glr_s = glr_s_at_offset.clone();
+                      cloned_glr_s.active_state.stack.intersect_tokens_and_prune_arc(&possible_matches[&TerminalID(match_info.id)]);
                       cloned_glr_s.step(TerminalID(match_info.id));
 
                       if cloned_glr_s.is_ok() && !cloned_glr_s.active_state.stack.is_empty() {
@@ -2255,11 +2256,12 @@ local_system:
 
                   let mut possible_matches = BTreeMap::new();
                   if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
-                      possible_matches = self.possible_matches(&self.parent.tokenizer, final_tokenizer_s_id_for_llm_token_segment);
+                      possible_matches = self.parent.possible_matches[&TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment)].clone();
                   }
 
                   for match_info in &exec_result.matches {
                       let mut cloned_glr_s = glr_s_at_offset.clone();
+                      cloned_glr_s.active_state.stack.intersect_tokens_and_prune_arc(&possible_matches[&TerminalID(match_info.id)]);
                       cloned_glr_s.step(TerminalID(match_info.id));
 
                       if cloned_glr_s.is_ok() && !cloned_glr_s.active_state.stack.is_empty() {
@@ -2321,7 +2323,7 @@ local_system:
               &self.state
           }
       }
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
 system:
   message: |2
 
@@ -2337,7 +2339,6 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - copy-all/paste
     - copy-one/paste
   code_completion_model:
     - gemini/gemini-2.5-flash-preview-05-20
@@ -3440,11 +3441,12 @@ messages:
 
                   let mut possible_matches = BTreeMap::new();
                   if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
-                      possible_matches = self.possible_matches(&self.parent.tokenizer, final_tokenizer_s_id_for_llm_token_segment);
+                      possible_matches = self.parent.possible_matches[&TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment)].clone();
                   }
 
                   for match_info in &exec_result.matches {
                       let mut cloned_glr_s = glr_s_at_offset.clone();
+                      cloned_glr_s.active_state.stack.intersect_tokens_and_prune_arc(&possible_matches[&TerminalID(match_info.id)]);
                       cloned_glr_s.step(TerminalID(match_info.id));
 
                       if cloned_glr_s.is_ok() && !cloned_glr_s.active_state.stack.is_empty() {
@@ -3513,5 +3515,178 @@ messages:
   - user: |-
       Modify this to initialize `possible_matches` in the grammar constraint properly. Its value should be equivalent to calling `possible_matches` from the root vocab node for a given tokenizer state ID.
       However, unlike in the precomputer where `possible_matches` is calculated dynamically where needed, in the grammar constraint it must be computed fully ahead of time for all tokenizer states (but only the root vocab node).
+    metadata:
+  - assistant: |-
+      Okay, I will provide instructions to initialize the `possible_matches` field in the `GrammarConstraint` struct. This involves computing it upfront for all tokenizer states, using the root of the vocabulary prefix tree.
+
+      Here are the step-by-step instructions:
+
+      1.  **Define a new helper static method `compute_possible_matches_for_vocab_node` inside `impl GrammarConstraint`**.
+          This method will be responsible for recursively computing the possible LLM tokens for each grammar token, given a vocabulary node and a tokenizer state. It will use a cache to store intermediate results.
+
+          Add the following method to the `impl GrammarConstraint { ... }` block. It's a private helper, so it doesn't need to be in `pub(crate)` or `pub`.
+
+          ```rust
+          fn compute_possible_matches_for_vocab_node(
+              tokenizer: &Regex,
+              vocab_node: &VocabPrefixTreeNode,
+              tokenizer_state_id: TokenizerStateID,
+              cache: &mut HashMap<(*const VocabPrefixTreeNode, TokenizerStateID), BTreeMap<GrammarTokenID, LLMTokenBV>>,
+          ) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
+              let cache_key = (vocab_node as *const VocabPrefixTreeNode, tokenizer_state_id);
+              if let Some(cached_result) = cache.get(&cache_key) {
+                  return cached_result.clone();
+              }
+
+              let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
+
+              for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
+                  let child_vocab_node_ref = &**child_vocab_arc; // Get &VocabPrefixTreeNode
+                  let exec_result = tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
+
+                  for token_match in &exec_result.matches {
+                      let grammar_token_id = GrammarTokenID(token_match.id);
+                      // LLM tokens reachable under child_vocab_node_ref are those that start with segment_bytes
+                      let applicable_tokens = child_vocab_node_ref.reachable_token_ids();
+                      *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::new) |= applicable_tokens;
+                  }
+
+                  if let Some(final_state_val) = exec_result.end_state {
+                      let final_tokenizer_state_id = TokenizerStateID(final_state_val);
+                      
+                      let matches_possible_from_new_tokenizer_state: BTreeSet<_> = tokenizer
+                          .tokens_accessible_from_state(final_tokenizer_state_id)
+                          .into_iter()
+                          .map(GrammarTokenID) // Ensure comparison is between GrammarTokenID
+                          .collect();
+
+                      let matches_from_current_segment: BTreeSet<_> = exec_result
+                          .matches
+                          .iter()
+                          .map(|m| GrammarTokenID(m.id))
+                          .collect();
+                      
+                      let new_grammar_tokens_to_look_for = &matches_possible_from_new_tokenizer_state - &matches_from_current_segment;
+
+                      if !new_grammar_tokens_to_look_for.is_empty() {
+                          let next_results = Self::compute_possible_matches_for_vocab_node(
+                              tokenizer,
+                              child_vocab_node_ref, // Recurse with the child node
+                              final_tokenizer_state_id,
+                              cache,
+                          );
+                          for (token, bv) in next_results {
+                              *result_map.entry(token).or_insert_with(LLMTokenBV::new) |= bv;
+                          }
+                      }
+                  }
+              }
+              cache.insert(cache_key, result_map.clone());
+              result_map
+          }
+          ```
+
+      2.  **Modify the `GrammarConstraint::new` constructor** to compute and store `possible_matches`.
+
+          Locate the `pub fn new(...) -> Self { ... }` method.
+          You will need to:
+          *   Build a `VocabPrefixTree` using the `internal_llm_token_map_for_precompute`. This map contains tokens with internal IDs, which is what `LLMTokenBV` in `possible_matches` should refer to.
+          *   Initialize a cache for the `compute_possible_matches_for_vocab_node` function.
+          *   Iterate through all possible `TokenizerStateID`s. For each state, call `compute_possible_matches_for_vocab_node` with the root of the `VocabPrefixTree` and the current tokenizer state.
+          *   Store these results in a new `BTreeMap` that will be assigned to the `possible_matches` field of the `GrammarConstraint` instance.
+
+          Make the following changes within the `GrammarConstraint::new` method:
+
+          After this line:
+          ```rust
+                  if let Some(internal_id_val) = original_to_internal_id_bimap.get_by_left(&original_id.0) {
+                      internal_llm_token_map_for_precompute.insert(bytes.clone(), LLMTokenID(*internal_id_val));
+                  }
+              }
+          ```
+          Add the following code to build the vocabulary and compute `possible_matches`:
+          ```rust
+              // Build VocabPrefixTree for internal LLM tokens (needed for possible_matches computation)
+              let internal_tokens_for_vocab: Vec<(usize, Vec<u8>)> = internal_llm_token_map_for_precompute
+                  .iter()
+                  .map(|(bytes, id)| (id.0 as usize, bytes.clone()))
+                  .collect();
+              // Note: The tokenizer parameter to `new` is shadowed here by the struct field.
+              // We need to use the parameter `tokenizer` for the computation.
+              // Let's rename the parameter to avoid confusion, or be careful.
+              // Assuming `tokenizer` parameter is accessible directly if not shadowed by a field yet.
+              // If `tokenizer` in `Self { tokenizer, ... }` refers to the parameter, it's fine.
+              
+              crate::debug!(2, "Building vocab prefix tree for possible_matches computation");
+              let vocab_for_possible_matches = VocabPrefixTree::build(&internal_tokens_for_vocab);
+              crate::debug!(2, "Done building vocab prefix tree for possible_matches computation");
+
+              let mut computed_possible_matches = BTreeMap::new();
+              // Cache for the possible_matches computation
+              let mut pm_cache: HashMap<(*const VocabPrefixTreeNode, TokenizerStateID), BTreeMap<GrammarTokenID, LLMTokenBV>> = HashMap::new();
+
+              crate::debug!(2, "Computing possible_matches for all tokenizer states");
+              for sid_val in 0..tokenizer.max_state() { // Use the `tokenizer` parameter passed to `new`
+                  let sid = TokenizerStateID(sid_val);
+                  let matches_for_sid = Self::compute_possible_matches_for_vocab_node(
+                      &tokenizer, // Pass the tokenizer parameter from `new`
+                      &vocab_for_possible_matches.root,
+                      sid,
+                      &mut pm_cache,
+                  );
+                  computed_possible_matches.insert(sid, matches_for_sid);
+              }
+              crate::debug!(2, "Finished computing possible_matches");
+              // pm_cache is dropped here as it's no longer needed.
+          ```
+
+          Then, when constructing the `Self` instance at the end of the `new` method, assign `computed_possible_matches` to the `possible_matches` field.
+          Change:
+          ```rust
+              Self {
+                  tokenizer,
+                  parser,
+                  precomputed,
+                  llm_token_map, 
+                  token_name_map,
+                  max_original_llm_token_id,
+                  original_to_internal_id_bimap,
+                  internal_max_llm_token,
+              }
+          ```
+          To:
+          ```rust
+              Self {
+                  tokenizer, // This is the tokenizer parameter being moved into the struct
+                  parser,
+                  precomputed,
+                  llm_token_map, 
+                  token_name_map,
+                  max_original_llm_token_id,
+                  original_to_internal_id_bimap,
+                  internal_max_llm_token,
+                  possible_matches: computed_possible_matches, // Add this line
+              }
+          ```
+          Ensure that the `tokenizer` variable used in the loop for `sid_val in 0..tokenizer.max_state()` and passed to `Self::compute_possible_matches_for_vocab_node` refers to the `tokenizer: Regex` parameter of the `new` method, not a field of a partially constructed `Self`. The provided snippet should work correctly as `tokenizer` parameter is in scope.
+
+      These changes will ensure that `GrammarConstraint.possible_matches` is properly initialized with the required data. The `GrammarConstraintState::commit` method already uses this field, so it should now function as intended with the populated data.
+    metadata:
+  - user: |
+      Using model 'gemini/gemini-2.5-flash-preview-05-20' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/constraint.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/constraint.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/constraint.rs
     metadata:
 ...
