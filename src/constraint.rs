@@ -1179,25 +1179,6 @@ impl<'a> GrammarConstraintState<'a> {
         }
     }
 
-    pub fn step_with_llm_token_sequence(&mut self, llm_token_ids: &[LLMTokenID]) {
-        for &llm_token_id in llm_token_ids {
-            // Before committing, ensure the token is actually allowed by the current state.
-            // This check is crucial and would typically be done by the caller using get_mask().
-            // For internal consistency of this method, we can add it here.
-            let current_mask = self.get_mask();
-            if !current_mask.contains(llm_token_id.0) {
-                crate::debug!(1, "Token ID {} not in current mask. Stopping sequence processing.", llm_token_id.0);
-                self.state.clear(); // Or handle error appropriately
-                break;
-            }
-            self.commit(llm_token_id);
-            if !self.is_active() { 
-                crate::debug!(2, "Constraint state became inactive after committing token ID {}. Stopping sequence.", llm_token_id.0);
-                break;
-            }
-        }
-    }
-
     pub fn is_active(&self) -> bool {
         !self.state.is_empty() && self.state.values().any(|s| !s.active_state.stack.is_empty())
     }

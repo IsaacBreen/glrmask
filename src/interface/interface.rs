@@ -776,16 +776,18 @@ mod tests {
         let prefill: Vec<_> = llm_token_vec!(b"(i", b"+", b"i", b"*", b"i").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
         // Re-init state for this part of the test or use a fresh one
         let mut state_for_prefill = grammar_constraint.init();
-        state_for_prefill.step_with_llm_token_sequence(&prefill);
-        // state_for_prefill.step_with_all_llm_tokens(); // After sequence, re-evaluate all possible next tokens
+        for token in prefill.iter() {
+            state_for_prefill.commit(*token);
+        }
 
         let mask_after_prefill = state_for_prefill.get_mask();
         let expected_mask_after_prefill = bitvec_with_capacity_and_values(max_llm_token_id + 1, llm_token_vec!(b"+", b"*", b")", b"+i"));
         assert_eq!(mask_after_prefill, expected_mask_after_prefill);
 
         let final_token_seq: Vec<_> = llm_token_vec!(b")").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
-        state_for_prefill.step_with_llm_token_sequence(&final_token_seq);
-        // state_for_prefill.step_with_all_llm_tokens();
+        for token in final_token_seq.iter() {
+            state_for_prefill.commit(*token);
+        }
 
         let mask_after_final = state_for_prefill.get_mask();
         let mut expected_mask_final = bitvec_with_capacity_and_values(max_llm_token_id + 1, llm_token_vec!(b"+", b"*", b"+i"));
@@ -825,9 +827,9 @@ mod tests {
         assert_eq!(mask, expected_mask);
 
         let terminals: Vec<_> = llm_token_vec!(b"a").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
-        grammar_constraint_state.step_with_llm_token_sequence(&terminals);
-        // grammar_constraint_state.step_with_all_llm_tokens();
-
+        for token in terminals.iter() {
+            grammar_constraint_state.commit(*token);
+        }
 
         let mask = grammar_constraint_state.get_mask();
         let expected_mask = bitvec_with_capacity_and_values(max_llm_token_id + 1, llm_token_vec!(b"b"));
