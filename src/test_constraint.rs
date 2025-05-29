@@ -893,7 +893,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     );
     println!("GrammarConstraint constructed successfully.");
     grammar_constraint.dump_precomputed();
-    
+
     // --- TOKENIZATION AND SEQUENCE TESTING ---
 
     // Build a VocabPrefixTree from the LLM token map for tokenization

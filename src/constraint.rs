@@ -1097,6 +1097,10 @@ impl<'a> GrammarConstraintState<'a> {
                 let mut current_glr_parse_state_mut = current_glr_parse_state.clone(); // To modify
                 Arc::make_mut(&mut current_glr_parse_state_mut.active_state.stack).simplify();
 
+                if !current_glr_parse_state_mut.is_ok() {
+                    return false;
+                }
+
                 let active_llm_tokens = current_glr_parse_state_mut.active_state.stack.acc().active.clone();
                 let node_ptr = std::ptr::addr_of!(*node);
                 crate::debug!(3, "Processing node {:p}, {} LLM tokens, {} finalizers", node_ptr, active_llm_tokens.len(), node.value.finalizers().len()); 
