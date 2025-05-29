@@ -171,7 +171,8 @@ pub struct GrammarConstraint {
     pub(crate) token_name_map:   BiBTreeMap<String, usize>,
     pub(crate) max_original_llm_token_id: usize, 
     pub(crate) original_to_internal_id_bimap: BiBTreeMap<usize, usize>, 
-    pub(crate) internal_max_llm_token: usize, 
+    pub(crate) internal_max_llm_token: usize,
+    pub(crate) possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
 }
 
 impl GrammarConstraint {
@@ -184,6 +185,7 @@ impl GrammarConstraint {
         assert_eq!(self.max_original_llm_token_id, other.max_original_llm_token_id);
         assert_eq!(self.original_to_internal_id_bimap, other.original_to_internal_id_bimap);
         assert_eq!(self.internal_max_llm_token, other.internal_max_llm_token);
+        assert_eq!(self.possible_matches, other.possible_matches);
     }
 }
 
@@ -198,6 +200,7 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("max_original_llm_token_id".to_string(), self.max_original_llm_token_id.to_json());
         obj.insert("original_to_internal_id_bimap".to_string(), self.original_to_internal_id_bimap.to_json());
         obj.insert("internal_max_llm_token".to_string(), self.internal_max_llm_token.to_json());
+        obj.insert("possible_matches".to_string(), self.possible_matches.to_json());
         JSONNode::Object(obj)
     }
 
@@ -221,6 +224,8 @@ impl JSONConvertible for GrammarConstraint {
                                                        .and_then(|n| BiBTreeMap::<usize, usize>::from_json(n))?;
                 let internal_max_llm_token = obj.remove("internal_max_llm_token").ok_or_else(|| "Missing field internal_max_llm_token".to_string())
                                                   .and_then(usize::from_json)?;
+                let possible_matches = obj.remove("possible_matches").ok_or_else(|| "Missing field possible_matches".to_string())
+                                          .and_then(|n| BTreeMap::<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>::from_json(n))?;
                 Ok(GrammarConstraint {
                     tokenizer,
                     parser,
@@ -230,6 +235,7 @@ impl JSONConvertible for GrammarConstraint {
                     max_original_llm_token_id,
                     original_to_internal_id_bimap,
                     internal_max_llm_token,
+                    possible_matches,
                 })
             }
             _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
@@ -1080,6 +1086,11 @@ impl<'a> GrammarConstraintState<'a> {
                 &llm_token_bytes[offset..],
                 tokenizer_s_id_at_offset,
             );
+
+            let mut possible_matches = BTreeMap::new();
+            if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
+                possible_matches = self.possible_matches(&self.parent.tokenizer, final_tokenizer_s_id_for_llm_token_segment);
+            }
 
             for match_info in &exec_result.matches {
                 let mut cloned_glr_s = glr_s_at_offset.clone();

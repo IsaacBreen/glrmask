@@ -37,57 +37,41 @@ local_system:
 
       pub type LLMTokenBV = HybridBitset;
       pub type GrammarTokenBV = BitVec;
+      pub type LLMTokenInfo = Option<LLMTokenBV>;
 
       // -----------------------------------------------------------------------------
       // Small data-types used by the constraint
       // -----------------------------------------------------------------------------
-      #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct LLMTokenInfo {
-          pub active:       LLMTokenBV,
-          pub intersection: LLMTokenBV,
-          // Removed: pub terminals:    Arc<GSSNode<TerminalID, ()>>,
-      }
-
-      impl Default for LLMTokenInfo {
-          fn default() -> Self {
-              Self {
-                  active:       HybridBitset::new(),
-                  intersection: HybridBitset::max_ones(),
-                  // Removed terminals initialization
-              }
-          }
-      }
-
-      impl PathAccumulator for LLMTokenInfo {
+      impl PathAccumulator for Option<LLMTokenBV> {
           fn union_assign(&mut self, other: Self) {
-              self.active |= &other.active;
-              self.intersection &= &other.intersection;
-              // Removed terminals merge
+              match (self.as_mut(), other) {
+                  (Some(self_bv), Some(other_bv)) => {
+                      *self_bv |= &other_bv;
+                      // An empty bitset resulting from a union is still Some(empty_bv), not None.
+                  }
+                  (None, Some(other_bv)) => {
+                      *self = Some(LLMTokenBV::max_ones());
+                  }
+                  (Some(_), None) => {
+                      *self = Some(LLMTokenBV::max_ones());
+                  }
+                  (None, None) => {
+                      // self remains None
+                  }
+              }
           }
 
           fn intersect_assign(&mut self, right: Self) {
-              // The 'pop' or 'intersect' operation for LLMTokenInfo means:
-              // - The active set of the resulting path is the intersection of the left path's active set and the right path's active set.
-              // - The intersection set also becomes stricter (AND).
-              // - Terminals from the right path are kept (this logic is now removed).
-              self.active &= &right.active;
-              self.intersection &= &right.intersection;
-              // Removed terminals assignment
-          }
-      }
-
-
-      impl std::fmt::Debug for LLMTokenInfo {
-          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-              let fmt_bv = |bv: &LLMTokenBV| -> String {
-                  format!("{:?}", bv)
-              };
-
-              f.debug_struct("LLMTokenInfo")
-                  .field("active", &fmt_bv(&self.active))
-                  .field("intersection", &fmt_bv(&self.intersection))
-                  // Removed terminals field
-                  .finish()
+              match (self.as_mut(), right) {
+                  (Some(self_bv), Some(right_bv)) => {
+                      *self_bv &= &right_bv;
+                  }
+                  (None, Some(right_bv)) => {
+                      *self = Some(right_bv);
+                  }
+                  (Some(_), None) => {}
+                  (None, None) => {}
+              }
           }
       }
 
@@ -194,7 +178,8 @@ local_system:
           pub(crate) token_name_map:   BiBTreeMap<String, usize>,
           pub(crate) max_original_llm_token_id: usize, 
           pub(crate) original_to_internal_id_bimap: BiBTreeMap<usize, usize>, 
-          pub(crate) internal_max_llm_token: usize, 
+          pub(crate) internal_max_llm_token: usize,
+          pub(crate) possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
       }
 
       impl GrammarConstraint {
@@ -207,6 +192,7 @@ local_system:
               assert_eq!(self.max_original_llm_token_id, other.max_original_llm_token_id);
               assert_eq!(self.original_to_internal_id_bimap, other.original_to_internal_id_bimap);
               assert_eq!(self.internal_max_llm_token, other.internal_max_llm_token);
+              assert_eq!(self.possible_matches, other.possible_matches);
           }
       }
 
@@ -221,6 +207,7 @@ local_system:
               obj.insert("max_original_llm_token_id".to_string(), self.max_original_llm_token_id.to_json());
               obj.insert("original_to_internal_id_bimap".to_string(), self.original_to_internal_id_bimap.to_json());
               obj.insert("internal_max_llm_token".to_string(), self.internal_max_llm_token.to_json());
+              obj.insert("possible_matches".to_string(), self.possible_matches.to_json());
               JSONNode::Object(obj)
           }
 
@@ -244,6 +231,8 @@ local_system:
                                                              .and_then(|n| BiBTreeMap::<usize, usize>::from_json(n))?;
                       let internal_max_llm_token = obj.remove("internal_max_llm_token").ok_or_else(|| "Missing field internal_max_llm_token".to_string())
                                                         .and_then(usize::from_json)?;
+                      let possible_matches = obj.remove("possible_matches").ok_or_else(|| "Missing field possible_matches".to_string())
+                                                .and_then(|n| BTreeMap::<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>::from_json(n))?;
                       Ok(GrammarConstraint {
                           tokenizer,
                           parser,
@@ -253,6 +242,7 @@ local_system:
                           max_original_llm_token_id,
                           original_to_internal_id_bimap,
                           internal_max_llm_token,
+                          possible_matches,
                       })
                   }
                   _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
@@ -350,10 +340,7 @@ local_system:
 
           pub fn init(&self) -> GrammarConstraintState<'_> {
               let base_set_for_info = HybridBitset::ones(self.internal_max_llm_token + 1);
-              let initial_llm_token_acc = LLMTokenInfo { 
-                  active:       base_set_for_info.clone(),
-                  intersection: base_set_for_info,
-              };
+              let initial_llm_token_acc: Option<LLMTokenBV> = None;
               let mut state = BTreeMap::new();
               state.insert(
                   self.tokenizer.initial_state_id(),
@@ -1011,7 +998,7 @@ local_system:
                   |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
                       let mut glr_s = glr_s.clone();
                       
-                      intersect_tokens_and_prune_arc(&mut glr_s.active_state.stack, edge_llm_tokens_bv);
+                      intersect_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv);
 
                       if let Some(gtid) = grammar_token_opt {
                           glr_s.step(*gtid);
@@ -1033,11 +1020,11 @@ local_system:
                           return true; 
                       }
 
-                      let glr_active_tokens = final_glr_s.active_state.stack.acc().active.clone();
+                      let glr_active_tokens = final_glr_s.active_state.stack.acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
 
                       if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
                           let mask_contribution = &glr_active_tokens & clean_end_bv;
-                          final_mask_internal |= &mask_contribution;
+                          final_mask_internal |= mask_contribution;
                       }
 
                       for (grammar_token, finalizer) in precomputed_node_data.value.finalizers() {
@@ -1045,7 +1032,7 @@ local_system:
                           temp_glr_s_for_finalizer_step.step(*grammar_token);
 
                           if temp_glr_s_for_finalizer_step.is_ok() && !temp_glr_s_for_finalizer_step.active_state.stack.is_empty() {
-                              let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc().active.clone();
+                              let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
                               for finalizer_llm_token_bv in finalizer.content.values() {
                                   let mask_contribution = &glr_active_after_step & finalizer_llm_token_bv;
                                   final_mask_internal |= &mask_contribution;
@@ -1083,67 +1070,59 @@ local_system:
               let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
               let initial_states_to_process = std::mem::take(&mut self.state);
 
+              let mut processing_queue: VecDeque<(usize, TokenizerStateID, GLRParserState<'a>)> = VecDeque::new();
               for (current_tokenizer_s_id, base_glr_s) in initial_states_to_process {
-                  if base_glr_s.active_state.stack.is_empty() { // Skip if GSS is already empty
+                  processing_queue.push_back((0, current_tokenizer_s_id, base_glr_s.clone()));
+              }
+
+              while let Some((offset, tokenizer_s_id_at_offset, glr_s_at_offset)) = processing_queue.pop_front() {
+                  assert!(offset <= llm_token_bytes.len());
+                  if offset == llm_token_bytes.len() {
+                      // This path fully consumed the llm_token_bytes.
+                      // The tokenizer state for the *next* LLM token will be the initial state.
+                      let next_tokenizer_state_for_overall = self.parent.tokenizer.initial_state_id();
+                      if let Some(existing_glr_s) = new_overall_state.get_mut(&next_tokenizer_state_for_overall) {
+                          existing_glr_s.merge_with(glr_s_at_offset);
+                      } else {
+                          new_overall_state.insert(next_tokenizer_state_for_overall, glr_s_at_offset);
+                      }
                       continue;
                   }
-                  // Ensure the base_glr_s is compatible with the committed token *before* tokenizing its bytes.
-                  // The `active` set of base_glr_s should allow `internal_llm_id`.
-                  // This check was implicitly part of the old design where `commit` followed `step`.
-                  // Now, `get_mask` would have been called, and the caller ensures `llm_token_id` is in the mask.
-                  // So, we assume `base_glr_s` is compatible.
 
-                  let mut processing_queue: VecDeque<(usize, TokenizerStateID, GLRParserState<'a>)> = VecDeque::new();
-                  processing_queue.push_back((0, current_tokenizer_s_id, base_glr_s.clone()));
+                  let exec_result = self.parent.tokenizer.execute_from_state(
+                      &llm_token_bytes[offset..],
+                      tokenizer_s_id_at_offset,
+                  );
 
-                  while let Some((offset, tokenizer_s_id_at_offset, mut glr_s_at_offset)) = processing_queue.pop_front() {
-                       // If the GSS stack for glr_s_at_offset is empty, prune this path.
-                      if glr_s_at_offset.active_state.stack.is_empty() {
-                          continue;
+                  let mut possible_matches = BTreeMap::new();
+                  if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
+                      possible_matches = self.possible_matches(&self.parent.tokenizer, final_tokenizer_s_id_for_llm_token_segment);
+                  }
+
+                  for match_info in &exec_result.matches {
+                      let mut cloned_glr_s = glr_s_at_offset.clone();
+                      cloned_glr_s.step(TerminalID(match_info.id));
+
+                      if cloned_glr_s.is_ok() && !cloned_glr_s.active_state.stack.is_empty() {
+                          let new_offset = offset + match_info.width;
+                          // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
+                          let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
+                          processing_queue.push_back((
+                              new_offset,
+                              next_tokenizer_id_for_segment,
+                              cloned_glr_s,
+                          ));
                       }
+                  }
 
-                      if offset >= llm_token_bytes.len() {
-                          // This path fully consumed the llm_token_bytes.
-                          // The tokenizer state for the *next* LLM token will be the initial state.
-                          let next_tokenizer_state_for_overall = self.parent.tokenizer.initial_state_id();
-                          if let Some(existing_glr_s) = new_overall_state.get_mut(&next_tokenizer_state_for_overall) {
-                              existing_glr_s.merge_with(glr_s_at_offset);
-                          } else {
-                              new_overall_state.insert(next_tokenizer_state_for_overall, glr_s_at_offset);
-                          }
-                          continue;
-                      }
-
-                      let exec_result = self.parent.tokenizer.execute_from_state(
-                          &llm_token_bytes[offset..],
-                          tokenizer_s_id_at_offset,
-                      );
-
-                      for match_info in &exec_result.matches {
-                          let mut cloned_glr_s = glr_s_at_offset.clone();
-                          cloned_glr_s.step(TerminalID(match_info.id));
-
-                          if cloned_glr_s.is_ok() && !cloned_glr_s.active_state.stack.is_empty() {
-                              let new_offset = offset + match_info.width;
-                              // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
-                              let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
-                              processing_queue.push_back((
-                                  new_offset,
-                                  next_tokenizer_id_for_segment,
-                                  cloned_glr_s,
-                              ));
-                          }
-                      }
-
-                      if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
-                          // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
-                          // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
-                          let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
-                          if let Some(existing_glr_s) = new_overall_state.get_mut(&final_tokenizer_state) {
-                              existing_glr_s.merge_with(glr_s_at_offset.clone());
-                          } else {
-                              new_overall_state.insert(final_tokenizer_state, glr_s_at_offset.clone());
-                          }
+                  if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
+                      // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
+                      // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
+                      let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
+                      if let Some(existing_glr_s) = new_overall_state.get_mut(&final_tokenizer_state) {
+                          existing_glr_s.merge_with(glr_s_at_offset.clone());
+                      } else {
+                          new_overall_state.insert(final_tokenizer_state, glr_s_at_offset.clone());
                       }
                   }
               }
@@ -1154,7 +1133,7 @@ local_system:
               let all_tokens_bv = self.parent.all_internal_llm_tokens_bitset();
               let mut roots_to_simplify_arcs = Vec::new();
               for glr_parser_state in self.state.values_mut() {
-                  reset_tokens(&mut glr_parser_state.active_state.stack, &all_tokens_bv);
+                  reset_tokens(&mut glr_parser_state.active_state.stack);
                   if !glr_parser_state.active_state.stack.is_empty() {
                       roots_to_simplify_arcs.push(&mut glr_parser_state.active_state.stack);
                   }
@@ -1217,57 +1196,41 @@ local_system:
 
       pub type LLMTokenBV = HybridBitset;
       pub type GrammarTokenBV = BitVec;
+      pub type LLMTokenInfo = Option<LLMTokenBV>;
 
       // -----------------------------------------------------------------------------
       // Small data-types used by the constraint
       // -----------------------------------------------------------------------------
-      #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct LLMTokenInfo {
-          pub active:       LLMTokenBV,
-          pub intersection: LLMTokenBV,
-          // Removed: pub terminals:    Arc<GSSNode<TerminalID, ()>>,
-      }
-
-      impl Default for LLMTokenInfo {
-          fn default() -> Self {
-              Self {
-                  active:       HybridBitset::new(),
-                  intersection: HybridBitset::max_ones(),
-                  // Removed terminals initialization
-              }
-          }
-      }
-
-      impl PathAccumulator for LLMTokenInfo {
+      impl PathAccumulator for Option<LLMTokenBV> {
           fn union_assign(&mut self, other: Self) {
-              self.active |= &other.active;
-              self.intersection &= &other.intersection;
-              // Removed terminals merge
+              match (self.as_mut(), other) {
+                  (Some(self_bv), Some(other_bv)) => {
+                      *self_bv |= &other_bv;
+                      // An empty bitset resulting from a union is still Some(empty_bv), not None.
+                  }
+                  (None, Some(other_bv)) => {
+                      *self = Some(LLMTokenBV::max_ones());
+                  }
+                  (Some(_), None) => {
+                      *self = Some(LLMTokenBV::max_ones());
+                  }
+                  (None, None) => {
+                      // self remains None
+                  }
+              }
           }
 
           fn intersect_assign(&mut self, right: Self) {
-              // The 'pop' or 'intersect' operation for LLMTokenInfo means:
-              // - The active set of the resulting path is the intersection of the left path's active set and the right path's active set.
-              // - The intersection set also becomes stricter (AND).
-              // - Terminals from the right path are kept (this logic is now removed).
-              self.active &= &right.active;
-              self.intersection &= &right.intersection;
-              // Removed terminals assignment
-          }
-      }
-
-
-      impl std::fmt::Debug for LLMTokenInfo {
-          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-              let fmt_bv = |bv: &LLMTokenBV| -> String {
-                  format!("{:?}", bv)
-              };
-
-              f.debug_struct("LLMTokenInfo")
-                  .field("active", &fmt_bv(&self.active))
-                  .field("intersection", &fmt_bv(&self.intersection))
-                  // Removed terminals field
-                  .finish()
+              match (self.as_mut(), right) {
+                  (Some(self_bv), Some(right_bv)) => {
+                      *self_bv &= &right_bv;
+                  }
+                  (None, Some(right_bv)) => {
+                      *self = Some(right_bv);
+                  }
+                  (Some(_), None) => {}
+                  (None, None) => {}
+              }
           }
       }
 
@@ -1374,7 +1337,8 @@ local_system:
           pub(crate) token_name_map:   BiBTreeMap<String, usize>,
           pub(crate) max_original_llm_token_id: usize, 
           pub(crate) original_to_internal_id_bimap: BiBTreeMap<usize, usize>, 
-          pub(crate) internal_max_llm_token: usize, 
+          pub(crate) internal_max_llm_token: usize,
+          pub(crate) possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
       }
 
       impl GrammarConstraint {
@@ -1387,6 +1351,7 @@ local_system:
               assert_eq!(self.max_original_llm_token_id, other.max_original_llm_token_id);
               assert_eq!(self.original_to_internal_id_bimap, other.original_to_internal_id_bimap);
               assert_eq!(self.internal_max_llm_token, other.internal_max_llm_token);
+              assert_eq!(self.possible_matches, other.possible_matches);
           }
       }
 
@@ -1401,6 +1366,7 @@ local_system:
               obj.insert("max_original_llm_token_id".to_string(), self.max_original_llm_token_id.to_json());
               obj.insert("original_to_internal_id_bimap".to_string(), self.original_to_internal_id_bimap.to_json());
               obj.insert("internal_max_llm_token".to_string(), self.internal_max_llm_token.to_json());
+              obj.insert("possible_matches".to_string(), self.possible_matches.to_json());
               JSONNode::Object(obj)
           }
 
@@ -1424,6 +1390,8 @@ local_system:
                                                              .and_then(|n| BiBTreeMap::<usize, usize>::from_json(n))?;
                       let internal_max_llm_token = obj.remove("internal_max_llm_token").ok_or_else(|| "Missing field internal_max_llm_token".to_string())
                                                         .and_then(usize::from_json)?;
+                      let possible_matches = obj.remove("possible_matches").ok_or_else(|| "Missing field possible_matches".to_string())
+                                                .and_then(|n| BTreeMap::<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>::from_json(n))?;
                       Ok(GrammarConstraint {
                           tokenizer,
                           parser,
@@ -1433,6 +1401,7 @@ local_system:
                           max_original_llm_token_id,
                           original_to_internal_id_bimap,
                           internal_max_llm_token,
+                          possible_matches,
                       })
                   }
                   _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
@@ -1530,10 +1499,7 @@ local_system:
 
           pub fn init(&self) -> GrammarConstraintState<'_> {
               let base_set_for_info = HybridBitset::ones(self.internal_max_llm_token + 1);
-              let initial_llm_token_acc = LLMTokenInfo { 
-                  active:       base_set_for_info.clone(),
-                  intersection: base_set_for_info,
-              };
+              let initial_llm_token_acc: Option<LLMTokenBV> = None;
               let mut state = BTreeMap::new();
               state.insert(
                   self.tokenizer.initial_state_id(),
@@ -2191,7 +2157,7 @@ local_system:
                   |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
                       let mut glr_s = glr_s.clone();
                       
-                      intersect_tokens_and_prune_arc(&mut glr_s.active_state.stack, edge_llm_tokens_bv);
+                      intersect_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv);
 
                       if let Some(gtid) = grammar_token_opt {
                           glr_s.step(*gtid);
@@ -2213,11 +2179,11 @@ local_system:
                           return true; 
                       }
 
-                      let glr_active_tokens = final_glr_s.active_state.stack.acc().active.clone();
+                      let glr_active_tokens = final_glr_s.active_state.stack.acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
 
                       if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
                           let mask_contribution = &glr_active_tokens & clean_end_bv;
-                          final_mask_internal |= &mask_contribution;
+                          final_mask_internal |= mask_contribution;
                       }
 
                       for (grammar_token, finalizer) in precomputed_node_data.value.finalizers() {
@@ -2225,7 +2191,7 @@ local_system:
                           temp_glr_s_for_finalizer_step.step(*grammar_token);
 
                           if temp_glr_s_for_finalizer_step.is_ok() && !temp_glr_s_for_finalizer_step.active_state.stack.is_empty() {
-                              let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc().active.clone();
+                              let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
                               for finalizer_llm_token_bv in finalizer.content.values() {
                                   let mask_contribution = &glr_active_after_step & finalizer_llm_token_bv;
                                   final_mask_internal |= &mask_contribution;
@@ -2263,67 +2229,59 @@ local_system:
               let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
               let initial_states_to_process = std::mem::take(&mut self.state);
 
+              let mut processing_queue: VecDeque<(usize, TokenizerStateID, GLRParserState<'a>)> = VecDeque::new();
               for (current_tokenizer_s_id, base_glr_s) in initial_states_to_process {
-                  if base_glr_s.active_state.stack.is_empty() { // Skip if GSS is already empty
+                  processing_queue.push_back((0, current_tokenizer_s_id, base_glr_s.clone()));
+              }
+
+              while let Some((offset, tokenizer_s_id_at_offset, glr_s_at_offset)) = processing_queue.pop_front() {
+                  assert!(offset <= llm_token_bytes.len());
+                  if offset == llm_token_bytes.len() {
+                      // This path fully consumed the llm_token_bytes.
+                      // The tokenizer state for the *next* LLM token will be the initial state.
+                      let next_tokenizer_state_for_overall = self.parent.tokenizer.initial_state_id();
+                      if let Some(existing_glr_s) = new_overall_state.get_mut(&next_tokenizer_state_for_overall) {
+                          existing_glr_s.merge_with(glr_s_at_offset);
+                      } else {
+                          new_overall_state.insert(next_tokenizer_state_for_overall, glr_s_at_offset);
+                      }
                       continue;
                   }
-                  // Ensure the base_glr_s is compatible with the committed token *before* tokenizing its bytes.
-                  // The `active` set of base_glr_s should allow `internal_llm_id`.
-                  // This check was implicitly part of the old design where `commit` followed `step`.
-                  // Now, `get_mask` would have been called, and the caller ensures `llm_token_id` is in the mask.
-                  // So, we assume `base_glr_s` is compatible.
 
-                  let mut processing_queue: VecDeque<(usize, TokenizerStateID, GLRParserState<'a>)> = VecDeque::new();
-                  processing_queue.push_back((0, current_tokenizer_s_id, base_glr_s.clone()));
+                  let exec_result = self.parent.tokenizer.execute_from_state(
+                      &llm_token_bytes[offset..],
+                      tokenizer_s_id_at_offset,
+                  );
 
-                  while let Some((offset, tokenizer_s_id_at_offset, mut glr_s_at_offset)) = processing_queue.pop_front() {
-                       // If the GSS stack for glr_s_at_offset is empty, prune this path.
-                      if glr_s_at_offset.active_state.stack.is_empty() {
-                          continue;
+                  let mut possible_matches = BTreeMap::new();
+                  if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
+                      possible_matches = self.possible_matches(&self.parent.tokenizer, final_tokenizer_s_id_for_llm_token_segment);
+                  }
+
+                  for match_info in &exec_result.matches {
+                      let mut cloned_glr_s = glr_s_at_offset.clone();
+                      cloned_glr_s.step(TerminalID(match_info.id));
+
+                      if cloned_glr_s.is_ok() && !cloned_glr_s.active_state.stack.is_empty() {
+                          let new_offset = offset + match_info.width;
+                          // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
+                          let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
+                          processing_queue.push_back((
+                              new_offset,
+                              next_tokenizer_id_for_segment,
+                              cloned_glr_s,
+                          ));
                       }
+                  }
 
-                      if offset >= llm_token_bytes.len() {
-                          // This path fully consumed the llm_token_bytes.
-                          // The tokenizer state for the *next* LLM token will be the initial state.
-                          let next_tokenizer_state_for_overall = self.parent.tokenizer.initial_state_id();
-                          if let Some(existing_glr_s) = new_overall_state.get_mut(&next_tokenizer_state_for_overall) {
-                              existing_glr_s.merge_with(glr_s_at_offset);
-                          } else {
-                              new_overall_state.insert(next_tokenizer_state_for_overall, glr_s_at_offset);
-                          }
-                          continue;
-                      }
-
-                      let exec_result = self.parent.tokenizer.execute_from_state(
-                          &llm_token_bytes[offset..],
-                          tokenizer_s_id_at_offset,
-                      );
-
-                      for match_info in &exec_result.matches {
-                          let mut cloned_glr_s = glr_s_at_offset.clone();
-                          cloned_glr_s.step(TerminalID(match_info.id));
-
-                          if cloned_glr_s.is_ok() && !cloned_glr_s.active_state.stack.is_empty() {
-                              let new_offset = offset + match_info.width;
-                              // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
-                              let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
-                              processing_queue.push_back((
-                                  new_offset,
-                                  next_tokenizer_id_for_segment,
-                                  cloned_glr_s,
-                              ));
-                          }
-                      }
-
-                      if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
-                          // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
-                          // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
-                          let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
-                          if let Some(existing_glr_s) = new_overall_state.get_mut(&final_tokenizer_state) {
-                              existing_glr_s.merge_with(glr_s_at_offset.clone());
-                          } else {
-                              new_overall_state.insert(final_tokenizer_state, glr_s_at_offset.clone());
-                          }
+                  if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
+                      // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
+                      // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
+                      let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
+                      if let Some(existing_glr_s) = new_overall_state.get_mut(&final_tokenizer_state) {
+                          existing_glr_s.merge_with(glr_s_at_offset.clone());
+                      } else {
+                          new_overall_state.insert(final_tokenizer_state, glr_s_at_offset.clone());
                       }
                   }
               }
@@ -2334,7 +2292,7 @@ local_system:
               let all_tokens_bv = self.parent.all_internal_llm_tokens_bitset();
               let mut roots_to_simplify_arcs = Vec::new();
               for glr_parser_state in self.state.values_mut() {
-                  reset_tokens(&mut glr_parser_state.active_state.stack, &all_tokens_bv);
+                  reset_tokens(&mut glr_parser_state.active_state.stack);
                   if !glr_parser_state.active_state.stack.is_empty() {
                       roots_to_simplify_arcs.push(&mut glr_parser_state.active_state.stack);
                   }
@@ -2363,7 +2321,7 @@ local_system:
               &self.state
           }
       }
-  diffs_applied_this_send: true
+  diffs_applied_this_send: false
 system:
   message: |2
 
@@ -2379,6 +2337,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
+    - copy-all/paste
     - copy-one/paste
   code_completion_model:
     - gemini/gemini-2.5-flash-preview-05-20
@@ -2422,57 +2381,41 @@ messages:
 
       pub type LLMTokenBV = HybridBitset;
       pub type GrammarTokenBV = BitVec;
+      pub type LLMTokenInfo = Option<LLMTokenBV>;
 
       // -----------------------------------------------------------------------------
       // Small data-types used by the constraint
       // -----------------------------------------------------------------------------
-      #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct LLMTokenInfo {
-          pub active:       LLMTokenBV,
-          pub intersection: LLMTokenBV,
-          // Removed: pub terminals:    Arc<GSSNode<TerminalID, ()>>,
-      }
-
-      impl Default for LLMTokenInfo {
-          fn default() -> Self {
-              Self {
-                  active:       HybridBitset::new(),
-                  intersection: HybridBitset::max_ones(),
-                  // Removed terminals initialization
-              }
-          }
-      }
-
-      impl PathAccumulator for LLMTokenInfo {
+      impl PathAccumulator for Option<LLMTokenBV> {
           fn union_assign(&mut self, other: Self) {
-              self.active |= &other.active;
-              self.intersection &= &other.intersection;
-              // Removed terminals merge
+              match (self.as_mut(), other) {
+                  (Some(self_bv), Some(other_bv)) => {
+                      *self_bv |= &other_bv;
+                      // An empty bitset resulting from a union is still Some(empty_bv), not None.
+                  }
+                  (None, Some(other_bv)) => {
+                      *self = Some(LLMTokenBV::max_ones());
+                  }
+                  (Some(_), None) => {
+                      *self = Some(LLMTokenBV::max_ones());
+                  }
+                  (None, None) => {
+                      // self remains None
+                  }
+              }
           }
 
           fn intersect_assign(&mut self, right: Self) {
-              // The 'pop' or 'intersect' operation for LLMTokenInfo means:
-              // - The active set of the resulting path is the intersection of the left path's active set and the right path's active set.
-              // - The intersection set also becomes stricter (AND).
-              // - Terminals from the right path are kept (this logic is now removed).
-              self.active &= &right.active;
-              self.intersection &= &right.intersection;
-              // Removed terminals assignment
-          }
-      }
-
-
-      impl std::fmt::Debug for LLMTokenInfo {
-          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-              let fmt_bv = |bv: &LLMTokenBV| -> String {
-                  format!("{:?}", bv)
-              };
-
-              f.debug_struct("LLMTokenInfo")
-                  .field("active", &fmt_bv(&self.active))
-                  .field("intersection", &fmt_bv(&self.intersection))
-                  // Removed terminals field
-                  .finish()
+              match (self.as_mut(), right) {
+                  (Some(self_bv), Some(right_bv)) => {
+                      *self_bv &= &right_bv;
+                  }
+                  (None, Some(right_bv)) => {
+                      *self = Some(right_bv);
+                  }
+                  (Some(_), None) => {}
+                  (None, None) => {}
+              }
           }
       }
 
@@ -2579,7 +2522,8 @@ messages:
           pub(crate) token_name_map:   BiBTreeMap<String, usize>,
           pub(crate) max_original_llm_token_id: usize, 
           pub(crate) original_to_internal_id_bimap: BiBTreeMap<usize, usize>, 
-          pub(crate) internal_max_llm_token: usize, 
+          pub(crate) internal_max_llm_token: usize,
+          pub(crate) possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
       }
 
       impl GrammarConstraint {
@@ -2592,6 +2536,7 @@ messages:
               assert_eq!(self.max_original_llm_token_id, other.max_original_llm_token_id);
               assert_eq!(self.original_to_internal_id_bimap, other.original_to_internal_id_bimap);
               assert_eq!(self.internal_max_llm_token, other.internal_max_llm_token);
+              assert_eq!(self.possible_matches, other.possible_matches);
           }
       }
 
@@ -2606,6 +2551,7 @@ messages:
               obj.insert("max_original_llm_token_id".to_string(), self.max_original_llm_token_id.to_json());
               obj.insert("original_to_internal_id_bimap".to_string(), self.original_to_internal_id_bimap.to_json());
               obj.insert("internal_max_llm_token".to_string(), self.internal_max_llm_token.to_json());
+              obj.insert("possible_matches".to_string(), self.possible_matches.to_json());
               JSONNode::Object(obj)
           }
 
@@ -2629,6 +2575,8 @@ messages:
                                                              .and_then(|n| BiBTreeMap::<usize, usize>::from_json(n))?;
                       let internal_max_llm_token = obj.remove("internal_max_llm_token").ok_or_else(|| "Missing field internal_max_llm_token".to_string())
                                                         .and_then(usize::from_json)?;
+                      let possible_matches = obj.remove("possible_matches").ok_or_else(|| "Missing field possible_matches".to_string())
+                                                .and_then(|n| BTreeMap::<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>::from_json(n))?;
                       Ok(GrammarConstraint {
                           tokenizer,
                           parser,
@@ -2638,6 +2586,7 @@ messages:
                           max_original_llm_token_id,
                           original_to_internal_id_bimap,
                           internal_max_llm_token,
+                          possible_matches,
                       })
                   }
                   _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
@@ -2735,10 +2684,7 @@ messages:
 
           pub fn init(&self) -> GrammarConstraintState<'_> {
               let base_set_for_info = HybridBitset::ones(self.internal_max_llm_token + 1);
-              let initial_llm_token_acc = LLMTokenInfo { 
-                  active:       base_set_for_info.clone(),
-                  intersection: base_set_for_info,
-              };
+              let initial_llm_token_acc: Option<LLMTokenBV> = None;
               let mut state = BTreeMap::new();
               state.insert(
                   self.tokenizer.initial_state_id(),
@@ -3396,7 +3342,7 @@ messages:
                   |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
                       let mut glr_s = glr_s.clone();
                       
-                      intersect_tokens_and_prune_arc(&mut glr_s.active_state.stack, edge_llm_tokens_bv);
+                      intersect_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv);
 
                       if let Some(gtid) = grammar_token_opt {
                           glr_s.step(*gtid);
@@ -3418,11 +3364,11 @@ messages:
                           return true; 
                       }
 
-                      let glr_active_tokens = final_glr_s.active_state.stack.acc().active.clone();
+                      let glr_active_tokens = final_glr_s.active_state.stack.acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
 
                       if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
                           let mask_contribution = &glr_active_tokens & clean_end_bv;
-                          final_mask_internal |= &mask_contribution;
+                          final_mask_internal |= mask_contribution;
                       }
 
                       for (grammar_token, finalizer) in precomputed_node_data.value.finalizers() {
@@ -3430,7 +3376,7 @@ messages:
                           temp_glr_s_for_finalizer_step.step(*grammar_token);
 
                           if temp_glr_s_for_finalizer_step.is_ok() && !temp_glr_s_for_finalizer_step.active_state.stack.is_empty() {
-                              let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc().active.clone();
+                              let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
                               for finalizer_llm_token_bv in finalizer.content.values() {
                                   let mask_contribution = &glr_active_after_step & finalizer_llm_token_bv;
                                   final_mask_internal |= &mask_contribution;
@@ -3468,67 +3414,59 @@ messages:
               let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
               let initial_states_to_process = std::mem::take(&mut self.state);
 
+              let mut processing_queue: VecDeque<(usize, TokenizerStateID, GLRParserState<'a>)> = VecDeque::new();
               for (current_tokenizer_s_id, base_glr_s) in initial_states_to_process {
-                  if base_glr_s.active_state.stack.is_empty() { // Skip if GSS is already empty
+                  processing_queue.push_back((0, current_tokenizer_s_id, base_glr_s.clone()));
+              }
+
+              while let Some((offset, tokenizer_s_id_at_offset, glr_s_at_offset)) = processing_queue.pop_front() {
+                  assert!(offset <= llm_token_bytes.len());
+                  if offset == llm_token_bytes.len() {
+                      // This path fully consumed the llm_token_bytes.
+                      // The tokenizer state for the *next* LLM token will be the initial state.
+                      let next_tokenizer_state_for_overall = self.parent.tokenizer.initial_state_id();
+                      if let Some(existing_glr_s) = new_overall_state.get_mut(&next_tokenizer_state_for_overall) {
+                          existing_glr_s.merge_with(glr_s_at_offset);
+                      } else {
+                          new_overall_state.insert(next_tokenizer_state_for_overall, glr_s_at_offset);
+                      }
                       continue;
                   }
-                  // Ensure the base_glr_s is compatible with the committed token *before* tokenizing its bytes.
-                  // The `active` set of base_glr_s should allow `internal_llm_id`.
-                  // This check was implicitly part of the old design where `commit` followed `step`.
-                  // Now, `get_mask` would have been called, and the caller ensures `llm_token_id` is in the mask.
-                  // So, we assume `base_glr_s` is compatible.
 
-                  let mut processing_queue: VecDeque<(usize, TokenizerStateID, GLRParserState<'a>)> = VecDeque::new();
-                  processing_queue.push_back((0, current_tokenizer_s_id, base_glr_s.clone()));
+                  let exec_result = self.parent.tokenizer.execute_from_state(
+                      &llm_token_bytes[offset..],
+                      tokenizer_s_id_at_offset,
+                  );
 
-                  while let Some((offset, tokenizer_s_id_at_offset, mut glr_s_at_offset)) = processing_queue.pop_front() {
-                       // If the GSS stack for glr_s_at_offset is empty, prune this path.
-                      if glr_s_at_offset.active_state.stack.is_empty() {
-                          continue;
+                  let mut possible_matches = BTreeMap::new();
+                  if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
+                      possible_matches = self.possible_matches(&self.parent.tokenizer, final_tokenizer_s_id_for_llm_token_segment);
+                  }
+
+                  for match_info in &exec_result.matches {
+                      let mut cloned_glr_s = glr_s_at_offset.clone();
+                      cloned_glr_s.step(TerminalID(match_info.id));
+
+                      if cloned_glr_s.is_ok() && !cloned_glr_s.active_state.stack.is_empty() {
+                          let new_offset = offset + match_info.width;
+                          // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
+                          let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
+                          processing_queue.push_back((
+                              new_offset,
+                              next_tokenizer_id_for_segment,
+                              cloned_glr_s,
+                          ));
                       }
+                  }
 
-                      if offset >= llm_token_bytes.len() {
-                          // This path fully consumed the llm_token_bytes.
-                          // The tokenizer state for the *next* LLM token will be the initial state.
-                          let next_tokenizer_state_for_overall = self.parent.tokenizer.initial_state_id();
-                          if let Some(existing_glr_s) = new_overall_state.get_mut(&next_tokenizer_state_for_overall) {
-                              existing_glr_s.merge_with(glr_s_at_offset);
-                          } else {
-                              new_overall_state.insert(next_tokenizer_state_for_overall, glr_s_at_offset);
-                          }
-                          continue;
-                      }
-
-                      let exec_result = self.parent.tokenizer.execute_from_state(
-                          &llm_token_bytes[offset..],
-                          tokenizer_s_id_at_offset,
-                      );
-
-                      for match_info in &exec_result.matches {
-                          let mut cloned_glr_s = glr_s_at_offset.clone();
-                          cloned_glr_s.step(TerminalID(match_info.id));
-
-                          if cloned_glr_s.is_ok() && !cloned_glr_s.active_state.stack.is_empty() {
-                              let new_offset = offset + match_info.width;
-                              // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
-                              let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
-                              processing_queue.push_back((
-                                  new_offset,
-                                  next_tokenizer_id_for_segment,
-                                  cloned_glr_s,
-                              ));
-                          }
-                      }
-
-                      if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
-                          // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
-                          // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
-                          let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
-                          if let Some(existing_glr_s) = new_overall_state.get_mut(&final_tokenizer_state) {
-                              existing_glr_s.merge_with(glr_s_at_offset.clone());
-                          } else {
-                              new_overall_state.insert(final_tokenizer_state, glr_s_at_offset.clone());
-                          }
+                  if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
+                      // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
+                      // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
+                      let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
+                      if let Some(existing_glr_s) = new_overall_state.get_mut(&final_tokenizer_state) {
+                          existing_glr_s.merge_with(glr_s_at_offset.clone());
+                      } else {
+                          new_overall_state.insert(final_tokenizer_state, glr_s_at_offset.clone());
                       }
                   }
               }
@@ -3539,7 +3477,7 @@ messages:
               let all_tokens_bv = self.parent.all_internal_llm_tokens_bitset();
               let mut roots_to_simplify_arcs = Vec::new();
               for glr_parser_state in self.state.values_mut() {
-                  reset_tokens(&mut glr_parser_state.active_state.stack, &all_tokens_bv);
+                  reset_tokens(&mut glr_parser_state.active_state.stack);
                   if !glr_parser_state.active_state.stack.is_empty() {
                       roots_to_simplify_arcs.push(&mut glr_parser_state.active_state.stack);
                   }
@@ -3572,280 +3510,8 @@ messages:
       ```
     metadata:
       filename: src/constraint.rs
-  - user: |
-      Remove `intersection` from `LLMTokenInfo`. And actually let's use `Option<LLMTokenBV>` instead of `LLMTokenInfo`.
-      The actual bitset should only be initialized when necessary.
-      Implement `PathAccumulator` for `Option<LLMTokenBV>`.
-    metadata:
-  - assistant: |-
-      Okay, I'll guide you through the process of replacing `LLMTokenInfo` with `Option<LLMTokenBV>` and updating its usage. This involves removing the old struct and its implementations, adding a new `PathAccumulator` implementation, and adjusting a few key areas where the accumulator is used.
-
-      Here are the step-by-step instructions:
-
-      **Step 1: Remove the `LLMTokenInfo` struct and its associated implementations.**
-
-      1.  **Delete the `LLMTokenInfo` struct definition.**
-          This is the block starting around line 30:
-          ```rust
-          // Around line 30
-          #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-          pub struct LLMTokenInfo {
-              pub active:       LLMTokenBV,
-              pub intersection: LLMTokenBV,
-              // Removed: pub terminals:    Arc<GSSNode<TerminalID, ()>>,
-          }
-          ```
-          Remove these lines entirely.
-
-      2.  **Delete the `impl Default for LLMTokenInfo` block.**
-          This is the block starting around line 38:
-          ```rust
-          // Around line 38
-          impl Default for LLMTokenInfo {
-              fn default() -> Self {
-                  Self {
-                      active:       HybridBitset::new(),
-                      intersection: HybridBitset::max_ones(),
-                      // Removed terminals initialization
-                  }
-              }
-          }
-          ```
-          Remove these lines entirely.
-
-      3.  **Delete the `impl PathAccumulator for LLMTokenInfo` block.**
-          This is the block starting around line 45:
-          ```rust
-          // Around line 45
-          impl PathAccumulator for LLMTokenInfo {
-              fn union_assign(&mut self, other: Self) {
-                  self.active |= &other.active;
-                  self.intersection &= &other.intersection;
-                  // Removed terminals merge
-              }
-
-              fn intersect_assign(&mut self, right: Self) {
-                  // The 'pop' or 'intersect' operation for LLMTokenInfo means:
-                  // - The active set of the resulting path is the intersection of the left path's active set and the right path's active set.
-                  // - The intersection set also becomes stricter (AND).
-                  // - Terminals from the right path are kept (this logic is now removed).
-                  self.active &= &right.active;
-                  self.intersection &= &right.intersection;
-                  // Removed terminals assignment
-              }
-          }
-          ```
-          Remove these lines entirely.
-
-      4.  **Delete the `impl std::fmt::Debug for LLMTokenInfo` block.**
-          This is the block starting around line 63:
-          ```rust
-          // Around line 63
-          impl std::fmt::Debug for LLMTokenInfo {
-              fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                  let fmt_bv = |bv: &LLMTokenBV| -> String {
-                      format!("{:?}", bv)
-                  };
-
-                  f.debug_struct("LLMTokenInfo")
-                      .field("active", &fmt_bv(&self.active))
-                      .field("intersection", &fmt_bv(&self.intersection))
-                      // Removed terminals field
-                      .finish()
-              }
-          }
-          ```
-          Remove these lines entirely.
-
-      **Step 2: Add the `PathAccumulator` implementation for `Option<LLMTokenBV>`.**
-
-      Insert the following code block. A good place for this would be where the `impl PathAccumulator for LLMTokenInfo` was, or generally after the type aliases `LLMTokenBV` and `GrammarTokenBV` (around current line 28, which will be an earlier line number after deletions).
-
-      ```rust
-      impl PathAccumulator for Option<LLMTokenBV> {
-          fn union_assign(&mut self, other: Self) {
-              match (self.as_mut(), other) {
-                  (Some(self_bv), Some(other_bv)) => {
-                      *self_bv |= &other_bv;
-                      // An empty bitset resulting from a union is still Some(empty_bv), not None.
-                  }
-                  (None, Some(other_bv)) => {
-                      *self = Some(other_bv);
-                  }
-                  (Some(_), None) => {
-                      // self remains Some(self_bv)
-                  }
-                  (None, None) => {
-                      // self remains None
-                  }
-              }
-          }
-
-          fn intersect_assign(&mut self, right: Self) {
-              match self.as_mut() {
-                  Some(self_bv) => {
-                      if let Some(right_bv) = right {
-                          *self_bv &= &right_bv;
-                          if self_bv.is_empty() {
-                              *self = None; // If intersection is empty, represent as None
-                          }
-                      } else {
-                          // Intersecting with None (no allowed tokens on the right path)
-                          *self = None; // Results in no allowed tokens for self.
-                      }
-                  }
-                  None => {
-                      // self is already None (no allowed tokens), so intersection remains None.
-                  }
-              }
-          }
-      }
-      ```
-
-      **Step 3: Modify `GrammarConstraint::init()`**
-
-      In the `GrammarConstraint::init` method (originally around line 312), change the initialization of `initial_llm_token_acc`.
-
-      *   **Original code (around lines 316-320):**
-          ```rust
-                  let base_set_for_info = HybridBitset::ones(self.internal_max_llm_token + 1);
-                  let initial_llm_token_acc = LLMTokenInfo { 
-                      active:       base_set_for_info.clone(),
-                      intersection: base_set_for_info,
-                  };
-          ```
-
-      *   **Replace with:**
-          ```rust
-                  let base_set_for_info = HybridBitset::ones(self.internal_max_llm_token + 1);
-                  let initial_llm_token_acc: Option<LLMTokenBV> = Some(base_set_for_info);
-          ```
-          Note: The type `GLRParserState<'a>` (used in the `state.insert` call on line 321) will now implicitly be `GLRParserState<'a, Option<LLMTokenBV>>`. This change propagates from the `GLRParser::init_glr_parser_with_acc` method, which will now expect `Option<LLMTokenBV>`.
-
-      **Step 4: Modify `GrammarConstraintState::get_mask()`**
-
-      Inside the `get_mask` method, locate the `Trie::special_map` call (originally around line 878). You need to modify the `process_fn` lambda (the last argument to `special_map`).
-
-      *   **Original `process_fn` (lambda starting around line 892):**
-          ```rust
-                      // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
-                      |precomputed_node_data, final_glr_s| {
-                          if final_glr_s.active_state.stack.is_empty() {
-                              return true; 
-                          }
-
-                          let glr_active_tokens = final_glr_s.active_state.stack.acc().active.clone();
-
-                          if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
-                              let mask_contribution = &glr_active_tokens & clean_end_bv;
-                              final_mask_internal |= &mask_contribution;
-                          }
-
-                          for (grammar_token, finalizer) in precomputed_node_data.value.finalizers() {
-                              let mut temp_glr_s_for_finalizer_step = final_glr_s.clone();
-                              temp_glr_s_for_finalizer_step.step(*grammar_token);
-
-                              if temp_glr_s_for_finalizer_step.is_ok() && !temp_glr_s_for_finalizer_step.active_state.stack.is_empty() {
-                                  let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc().active.clone();
-                                  for finalizer_llm_token_bv in finalizer.content.values() {
-                                      let mask_contribution = &glr_active_after_step & finalizer_llm_token_bv;
-                                      final_mask_internal |= &mask_contribution;
-                                  }
-                              }
-                          }
-                          true 
-                      },
-          ```
-
-      *   **Modify to (changes are within the lambda):**
-          ```rust
-                      // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
-                      |precomputed_node_data, final_glr_s| {
-                          if final_glr_s.active_state.stack.is_empty() {
-                              return true; 
-                          }
-
-                          // Get the accumulator, which is now Option<LLMTokenBV>
-                          let glr_active_tokens_opt = final_glr_s.active_state.stack.acc().clone();
-
-                          if let Some(glr_active_tokens) = glr_active_tokens_opt {
-                              // Only proceed if there's an active bitset
-                              if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
-                                  let mask_contribution = &glr_active_tokens & clean_end_bv;
-                                  final_mask_internal |= &mask_contribution;
-                              }
-
-                              for (grammar_token, finalizer) in precomputed_node_data.value.finalizers() {
-                                  let mut temp_glr_s_for_finalizer_step = final_glr_s.clone();
-                                  temp_glr_s_for_finalizer_step.step(*grammar_token);
-
-                                  if temp_glr_s_for_finalizer_step.is_ok() && !temp_glr_s_for_finalizer_step.active_state.stack.is_empty() {
-                                      // Get accumulator for the state after stepping
-                                      if let Some(glr_active_after_step) = temp_glr_s_for_finalizer_step.active_state.stack.acc().clone() {
-                                          for finalizer_llm_token_bv in finalizer.content.values() {
-                                              let mask_contribution = &glr_active_after_step & finalizer_llm_token_bv;
-                                              final_mask_internal |= &mask_contribution;
-                                          }
-                                      }
-                                  }
-                              }
-                          }
-                          // If glr_active_tokens_opt was None, no contribution from this path.
-                          true 
-                      },
-          ```
-          The key changes are:
-          1.  `final_glr_s.active_state.stack.acc()` now returns an `&Option<LLMTokenBV>`. We clone it to `Option<LLMTokenBV>`.
-          2.  We use `if let Some(glr_active_tokens) = glr_active_tokens_opt` to proceed only if the accumulator is `Some`.
-          3.  The same pattern is applied for `glr_active_after_step`.
-
-      **Step 5: Modify `GrammarConstraintState::commit()`**
-
-      In the `GrammarConstraintState::commit` method (originally around line 922), find the loop where `reset_tokens` is called (originally around line 1004).
-
-      *   **Original line (around line 1004):**
-          ```rust
-                      reset_tokens(&mut glr_parser_state.active_state.stack, &all_tokens_bv);
-          ```
-
-      *   **Replace with:**
-          ```rust
-                      reset_tokens(&mut glr_parser_state.active_state.stack, Some(all_tokens_bv.clone()));
-          ```
-          This assumes the `reset_tokens` function (defined in `src/datastructures/gss.rs`) will be updated to accept `Option<LLMTokenBV>` as its second effective argument for the new accumulator value. The `active_state.stack` type has also changed.
-
-      **Step 6: Awareness of Propagated Changes (Outside `src/constraint.rs`)**
-
-      Be aware that changing the accumulator type from `LLMTokenInfo` to `Option<LLMTokenBV>` has implications for other parts of your codebase, specifically:
-
-      *   **`src/glr/parser.rs`**:
-          *   `GLRParserState<'a>` will now effectively be `GLRParserState<'a, Option<LLMTokenBV>>`.
-          *   `ParseState<'a, Acc>` will be instantiated as `ParseState<'a, Option<LLMTokenBV>>`.
-          *   `GLRParser::init_glr_parser_with_acc` will need to accept `Option<LLMTokenBV>`.
-          *   The `log_gss` method will need to handle `self.active_state.stack.acc()` returning `Option<LLMTokenBV>`.
-      *   **`src/datastructures/gss.rs`**:
-          *   `GSSNode<T, Acc>` will be instantiated with `Acc = Option<LLMTokenBV>`.
-          *   All methods on `GSSNode` that operate on or return `Acc` will now use `Option<LLMTokenBV>`.
-          *   The `reset_tokens` function will need to be updated to take an `Option<LLMTokenBV>` for the new accumulator state.
-          *   The `intersect_tokens_and_prune_arc` function will operate on GSS nodes where the accumulator is `Option<LLMTokenBV>`. Its internal logic for modifying the accumulator will need to use the `PathAccumulator` methods for `Option<LLMTokenBV>`.
-
-      These instructions focus on `src/constraint.rs` as requested. You'll need to adjust the related code in other files to fully integrate this change. After these modifications, your `LLMTokenInfo` will be effectively replaced by `Option<LLMTokenBV>`, and bitsets will only be stored when they are `Some`, with `None` representing an empty or pruned path in terms of allowed LLM tokens.
-    metadata:
-  - user: |
-      Using model 'gemini/gemini-2.5-flash-preview-05-20' for code completion.
-
-      --- LLM Code Generation Attempt 1/5 ---
-      Parsed actions JSON: [
-        {
-          "action": "replace",
-          "filepath": "src/constraint.rs"
-        }
-      ]
-      Found 1 code blocks with filepaths in attempt 1.
-      Received code for required file: src/constraint.rs
-      All required file contents received or no content needed.
-
-      --- Applying Changes ---
-      Successfully replaced file: src/constraint.rs
+  - user: |-
+      Modify this to initialize `possible_matches` in the grammar constraint properly. Its value should be equivalent to calling `possible_matches` from the root vocab node for a given tokenizer state ID.
+      However, unlike in the precomputer where `possible_matches` is calculated dynamically where needed, in the grammar constraint it must be computed fully ahead of time for all tokenizer states (but only the root vocab node).
     metadata:
 ...
