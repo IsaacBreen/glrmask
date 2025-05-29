@@ -166,8 +166,7 @@ fn test_constraint_simple() {
         let grammar_token_id = grammar_token_map.get_by_left(&Terminal(grammar_token.to_string())).unwrap();
         parser_state_for_comp.step(*grammar_token_id);
     }
-
-
+    
     assert_eq!(constraint_state_for_comp.state().len(), 1, "Constraint state should have one tokenizer state after commit");
     let (tokenizer_state_id_comp, actual_constraint_parser_state) = constraint_state_for_comp.state().iter().next().unwrap();
     
