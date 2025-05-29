@@ -208,11 +208,14 @@ impl GSSNode {
 
     pub fn pop_iter(&self) -> Vec<(Arc<Self>, ParseStateEdgeContent)> {
         self.predecessors.iter().map(|(edge_val, pred_arc)| {
+            let mut pred_arc = pred_arc.clone();
             // The acc for the path ending at pred_arc (after popping self)
             // is self.acc intersected with pred_arc's original acc.
             let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
-            let new_pred_node_data = pred_arc.as_ref().clone().with_acc(path_acc);
-            (Arc::new(new_pred_node_data), edge_val.clone())
+            if path_acc != *pred_arc.acc() {
+                pred_arc = Arc::new(pred_arc.as_ref().clone().with_acc(path_acc));
+            }
+            (pred_arc, edge_val.clone())
         }).collect()
     }
 
