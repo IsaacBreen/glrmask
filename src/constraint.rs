@@ -1002,24 +1002,20 @@ impl<'a> GrammarConstraintState<'a> {
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
             |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
-                let mut temp_glr_s = glr_s.clone();
+                let mut glr_s = glr_s.clone();
                 
-                let mut current_acc = (*temp_glr_s.active_state.stack.acc()).clone();
-                current_acc.active &= edge_llm_tokens_bv;
+                intersect_tokens_and_prune_arc(&mut glr_s.active_state.stack, edge_llm_tokens_bv);
 
-                if current_acc.active.is_empty() {
-                    return None; 
+                if glr_s.active_state.stack.is_empty() {
+                    return None;
                 }
-                
-                let updated_gss_node = (*temp_glr_s.active_state.stack).clone().with_acc(current_acc);
-                temp_glr_s.active_state.stack = Arc::new(updated_gss_node);
 
                 if let Some(gtid) = grammar_token_opt {
-                    temp_glr_s.step(*gtid);
+                    glr_s.step(*gtid);
                 }
 
-                if temp_glr_s.is_ok() && !temp_glr_s.active_state.stack.is_empty() {
-                    Some(temp_glr_s)
+                if glr_s.is_ok() && !glr_s.active_state.stack.is_empty() {
+                    Some(glr_s)
                 } else {
                     None
                 }
