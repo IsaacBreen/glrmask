@@ -138,6 +138,7 @@ fn test_constraint_simple() {
     assert_eq!(mask, HybridBitset::from_iter(vec![0, 1])); // Expect "ab" or "ac"
 
     // Commit "ab" (LLMTokenID 0)
+    dbg!(&constraint_state);
     constraint_state.commit(LLMTokenID(0));
     assert!(constraint_state.is_active());
     
