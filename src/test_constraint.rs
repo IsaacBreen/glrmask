@@ -1035,11 +1035,14 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let initial_tokenizer_state_id = constraint_state_for_comp.parent.tokenizer.initial_state_id();
     assert_eq!(constraint_state_for_comp.state().len(), 1, "Constraint state for comparison should have one tokenizer state");
     let (tokenizer_state_id_comp, actual_constraint_parser_state_comp) = constraint_state_for_comp.state().iter().next().unwrap();
+    let mut actual_constraint_parser_state_comp = actual_constraint_parser_state_comp.clone();
     
-    let all_ones_acc_comp = grammar_constraint.all_internal_llm_tokens_bitset();
     let mut comparable_parser_gss_comp = (*parser_state_for_comp.active_state.stack).clone();
-    comparable_parser_gss_comp.reset_tokens(&HybridBitset::new());
-    let comparable_parser_active_state_comp = ParseState { stack: Arc::new(comparable_parser_gss_comp) };
+    let mut comparable_parser_active_state_comp = ParseState { stack: Arc::new(comparable_parser_gss_comp) };
+
+
+    Arc::make_mut(&mut comparable_parser_active_state_comp.stack).reset_tokens(&HybridBitset::new());
+    Arc::make_mut(&mut actual_constraint_parser_state_comp.active_state.stack).reset_tokens(&HybridBitset::new());
 
     assert_eq!(*tokenizer_state_id_comp, grammar_constraint.tokenizer.initial_state_id(), "Tokenizer for comparison should be in initial state");
     assert_eq!(actual_constraint_parser_state_comp.active_state, comparable_parser_active_state_comp, "GSS structures for comparison should match");
