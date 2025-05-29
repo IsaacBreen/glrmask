@@ -1045,7 +1045,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // assert_eq!(constraint_state.state().len(), 1);
     assert_eq!(constraint_parser_state.active_state, parser_state.active_state);
     println!("Number of states: {}", constraint_state.state().len());
-    println!("State statistics:");
+    let roots = constraint_state.state().values().map(|state| state.active_state.stack.as_ref().clone()).collect::<Vec<_>>();
+    println!("State statistics: {:?}", gather_gss_stats(&roots.iter().collect::<Vec<_>>()));
     for (tokenizer_state_id, state) in constraint_state.state() {
         println!("  State {}: {:?}", tokenizer_state_id.0, gather_gss_stats(&vec![&state.active_state.stack.as_ref().clone()]));
     }
