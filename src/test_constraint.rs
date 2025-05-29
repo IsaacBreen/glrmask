@@ -154,7 +154,7 @@ fn test_constraint_simple() {
     // Ensure the parse state after stepping the constraint with all LLM tokens and committing an LLM token is the same as the parse state after stepping the parser itself tokens emitted by the tokenizer for that same LLM token.
     // In general, this should be true if all LLM tokens cleanly match grammar tokens (or, equivalently, if the only non-empty entry in the precompute tree is under the initial tokenizer state).
     let llm_token = b"ab".to_vec();
-    let grammar_tokens_text = vec!["AB"]; // The grammar token(s) "ab" (LLM) corresponds to
+    let grammar_tokenss = vec![vec!["A", "B_OR_C"], vec!["AB"]];
     let llm_token_id_for_comp = llm_token_map.get_by_left(&llm_token).unwrap();
     
     let mut constraint_state_for_comp = constraint.init();
@@ -162,10 +162,14 @@ fn test_constraint_simple() {
     let _mask_before = constraint_state_for_comp.get_mask();
     constraint_state_for_comp.commit(*llm_token_id_for_comp);
 
-    let mut parser_state_for_comp = parser.init_glr_parser();
-    for grammar_token in grammar_tokens_text {
-        let grammar_token_id = grammar_token_map.get_by_left(&Terminal(grammar_token.to_string())).unwrap();
-        parser_state_for_comp.step(*grammar_token_id);
+    let mut parser_state_for_comp = parser.init_glr_parser_null();
+    for grammar_tokens in grammar_tokenss {
+        let mut parser_state = parser.init_glr_parser();
+        for grammar_token in grammar_tokens {
+            let grammar_token_id = grammar_token_map.get_by_left(&Terminal(grammar_token.to_string())).unwrap();
+            parser_state.step(*grammar_token_id);
+        }
+        parser_state_for_comp.merge_with(parser_state);
     }
 
     assert_eq!(constraint_state_for_comp.state().len(), 1, "Constraint state should have one tokenizer state after commit");
@@ -176,8 +180,8 @@ fn test_constraint_simple() {
     let mut comparable_parser_gss = (*parser_state_for_comp.active_state.stack).clone();
     let mut comparable_parser_active_state = ParseState { stack: Arc::new(comparable_parser_gss) };
 
-    // Arc::make_mut(&mut comparable_parser_active_state.stack).reset_tokens();
-    // Arc::make_mut(&mut actual_constraint_parser_state.active_state.stack).reset_tokens();
+    Arc::make_mut(&mut comparable_parser_active_state.stack).reset_tokens();
+    Arc::make_mut(&mut actual_constraint_parser_state.active_state.stack).reset_tokens();
 
     assert_eq!(*tokenizer_state_id_comp, tokenizer.initial_state_id(), "Tokenizer should be in initial state");
     assert_eq!(actual_constraint_parser_state.active_state, comparable_parser_active_state, "GSS structures should match");

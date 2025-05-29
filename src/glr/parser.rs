@@ -151,6 +151,15 @@ impl GLRParser {
         self.init_glr_parser_with_acc(LLMTokenInfo::default())
     }
 
+    pub fn init_glr_parser_null(&self) -> GLRParserState { // No longer generic
+        GLRParserState {
+            parser: self,
+            active_state: ParseState::new(),
+            action_not_found_states: ParseState::new(),
+            cycled_states: ParseState::new(),
+        }
+    }
+
     pub fn init_glr_parser_with_acc(&self, initial_acc: LLMTokenInfo) -> GLRParserState { // No longer generic
         let initial_parse_state = self.init_parse_state_with_acc(initial_acc);
         GLRParserState {
