@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use bimap::BiBTreeMap;
 use reqwest::blocking;
 use serde_json;
-use crate::constraint::GrammarConstraint;
+use crate::constraint::{GrammarConstraint, LLMTokenInfo};
 use crate::datastructures::trie::Trie;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 // Already a main dependency, but good to be explicit if used directly
@@ -30,7 +30,9 @@ use rand::{Rng, SeedableRng};
 use rand::seq::SliceRandom;
 use crate::glr::analyze::{filter_productions_by_reachability, remove_productions_with_undefined_nonterminals};
 use std::panic::{self, AssertUnwindSafe}; // Added for panic catching
-use std::collections::HashMap; // For the symbol removal helper
+use std::collections::HashMap;
+use crate::datastructures::gss::reset_tokens;
+// For the symbol removal helper
 
 
 // Use concrete types for merge tests
@@ -119,9 +121,9 @@ fn test_constraint_simple() {
     }
 
     let constraint = GrammarConstraint::new(
-        tokenizer,
-        parser,
-        llm_token_map,
+        tokenizer.clone(),
+        parser.clone(),
+        llm_token_map.clone(),
         token_name_map,
         3, // max_llm_token_id should be 3 for 0, 1, 2
     );
@@ -149,6 +151,31 @@ fn test_constraint_simple() {
     let json = constraint.to_json();
     let constraint_from_json = GrammarConstraint::from_json(json).unwrap();
     constraint.assert_eq(&constraint_from_json); // Use the new assert_eq method
+
+    // Ensure the parse state after stepping the constraint with all LLM tokens and committing an LLM token is the same as the parse state after stepping the parser itself tokens emitted by the tokenizer for that same LLM token.
+    // In general, this should be true if all LLM tokens cleanly match grammar tokens (or, equivalently, if the only non-empty entry in the precompute tree is under the initial tokenizer state).
+    let llm_token = b"ab".to_vec();
+    let grammar_tokens = vec!["AB"];
+    let llm_token_id = llm_token_map.get_by_left(&llm_token).unwrap();
+    let grammar_token_ids = grammar_tokens.iter().map(|token| grammar_token_map.get_by_left(&Terminal(token.to_string())).unwrap()).collect::<Vec<_>>();
+    let mut constraint_state = constraint.init();
+    constraint_state.step_with_all_llm_tokens();
+    constraint_state.commit(*llm_token_id);
+
+    let mut parser_state = parser.init_glr_parser();
+    for grammar_token_id in grammar_token_ids {
+        parser_state.step(*grammar_token_id);
+    }
+
+    let (tokenizer_state_id, constraint_parser_state) = constraint_state.state().iter().next().unwrap();
+    let mut constraint_parser_state = constraint_parser_state.clone();
+
+    reset_tokens(&mut constraint_parser_state.active_state.stack, &HybridBitset::new());
+    reset_tokens(&mut parser_state.active_state.stack, &HybridBitset::new());
+
+    assert_eq!(constraint_state.state().len(), 1);
+    assert_eq!(*tokenizer_state_id, tokenizer.initial_state_id());
+    assert_eq!(constraint_parser_state.active_state, parser_state.active_state);
 }
 
 #[test]
