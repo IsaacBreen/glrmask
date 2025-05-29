@@ -55,21 +55,15 @@ impl PathAccumulator for Option<LLMTokenBV> {
     }
 
     fn intersect_assign(&mut self, right: Self) {
-        match self.as_mut() {
-            Some(self_bv) => {
-                if let Some(right_bv) = right {
-                    *self_bv &= &right_bv;
-                    if self_bv.is_empty() {
-                        *self = None; // If intersection is empty, represent as None
-                    }
-                } else {
-                    // Intersecting with None (no allowed tokens on the right path)
-                    *self = None; // Results in no allowed tokens for self.
-                }
+        match (self.as_mut(), right) {
+            (Some(self_bv), Some(right_bv)) => {
+                *self_bv &= &right_bv;
             }
-            None => {
-                // self is already None (no allowed tokens), so intersection remains None.
+            (None, Some(right_bv)) => {
+                *self = Some(right_bv);
             }
+            (Some(_), None) => {}
+            (None, None) => {}
         }
     }
 }
