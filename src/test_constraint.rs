@@ -31,7 +31,7 @@ use rand::seq::SliceRandom;
 use crate::glr::analyze::{filter_productions_by_reachability, remove_productions_with_undefined_nonterminals};
 use std::panic::{self, AssertUnwindSafe}; // Added for panic catching
 use std::collections::HashMap;
-use crate::datastructures::gss::reset_tokens;
+use crate::datastructures::gss::{gather_gss_stats, reset_tokens};
 // For the symbol removal helper
 
 
@@ -1044,6 +1044,11 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     // assert_eq!(constraint_state.state().len(), 1);
     assert_eq!(constraint_parser_state.active_state, parser_state.active_state);
+    println!("Number of states: {}", constraint_state.state().len());
+    println!("State statistics:");
+    for (tokenizer_state_id, state) in constraint_state.state() {
+        println!("  State {}: {:?}", tokenizer_state_id.0, gather_gss_stats(&vec![&state.active_state.stack.as_ref().clone()]));
+    }
 
     Ok(())
 }
