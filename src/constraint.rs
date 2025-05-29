@@ -1089,11 +1089,12 @@ impl<'a> GrammarConstraintState<'a> {
 
             let mut possible_matches = BTreeMap::new();
             if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
-                possible_matches = self.possible_matches(&self.parent.tokenizer, final_tokenizer_s_id_for_llm_token_segment);
+                possible_matches = self.parent.possible_matches[&TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment)].clone();
             }
 
             for match_info in &exec_result.matches {
                 let mut cloned_glr_s = glr_s_at_offset.clone();
+                cloned_glr_s.active_state.stack.intersect_tokens_and_prune_arc(&possible_matches[&TerminalID(match_info.id)]);
                 cloned_glr_s.step(TerminalID(match_info.id));
 
                 if cloned_glr_s.is_ok() && !cloned_glr_s.active_state.stack.is_empty() {
