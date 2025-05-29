@@ -570,6 +570,40 @@ pub fn find_longest_path(
     if longest_overall_path.is_empty() { None } else { Some(longest_overall_path) }
 }
 
+impl GSSNode {
+    pub fn prune_and_transform_recursive(
+        &mut self,
+        closure: &impl Fn(&LLMTokenInfo) -> Option<(LLMTokenInfo, bool)>,
+        memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
+    ) {
+        let node_arc = Arc::new(self.clone());
+        if let Some(new_node_arc) = prune_and_transform_recursive(&node_arc, closure, memo) {
+            *self = new_node_arc.as_ref().clone();
+        } else {
+            *self = GSSNode::new(self.acc.clone());
+        }
+    }
+
+    pub fn intersect_tokens_and_prune_arc(
+        &mut self,
+        llm_tokens: &LLMTokenBV,
+    ) {
+        let mut node_arc = Arc::new(self.clone());
+        intersect_tokens_and_prune_arc(&mut node_arc, llm_tokens);
+        *self = node_arc.as_ref().clone();
+    }
+
+    pub fn reset_tokens(&mut self, tokens_to_reset: &LLMTokenBV) {
+        let mut node_arc = Arc::new(self.clone());
+        reset_tokens(&mut node_arc, tokens_to_reset);
+        *self = node_arc.as_ref().clone();
+    }
+
+    pub fn find_longest_path(&self) -> Option<Vec<(ParseStateEdgeContent, Arc<GSSNode>)>> {
+        find_longest_path(&self)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GSSStats {
     pub num_roots: usize,
