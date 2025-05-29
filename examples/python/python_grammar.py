@@ -482,8 +482,8 @@ if __name__ == "__main__":
 #     expected_next_token = "world"
 
     pre_input_text = ""
-    input_text = 'from typing import Any, List, Tuple, Union'
-#     input_text = 'def'
+#     input_text = 'from typing import Any, List, Tuple, Union'
+    input_text = 'def'
 #     input_text = 'NAME'
     expected_next_token = ""
 
