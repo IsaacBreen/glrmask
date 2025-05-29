@@ -1151,11 +1151,14 @@ impl<'a> GrammarConstraintState<'a> {
 
         crate::debug!(2, "Committing LLM Token: {:?} (Original ID: {}, Internal ID: {}), Bytes: {:?}", String::from_utf8_lossy(&llm_token_bytes), llm_token_id.0, internal_llm_id.0, llm_token_bytes);
 
+        for state in self.state.values_mut() {
+            Arc::make_mut(&mut state.active_state.stack).reset_tokens();
+        }
+
         let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
-        let initial_states_to_process = std::mem::take(&mut self.state);
 
         let mut processing_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, GLRParserState<'a>>> = BTreeMap::new();
-        processing_queue.insert(0, initial_states_to_process);
+        processing_queue.insert(0, std::mem::take(&mut self.state));
 
         while let Some((offset, states_to_process)) = processing_queue.pop_first() {
             for (tokenizer_s_id_at_offset, glr_s_at_offset) in states_to_process {
@@ -1208,30 +1211,28 @@ impl<'a> GrammarConstraintState<'a> {
                 }
             }
 
-            self.state = new_overall_state.clone();
-            self.state.retain(|_k, v| v.is_ok() && !v.active_state.stack.is_empty());
+        }
 
-            let all_tokens_bv = self.parent.all_internal_llm_tokens_bitset();
-            let mut roots_to_simplify_arcs = Vec::new();
-            for glr_parser_state in self.state.values_mut() {
-                reset_tokens(&mut glr_parser_state.active_state.stack);
-                if !glr_parser_state.active_state.stack.is_empty() {
-                    roots_to_simplify_arcs.push(&mut glr_parser_state.active_state.stack);
-                }
+        self.state = new_overall_state.clone();
+
+        let mut roots_to_simplify_arcs = Vec::new();
+        for glr_parser_state in self.state.values_mut() {
+            if !glr_parser_state.active_state.stack.is_empty() {
+                roots_to_simplify_arcs.push(&mut glr_parser_state.active_state.stack);
             }
+        }
 
-            if !roots_to_simplify_arcs.is_empty() {
-                GSSNode::simplify_together(&mut roots_to_simplify_arcs);
-            }
+        if !roots_to_simplify_arcs.is_empty() {
+            GSSNode::simplify_together(&mut roots_to_simplify_arcs);
+        }
 
-            crate::debug!(2, "State after committing LLM Token (Original ID: {}): {} active tokenizer states.", llm_token_id.0, self.state.len());
-            for (tokenizer_id, glr_state) in &self.state {
-                if !glr_state.active_state.stack.is_empty() { // Log only for non-empty GSS
-                    glr_state.log_gss(
-                        &format!("GSS for tokenizer state {} after commit of token ID {} (internal {})", tokenizer_id.0, llm_token_id.0, internal_llm_id.0),
-                        TerminalID(internal_llm_id.0)
-                    );
-                }
+        crate::debug!(2, "State after committing LLM Token (Original ID: {}): {} active tokenizer states.", llm_token_id.0, self.state.len());
+        for (tokenizer_id, glr_state) in &self.state {
+            if !glr_state.active_state.stack.is_empty() { // Log only for non-empty GSS
+                glr_state.log_gss(
+                    &format!("GSS for tokenizer state {} after commit of token ID {} (internal {})", tokenizer_id.0, llm_token_id.0, internal_llm_id.0),
+                    TerminalID(internal_llm_id.0)
+                );
             }
         }
     }
