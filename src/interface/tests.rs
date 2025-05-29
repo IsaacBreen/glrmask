@@ -97,6 +97,7 @@ mod tests {
 
         println!("Initializing state...");
         let mut state = grammar_constraint.init();
+        state.step_with_all_llm_tokens();
 
         let input_token_ids = vec![
             LLMTokenID(1), LLMTokenID(2), LLMTokenID(3), LLMTokenID(10), // "123+"
@@ -112,6 +113,7 @@ mod tests {
             );
             // println!("Committing token ID: {}", token_id.0);
             state.commit(token_id);
+            state.step_with_all_llm_tokens();
         }
 
         println!("Getting final mask...");
@@ -255,6 +257,7 @@ mod tests {
 
         println!("Initializing state for sentence test...");
         let mut state = grammar_constraint.init();
+        state.step_with_all_llm_tokens();
 
         // 1. Initial mask: Expect tokens for rule A
         let mut expected_A_tokens = vec![tok_a, tok_the, tok_apple, tok_banana, tok_person];
@@ -263,18 +266,21 @@ mod tests {
 
         // 2. Commit "apple" (tok_apple)
         state.commit(tok_apple);
+        state.step_with_all_llm_tokens();
         current_mask = state.get_mask();
         let expected_IGNORE_tokens = vec![tok_space];
         assert_eq!(current_mask, ids_to_mask(&expected_IGNORE_tokens), "Mask after 'apple' should allow token for IGNORE (' ')");
 
         // 3. Commit " " (tok_space)
         state.commit(tok_space);
+        state.step_with_all_llm_tokens();
         current_mask = state.get_mask();
         let mut expected_B_tokens = vec![tok_a, tok_eats, tok_likes, tok_is, tok_tasty, tok_red, tok_happy, tok_dot, tok_and, tok_e];
         assert_eq!(current_mask, ids_to_mask(&expected_B_tokens), "Mask after 'apple ' should allow tokens for B");
 
         // 4. Commit "eats" (tok_eats)
         state.commit(tok_eats);
+        state.step_with_all_llm_tokens();
         current_mask = state.get_mask();
         // After "apple eats", the rule "start -> A IGNORE B" is complete.
         // The augmented rule "start' -> start" is also complete.
@@ -357,6 +363,7 @@ mod tests {
 
         println!("Initializing state for sentence test...");
         let mut state = grammar_constraint.init();
+        state.step_with_all_llm_tokens();
 
         // 1. Initial mask: Expect tokens for rule A
         let mut expected_A_tokens = vec![];
@@ -400,6 +407,7 @@ mod tests {
         let mut state = grammar_constraint.init();
         // In the Python example, step_with_all_llm_tokens() is called after init
         // and after each commit. We replicate that behavior here.
+        state.step_with_all_llm_tokens();
 
         // 4. Initial Mask Check - This is where the bug is expected
         // Allowed LLM tokens should be:

@@ -25300,978 +25300,870 @@ messages:
 
       ...
 
+      These changes also mean that `LLMTokenInfo` can be reduced to just its `active` field (ie `LLMTokenInfo` can be removed and we can just use `HybridBitset` directly).
+
       Impelement the changes in full based on my notes. That is, modify `commit`, remove `step`, and modify `get_mask`.
       Update all the rest of the code appropriately.
+      Just to be clear, these files should NOT be modified:
+      - src/glr/parser.rs
+      - src/datastructures/gss.rs
+      - src/datastructures/trie.rs
+      Only these files should be modified:
+      - src/constraint.rs
+      - src/test_constraint.rs
+      - src/interface/interface.rs
     metadata:
   - assistant: |-
-      Okay, this is a significant refactoring aimed at improving the handling of token boundaries and greediness. Here's a step-by-step guide to implement these changes.
+      Okay, I'll provide the step-by-step instructions to refactor the `GrammarConstraint` and related components as you've outlined. This involves simplifying `LLMTokenInfo`, removing the public `step` method from `GrammarConstraintState`, and reimplementing `get_mask` and `commit`.
 
-      **Phase 1: Modify `LLMTokenInfo` and related GSS parts if necessary**
+      Here are the detailed changes:
 
-      The prompt doesn't explicitly ask for changes to `LLMTokenInfo` or `PathAccumulator` for it, beyond removing the `terminals` field (which is already done in the provided code). We'll assume `active` and `intersection` are still relevant. The `intersection` field's role might become less critical if `active` is managed precisely by `get_mask` and `commit`, but we'll keep it for now.
+      **File: `src/constraint.rs`**
 
-      **Phase 2: Refactor `GrammarConstraintState` in `src/constraint.rs`**
-
-      1.  **Remove `step_with_all_llm_tokens` and `step_with_llm_token`:**
-          *   Delete these public methods from `GrammarConstraintState`.
-          *   The `step_with_llm_token_sequence` method will be updated later to use the new `commit`.
-
-      2.  **Remove `prepare_initial_nodes_and_values_for_special_map`:**
-          *   This helper function will no longer be needed in its current form. `get_mask` will incorporate similar logic.
-
-      3.  **Modify `GrammarConstraintState::commit`:**
-
-          *   Replace the current `commit` method with the new logic.
-          *   You'll need a helper in `GrammarConstraint` (or pass it to `commit`) for `all_internal_llm_tokens_bitset`. Let's add it to `GrammarConstraint`.
-
-          ```rust
-          // In src/constraint.rs
-
-          // Add to GrammarConstraint impl
-          impl GrammarConstraint {
-              // ... (existing methods)
-
-              fn all_internal_llm_tokens_bitset(&self) -> LLMTokenBV {
-                  HybridBitset::ones(self.internal_max_llm_token + 1)
-              }
-          }
-
-          // Modify GrammarConstraintState::commit
-          impl<'a> GrammarConstraintState<'a> {
-              // ... (get_mask will be modified next, step is removed)
-
-              pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
-                  let internal_llm_id = match self.parent.original_id_to_internal(llm_token_id) {
-                      Some(id) => id,
-                      None => {
-                          crate::debug!(1, "LLM Token ID {} not found in internal mapping. Clearing state.", llm_token_id.0);
-                          self.state.clear();
-                          return;
-                      }
-                  };
-
-                  let llm_token_bytes = match self.parent.llm_token_map.get_by_right(&llm_token_id) {
-                      Some(bytes) => bytes.clone(),
-                      None => {
-                          // This case should ideally not happen if original_id_to_internal succeeded,
-                          // but as a safeguard if llm_token_map is out of sync.
-                          crate::debug!(1, "LLM Token bytes for original ID {} not found. Clearing state.", llm_token_id.0);
-                          self.state.clear();
-                          return;
-                      }
-                  };
-
-                  crate::debug!(2, "Committing LLM Token: {:?} (Original ID: {}, Internal ID: {}), Bytes: {:?}", String::from_utf8_lossy(&llm_token_bytes), llm_token_id.0, internal_llm_id.0, llm_token_bytes);
-
-                  let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
-                  let initial_states_to_process = std::mem::take(&mut self.state);
-
-                  for (current_tokenizer_s_id, base_glr_s) in initial_states_to_process {
-                      let mut processing_queue: VecDeque<(usize, TokenizerStateID, GLRParserState<'a>)> = VecDeque::new();
-                      // Initial GLR state's accumulator should be intersected with the committed token
-                      // Or, rather, the paths taken *through* the tokenization of llm_token_bytes
-                      // will naturally select compatible GLR states.
-                      // The base_glr_s.active_state.stack.acc().active already reflects what's allowed *before* this token.
-
-                      // We start processing the llm_token_bytes from its beginning (offset 0)
-                      // using the current_tokenizer_s_id and its associated base_glr_s.
-                      processing_queue.push_back((0, current_tokenizer_s_id, base_glr_s));
-
-                      while let Some((offset, tokenizer_s_id_at_offset, glr_s_at_offset)) = processing_queue.pop_front() {
-                          if offset >= llm_token_bytes.len() { // Already fully processed this path
-                              // This case implies a previous step led to consuming the entire token.
-                              // It should have been added to new_overall_state then.
-                              // For safety, if it reaches here, it means it's a valid state at the end of the token.
-                              // The tokenizer state should be the initial one for the *next* token.
-                              let next_tokenizer_state_for_overall = self.parent.tokenizer.initial_state_id();
-                              if let Some(existing_glr_s) = new_overall_state.get_mut(&next_tokenizer_state_for_overall) {
-                                  existing_glr_s.merge_with(glr_s_at_offset.clone());
-                              } else {
-                                  new_overall_state.insert(next_tokenizer_state_for_overall, glr_s_at_offset.clone());
-                              }
-                              continue;
-                          }
-
-                          let exec_result = self.parent.tokenizer.execute_from_state(
-                              &llm_token_bytes[offset..],
-                              tokenizer_s_id_at_offset,
-                          );
-
-                          for match_info in &exec_result.matches {
-                              let mut cloned_glr_s = glr_s_at_offset.clone();
-                              // The acc of cloned_glr_s is from glr_s_at_offset.
-                              // We need to ensure that this path is compatible with the *committed* internal_llm_id.
-                              // This is implicitly handled if the old `active` set was accurate.
-                              // For commit, we are forcing this path.
-                              
-                              cloned_glr_s.step(TerminalID(match_info.id));
-
-                              if cloned_glr_s.is_ok() {
-                                  let new_offset = offset + match_info.width;
-                                  if new_offset == llm_token_bytes.len() {
-                                      let next_tokenizer_state_for_overall = self.parent.tokenizer.initial_state_id();
-                                      if let Some(existing_glr_s) = new_overall_state.get_mut(&next_tokenizer_state_for_overall) {
-                                          existing_glr_s.merge_with(cloned_glr_s);
-                                      } else {
-                                          new_overall_state.insert(next_tokenizer_state_for_overall, cloned_glr_s);
-                                      }
-                                  } else {
-                                      // A grammar token was consumed, next part of LLM token starts from tokenizer's initial state
-                                      processing_queue.push_back((
-                                          new_offset,
-                                          self.parent.tokenizer.initial_state_id(),
-                                          cloned_glr_s,
-                                      ));
-                                  }
-                              }
-                          }
-
-                          if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
-                              // This means the rest of llm_token_bytes (from offset) was consumed by the tokenizer,
-                              // ending in final_tokenizer_s_id_for_llm_token_segment.
-                              // The glr_s_at_offset is carried over, as no further *grammar* token was completed from this segment.
-                              // This state (tokenizer and GLR) is what we'd be in *after* consuming the LLM token.
-                              if let Some(existing_glr_s) = new_overall_state.get_mut(&TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment)) {
-                                  existing_glr_s.merge_with(glr_s_at_offset.clone());
-                              } else {
-                                  new_overall_state.insert(TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment), glr_s_at_offset.clone());
-                              }
-                          }
-                      }
-                  }
-
-                  self.state = new_overall_state;
-                  self.state.retain(|_k, v| v.is_ok() && !v.active_state.stack.is_empty());
-
-
-                  let all_tokens_bv = self.parent.all_internal_llm_tokens_bitset();
-                  let mut roots_to_simplify = Vec::new();
-                  for glr_parser_state in self.state.values_mut() {
-                      // Reset active tokens to all possibilities for the *next* token.
-                      // get_mask will then determine the actual subset.
-                      reset_tokens(&mut glr_parser_state.active_state.stack, &all_tokens_bv);
-                      if !glr_parser_state.active_state.stack.is_empty() {
-                          roots_to_simplify.push(&mut glr_parser_state.active_state.stack);
-                      }
-                  }
-                  
-                  if !roots_to_simplify.is_empty() {
-                      GSSNode::simplify_together(&mut roots_to_simplify);
-                  }
-                  
-                  // Logging after commit
-                  crate::debug!(2, "State after committing LLM Token (Original ID: {}): {} active tokenizer states.", llm_token_id.0, self.state.len());
-                  for (tokenizer_id, glr_state) in &self.state {
-                      glr_state.log_gss(
-                          &format!("GSS for tokenizer state {} after commit", tokenizer_id.0),
-                          TerminalID(internal_llm_id.0) // Just for context, not a real grammar token
-                      );
-                  }
-              }
-          }
-          ```
-
-      4.  **Modify `GrammarConstraintState::get_mask`:**
-
-          ```rust
-          // In src/constraint.rs
-          // Modify GrammarConstraintState::get_mask
-          impl<'a> GrammarConstraintState<'a> {
-              pub fn get_mask(&mut self) -> LLMTokenBV {
-                  let mut final_mask_internal = HybridBitset::new();
-
-                  if self.state.is_empty() {
-                      return self.parent.internal_bv_to_original(&final_mask_internal);
-                  }
-
-                  let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
-                  for (tokenizer_state_id, glr_state) in &self.state {
-                      if let Some(precomputed_trie_root_data) = self.parent.precomputed.get(tokenizer_state_id) {
-                          let precomputed_trie_arc = Arc::new(Mutex::new(precomputed_trie_root_data.clone()));
-                          initial_values_for_map.push((precomputed_trie_arc, glr_state.clone()));
-                      } else {
-                          // This case implies a tokenizer state exists in self.state
-                          // for which no precomputed trie exists. This might be an issue
-                          // or indicate that such states cannot lead to any valid LLM tokens.
-                          crate::debug!(1, "Warning: No precomputed trie found for tokenizer state {:?}. This state will not contribute to the mask.", tokenizer_state_id);
-                      }
-                  }
-
-                  if initial_values_for_map.is_empty() && !self.state.is_empty() {
-                       crate::debug!(1, "Warning: initial_values_for_map is empty for get_mask, but self.state was not. No LLM tokens will be allowed.");
-                       return self.parent.internal_bv_to_original(&final_mask_internal);
-                  }
-                  if initial_values_for_map.is_empty() && self.state.is_empty() {
-                       return self.parent.internal_bv_to_original(&final_mask_internal);
-                  }
-
-
-                  Trie::special_map(
-                      initial_values_for_map,
-                      // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
-                      |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
-                          let mut temp_glr_s = glr_s.clone();
-                          
-                          // The active set in glr_s.acc already reflects grammar constraints up to this point.
-                          // Intersect with LLM tokens allowed on this edge of the precomputed trie.
-                          let mut new_active_for_gss = temp_glr_s.active_state.stack.acc().active.clone();
-                          new_active_for_gss &= edge_llm_tokens_bv;
-
-                          if new_active_for_gss.is_empty() {
-                              return None; // This path in precomputed trie is not compatible
-                          }
-                          
-                          // Update the GSS nodes with this more restricted active set.
-                          // This is tricky because intersect_tokens_and_prune_arc modifies in place.
-                          // We need a way to apply this intersection to a cloned GSS stack.
-                          // For now, let's assume acc_mut was public or we have a helper.
-                          // A simpler way: the active set of the *output* GLR state should reflect this.
-                          // The GSS structure itself doesn't change here, only its accumulator.
-                          
-                          let mut temp_gss_node_data = (*temp_glr_s.active_state.stack).clone();
-                          temp_gss_node_data.acc_mut().active = new_active_for_gss; // Assuming acc_mut or similar
-                          // If acc_mut is not available, we'd need to rebuild the top GSSNode with the new acc.
-                          // This is complex. Let's assume LLMTokenInfo::intersect_assign can be used on the acc.
-                          temp_glr_s.active_state.stack = Arc::new(temp_gss_node_data);
-
-
-                          if let Some(gtid) = grammar_token_opt {
-                              temp_glr_s.step(*gtid);
-                          }
-
-                          if temp_glr_s.is_ok() && !temp_glr_s.active_state.stack.is_empty() {
-                              Some(temp_glr_s)
-                          } else {
-                              None
-                          }
-                      },
-                      // merge_fn
-                      |glr_s1, glr_s2| {
-                          glr_s1.merge_with(glr_s2);
-                      },
-                      // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
-                      |precomputed_node_data, final_glr_s| {
-                          if final_glr_s.active_state.stack.is_empty() {
-                              return true; // Continue traversal, but this path yields no tokens.
-                          }
-
-                          let glr_active_tokens = final_glr_s.active_state.stack.acc().active.clone();
-
-                          if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
-                              let mask_contribution = &glr_active_tokens & clean_end_bv;
-                              final_mask_internal |= &mask_contribution;
-                          }
-
-                          for (grammar_token, finalizer) in precomputed_node_data.value.finalizers() {
-                              // If we consume 'grammar_token' now, what LLM tokens would that be?
-                              // And would the GLR state still be valid?
-                              let mut temp_glr_s_for_finalizer_step = final_glr_s.clone();
-                              temp_glr_s_for_finalizer_step.step(*grammar_token);
-
-                              if temp_glr_s_for_finalizer_step.is_ok() && !temp_glr_s_for_finalizer_step.active_state.stack.is_empty() {
-                                  // The active set of temp_glr_s_for_finalizer_step now reflects constraints *after* stepping with grammar_token.
-                                  // This should be intersected with the finalizer_llm_token_bv.
-                                  let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc().active.clone();
-                                  for finalizer_llm_token_bv in finalizer.content.values() {
-                                      let mask_contribution = &glr_active_after_step & finalizer_llm_token_bv;
-                                      final_mask_internal |= &mask_contribution;
-                                  }
-                              }
-                          }
-                          true // Continue traversal
-                      },
-                  );
-
-                  self.parent.internal_bv_to_original(&final_mask_internal)
-              }
-
-              // Update step_with_llm_token_sequence
-              pub fn step_with_llm_token_sequence(&mut self, llm_token_ids: &[LLMTokenID]) {
-                  for &llm_token_id in llm_token_ids {
-                      self.commit(llm_token_id);
-                      if !self.is_active() { // Stop if state becomes invalid
-                          break;
-                      }
-                  }
-              }
-          }
-          ```
-          A note on `get_mask`'s `step_fn`: Modifying `temp_glr_s.active_state.stack` by creating a new `Arc::new(temp_gss_node_data)` is crucial. The `GSSNode::acc_mut()` was made private. We need to ensure `GSSNode` can have its accumulator updated, or `GLRParserState::step` needs to handle this.
-          The simplest way is to make `GSSNode::with_acc` public or add a `set_acc` method.
-          Let's assume `GSSNode::with_acc` is made public for this.
-
-          In `src/datastructures/gss.rs`, make `with_acc` public:
-          ```rust
-          // In GSSNode impl
-          // Helper to clone the node and set a new accumulator. Used internally.
-          // Make this public for constraint.rs usage
-          pub fn with_acc(mut self, acc: LLMTokenInfo) -> Self {
-              self.acc = acc;
-              self.hash_key_cache = compute_hash_key(&self.predecessors); // Recalculate hash if acc changes meaning
-              self
-          }
-          ```
-          Then, in `get_mask`'s `step_fn`:
-          ```rust
-          // ... inside step_fn of get_mask
-          let mut new_acc_for_gss = (*temp_glr_s.active_state.stack.acc()).clone(); // Clone existing acc
-          new_acc_for_gss.active &= edge_llm_tokens_bv; // Modify the active part
-
-          if new_acc_for_gss.active.is_empty() {
-              return None; 
-          }
-          
-          // Create a new GSSNode with the updated accumulator
-          let updated_gss_node = (*temp_glr_s.active_state.stack).clone().with_acc(new_acc_for_gss);
-          temp_glr_s.active_state.stack = Arc::new(updated_gss_node);
-          // ... rest of step_fn
-          ```
-
-      5.  **Update `GLRParserState::step` in `src/glr/parser.rs`:**
-          *   The `acc_for_new_node` in `push_state` should propagate the accumulator.
-          *   The `new_acc_for_goto_child` in `pop_and_goto` should also propagate.
-          *   The current logic for these seems to correctly propagate the `LLMTokenInfo`. The key is that the `LLMTokenInfo` passed *into* `GLRParserState::step` (via the `glr_s` in `get_mask`'s `step_fn`) must have its `active` set correctly representing the LLM tokens allowed by the precomputed trie edge.
-          *   The GSS simplification call `Arc::make_mut(&mut self.active_state.stack).simplify();` at the end of `GLRParserState::step` should be removed. Simplification is now handled in `GrammarConstraintState::commit`.
-          *   Logging calls (`log_gss`) should be removed from `GLRParserState::step` as it's now an internal part of `get_mask` or `commit`'s logic.
-
-          ```rust
-          // In src/glr/parser.rs
-          // Modify GLRParserState::step
-          pub fn step(&mut self, token_id: TerminalID) {
-              // Remove: crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
-              // Remove: self.log_gss("Step-start", token_id);
-              self.cycled_states = ParseState::new(); // This might still be useful if cycles are specific to a step
-
-              let mut todo: Vec<(ParseState, BTreeSet<Arc<GSSNode>>)> = Vec::new();
-              todo.push((ParseState { stack: self.active_state.stack.clone() }, BTreeSet::new()));
-
-              let mut next = ParseState::new();
-              let mut not_found = ParseState::new(); // Renamed from action_not_found_states_for_step
-
-              while let Some((state, visited_on_this_path)) = todo.pop() {
-                  if visited_on_this_path.contains(&state.stack) {
-                      // This cycle detection is for GSS structure during reductions, keep it.
-                      crate::debug!(2, "Cycle detected: GSSNode at {:p} encountered again in reduction path while processing token {:?}.", Arc::as_ptr(&state.stack), token_id);
-                      // Consider if panic is too harsh here, maybe add to self.cycled_states and prune.
-                      // For now, keeping panic as it indicates a potentially deep issue.
-                      // print_gss_forest(&[state.stack.clone()], usize::MAX); // For debugging
-                      // panic!("Cycle detected: GSSNode at {:p} encountered again in reduction path.", Arc::as_ptr(&state.stack));
-                      self.cycled_states.merge(state.clone()); // Collect cycled states
-                      continue; // Skip processing this path further to avoid infinite loop
-                  }
-
-                  let mut next_visited_on_this_path = visited_on_this_path.clone();
-                  next_visited_on_this_path.insert(state.stack.clone());
-
-                  let stack_arc_for_operations = &state.stack;
-                  // Iterate over (parent_of_top_edge, top_edge_content)
-                  for (parent_arc, top_edge_content) in state.stack.pop_iter() {
-                      // current_path_acc is the accumulator value of the path segment ending at parent_arc,
-                      // considering the path *through* state.stack.
-                      let current_path_acc = state.stack.acc().clone().intersect(parent_arc.acc().clone());
-
-                      // temp_idk represents the GSS stack *before* the shift or reduce action,
-                      // but *after* popping the current state.stack. Its accumulator is current_path_acc.
-                      // This is the GSSNode that results from (parent_arc --top_edge_content--> state.stack)
-                      // effectively, it's parent_arc with top_edge_content on top, but its acc is current_path_acc.
-                      // This seems to be what GSSNode::push is for.
-                      let gss_node_before_action = Arc::new(parent_arc.push(top_edge_content.clone(), current_path_acc.clone()));
-
-
-                      let row_result = self.parser.stage_7_table.get(&top_edge_content.state_id);
-                      if row_result.is_none() {
-                          crate::debug!(1, "Error: State {} not found in stage_7_table. This should not happen.", top_edge_content.state_id.0);
-                          not_found.merge(state.clone()); // Mark this path as problematic
-                          continue;
-                      }
-                      let row = row_result.unwrap();
-
-
-                      match row.shifts_and_reduces.get(&token_id) {
-                          Some(Stage7ShiftsAndReduces::Shift(to)) => {
-                              // acc_for_new_node for push_state should be the acc of gss_node_before_action
-                              let new_parse_state = self.push_state(&gss_node_before_action, *to, gss_node_before_action.acc().clone());
-                              next.merge(new_parse_state);
-                          }
-                          Some(Stage7ShiftsAndReduces::Reduce { nonterminal_id: nt, len, .. }) => {
-                              // pop_and_goto needs the GSS node from which to pop (gss_node_before_action),
-                              // the edge that led to it (top_edge_content), and the parent of that edge (parent_arc).
-                              // The accumulator for the new node after goto will be derived inside pop_and_goto.
-                              let s_new_arc = self.pop_and_goto(&gss_node_before_action, &top_edge_content, &parent_arc, *len, *nt);
-                              if !s_new_arc.is_empty() {
-                                 todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
-                              }
-                          }
-                          Some(Stage7ShiftsAndReduces::Split { shift, reduces }) => {
-                              if let Some(to) = shift {
-                                  let new_parse_state = self.push_state(&gss_node_before_action, *to, gss_node_before_action.acc().clone());
-                                  next.merge(new_parse_state);
-                              }
-                              for (len, nts) in reduces {
-                                  for (nt, _prod_ids) in nts {
-                                      let s_new_arc = self.pop_and_goto(&gss_node_before_action, &top_edge_content, &parent_arc, *len, *nt);
-                                      if !s_new_arc.is_empty() {
-                                          todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
-                                      }
-                                  }
-                              }
-                          }
-                          None => {
-                              not_found.merge(state.clone());
-                          },
-                      }
-                  }
-              }
-
-              self.active_state = next;
-              self.action_not_found_states = not_found;
-              
-              // Remove GSS simplification from here
-              // Remove: if !self.active_state.stack.is_empty() { ... }
-              // Remove: self.log_gss("Step-end", token_id);
-              // Remove: crate::debug!(4, "----------------------------------------------------------------");
-          }
-          ```
-
-      6.  **Update `src/test_constraint.rs`:**
-          *   Tests using `step_with_all_llm_tokens` or `step_with_llm_token` will need to be rewritten.
-          *   They should now call `commit` for advancing state and `get_mask` for checking possibilities.
-          *   Example:
+      1.  **Simplify `LLMTokenInfo` struct**:
+          *   Locate the `LLMTokenInfo` struct definition.
+          *   Remove the `intersection` field. The struct should now look like this:
               ```rust
-              // Old:
-              // constraint_state.step_with_all_llm_tokens();
-              // let mask = constraint_state.get_mask();
-              // constraint_state.commit(LLMTokenID(0));
-
-              // New:
-              let mask = constraint_state.get_mask(); // Get mask based on current state
-              // ... assert on mask ...
-              constraint_state.commit(LLMTokenID(0)); // Commit the token
-              // ... (optionally get mask again if needed for next step)
+              pub struct LLMTokenInfo {
+                  pub active:       LLMTokenBV,
+                  // Removed: pub terminals:    Arc<GSSNode<TerminalID, ()>>, // Already removed
+              }
               ```
-          *   The test `test_constraint_simple` and `test_constraint_expression` will need careful review of their assertions based on the new `commit` and `get_mask` behavior.
-          *   The assertion comparing `constraint_parser_state.active_state` with `parser_state.active_state` after a commit needs to be re-evaluated. The `LLMTokenInfo` in `constraint_parser_state` will have its `active` set to "all ones" after `commit` and `reset_tokens`. The structural part of the GSS should still be comparable if the `reset_tokens` function is modified to only affect the `active` and `intersection` fields of `LLMTokenInfo`, leaving other parts (if any) untouched, or if `LLMTokenInfo` only contains those two fields. Given the current `LLMTokenInfo`, `reset_tokens` effectively makes the `acc` part different. So, this specific assertion might need to compare GSS structure ignoring the top-level accumulator, or the `reset_tokens` function needs to be more nuanced (but the prompt implies `reset_tokens` is fine). For now, let's assume the structural comparison is the goal. We might need to temporarily set the `acc` of `parser_state.active_state.stack` to a similar "all ones" state for a direct comparison if `LLMTokenInfo` is part of `GSSNode`'s `Eq` impl.
-              The `reset_tokens` function in `gss.rs` already sets `active` and `intersection` of `LLMTokenInfo`. If `LLMTokenInfo` is only these two, then `Eq` should work if both are reset identically.
-
-          *   The test `test_hideous_ambiguity` calls `step_with_all_llm_tokens` in a loop. This test's purpose was likely to stress GSS growth or cycle detection. It should be adapted to call `get_mask` (if the mask itself is interesting under ambiguity) or `commit` with a fixed token repeatedly if the goal is to observe state evolution. Since `get_mask` is read-only, repeatedly calling it won't change state. So, it should probably use `commit`.
-
-          *   The test `test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab` also uses `step_with_all_llm_tokens` and `commit`. This will need similar adaptation.
-
-      Let's apply these changes.
-
-      **Correction for `get_mask`'s `step_fn` accumulator handling:**
-      The line `temp_glr_s.active_state.stack = Arc::new(updated_gss_node);` is correct. The `active` set of the `LLMTokenInfo` within the `GLRParserState` that is passed along the `special_map` traversal should indeed reflect the intersection of grammar possibilities and precomputed trie edge possibilities.
-
-      **Review `GLRParserState::pop_and_goto` accumulator logic:**
-      The `new_acc_for_goto_child` is `parent_gss_node.acc().clone().intersect(cur_acc_from_reducible_node.clone())`. This is then used in `isolated_parent_arc.push(edge_value.clone(), new_acc_for_goto_child.clone())` and `new_gss_node = isolated_parent_arc.push(goto_node_content, new_acc_for_goto_child)`. This means the `active` set is narrowed by intersections. This is consistent with the idea that `LLMTokenInfo.active` represents the valid *next* LLM tokens for that path.
-
-      The overall flow seems to be:
-      1.  `commit(T)`: Processes `T`. Resets `LLMTokenInfo.active` in all resulting `GLRParserState`s to "all ones".
-      2.  `get_mask()`: Traverses precomputed trie. For each path, it starts with a `GLRParserState` (whose `acc.active` is "all ones"). As it traverses precomputed trie edges and corresponding grammar tokens, this `active` set is progressively intersected. When a terminal point in the precomputed trie is reached (a point corresponding to a complete LLM token), the `active` set of the `GLRParserState` at that point, intersected with the LLM tokens from `clean_end` or `finalizers`, contributes to the mask.
-
-      This looks correct. The `active` set in `LLMTokenInfo` always means "what LLM tokens could come *next* given the history encoded in this GSS node and current tokenizer state". `commit` finalizes the history for the *current* token and prepares for the *next*. `get_mask` explores what those *next* tokens could be.
-
-      Final check on `GLRParserState::step` in `parser.rs`:
-      The `push_state` call uses `stack_arc_for_operations.acc().clone()`. `stack_arc_for_operations` is `state.stack`. If `state` is from the `todo` queue, its `acc` is already path-dependent. This is fine.
-      The `pop_and_goto` call: `let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt);`. `temp_idk` is `Arc::new(parent_arc.push(top_edge_content.clone(), current_path_acc.clone()))`. Its accumulator `current_path_acc` is correctly derived. This also seems fine.
-
-      The `GLRParserState::step` logic seems to correctly propagate accumulators. The key is that the `GLRParserState` instances passed into `Trie::special_map` (by `get_mask`) must have their `active` sets appropriately initialized (e.g., to "all ones" if they are the result of a `commit`).
-
-      The `initial_values_for_map` in `get_mask` clones `glr_state` from `self.state`. If `self.state` comes from a `commit`, then `glr_state.active_state.stack.acc().active` is already "all ones". This is correct.
-
-      One small detail in `get_mask`'s `step_fn`:
-      `let mut new_active_for_gss = temp_glr_s.active_state.stack.acc().active.clone();`
-      `temp_glr_s` is `glr_s.clone()`. `glr_s` is the value from the `special_map`'s processing. Its `active` set is already the result of prior intersections. So, `new_active_for_gss &= edge_llm_tokens_bv;` is correct. It further constrains the already constrained set.
-
-      Looks good to proceed with coding.Okay, this is a substantial refactoring. I'll provide the necessary modifications step-by-step.
-
-      **Step 1: Modify `src/datastructures/gss.rs`**
-
-      Make `GSSNode::with_acc` public.
-
-      ```rust 'src/datastructures/gss.rs'
-      // In GSSNode impl
-      // ... (other methods)
-
-          // Helper to clone the node and set a new accumulator. Used internally.
-          // Make this public for constraint.rs usage
-          pub fn with_acc(mut self, acc: LLMTokenInfo) -> Self {
-              self.acc = acc;
-              self.hash_key_cache = compute_hash_key(&self.predecessors); // Recalculate hash if acc changes meaning
-              self
-          }
-      // ... (other methods)
-      ```
-
-      **Step 2: Modify `src/glr/parser.rs`**
-
-      Refactor `GLRParserState::step` to remove GSS simplification and logging. Also, ensure cycle detection in reductions leads to collecting cycled states rather than immediate panic, allowing `is_ok()` to reflect this.
-
-      ```rust 'src/glr/parser.rs'
-      // In GLRParserState::step method
-
-      // ... (inside the while let Some((state, visited_on_this_path)) = todo.pop() loop)
-                  if visited_on_this_path.contains(&state.stack) {
-                      crate::debug!(2, "Cycle detected: GSSNode at {:p} encountered again in reduction path while processing token {:?}.", Arc::as_ptr(&state.stack), token_id);
-                      // Collect cycled states instead of panicking immediately.
-                      // The main loop in commit or get_mask can decide how to handle these.
-                      self.cycled_states.merge(state.clone());
-                      continue; // Skip processing this path further
-                  }
-      // ...
-
-      // (At the end of GLRParserState::step method)
-              self.active_state = next;
-              self.action_not_found_states = not_found;
-              // Removed GSS simplification: Arc::make_mut(&mut self.active_state.stack).simplify();
-              // Removed self.log_gss("Step-end", token_id);
-              // Removed crate::debug!(4, "----------------------------------------------------------------");
-          }
-      // ...
-      ```
-
-      **Step 3: Modify `src/constraint.rs`**
-
-      This is the most significant part.
-
-      1.  **Add `all_internal_llm_tokens_bitset` to `GrammarConstraint`:**
-
-          ```rust 'src/constraint.rs'
-          // In impl GrammarConstraint
-          // ... (existing methods like new, precompute, init, id conversions) ...
-
-              fn all_internal_llm_tokens_bitset(&self) -> LLMTokenBV {
-                  HybridBitset::ones(self.internal_max_llm_token + 1)
-              }
-          // ...
-          ```
-
-      2.  **Refactor `GrammarConstraintState`:**
-          *   Remove `step_with_all_llm_tokens`, `step_with_llm_token`.
-          *   Remove `prepare_initial_nodes_and_values_for_special_map`.
-          *   Implement the new `commit` method.
-          *   Implement the new `get_mask` method.
-          *   Update `step_with_llm_token_sequence`.
-
-          ```rust 'src/constraint.rs'
-          // In impl<'a> GrammarConstraintState<'a>
-
-              // Remove step_with_all_llm_tokens method
-              // Remove step_with_llm_token method
-              // Remove prepare_initial_nodes_and_values_for_special_map method
-
-              pub fn get_mask(&mut self) -> LLMTokenBV {
-                  let mut final_mask_internal = HybridBitset::new();
-
-                  if self.state.is_empty() {
-                      return self.parent.internal_bv_to_original(&final_mask_internal);
-                  }
-
-                  let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
-                  for (tokenizer_state_id, glr_state) in &self.state {
-                      // Ensure the GLR state's GSS stack is not empty before proceeding
-                      if glr_state.active_state.stack.is_empty() {
-                          continue;
-                      }
-                      if let Some(precomputed_trie_root_data) = self.parent.precomputed.get(tokenizer_state_id) {
-                          let precomputed_trie_arc = Arc::new(Mutex::new(precomputed_trie_root_data.clone()));
-                          initial_values_for_map.push((precomputed_trie_arc, glr_state.clone()));
-                      } else {
-                          crate::debug!(1, "Warning: No precomputed trie found for tokenizer state {:?}. This state will not contribute to the mask.", tokenizer_state_id);
+          *   Update the `Default` implementation for `LLMTokenInfo`:
+              Change:
+              ```rust
+              impl Default for LLMTokenInfo {
+                  fn default() -> Self {
+                      Self {
+                          active:       HybridBitset::new(),
+                          intersection: HybridBitset::max_ones(),
+                          // Removed terminals initialization
                       }
                   }
-
-                  if initial_values_for_map.is_empty() {
-                       // This can happen if all GLR states had empty GSS stacks or no corresponding precomputed tries.
-                       crate::debug!(2, "No valid initial states for get_mask's special_map traversal.");
-                       return self.parent.internal_bv_to_original(&final_mask_internal);
+              }
+              ```
+              To:
+              ```rust
+              impl Default for LLMTokenInfo {
+                  fn default() -> Self {
+                      Self {
+                          active:       HybridBitset::new(),
+                      }
+                  }
+              }
+              ```
+          *   Update the `PathAccumulator` implementation for `LLMTokenInfo`:
+              Change:
+              ```rust
+              impl PathAccumulator for LLMTokenInfo {
+                  fn union_assign(&mut self, other: Self) {
+                      self.active |= &other.active;
+                      self.intersection &= &other.intersection;
+                      // Removed terminals merge
                   }
 
-                  Trie::special_map(
-                      initial_values_for_map,
-                      // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
-                      |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
-                          let mut temp_glr_s = glr_s.clone();
-                          
-                          let mut current_acc = (*temp_glr_s.active_state.stack.acc()).clone();
-                          current_acc.active &= edge_llm_tokens_bv;
-
-                          if current_acc.active.is_empty() {
-                              return None; 
-                          }
-                          
-                          let updated_gss_node = (*temp_glr_s.active_state.stack).clone().with_acc(current_acc);
-                          temp_glr_s.active_state.stack = Arc::new(updated_gss_node);
-
-                          if let Some(gtid) = grammar_token_opt {
-                              temp_glr_s.step(*gtid);
-                          }
-
-                          if temp_glr_s.is_ok() && !temp_glr_s.active_state.stack.is_empty() {
-                              Some(temp_glr_s)
-                          } else {
-                              None
-                          }
-                      },
-                      // merge_fn
-                      |glr_s1, glr_s2| {
-                          glr_s1.merge_with(glr_s2);
-                      },
-                      // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
-                      |precomputed_node_data, final_glr_s| {
-                          if final_glr_s.active_state.stack.is_empty() {
-                              return true; 
-                          }
-
-                          let glr_active_tokens = final_glr_s.active_state.stack.acc().active.clone();
-
-                          if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
-                              let mask_contribution = &glr_active_tokens & clean_end_bv;
-                              final_mask_internal |= &mask_contribution;
-                          }
-
-                          for (grammar_token, finalizer) in precomputed_node_data.value.finalizers() {
-                              let mut temp_glr_s_for_finalizer_step = final_glr_s.clone();
-                              temp_glr_s_for_finalizer_step.step(*grammar_token);
-
-                              if temp_glr_s_for_finalizer_step.is_ok() && !temp_glr_s_for_finalizer_step.active_state.stack.is_empty() {
-                                  let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc().active.clone();
-                                  for finalizer_llm_token_bv in finalizer.content.values() {
-                                      let mask_contribution = &glr_active_after_step & finalizer_llm_token_bv;
-                                      final_mask_internal |= &mask_contribution;
-                                  }
-                              }
-                          }
-                          true 
-                      },
-                  );
-
-                  self.parent.internal_bv_to_original(&final_mask_internal)
+                  fn intersect_assign(&mut self, right: Self) {
+                      self.active &= &right.active;
+                      self.intersection &= &right.intersection;
+                      // Removed terminals assignment
+                  }
               }
+              ```
+              To:
+              ```rust
+              impl PathAccumulator for LLMTokenInfo {
+                  fn union_assign(&mut self, other: Self) {
+                      self.active |= &other.active;
+                  }
 
-              pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
-                  let internal_llm_id = match self.parent.original_id_to_internal(llm_token_id) {
+                  fn intersect_assign(&mut self, right: Self) {
+                      self.active &= &right.active;
+                  }
+              }
+              ```
+          *   Update the `Debug` implementation for `LLMTokenInfo`:
+              Remove the line `.field("intersection", &fmt_bv(&self.intersection))`
+
+      2.  **Modify `GrammarConstraint::init`**:
+          *   Locate the `init` method.
+          *   Change the initialization of `initial_llm_token_acc`:
+              From:
+              ```rust
+              let initial_llm_token_acc = LLMTokenInfo { 
+                  active:       base_set_for_info.clone(),
+                  intersection: base_set_for_info,
+              };
+              ```
+              To:
+              ```rust
+              let initial_llm_token_acc = LLMTokenInfo { 
+                  active:       base_set_for_info.clone(),
+              };
+              ```
+
+      3.  **Remove `GrammarConstraintState::step_with_all_llm_tokens` method**:
+          *   Delete the entire `step_with_all_llm_tokens` method.
+
+      4.  **Remove `GrammarConstraintState::step_with_llm_token` method**:
+          *   Delete the entire `step_with_llm_token` method.
+
+      5.  **Modify `GrammarConstraintState::commit` method**:
+          *   Replace the current `commit` method with the following implementation:
+              ```rust
+              pub fn commit(&mut self, llm_token_id_original: LLMTokenID) {
+                  let internal_llm_id = match self.parent.original_id_to_internal(llm_token_id_original) {
                       Some(id) => id,
                       None => {
-                          crate::debug!(1, "LLM Token ID {} (original) not found in internal mapping. Clearing constraint state.", llm_token_id.0);
+                          crate::debug!(2, "Committed LLMTokenID {} not found in internal mapping. Clearing constraint state.", llm_token_id_original.0);
                           self.state.clear();
                           return;
                       }
                   };
 
-                  let llm_token_bytes = match self.parent.llm_token_map.get_by_right(&llm_token_id) {
-                      Some(bytes) => bytes.clone(),
+                  let llm_token_bytes = match self.parent.llm_token_map.get_by_right(&llm_token_id_original) {
+                      Some(bytes) => bytes,
+                      None => { // Should not happen if original_id_to_internal succeeded
+                          crate::debug!(0, "Error: LLMTokenID {} (internal {}) has no byte mapping. Clearing constraint state.", llm_token_id_original.0, internal_llm_id.0);
+                          self.state.clear();
+                          return;
+                      }
+                  };
+
+                  crate::debug!(2, "Committing LLMTokenID {} (internal {}), bytes: {:?}", llm_token_id_original.0, internal_llm_id.0, String::from_utf8_lossy(llm_token_bytes));
+
+                  let internal_llm_id_bitset = {
+                      let mut bv = LLMTokenBV::new();
+                      bv.insert(internal_llm_id.0);
+                      bv
+                  };
+
+                  let mut pending_glr_states: std::collections::VecDeque<(usize, TokenizerStateID, GLRParserState<'a>)> = std::collections::VecDeque::new();
+
+                  for (tokenizer_id, glr_state) in std::mem::take(&mut self.state) {
+                      let mut initial_glr_state_for_commit = glr_state.clone();
+                      intersect_tokens_and_prune_arc(&mut initial_glr_state_for_commit.active_state.stack, &internal_llm_id_bitset);
+                      
+                      if initial_glr_state_for_commit.is_ok() && !initial_glr_state_for_commit.active_state.stack.is_empty() {
+                           crate::debug!(4, "Queueing initial GLR state for tokenizer_id {} after filtering by committed token.", tokenizer_id.0);
+                          pending_glr_states.push_back((0, tokenizer_id, initial_glr_state_for_commit));
+                      } else {
+                          crate::debug!(4, "GLR state for tokenizer_id {} became invalid/empty after filtering by committed token. Discarding.", tokenizer_id.0);
+                      }
+                  }
+
+                  let mut next_constraint_states_map: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
+
+                  while let Some((offset, current_tokenizer_id, current_glr_state)) = pending_glr_states.pop_front() {
+                      crate::debug!(4, "Processing commit: offset {}, tokenizer_id {}", offset, current_tokenizer_id.0);
+                      let exec_result = self.parent.tokenizer.execute_from_state(&llm_token_bytes[offset..], current_tokenizer_id);
+
+                      if let Some(end_tokenizer_id_val) = exec_result.end_state {
+                          crate::debug!(4, "  Tokenizer consumed rest of bytes, ended in state {}. Merging GLR state.", end_tokenizer_id_val);
+                          let target_tokenizer_id = TokenizerStateID(end_tokenizer_id_val);
+                          if let Some(existing_state) = next_constraint_states_map.get_mut(&target_tokenizer_id) {
+                              existing_state.merge_with(current_glr_state.clone());
+                          } else {
+                              next_constraint_states_map.insert(target_tokenizer_id, current_glr_state.clone());
+                          }
+                      }
+
+                      for match_info in exec_result.matches {
+                          let grammar_token_id = TerminalID(match_info.id);
+                          let match_width = match_info.width;
+                          let next_offset = offset + match_width;
+                          
+                          crate::debug!(4, "  Matched grammar_token_id {} (width {}), next_offset {}.", grammar_token_id.0, match_width, next_offset);
+
+                          let mut next_glr_state_after_match = current_glr_state.clone();
+                          next_glr_state_after_match.step(grammar_token_id);
+
+                          if next_glr_state_after_match.is_ok() && !next_glr_state_after_match.active_state.stack.is_empty() {
+                              let final_tokenizer_state_for_match = self.parent.tokenizer.initial_state_id(); // Grammar tokens are greedy
+                              if next_offset == llm_token_bytes.len() {
+                                  crate::debug!(4, "    End of LLM token bytes. Merging GLR state for tokenizer_id {}.", final_tokenizer_state_for_match.0);
+                                  if let Some(existing_state) = next_constraint_states_map.get_mut(&final_tokenizer_state_for_match) {
+                                      existing_state.merge_with(next_glr_state_after_match.clone());
+                                  } else {
+                                      next_constraint_states_map.insert(final_tokenizer_state_for_match, next_glr_state_after_match.clone());
+                                  }
+                              } else {
+                                  crate::debug!(4, "    Queueing further processing: next_offset {}, tokenizer_id {}.", next_offset, final_tokenizer_state_for_match.0);
+                                  pending_glr_states.push_back((next_offset, final_tokenizer_state_for_match, next_glr_state_after_match));
+                              }
+                          } else {
+                               crate::debug!(4, "    GLR state became invalid/empty after stepping with grammar_token_id {}. Discarding path.", grammar_token_id.0);
+                          }
+                      }
+                  }
+                  
+                  self.state = next_constraint_states_map;
+                  self.state.retain(|_tid, s| s.is_ok() && !s.active_state.stack.is_empty());
+
+                  crate::debug!(3, "Commit processed. Resulting self.state has {} entries.", self.state.len());
+
+                  let all_internal_tokens = HybridBitset::ones(self.parent.internal_max_llm_token + 1);
+                  for (final_tokenizer_id, final_glr_state) in self.state.iter_mut() {
+                      crate::debug!(4, "Resetting tokens and simplifying for final tokenizer_id {}.", final_tokenizer_id.0);
+                      reset_tokens(&mut final_glr_state.active_state.stack, &all_internal_tokens);
+                      Arc::make_mut(&mut final_glr_state.active_state.stack).simplify();
+                      if final_glr_state.active_state.stack.is_empty() {
+                           crate::debug!(4, "  Stack became empty after reset/simplify for tokenizer_id {}.", final_tokenizer_id.0);
+                      }
+                  }
+                  self.state.retain(|_tid, s| !s.active_state.stack.is_empty());
+                  crate::debug!(2, "Commit finished. Final self.state has {} entries.", self.state.len());
+              }
+              ```
+
+      6.  **Replace `GrammarConstraintState::step` method with `GrammarConstraintState::get_mask`**:
+          *   Delete the old `step` method.
+          *   Add the new `get_mask` method:
+              ```rust
+              impl<'a> GrammarConstraintState<'a> {
+                  pub fn get_mask(&self) -> LLMTokenBV {
+                      crate::debug!(2, "Calculating mask for constraint state with {} entries.", self.state.len());
+                      let mut overall_mask = HybridBitset::new();
+                      let step_counts = RefCell::new(BTreeMap::<GrammarTokenID, usize>::new()); // For logging
+
+                      for (tokenizer_id, glr_state) in &self.state {
+                          if glr_state.active_state.stack.is_empty() {
+                              crate::debug!(4, "  Skipping tokenizer_id {}: GSS stack is empty.", tokenizer_id.0);
+                              continue;
+                          }
+                          crate::debug!(4, "  Processing tokenizer_id {}.", tokenizer_id.0);
+
+                          let initial_gss_stack_arc = glr_state.active_state.stack.clone();
+                          let precompute_root_node = match self.parent.precomputed.get(tokenizer_id) {
+                              Some(node) => node.clone(),
+                              None => {
+                                  crate::debug!(3, "    No precomputed root for tokenizer_id {}. Skipping.", tokenizer_id.0);
+                                  continue;
+                              }
+                          };
+
+                          let initial_nodes_and_values_for_special_map = vec![(
+                              Arc::new(Mutex::new(precompute_root_node)),
+                              initial_gss_stack_arc
+                          )];
+
+                          Trie::special_map(
+                              initial_nodes_and_values_for_special_map,
+                              // step_fn
+                              |current_gss_arc: &Arc<GSSNode>,
+                               grammar_token_opt: &Option<GrammarTokenID>,
+                               edge_llm_tokens: &LLMTokenBV,
+                               _child_node_val: &PrecomputedNodeContents| 
+                               -> Option<Arc<GSSNode>> {
+                                  crate::debug!(5, "    step_fn: grammar_token {:?}, edge_llm_tokens non-empty: {}", grammar_token_opt.map(|g|g.0), !edge_llm_tokens.is_empty());
+                                  let mut next_gss_arc = current_gss_arc.clone();
+                                  
+                                  // It's crucial to operate on a mutable GSSNode data, not just the Arc.
+                                  // We need to ensure that modifications to `acc.active` are done on a mutable reference
+                                  // to the GSSNode's actual accumulator.
+                                  let mut new_active_set = Arc::make_mut(&mut next_gss_arc).acc_mut().active.clone();
+                                  new_active_set &= edge_llm_tokens;
+                                  
+                                  if new_active_set.is_empty() {
+                                      crate::debug!(5, "      step_fn: active set empty after edge_llm_tokens intersection. Pruning path.");
+                                      return None;
+                                  }
+                                  Arc::make_mut(&mut next_gss_arc).acc_mut().active = new_active_set;
+
+                                  // Pruning based on active set should be done carefully.
+                                  // intersect_tokens_and_prune_arc modifies the structure.
+                                  // For get_mask, we are exploring possibilities, not committing structural changes to the main GSS.
+                                  // The GSS passed around in special_map is a clone for exploration.
+                                  // If we call intersect_tokens_and_prune_arc here, it might be too slow or complex.
+                                  // The current approach of just filtering the active set of the top node is simpler for mask calculation.
+
+                                  if let Some(gtid) = grammar_token_opt {
+                                      crate::debug!(5, "      step_fn: stepping with grammar_token_id {}", gtid.0);
+                                      // Create a temporary GLRParserState to call step
+                                      // This requires `self.parent.parser` which is `&'a GLRParser`.
+                                      // The GLRParserState needs a lifetime tied to `self.parent.parser`.
+                                      // This is tricky because special_map closures don't easily carry 'a.
+                                      // However, `self` has lifetime 'a, so `self.parent.parser` is accessible.
+                                      let mut temp_glr_state = self.parent.parser.init_glr_parser_from_parse_state(ParseState { stack: next_gss_arc });
+                                      temp_glr_state.step(*gtid);
+                                      next_gss_arc = temp_glr_state.active_state.stack;
+                                      
+                                      // Log for step_counts
+                                      *step_counts.borrow_mut().entry(*gtid).or_insert(0) += 1;
+                                  }
+
+                                  if next_gss_arc.acc().active.is_empty() {
+                                      crate::debug!(5, "      step_fn: active set empty after GLR step. Pruning path.");
+                                      None
+                                  } else {
+                                      crate::debug!(5, "      step_fn: path valid. Resulting active set non-empty: {}", !next_gss_arc.acc().active.is_empty());
+                                      Some(next_gss_arc)
+                                  }
+                              },
+                              // merge_fn
+                              |gss_arc1: &mut Arc<GSSNode>, gss_arc2: Arc<GSSNode>| {
+                                  Arc::make_mut(gss_arc1).merge(&gss_arc2);
+                              },
+                              // process_fn
+                              |precompute_node_val: &PrecomputedNodeContents, final_gss_arc: &mut Arc<GSSNode>| -> bool {
+                                  Arc::make_mut(final_gss_arc).simplify();
+                                  if final_gss_arc.acc().active.is_empty() {
+                                      crate::debug!(5, "    process_fn: final_gss_arc active set is empty. Stopping propagation.");
+                                      return false; // Stop propagation
+                                  }
+                                  
+                                  let mut mask_contribution_from_this_path = LLMTokenBV::new();
+
+                                  if let Some(clean_tokens) = &precompute_node_val.clean_end {
+                                      crate::debug!(5, "    process_fn: found clean_end. Intersecting with active set.");
+                                      mask_contribution_from_this_path |= &(final_gss_arc.acc().active & clean_tokens);
+                                  }
+
+                                  for (gtid, finalizer) in precompute_node_val.finalizers() {
+                                      for (_finalizer_tokenizer_id, llm_tokens_from_finalizer) in &finalizer.content {
+                                          let mut temp_gss_arc = final_gss_arc.clone();
+                                          
+                                          let mut temp_active_set = Arc::make_mut(&mut temp_gss_arc).acc_mut().active.clone();
+                                          temp_active_set &= llm_tokens_from_finalizer;
+
+                                          if temp_active_set.is_empty() {
+                                              continue;
+                                          }
+                                          Arc::make_mut(&mut temp_gss_arc).acc_mut().active = temp_active_set;
+                                          
+                                          let mut temp_glr_state = self.parent.parser.init_glr_parser_from_parse_state(ParseState { stack: temp_gss_arc });
+                                          temp_glr_state.step(*gtid);
+                                          
+                                          // Log for step_counts
+                                           *step_counts.borrow_mut().entry(*gtid).or_insert(0) += 1;
+
+                                          if temp_glr_state.is_ok() && !temp_glr_state.active_state.stack.is_empty() {
+                                              mask_contribution_from_this_path |= &temp_glr_state.active_state.stack.acc().active;
+                                          }
+                                      }
+                                  }
+                                  
+                                  if !mask_contribution_from_this_path.is_empty() {
+                                      crate::debug!(5, "    process_fn: contributing to overall_mask. Contribution non-empty: {}", !mask_contribution_from_this_path.is_empty());
+                                      overall_mask |= &mask_contribution_from_this_path;
+                                  }
+                                  true // Continue propagation
+                              },
+                          );
+                      }
+                      
+                      // Logging step_counts
+                      let counts = step_counts.into_inner();
+                      if !counts.is_empty() {
+                          let mut sorted_counts: Vec<(GrammarTokenID, usize)> = counts.into_iter().collect();
+                          sorted_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                          crate::debug!(3, "--- GLRParserState::step call counts (during get_mask) ---");
+                          for (gtid, count) in sorted_counts {
+                              let token_name = self.parent.token_name_map.get_by_right(&gtid.0)
+                                  .map(|s| s.as_str()).unwrap_or("<Unknown Name>");
+                              crate::debug!(3, "  Token {} (ID: {}): {} calls", token_name, gtid.0, count);
+                          }
+                          crate::debug!(3, "-------------------------------------------------------");
+                      }
+
+
+                      crate::debug!(2, "Calculated mask. Internal mask non-empty: {}. Converting to original IDs.", !overall_mask.is_empty());
+                      self.parent.internal_bv_to_original(&overall_mask)
+                  }
+              }
+              ```
+
+      7.  **Remove `GrammarConstraintState::step_with_llm_token_sequence` method**:
+          *   Delete the entire `step_with_llm_token_sequence` method.
+
+      8.  **Update `GrammarConstraintState::is_active` method**:
+          *   The current implementation should still be valid:
+              ```rust
+              pub fn is_active(&self) -> bool {
+                  !self.state.is_empty() && self.state.values().any(|s| !s.active_state.stack.is_empty())
+              }
+              ```
+
+      9.  **Update `Precomputer::dfs` and `Precomputer::process_segment`**:
+          *   The `map_fn` in `Trie::special_map` (used internally by `Precomputer` if it calls `special_map`, but it seems `Precomputer` has its own DFS) might need adjustment if it was relying on the old `step` behavior or `LLMTokenInfo` structure. However, `Precomputer` seems to build the `PrecomputeNode` graph, which stores `PrecomputedNodeContents`. The `LLMTokenBV` on edges and in `PrecomputedNodeContents` is already `HybridBitset`. This part might be okay.
+          *   The `Precomputer`'s `insert_edge` method uses `EdgeInserter` with `LLMTokenBV` as edge value, which is fine.
+          *   The `clean_end` and `finalizers` in `PrecomputedNodeContents` store `LLMTokenBV`. This is fine.
+          *   The main concern is if `Precomputer`'s logic implicitly relied on `LLMTokenInfo::intersection`. Since it's gone, ensure no direct or indirect dependency. It seems `Precomputer` is mostly about constructing the `PrecomputeNode` graph and its values, which are already `LLMTokenBV`-based.
+
+      This covers the changes to `src/constraint.rs`.
+
+      **File: `src/test_constraint.rs`**
+
+      1.  **Update `test_constraint_simple`**:
+          *   Replace `constraint_state.step_with_all_llm_tokens();` before `get_mask()` with just calling `get_mask()`.
+          *   The first `get_mask()` call after `constraint.init()` should produce the initial mask.
+          *   Replace `constraint_state.commit(LLMTokenID(0)); constraint_state.step_with_all_llm_tokens();` with just `constraint_state.commit(LLMTokenID(0));`. The subsequent `get_mask()` will compute the mask for the new state.
+          *   The assertion `assert_eq!(*tokenizer_state_id, tokenizer.initial_state_id());` might change if `commit` produces multiple tokenizer states. The test logic for comparing parser states might need to handle this or focus on a primary resulting state if that's the expectation. The current `commit` logic merges states under the *same* resulting `TokenizerStateID`.
+
+      2.  **Update `test_constraint_expression`**:
+          *   Similar changes: remove `step_with_all_llm_tokens()`, rely on `get_mask()` and `commit()`.
+          *   Verify assertions on masks.
+
+      3.  **Update `test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab`**:
+          *   Remove `constraint_state.step_with_all_llm_tokens();` after `constraint.init()`.
+          *   The loop:
+              ```rust
+              // constraint_state.step_with_all_llm_tokens(); // Remove
+              let current_mask = constraint_state.get_mask(); // Keep
+              // ...
+              constraint_state.commit(llm_token_id); // Keep
+              ```
+          *   The final `assert_eq!(constraint_parser_state.active_state, parser_state.active_state);` needs careful review. `commit` now internally processes the LLM token into grammar tokens and steps the GLR parser. The `active` set in the GSS nodes of `constraint_parser_state.active_state.stack` will be "all internal tokens" after `commit`. The `parser_state` built by manually stepping grammar tokens will have its GSS `active` sets reflecting the `LLMTokenInfo::default()` (which is an empty `active` set) passed during its internal `push` calls. To compare them, you'd need to `reset_tokens` on `parser_state.active_state.stack` to "all internal tokens" as well, or compare only the GSS structure ignoring the `active` sets if that's the intent. The current test already does `reset_tokens` on both to an empty set, which should make their structures comparable if their `acc` values were the only difference. This part should be okay.
+
+      4.  **Update `test_hideous_ambiguity`**:
+          *   Replace `constraint_state.step_with_all_llm_tokens();` with `let _mask = constraint_state.get_mask();` if the mask is needed, or remove if the goal was just to advance state (which `commit` now does). This test seems to be about repeatedly getting the mask or checking for hangs/panics. If it's about advancing state, it should use `commit`. If it's about repeatedly calculating mask, `get_mask()` is fine. The original loop seems to be stressing the system. Let's assume it should commit the token repeatedly.
+              ```rust
+              // constraint_state.step_with_all_llm_tokens(); // Remove
+              constraint_state.commit(LLMTokenID(a_id)); // Add this
+              ```
+              And the loop should probably check `is_active()` or the mask.
+
+      5.  **Update `test_simple_def_match_non_zero_llm_id`**:
+          *   Remove `constraint_state.step_with_all_llm_tokens();`. The `get_mask()` call right after `init()` should give the initial mask.
+
+      **File: `src/interface/interface.rs`**
+
+      1.  **`IncrementalParser`**:
+          *   This struct uses `GLRParserState` and calls `glr_state.step(grammar_token_id)`. This is the internal GLR step with a `TerminalID`, not related to the `GrammarConstraintState`'s old `step` method that processed LLM tokens.
+          *   The `LLMTokenInfo` changes (simplification to just `active`) will affect `GLRParserState` if it directly manipulated `intersection`. However, `GLRParserState::step` primarily calls `push_state` and `pop_and_goto`, which in turn call GSS methods. These GSS methods will now receive `LLMTokenInfo` (with only `active`) as their accumulator.
+          *   The `acc_for_new_node` in `GLRParserState::push_state` and `pop_and_goto` is `LLMTokenInfo`. When `push_state` calls `stack.push(new_content, acc_for_new_node)`, this `acc_for_new_node` (an `LLMTokenInfo`) is passed to `GSSNode::push`.
+          *   `GSSNode::push` takes `acc_for_new_node: LLMTokenInfo`. This is consistent.
+          *   The logic within `GLRParserState::step` that calculates `current_path_acc` or `new_acc_for_goto_child` using `intersect` on `LLMTokenInfo` will now use the simplified `intersect_assign` (which only ANDs `active` fields). This is the intended change.
+          *   **Conclusion**: `IncrementalParser` itself likely doesn't need direct changes to its method signatures or high-level logic due to this refactoring, as its interactions are with `GLRParserState`'s existing methods, which will adapt to the simplified `LLMTokenInfo`.
+
+      2.  **`GrammarConstraint::from_compiled_grammar`**:
+          *   This method calls `GrammarConstraint::new`. The signature of `GrammarConstraint::new` is unchanged.
+          *   The internal call to `GrammarConstraint::init` (if any, or when `GrammarConstraintState::init` is called by the user) will use the simplified `LLMTokenInfo`. This is fine.
+
+      No changes seem immediately necessary for `src/interface/interface.rs` based on the refactoring of `GrammarConstraintState`'s `step`/`commit`/`get_mask` and `LLMTokenInfo` simplification, as `IncrementalParser` operates at a different level (processing grammar tokens).
+
+      This completes the plan. I've focused on the requested files and the described logic changes.Okay, I will provide the detailed, step-by-step instructions for modifying your Rust code based on the plan we've discussed.
+
+      **File: `src/constraint.rs`**
+
+      1.  **Simplify `LLMTokenInfo` struct definition**:
+          *   Locate the struct `LLMTokenInfo`.
+          *   Remove the `intersection` field.
+          *   The struct definition should now be:
+              ```rust
+              pub struct LLMTokenInfo {
+                  pub active:       LLMTokenBV,
+              }
+              ```
+
+      2.  **Update `impl Default for LLMTokenInfo`**:
+          *   Modify the `default` function:
+              ```rust
+              impl Default for LLMTokenInfo {
+                  fn default() -> Self {
+                      Self {
+                          active:       HybridBitset::new(), // Changed from max_ones for intersection
+                      }
+                  }
+              }
+              ```
+
+      3.  **Update `impl PathAccumulator for LLMTokenInfo`**:
+          *   Modify the `union_assign` method:
+              ```rust
+              fn union_assign(&mut self, other: Self) {
+                  self.active |= &other.active;
+                  // self.intersection &= &other.intersection; // Remove this line
+              }
+              ```
+          *   Modify the `intersect_assign` method:
+              ```rust
+              fn intersect_assign(&mut self, right: Self) {
+                  self.active &= &right.active;
+                  // self.intersection &= &right.intersection; // Remove this line
+              }
+              ```
+
+      4.  **Update `impl std::fmt::Debug for LLMTokenInfo`**:
+          *   In the `fmt` method, remove the line formatting the `intersection` field:
+              ```rust
+              // .field("intersection", &fmt_bv(&self.intersection)) // Remove this line
+              ```
+
+      5.  **Modify `GrammarConstraint::init` method**:
+          *   Locate the line initializing `initial_llm_token_acc`.
+          *   Change it from:
+              ```rust
+              let initial_llm_token_acc = LLMTokenInfo { 
+                  active:       base_set_for_info.clone(),
+                  intersection: base_set_for_info,
+              };
+              ```
+          *   To:
+              ```rust
+              let initial_llm_token_acc = LLMTokenInfo { 
+                  active:       base_set_for_info.clone(),
+              };
+              ```
+
+      6.  **Remove `GrammarConstraintState::step_with_all_llm_tokens` method**:
+          *   Delete the entire public method `step_with_all_llm_tokens(&mut self)`.
+
+      7.  **Remove `GrammarConstraintState::step_with_llm_token` method**:
+          *   Delete the entire public method `step_with_llm_token(&mut self, llm_token_id: LLMTokenID)`.
+
+      8.  **Remove `GrammarConstraintState::step_with_llm_token_sequence` method**:
+          *   Delete the entire public method `step_with_llm_token_sequence(&mut self, llm_token_ids: &[LLMTokenID])`.
+
+      9.  **Replace `GrammarConstraintState::step` method with `GrammarConstraintState::get_mask`**:
+          *   Delete the entire public method `step(&mut self, llm_tokens: &LLMTokenBV)`.
+          *   Add the new `get_mask` method:
+              ```rust
+              impl<'a> GrammarConstraintState<'a> {
+                  pub fn get_mask(&self) -> LLMTokenBV {
+                      crate::debug!(2, "Calculating mask for constraint state with {} entries.", self.state.len());
+                      let mut overall_mask = HybridBitset::new();
+                      let step_counts = RefCell::new(BTreeMap::<GrammarTokenID, usize>::new());
+
+                      for (tokenizer_id, glr_state) in &self.state {
+                          if glr_state.active_state.stack.is_empty() {
+                              crate::debug!(4, "  Skipping tokenizer_id {}: GSS stack is empty.", tokenizer_id.0);
+                              continue;
+                          }
+                          crate::debug!(4, "  get_mask: Processing tokenizer_id {}.", tokenizer_id.0);
+
+                          let initial_gss_stack_arc = glr_state.active_state.stack.clone();
+                          
+                          let precompute_root_node_arc = match self.parent.precomputed.get(tokenizer_id) {
+                              Some(node) => Arc::new(Mutex::new(node.clone())), // Clone the PrecomputeNode for the Mutex
+                              None => {
+                                  crate::debug!(3, "    No precomputed root for tokenizer_id {}. Skipping.", tokenizer_id.0);
+                                  continue;
+                              }
+                          };
+
+                          let initial_nodes_and_values_for_special_map = vec![(
+                              precompute_root_node_arc,
+                              initial_gss_stack_arc
+                          )];
+
+                          Trie::special_map(
+                              initial_nodes_and_values_for_special_map,
+                              // step_fn (map_fn in special_map's terms)
+                              |current_gss_arc: &Arc<GSSNode>, // This is V from previous step/initial
+                               grammar_token_opt: &Option<GrammarTokenID>, // This is EK (Edge Key)
+                               edge_llm_tokens: &LLMTokenBV, // This is EV (Edge Value)
+                               _child_precompute_node_contents: &PrecomputedNodeContents| // This is Trie::value of child Trie node
+                               -> Option<Arc<GSSNode>> { // Returns new V for child
+                                  crate::debug!(5, "    step_fn: grammar_token {:?}, edge_llm_tokens non-empty: {}", grammar_token_opt.map(|g|g.0), !edge_llm_tokens.is_empty());
+                                  let mut next_gss_arc = current_gss_arc.clone();
+                                  
+                                  let mut current_active_set = Arc::make_mut(&mut next_gss_arc).acc_mut().active.clone();
+                                  current_active_set &= edge_llm_tokens;
+                                  
+                                  if current_active_set.is_empty() {
+                                      crate::debug!(5, "      step_fn: active set empty after edge_llm_tokens intersection. Pruning path.");
+                                      return None;
+                                  }
+                                  Arc::make_mut(&mut next_gss_arc).acc_mut().active = current_active_set;
+
+                                  if let Some(gtid) = grammar_token_opt {
+                                      crate::debug!(5, "      step_fn: stepping with grammar_token_id {}", gtid.0);
+                                      let mut temp_glr_state = self.parent.parser.init_glr_parser_from_parse_state(ParseState { stack: next_gss_arc });
+                                      temp_glr_state.step(*gtid);
+                                      next_gss_arc = temp_glr_state.active_state.stack;
+                                      
+                                      *step_counts.borrow_mut().entry(*gtid).or_insert(0) += 1;
+                                  }
+
+                                  if next_gss_arc.acc().active.is_empty() {
+                                      crate::debug!(5, "      step_fn: active set empty after GLR step. Pruning path.");
+                                      None
+                                  } else {
+                                      crate::debug!(5, "      step_fn: path valid. Resulting active set non-empty: {}", !next_gss_arc.acc().active.is_empty());
+                                      Some(next_gss_arc)
+                                  }
+                              },
+                              // merge_fn
+                              |gss_arc1: &mut Arc<GSSNode>, gss_arc2: Arc<GSSNode>| {
+                                  Arc::make_mut(gss_arc1).merge(&gss_arc2);
+                              },
+                              // process_fn
+                              |precompute_node_val: &PrecomputedNodeContents, final_gss_arc: &mut Arc<GSSNode>| -> bool {
+                                  Arc::make_mut(final_gss_arc).simplify();
+                                  if final_gss_arc.acc().active.is_empty() {
+                                      crate::debug!(5, "    process_fn: final_gss_arc active set is empty. Stopping propagation.");
+                                      return false; 
+                                  }
+                                  
+                                  let mut mask_contribution_from_this_path = LLMTokenBV::new();
+
+                                  if let Some(clean_tokens) = &precompute_node_val.clean_end {
+                                      crate::debug!(5, "    process_fn: found clean_end. Intersecting with active set.");
+                                      mask_contribution_from_this_path |= &(final_gss_arc.acc().active & clean_tokens);
+                                  }
+
+                                  for (gtid, finalizer) in precompute_node_val.finalizers() {
+                                      for (_finalizer_tokenizer_id, llm_tokens_from_finalizer) in &finalizer.content {
+                                          let mut temp_gss_arc_for_finalizer = final_gss_arc.clone();
+                                          
+                                          let mut temp_active_set_finalizer = Arc::make_mut(&mut temp_gss_arc_for_finalizer).acc_mut().active.clone();
+                                          temp_active_set_finalizer &= llm_tokens_from_finalizer;
+
+                                          if temp_active_set_finalizer.is_empty() {
+                                              continue;
+                                          }
+                                          Arc::make_mut(&mut temp_gss_arc_for_finalizer).acc_mut().active = temp_active_set_finalizer;
+                                          
+                                          let mut temp_glr_state_finalizer = self.parent.parser.init_glr_parser_from_parse_state(ParseState { stack: temp_gss_arc_for_finalizer });
+                                          temp_glr_state_finalizer.step(*gtid);
+                                          
+                                          *step_counts.borrow_mut().entry(*gtid).or_insert(0) += 1;
+
+                                          if temp_glr_state_finalizer.is_ok() && !temp_glr_state_finalizer.active_state.stack.is_empty() {
+                                              mask_contribution_from_this_path |= &temp_glr_state_finalizer.active_state.stack.acc().active;
+                                          }
+                                      }
+                                  }
+                                  
+                                  if !mask_contribution_from_this_path.is_empty() {
+                                      crate::debug!(5, "    process_fn: contributing to overall_mask. Contribution non-empty: {}", !mask_contribution_from_this_path.is_empty());
+                                      overall_mask |= &mask_contribution_from_this_path;
+                                  }
+                                  true 
+                              },
+                          );
+                      }
+                      
+                      let counts = step_counts.into_inner();
+                      if !counts.is_empty() {
+                          let mut sorted_counts: Vec<(GrammarTokenID, usize)> = counts.into_iter().collect();
+                          sorted_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                          crate::debug!(3, "--- GLRParserState::step call counts (during get_mask) ---");
+                          for (gtid, count) in sorted_counts {
+                              let token_name = self.parent.token_name_map.get_by_right(&gtid.0)
+                                  .map(|s| s.as_str()).unwrap_or("<Unknown Name>");
+                              crate::debug!(3, "  Token {} (ID: {}): {} calls", token_name, gtid.0, count);
+                          }
+                          crate::debug!(3, "-------------------------------------------------------");
+                      }
+
+                      crate::debug!(2, "Calculated mask. Internal mask non-empty: {}. Converting to original IDs.", !overall_mask.is_empty());
+                      self.parent.internal_bv_to_original(&overall_mask)
+                  }
+                  // Add other methods like commit, is_active, state if they are part of this impl block
+              }
+              ```
+
+      10. **Modify `GrammarConstraintState::commit` method**:
+          *   Replace the existing `commit` method (which was updated in step 5, but now needs the final logic) with:
+              ```rust
+              pub fn commit(&mut self, llm_token_id_original: LLMTokenID) {
+                  let internal_llm_id = match self.parent.original_id_to_internal(llm_token_id_original) {
+                      Some(id) => id,
                       None => {
-                          crate::debug!(1, "LLM Token bytes for original ID {} not found. Clearing constraint state.", llm_token_id.0);
+                          crate::debug!(2, "Committed LLMTokenID {} not found in internal mapping. Clearing constraint state.", llm_token_id_original.0);
                           self.state.clear();
                           return;
                       }
                   };
 
-                  crate::debug!(2, "Committing LLM Token: {:?} (Original ID: {}, Internal ID: {}), Bytes: {:?}", String::from_utf8_lossy(&llm_token_bytes), llm_token_id.0, internal_llm_id.0, llm_token_bytes);
-
-                  let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
-                  let initial_states_to_process = std::mem::take(&mut self.state);
-
-                  for (current_tokenizer_s_id, base_glr_s) in initial_states_to_process {
-                      if base_glr_s.active_state.stack.is_empty() { // Skip if GSS is already empty
-                          continue;
+                  let llm_token_bytes = match self.parent.llm_token_map.get_by_right(&llm_token_id_original) {
+                      Some(bytes) => bytes.clone(), // Clone here as it's used in a loop
+                      None => {
+                          crate::debug!(0, "Error: LLMTokenID {} (internal {}) has no byte mapping. Clearing constraint state.", llm_token_id_original.0, internal_llm_id.0);
+                          self.state.clear();
+                          return;
                       }
-                      // Ensure the base_glr_s is compatible with the committed token *before* tokenizing its bytes.
-                      // The `active` set of base_glr_s should allow `internal_llm_id`.
-                      // This check was implicitly part of the old design where `commit` followed `step`.
-                      // Now, `get_mask` would have been called, and the caller ensures `llm_token_id` is in the mask.
-                      // So, we assume `base_glr_s` is compatible.
+                  };
 
-                      let mut processing_queue: VecDeque<(usize, TokenizerStateID, GLRParserState<'a>)> = VecDeque::new();
-                      processing_queue.push_back((0, current_tokenizer_s_id, base_glr_s.clone()));
+                  crate::debug!(2, "Committing LLMTokenID {} (internal {}), bytes: {:?}", llm_token_id_original.0, internal_llm_id.0, String::from_utf8_lossy(&llm_token_bytes));
 
-                      while let Some((offset, tokenizer_s_id_at_offset, mut glr_s_at_offset)) = processing_queue.pop_front() {
-                           // If the GSS stack for glr_s_at_offset is empty, prune this path.
-                          if glr_s_at_offset.active_state.stack.is_empty() {
-                              continue;
-                          }
-                          // Optimization: If this GLR state can't possibly accept the current internal_llm_id, prune.
-                          // This check is more about efficiency if the initial `base_glr_s` was too broad.
-                          // However, the caller of `commit` is expected to have chosen a token from `get_mask`.
-                          // The `active` set of `glr_s_at_offset.active_state.stack.acc()` should reflect this.
-                          if !glr_s_at_offset.active_state.stack.acc().active.contains(internal_llm_id.0) && offset == 0 {
-                              // This check is primarily for the very first state before any part of llm_token_bytes is consumed.
-                              // Once parts of llm_token_bytes are consumed, the acc.active refers to *next* tokens.
-                              // crate::debug!(3, "Pruning path for tokenizer state {:?} as its GLR active set {:?} does not contain committed internal LLM ID {}", tokenizer_s_id_at_offset, glr_s_at_offset.active_state.stack.acc().active, internal_llm_id.0);
-                              // continue;
-                          }
+                  let internal_llm_id_bitset = {
+                      let mut bv = LLMTokenBV::new();
+                      bv.insert(internal_llm_id.0);
+                      bv
+                  };
 
+                  let mut pending_glr_states: std::collections::VecDeque<(usize, TokenizerStateID, GLRParserState<'a>)> = std::collections::VecDeque::new();
+                  let step_counts = RefCell::new(BTreeMap::<GrammarTokenID, usize>::new()); // For logging GLR steps
 
-                          if offset >= llm_token_bytes.len() {
-                              // This path fully consumed the llm_token_bytes.
-                              // The tokenizer state for the *next* LLM token will be the initial state.
-                              let next_tokenizer_state_for_overall = self.parent.tokenizer.initial_state_id();
-                              if let Some(existing_glr_s) = new_overall_state.get_mut(&next_tokenizer_state_for_overall) {
-                                  existing_glr_s.merge_with(glr_s_at_offset);
-                              } else {
-                                  new_overall_state.insert(next_tokenizer_state_for_overall, glr_s_at_offset);
-                              }
-                              continue;
-                          }
-
-                          let exec_result = self.parent.tokenizer.execute_from_state(
-                              &llm_token_bytes[offset..],
-                              tokenizer_s_id_at_offset,
-                          );
-
-                          for match_info in &exec_result.matches {
-                              let mut cloned_glr_s = glr_s_at_offset.clone();
-                              cloned_glr_s.step(TerminalID(match_info.id));
-
-                              if cloned_glr_s.is_ok() && !cloned_glr_s.active_state.stack.is_empty() {
-                                  let new_offset = offset + match_info.width;
-                                  // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
-                                  let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
-                                  processing_queue.push_back((
-                                      new_offset,
-                                      next_tokenizer_id_for_segment,
-                                      cloned_glr_s,
-                                  ));
-                              }
-                          }
-
-                          if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
-                              // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
-                              // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
-                              let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
-                              if let Some(existing_glr_s) = new_overall_state.get_mut(&final_tokenizer_state) {
-                                  existing_glr_s.merge_with(glr_s_at_offset.clone());
-                              } else {
-                                  new_overall_state.insert(final_tokenizer_state, glr_s_at_offset.clone());
-                              }
-                          }
+                  for (tokenizer_id, glr_state) in std::mem::take(&mut self.state) {
+                      let mut initial_glr_state_for_commit = glr_state.clone();
+                      // Filter current GSS states by the LLM token being committed.
+                      intersect_tokens_and_prune_arc(&mut initial_glr_state_for_commit.active_state.stack, &internal_llm_id_bitset);
+                      
+                      if initial_glr_state_for_commit.is_ok() && !initial_glr_state_for_commit.active_state.stack.is_empty() {
+                          crate::debug!(4, "Queueing initial GLR state for tokenizer_id {} after filtering by committed token.", tokenizer_id.0);
+                          pending_glr_states.push_back((0, *tokenizer_id, initial_glr_state_for_commit));
+                      } else {
+                          crate::debug!(4, "GLR state for tokenizer_id {} became invalid/empty after filtering by committed token. Discarding.", tokenizer_id.0);
                       }
                   }
 
-                  self.state = new_overall_state;
-                  self.state.retain(|_k, v| v.is_ok() && !v.active_state.stack.is_empty());
+                  let mut next_constraint_states_map: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
 
-                  let all_tokens_bv = self.parent.all_internal_llm_tokens_bitset();
-                  let mut roots_to_simplify_arcs = Vec::new();
-                  for glr_parser_state in self.state.values_mut() {
-                      reset_tokens(&mut glr_parser_state.active_state.stack, &all_tokens_bv);
-                      if !glr_parser_state.active_state.stack.is_empty() {
-                          roots_to_simplify_arcs.push(&mut glr_parser_state.active_state.stack);
+                  while let Some((offset, current_tokenizer_id, current_glr_state)) = pending_glr_states.pop_front() {
+                      crate::debug!(4, "Processing commit: offset {}, tokenizer_id {}", offset, current_tokenizer_id.0);
+                      let exec_result = self.parent.tokenizer.execute_from_state(&llm_token_bytes[offset..], current_tokenizer_id);
+
+                      if let Some(end_tokenizer_id_val) = exec_result.end_state {
+                          // This means the tokenizer consumed the rest of llm_token_bytes[offset..]
+                          // without emitting a grammar token, ending in end_tokenizer_id_val.
+                          // The current_glr_state is carried over to this new tokenizer state.
+                          crate::debug!(4, "  Tokenizer consumed rest of bytes, ended in state {}. Merging GLR state.", end_tokenizer_id_val);
+                          let target_tokenizer_id = TokenizerStateID(end_tokenizer_id_val);
+                          if let Some(existing_state) = next_constraint_states_map.get_mut(&target_tokenizer_id) {
+                              existing_state.merge_with(current_glr_state.clone());
+                          } else {
+                              next_constraint_states_map.insert(target_tokenizer_id, current_glr_state.clone());
+                          }
+                      }
+
+                      for match_info in exec_result.matches {
+                          let grammar_token_id = TerminalID(match_info.id);
+                          let match_width = match_info.width;
+                          let next_offset = offset + match_width;
+                          
+                          crate::debug!(4, "  Matched grammar_token_id {} (width {}), next_offset {}.", grammar_token_id.0, match_width, next_offset);
+
+                          let mut next_glr_state_after_match = current_glr_state.clone();
+                          next_glr_state_after_match.step(grammar_token_id);
+                          *step_counts.borrow_mut().entry(grammar_token_id).or_insert(0) += 1;
+
+
+                          if next_glr_state_after_match.is_ok() && !next_glr_state_after_match.active_state.stack.is_empty() {
+                              // After a grammar token is matched, the tokenizer resets to its initial state for the next segment.
+                              let final_tokenizer_state_for_match = self.parent.tokenizer.initial_state_id();
+                              if next_offset == llm_token_bytes.len() {
+                                  // End of the committed LLM token's bytes.
+                                  crate::debug!(4, "    End of LLM token bytes. Merging GLR state for tokenizer_id {}.", final_tokenizer_state_for_match.0);
+                                  if let Some(existing_state) = next_constraint_states_map.get_mut(&final_tokenizer_state_for_match) {
+                                      existing_state.merge_with(next_glr_state_after_match.clone());
+                                  } else {
+                                      next_constraint_states_map.insert(final_tokenizer_state_for_match, next_glr_state_after_match.clone());
+                                  }
+                              } else {
+                                  // More bytes from the committed LLM token to process.
+                                  crate::debug!(4, "    Queueing further processing: next_offset {}, tokenizer_id {}.", next_offset, final_tokenizer_state_for_match.0);
+                                  // Need to handle merging if multiple paths lead to the same (next_offset, final_tokenizer_state_for_match)
+                                  // For now, VecDeque just pushes. If merging here is critical, queue type might need to change or merge before push.
+                                  pending_glr_states.push_back((next_offset, final_tokenizer_state_for_match, next_glr_state_after_match));
+                              }
+                          } else {
+                               crate::debug!(4, "    GLR state became invalid/empty after stepping with grammar_token_id {}. Discarding path.", grammar_token_id.0);
+                          }
                       }
                   }
                   
-                  if !roots_to_simplify_arcs.is_empty() {
-                       GSSNode::simplify_together(&mut roots_to_simplify_arcs);
-                  }
-                  
-                  crate::debug!(2, "State after committing LLM Token (Original ID: {}): {} active tokenizer states.", llm_token_id.0, self.state.len());
-                  for (tokenizer_id, glr_state) in &self.state {
-                       if !glr_state.active_state.stack.is_empty() { // Log only for non-empty GSS
-                          glr_state.log_gss(
-                              &format!("GSS for tokenizer state {} after commit of token ID {} (internal {})", tokenizer_id.0, llm_token_id.0, internal_llm_id.0),
-                              TerminalID(internal_llm_id.0) 
-                          );
+                  self.state = next_constraint_states_map;
+                  self.state.retain(|_tid, s| s.is_ok() && !s.active_state.stack.is_empty());
+
+                  crate::debug!(3, "Commit processed. Resulting self.state has {} entries before final reset/simplify.", self.state.len());
+
+                  // Reset active sets in GSS nodes to all possible tokens, as we are now ready for the *next* LLM token.
+                  // The get_mask() function will then determine the actual allowed subset based on this.
+                  let all_internal_tokens = HybridBitset::ones(self.parent.internal_max_llm_token + 1);
+                  for (final_tokenizer_id, final_glr_state) in self.state.iter_mut() {
+                      crate::debug!(4, "Resetting tokens and simplifying for final tokenizer_id {}.", final_tokenizer_id.0);
+                      reset_tokens(&mut final_glr_state.active_state.stack, &all_internal_tokens);
+                      Arc::make_mut(&mut final_glr_state.active_state.stack).simplify();
+                      if final_glr_state.active_state.stack.is_empty() {
+                           crate::debug!(4, "  Stack became empty after reset/simplify for tokenizer_id {}.", final_tokenizer_id.0);
                       }
                   }
+                  self.state.retain(|_tid, s| !s.active_state.stack.is_empty()); // Clean up states that became empty after reset/simplify
+
+                  // Logging step_counts for commit
+                  let counts = step_counts.into_inner();
+                  if !counts.is_empty() {
+                      let mut sorted_counts: Vec<(GrammarTokenID, usize)> = counts.into_iter().collect();
+                      sorted_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                      crate::debug!(3, "--- GLRParserState::step call counts (during commit of LLM Token {}) ---", llm_token_id_original.0);
+                      for (gtid, count) in sorted_counts {
+                          let token_name = self.parent.token_name_map.get_by_right(&gtid.0)
+                              .map(|s| s.as_str()).unwrap_or("<Unknown Name>");
+                          crate::debug!(3, "  Token {} (ID: {}): {} calls", token_name, gtid.0, count);
+                      }
+                      crate::debug!(3, "----------------------------------------------------------------------");
+                  }
+
+                  crate::debug!(2, "Commit finished. Final self.state has {} entries.", self.state.len());
               }
+              ```
 
-              pub fn step_with_llm_token_sequence(&mut self, llm_token_ids: &[LLMTokenID]) {
-                  for &llm_token_id in llm_token_ids {
-                      // Before committing, ensure the token is actually allowed by the current state.
-                      // This check is crucial and would typically be done by the caller using get_mask().
-                      // For internal consistency of this method, we can add it here.
-                      let current_mask = self.get_mask();
-                      if !current_mask.contains(llm_token_id.0) {
-                          crate::debug!(1, "Token ID {} not in current mask. Stopping sequence processing.", llm_token_id.0);
-                          self.state.clear(); // Or handle error appropriately
-                          break;
-                      }
-                      self.commit(llm_token_id);
-                      if !self.is_active() { 
-                          crate::debug!(2, "Constraint state became inactive after committing token ID {}. Stopping sequence.", llm_token_id.0);
-                          break;
-                      }
-                  }
-              }
-          // ... (is_active, state methods remain)
-          }
-          ```
+      **File: `src/test_constraint.rs`**
 
-      **Step 4: Update `src/test_constraint.rs`**
-
-      This requires changing how tests interact with `GrammarConstraintState`.
-
-      *   Replace `constraint_state.step_with_all_llm_tokens();` with calls to `constraint_state.get_mask()`.
-      *   `constraint_state.commit(LLMTokenID(X));` remains, but its behavior is new.
-      *   Assertions on masks will now query `get_mask()` at appropriate times.
-
-      Example modification for `test_constraint_simple`:
-      ```rust 'src/test_constraint.rs'
-      // In test_constraint_simple
-          // ... (setup code) ...
-          let mut constraint_state = constraint.init();
-
-          // Initial mask
-          let mask = constraint_state.get_mask();
-          println!("Initial mask: {:?}", mask);
-          assert_eq!(mask, HybridBitset::from_iter(vec![0, 1])); // Expect "ab" or "ac"
-
-          // Commit "ab" (LLMTokenID 0)
-          constraint_state.commit(LLMTokenID(0));
-          assert!(constraint_state.is_active());
-          
-          // Mask after committing "ab"
-          let mask_after_commit = constraint_state.get_mask();
-          assert_eq!(mask_after_commit, HybridBitset::from_iter(vec![2])); // Expect "$" (EOF)
-
-          // ... (Serialization test remains the same) ...
-
-          // Re-evaluate the assertion comparing constraint_parser_state and parser_state
-          let llm_token = b"ab".to_vec();
-          let grammar_tokens_text = vec!["AB"]; // The grammar token(s) "ab" (LLM) corresponds to
-          let llm_token_id_for_comp = llm_token_map.get_by_left(&llm_token).unwrap();
-          
-          let mut constraint_state_for_comp = constraint.init();
-          // Mask before commit (optional, for debugging)
-          let _mask_before = constraint_state_for_comp.get_mask();
-          constraint_state_for_comp.commit(*llm_token_id_for_comp);
-
-          let mut parser_state_for_comp = parser.init_glr_parser();
-          // If "ab" (LLM) corresponds to a single grammar token "AB"
-          if grammar_tokens_text.len() == 1 && grammar_tokens_text[0] == "AB" {
-              let ab_grammar_id = grammar_token_map.get_by_left(&Terminal("AB".to_string())).unwrap();
-              parser_state_for_comp.step(*ab_grammar_id);
-          } else {
-              // If "ab" (LLM) corresponds to "A" then "B_OR_C" (e.g. if "AB" wasn't a direct grammar token)
-              // This part needs to reflect how the LLM token "ab" is tokenized by the grammar's tokenizer.
-              // For this specific test, "ab" LLM token should map to "AB" grammar token.
-              // If it mapped to "A" then "B_OR_C", the logic would be:
-              // let a_grammar_id = grammar_token_map.get_by_left(&Terminal("A".to_string())).unwrap();
-              // let b_or_c_grammar_id = grammar_token_map.get_by_left(&Terminal("B_OR_C".to_string())).unwrap();
-              // parser_state_for_comp.step(*a_grammar_id);
-              // parser_state_for_comp.step(*b_or_c_grammar_id); // Assuming 'b' was chosen for "ab"
-              // This highlights that the comparison is complex if an LLM token spans multiple grammar tokens
-              // or if a grammar token spans multiple LLM tokens.
-              // The new `commit` handles the LLM-token-to-grammar-tokens breakdown.
-          }
-
-
-          assert_eq!(constraint_state_for_comp.state().len(), 1, "Constraint state should have one tokenizer state after commit");
-          let (tokenizer_state_id_comp, actual_constraint_parser_state) = constraint_state_for_comp.state().iter().next().unwrap();
-          
-          // For comparison, parser_state_for_comp's GSS acc needs to be "all_ones" like commit does.
-          let all_ones_acc = LLMTokenInfo {
-              active: constraint.all_internal_llm_tokens_bitset(),
-              intersection: constraint.all_internal_llm_tokens_bitset(),
-          };
-          let mut comparable_parser_gss = (*parser_state_for_comp.active_state.stack).clone();
-          comparable_parser_gss = comparable_parser_gss.with_acc(all_ones_acc);
-          let comparable_parser_active_state = ParseState { stack: Arc::new(comparable_parser_gss) };
-
-          assert_eq!(*tokenizer_state_id_comp, tokenizer.initial_state_id(), "Tokenizer should be in initial state");
-          // Compare the GSS structures. The accumulators will differ due to reset_tokens in commit.
-          // This assertion will likely fail if GSSNode's PartialEq/Eq considers `acc`.
-          // We need to compare the structure, or ensure `acc` is comparable.
-          // After `commit`, `actual_constraint_parser_state.active_state.stack.acc()` is reset.
-          // `parser_state_for_comp.active_state.stack.acc()` is built from grammar steps.
-          // For a valid comparison, we'd need to compare GSS structure *ignoring* the `acc` field,
-          // or set `parser_state_for_comp.active_state.stack.acc()` to a known state (e.g. default or all_ones).
-          assert_eq!(actual_constraint_parser_state.active_state, comparable_parser_active_state, "GSS structures should match");
-
-      ```
-      The test `test_hideous_ambiguity`:
-      ```rust 'src/test_constraint.rs'
-      // In test_hideous_ambiguity
-          // ...
-          let mut constraint_state = constraint.init();
-
-          let a_id = llm_token_map.get_by_left(&b"a"[..]).unwrap().0;
-          for i in 0..10 { // Reduced iterations for faster test, was 1000
-              println!("{}. Committing LLM token ID {}", i, a_id);
-              // Before commit, check if 'a' is allowed. If not, the test logic is flawed for this grammar.
+      1.  **In `test_constraint_simple`**:
+          *   Replace `constraint_state.step_with_all_llm_tokens();` with `let mask = constraint_state.get_mask();`.
+          *   The line `println!("Initial mask: {:?}", mask);` should now be after the `get_mask()` call.
+          *   Replace:
+              ```rust
+              constraint_state.commit(LLMTokenID(0));
+              assert!(constraint_state.is_active());
+              constraint_state.step_with_all_llm_tokens();
               let mask = constraint_state.get_mask();
-              if !mask.contains(a_id) {
-                  println!("Token 'a' (ID {}) not in mask. Mask: {:?}. Stopping.", a_id, mask);
-                  // This might be expected if the grammar can complete or get stuck.
-                  // For this test, if it gets stuck, that's the result.
-                  break; 
-              }
+              ```
+              With:
+              ```rust
+              constraint_state.commit(LLMTokenID(0));
+              assert!(constraint_state.is_active());
+              let mask = constraint_state.get_mask();
+              ```
+          *   The comparison of parser states at the end: `reset_tokens(&mut constraint_parser_state.active_state.stack, &HybridBitset::new());` and `reset_tokens(&mut parser_state.active_state.stack, &HybridBitset::new());` should make their GSS structures comparable if the `active` sets were the main difference. This part should remain valid.
+
+      2.  **In `test_constraint_expression`**:
+          *   Replace `state.step_with_all_llm_tokens();` with `let mask = state.get_mask();`.
+          *   Replace `state.commit(LLMTokenID(5)); state.step_with_all_llm_tokens();` with `state.commit(LLMTokenID(5)); let mask = state.get_mask();`.
+          *   The commented-out section for committing `LLMTokenID(4)` should be updated similarly if uncommented.
+          *   The final parser state comparison logic should be fine due to the `reset_tokens` calls.
+
+      3.  **In `test_precompute_for_python_name_token` and `test_precompute_explosion`**:
+          *   These tests call `GrammarConstraint::precompute` directly. The `LLMTokenInfo` changes don't affect `PrecomputedNodeContents` or `LLMTokenBV` directly, so these tests might not need changes related to `LLMTokenInfo`. The `precompute` function itself doesn't use `GrammarConstraintState`.
+
+      4.  **In `test_precompute_with_gpt2_vocab`**:
+          *   Replace `constraint_state.step_with_all_llm_tokens();` with `let initial_mask = constraint_state.get_mask();`.
+          *   In the loop processing `a_id`:
+              ```rust
+              // constraint_state.step_with_all_llm_tokens(); // Remove this line
               constraint_state.commit(LLMTokenID(a_id));
-              if !constraint_state.is_active() {
-                  println!("Constraint state became inactive at iteration {}.", i);
-                  break;
+              ```
+              If you need to check the mask inside the loop, call `constraint_state.get_mask()`.
+
+      5.  **In `test_hideous_ambiguity`**:
+          *   Replace `constraint_state.step_with_all_llm_tokens();` with `constraint_state.commit(LLMTokenID(a_id));`. The purpose of this test seems to be to stress the commit/GSS operations.
+
+      6.  **In `test_simple_def_match_non_zero_llm_id`**:
+          *   Remove `constraint_state.step_with_all_llm_tokens();`. The subsequent `get_mask()` will compute the initial mask.
+
+      7.  **In `test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab`**:
+          *   Replace `constraint_state.step_with_all_llm_tokens();` with `let initial_mask = constraint_state.get_mask();`.
+          *   In the loop processing `test_token_sequence_ids`:
+              *   Remove `constraint_state.step_with_all_llm_tokens();` before `let current_mask = constraint_state.get_mask();`.
+          *   The final parser state comparison logic should be fine.
+
+      8.  **Update `test_grammar_from_exprs`, `test_grammar_from_exprs_simple`, `test_grammar_from_exprs_very_simple`**:
+          *   Apply similar changes: remove `step_with_all_llm_tokens()`, use `get_mask()` to get masks, and `commit()` to advance state.
+          *   For `test_grammar_from_exprs_very_simple`, after `grammar_constraint_state.commit(LLMTokenID(0));`, the next `get_mask()` call will determine the mask. The assertion for `expected_mask_final` (expecting EOF) should still be valid.
+          *   In `test_grammar_from_exprs`, the line `state_for_prefill.step_with_llm_token_sequence(&prefill);` should become:
+              ```rust
+              for token_id in &prefill {
+                  state_for_prefill.commit(*token_id);
               }
-          }
-      ```
+              ```
+              And similarly for `final_token_seq`. Remove subsequent `step_with_all_llm_tokens()` calls.
 
-      The test `test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab` needs similar changes:
-      `step_with_all_llm_tokens` becomes `get_mask` (if checking the mask) and `commit` to advance.
+      **File: `src/interface/interface.rs`**
 
-      ```rust 'src/test_constraint.rs'
-      // In test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab
-          // ...
-          let mut constraint_state = grammar_constraint.init();
-          
-          let initial_mask = constraint_state.get_mask(); // Get initial mask
-          println!("\nInitial mask obtained ({} allowed LLM tokens).", initial_mask.iter_bits().count());
+      *   **`IncrementalParser`**: As analyzed, `IncrementalParser` uses `GLRParserState::step` with `TerminalID`s, which is an internal GLR mechanism. The simplification of `LLMTokenInfo` (which is the accumulator in the GSS nodes manipulated by `GLRParserState`) will be handled correctly by the existing `GLRParserState` and `GSSNode` methods. No direct changes to `IncrementalParser`'s method signatures or its core loop logic seem necessary due to *this specific refactoring*.
+      *   **`GrammarConstraint::from_compiled_grammar`**: This method's signature and internal call to `GrammarConstraint::new` are unaffected by these changes, as `GrammarConstraint::new`'s signature remains the same.
 
-          println!("\nStepping through the token sequence with GrammarConstraint:");
-          for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
-              // ... (logging) ...
-              assert!(constraint_state.is_active(), /* ... */ );
-
-              let current_mask = constraint_state.get_mask(); // Get mask before commit
-              // ... (logging about mask) ...
-              assert!(current_mask.contains(llm_token_id.0), /* ... */);
-              // ... (logging) ...
-
-              constraint_state.commit(llm_token_id); // Commit the token
-              // ... (logging and assertions about active state) ...
-          }
-          // ... (final assertions) ...
-
-          // Comparison part:
-          let mut constraint_state_for_comp = grammar_constraint.init();
-          for llm_token_id_for_comp in llm_token_ids { // llm_token_ids was defined in the test
-              // Ensure token is allowed before committing
-              let mask_before_commit = constraint_state_for_comp.get_mask();
-              assert!(mask_before_commit.contains(llm_token_id_for_comp.0), "Token mismatch during comparison setup");
-              constraint_state_for_comp.commit(*llm_token_id_for_comp);
-          }
-          // ... (rest of comparison logic, ensuring comparable_parser_active_state is set up correctly) ...
-          // The GSS comparison logic from test_constraint_simple should be used here too.
-          assert_eq!(constraint_state_for_comp.state().len(), 1, "Constraint state for comparison should have one tokenizer state");
-          let (tokenizer_state_id_comp, actual_constraint_parser_state_comp) = constraint_state_for_comp.state().iter().next().unwrap();
-          
-          let all_ones_acc_comp = LLMTokenInfo {
-              active: grammar_constraint.all_internal_llm_tokens_bitset(),
-              intersection: grammar_constraint.all_internal_llm_tokens_bitset(),
-          };
-          let mut comparable_parser_gss_comp = (*parser_state.active_state.stack).clone(); // parser_state from test
-          comparable_parser_gss_comp = comparable_parser_gss_comp.with_acc(all_ones_acc_comp);
-          let comparable_parser_active_state_comp = ParseState { stack: Arc::new(comparable_parser_gss_comp) };
-
-          assert_eq!(*tokenizer_state_id_comp, grammar_constraint.tokenizer.initial_state_id(), "Tokenizer for comparison should be in initial state");
-          assert_eq!(actual_constraint_parser_state_comp.active_state, comparable_parser_active_state_comp, "GSS structures for comparison should match");
-
-      ```
-
-      This is a large set of changes. Careful testing will be required. The core idea is that `commit` now fully processes an LLM token and resets the "next token possibilities" to wide open, and `get_mask` then narrows those possibilities based on the grammar and precomputed trie.
+      This covers the requested modifications. Remember to run `cargo fmt` and `cargo clippy` after making these changes, and thoroughly test the behavior, especially around the `get_mask` and `commit` interactions.
     metadata:
   - user: |
       Using model 'gemini/gemini-2.5-flash-preview-05-20' for code completion.
 
       --- LLM Code Generation Attempt 1/5 ---
       Parsed actions JSON: [
-        {
-          "action": "replace",
-          "filepath": "src/datastructures/gss.rs"
-        },
-        {
-          "action": "replace",
-          "filepath": "src/glr/parser.rs"
-        },
         {
           "action": "replace",
           "filepath": "src/constraint.rs"
@@ -26281,22 +26173,13 @@ messages:
           "filepath": "src/test_constraint.rs"
         }
       ]
-      Found 3 code blocks with filepaths in attempt 1.
-      Received code for required file: src/datastructures/gss.rs
-      Received code for required file: src/glr/parser.rs
+      Found 2 code blocks with filepaths in attempt 1.
       Received code for required file: src/constraint.rs
-      Missing code blocks for: {'src/test_constraint.rs'}
-      Requesting missing code blocks...
-
-      --- LLM Code Generation Attempt 2/5 ---
-      Found 1 code blocks with filepaths in attempt 2.
       Received code for required file: src/test_constraint.rs
       All required file contents received or no content needed.
 
       --- Applying Changes ---
-      Successfully replaced file: src/datastructures/gss.rs
       Successfully replaced file: src/test_constraint.rs
       Successfully replaced file: src/constraint.rs
-      Successfully replaced file: src/glr/parser.rs
     metadata:
 ...
