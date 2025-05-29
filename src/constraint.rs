@@ -2,7 +2,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::BitOr;
 use std::sync::{Arc, Mutex};
@@ -385,7 +385,7 @@ impl GrammarConstraint {
         original_bv
     }
 
-    fn all_internal_llm_tokens_bitset(&self) -> LLMTokenBV {
+    pub(crate) fn all_internal_llm_tokens_bitset(&self) -> LLMTokenBV {
         HybridBitset::ones(self.internal_max_llm_token + 1)
     }
 }
@@ -777,7 +777,7 @@ impl<'r> Precomputer<'r> {
                     let match_end_offset = offset + m.width;
                     let active_tokens = child_vocab_of_segment.reachable_token_ids();
                     let tokens_with_future_match = possible_future_matches.get(&grammar_tok).cloned().unwrap_or_default();
-                    let edge_tokens = active_tokens - tokens_with_future_match;
+                    let edge_tokens = active_tokens.clone() - tokens_with_future_match;
 
                     if !edge_tokens.is_empty() {
                         for src in &merged_src_set {

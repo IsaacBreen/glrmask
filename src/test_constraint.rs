@@ -1,3 +1,4 @@
+use crate::glr::parser::ParseState;
 use rand::rngs::StdRng;
 use std::collections::{BTreeMap, BTreeSet};
 use crate::finite_automata::eat_u8;
@@ -281,7 +282,7 @@ fn test_constraint_expression() {
     
     let all_ones_acc = constraint.all_internal_llm_tokens_bitset();
     let mut comparable_parser_gss = (*parser_state_for_comp.active_state.stack).clone();
-    comparable_parser_gss = comparable_parser_gss.with_acc(all_ones_acc);
+    comparable_parser_gss.reset_tokens(&HybridBitset::new());
     let comparable_parser_active_state = ParseState { stack: Arc::new(comparable_parser_gss) };
 
     assert_eq!(*tokenizer_state_id_comp, tokenizer.initial_state_id());
@@ -1021,9 +1022,10 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     }
 
     let mut parser_state_for_comp = constraint_state_for_comp.parent.parser.init_glr_parser();
-    for grammar_token_ids in grammar_tokenss_for_comp {
+    for grammar_tokens in grammar_tokenss_for_comp {
         let mut this_parser_state = constraint_state_for_comp.parent.parser.init_glr_parser();
-        for grammar_token_id in grammar_token_ids {
+        for grammar_token in grammar_tokens {
+            let grammar_token_id = grammar_constraint.parser.terminal_map.get_by_left(&Terminal(grammar_token.to_string())).unwrap();
             this_parser_state.step(*grammar_token_id);
         }
         parser_state_for_comp.merge_with(this_parser_state);
@@ -1035,7 +1037,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     
     let all_ones_acc_comp = grammar_constraint.all_internal_llm_tokens_bitset();
     let mut comparable_parser_gss_comp = (*parser_state_for_comp.active_state.stack).clone();
-    comparable_parser_gss_comp = comparable_parser_gss_comp.with_acc(all_ones_acc_comp);
+    comparable_parser_gss_comp.reset_tokens(&HybridBitset::new());
     let comparable_parser_active_state_comp = ParseState { stack: Arc::new(comparable_parser_gss_comp) };
 
     assert_eq!(*tokenizer_state_id_comp, grammar_constraint.tokenizer.initial_state_id(), "Tokenizer for comparison should be in initial state");
