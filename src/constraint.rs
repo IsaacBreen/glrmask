@@ -43,10 +43,10 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 // An empty bitset resulting from a union is still Some(empty_bv), not None.
             }
             (None, Some(other_bv)) => {
-                *self = Some(other_bv);
+                *self = Some(LLMTokenBV::max_ones());
             }
             (Some(_), None) => {
-                // self remains Some(self_bv)
+                *self = Some(LLMTokenBV::max_ones());
             }
             (None, None) => {
                 // self remains None
