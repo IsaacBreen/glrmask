@@ -447,7 +447,7 @@ pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_int
     let closure = |current_acc: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
         let mut new_acc = current_acc.clone();
         if let Some(bv) = new_acc.as_mut() {
-            *bv |= tokens_to_intersect;
+            *bv &= tokens_to_intersect;
         } else {
             new_acc = Some(tokens_to_intersect.clone());
         }
