@@ -1063,6 +1063,7 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         while let Some((offset, tokenizer_s_id_at_offset, glr_s_at_offset)) = processing_queue.pop_front() {
+            assert!(offset <= llm_token_bytes.len());
             if offset == llm_token_bytes.len() {
                 // This path fully consumed the llm_token_bytes.
                 // The tokenizer state for the *next* LLM token will be the initial state.
