@@ -339,7 +339,7 @@ if __name__ == "__main__":
     tokenizer_vocab = tokenizer.get_vocab()
     # Ensure there are no spaces ' ' before we replace 'Ġ' with ' '
     assert not any(c == ' ' for c in tokenizer_vocab.keys())
-    tokenizer_vocab = {k.replace("Ġ", " "): v for k, v in tokenizer_vocab.items()}
+    tokenizer_vocab = {k.replace("Ġ", " ").replace("ą", "\n"): v for k, v in tokenizer_vocab.items()}
 
 #     # TODO: delete this
 #     # Remove tokens that have any letter other than 'a'
@@ -417,8 +417,8 @@ if __name__ == "__main__":
 
     # Map the remaining tokens to their proper IDs.
     actual_vocab = tokenizer.get_vocab()
-    tokenizer_vocab = {token.replace(" ", "Ġ"): i for token, i in tokenizer_vocab.items()}
-    tokenizer_vocab = {token.replace("Ġ", " "): actual_vocab[token] for token in tokenizer_vocab}
+    tokenizer_vocab = {token.replace(" ", "Ġ").replace("\n", "ą"): i for token, i in tokenizer_vocab.items()}
+    tokenizer_vocab = {token.replace("Ġ", " ").replace("ą", "\n"): actual_vocab[token] for token in tokenizer_vocab}
     print(f"tokenizer_vocab: {textwrap.shorten(str(tokenizer_vocab), width=100)}")
 
     llm_token_to_id = {token.encode(): i for token, i in tokenizer_vocab.items()}

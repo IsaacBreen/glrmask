@@ -852,7 +852,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     for (token_str, id_val_u32) in gpt2_raw_vocab.into_iter(){
         let id_val = id_val_u32 as usize;
         // Replace 'Ġ' with ' '
-        let token_str = token_str.replace("Ġ", " ");
+        let token_str = token_str.replace("Ġ", " ").replace("ą", "\n");
         let token_bytes = token_str.as_bytes().to_vec();
         llm_token_map.insert(token_bytes, LLMTokenID(id_val));
         if id_val > max_original_llm_token_id_val {
