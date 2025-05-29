@@ -446,8 +446,11 @@ fn prune_and_transform_recursive(
 pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_intersect: &LLMTokenBV) {
     let closure = |current_acc: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
         let mut new_acc = current_acc.clone();
-
-
+        if let Some(bv) = new_acc.as_mut() {
+            *bv |= tokens_to_intersect;
+        } else {
+            new_acc = Some(tokens_to_intersect.clone());
+        }
         if new_acc.as_ref().is_none_or(|bv| bv.is_empty()) {
             None // Prune this node
         } else {
@@ -467,15 +470,10 @@ pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_int
 }
 
 
-pub fn reset_tokens(root_arc: &mut Arc<GSSNode>, tokens_to_reset: &LLMTokenInfo) {
+pub fn reset_tokens(root_arc: &mut Arc<GSSNode>) {
     let closure = |current_acc: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
-        let mut new_acc = current_acc.clone();
-        new_acc = tokens_to_reset.clone();
-        if new_acc.as_ref().is_none_or(|bv| bv.is_empty()) {
-            None // Prune this node
-        } else {
-            Some((new_acc, true)) // Keep node, continue recursion
-        }
+        let continue_recursion = current_acc.is_some();
+        Some((None, true)) // Keep node, continue recursion
     };
     let mut memo = HashMap::new();
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
@@ -570,9 +568,9 @@ impl GSSNode {
         *self = node_arc.as_ref().clone();
     }
 
-    pub fn reset_tokens(&mut self, tokens_to_reset: &LLMTokenInfo) {
+    pub fn reset_tokens(&mut self) {
         let mut node_arc = Arc::new(self.clone());
-        reset_tokens(&mut node_arc, tokens_to_reset);
+        reset_tokens(&mut node_arc);
         *self = node_arc.as_ref().clone();
     }
 

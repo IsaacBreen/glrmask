@@ -1141,7 +1141,7 @@ impl<'a> GrammarConstraintState<'a> {
         let all_tokens_bv = self.parent.all_internal_llm_tokens_bitset();
         let mut roots_to_simplify_arcs = Vec::new();
         for glr_parser_state in self.state.values_mut() {
-            reset_tokens(&mut glr_parser_state.active_state.stack, &None);
+            reset_tokens(&mut glr_parser_state.active_state.stack);
             if !glr_parser_state.active_state.stack.is_empty() {
                 roots_to_simplify_arcs.push(&mut glr_parser_state.active_state.stack);
             }
