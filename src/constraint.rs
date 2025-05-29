@@ -1007,32 +1007,25 @@ impl<'a> GrammarConstraintState<'a> {
                     return true; 
                 }
 
-                // Get the accumulator, which is now Option<LLMTokenBV>
-                let glr_active_tokens_opt = final_glr_s.active_state.stack.acc().clone();
+                let glr_active_tokens = final_glr_s.active_state.stack.acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
 
-                if let Some(glr_active_tokens) = glr_active_tokens_opt {
-                    // Only proceed if there's an active bitset
-                    if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
-                        let mask_contribution = &glr_active_tokens & clean_end_bv;
-                        final_mask_internal |= &mask_contribution;
-                    }
+                if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
+                    let mask_contribution = &glr_active_tokens & clean_end_bv;
+                    final_mask_internal |= mask_contribution;
+                }
 
-                    for (grammar_token, finalizer) in precomputed_node_data.value.finalizers() {
-                        let mut temp_glr_s_for_finalizer_step = final_glr_s.clone();
-                        temp_glr_s_for_finalizer_step.step(*grammar_token);
+                for (grammar_token, finalizer) in precomputed_node_data.value.finalizers() {
+                    let mut temp_glr_s_for_finalizer_step = final_glr_s.clone();
+                    temp_glr_s_for_finalizer_step.step(*grammar_token);
 
-                        if temp_glr_s_for_finalizer_step.is_ok() && !temp_glr_s_for_finalizer_step.active_state.stack.is_empty() {
-                            // Get accumulator for the state after stepping
-                            if let Some(glr_active_after_step) = temp_glr_s_for_finalizer_step.active_state.stack.acc().clone() {
-                                for finalizer_llm_token_bv in finalizer.content.values() {
-                                    let mask_contribution = &glr_active_after_step & finalizer_llm_token_bv;
-                                    final_mask_internal |= &mask_contribution;
-                                }
-                            }
+                    if temp_glr_s_for_finalizer_step.is_ok() && !temp_glr_s_for_finalizer_step.active_state.stack.is_empty() {
+                        let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                        for finalizer_llm_token_bv in finalizer.content.values() {
+                            let mask_contribution = &glr_active_after_step & finalizer_llm_token_bv;
+                            final_mask_internal |= &mask_contribution;
                         }
                     }
                 }
-                // If glr_active_tokens_opt was None, no contribution from this path.
                 true 
             },
         );
