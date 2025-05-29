@@ -1062,13 +1062,8 @@ impl<'a> GrammarConstraintState<'a> {
             processing_queue.push_back((0, current_tokenizer_s_id, base_glr_s.clone()));
         }
 
-        while let Some((offset, tokenizer_s_id_at_offset, mut glr_s_at_offset)) = processing_queue.pop_front() {
-             // If the GSS stack for glr_s_at_offset is empty, prune this path.
-            if glr_s_at_offset.active_state.stack.is_empty() {
-                continue;
-            }
-
-            if offset >= llm_token_bytes.len() {
+        while let Some((offset, tokenizer_s_id_at_offset, glr_s_at_offset)) = processing_queue.pop_front() {
+            if offset == llm_token_bytes.len() {
                 // This path fully consumed the llm_token_bytes.
                 // The tokenizer state for the *next* LLM token will be the initial state.
                 let next_tokenizer_state_for_overall = self.parent.tokenizer.initial_state_id();
