@@ -162,6 +162,7 @@ fn test_constraint_simple() {
     constraint_state_for_comp.commit(*llm_token_id_for_comp);
 
     let mut parser_state_for_comp = parser.init_glr_parser();
+    // If "ab" (LLM) corresponds to a single grammar token "AB"
     if grammar_tokens_text.len() == 1 && grammar_tokens_text[0] == "AB" {
         let ab_grammar_id = grammar_token_map.get_by_left(&Terminal("AB".to_string())).unwrap();
         parser_state_for_comp.step(*ab_grammar_id);

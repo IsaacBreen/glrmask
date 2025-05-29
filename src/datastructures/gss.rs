@@ -166,12 +166,13 @@ impl GSSNode {
     }
 
     // Made private as requested
-    pub(crate) fn acc_mut(&mut self) -> &mut LLMTokenInfo {
+    fn acc_mut(&mut self) -> &mut LLMTokenInfo {
         &mut self.acc
     }
 
     // Helper to clone the node and set a new accumulator. Used internally.
-    fn with_acc(mut self, acc: LLMTokenInfo) -> Self {
+    // Make this public for constraint.rs usage
+    pub fn with_acc(mut self, acc: LLMTokenInfo) -> Self {
         self.acc = acc;
         self.hash_key_cache = compute_hash_key(&self.predecessors); // Recalculate hash if acc changes meaning
         self
