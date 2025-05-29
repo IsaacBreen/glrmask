@@ -1094,17 +1094,6 @@ impl<'a> GrammarConstraintState<'a> {
                 if glr_s_at_offset.active_state.stack.is_empty() {
                     continue;
                 }
-                // Optimization: If this GLR state can't possibly accept the current internal_llm_id, prune.
-                // This check is more about efficiency if the initial `base_glr_s` was too broad.
-                // However, the caller of `commit` is expected to have chosen a token from `get_mask`.
-                // The `active` set of `glr_s_at_offset.active_state.stack.acc()` should reflect this.
-                if !glr_s_at_offset.active_state.stack.acc().active.contains(internal_llm_id.0) && offset == 0 {
-                    // This check is primarily for the very first state before any part of llm_token_bytes is consumed.
-                    // Once parts of llm_token_bytes are consumed, the acc.active refers to *next* tokens.
-                    // crate::debug!(3, "Pruning path for tokenizer state {:?} as its GLR active set {:?} does not contain committed internal LLM ID {}", tokenizer_s_id_at_offset, glr_s_at_offset.active_state.stack.acc().active, internal_llm_id.0);
-                    // continue;
-                }
-
 
                 if offset >= llm_token_bytes.len() {
                     // This path fully consumed the llm_token_bytes.
