@@ -57,7 +57,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
     fn intersect_assign(&mut self, right: Self) {
         match (self.as_mut(), right) {
             (Some(self_bv), Some(right_bv)) => {
-                *self_bv &= &right_bv;
+                *self_bv &= right_bv;
             }
             (None, Some(right_bv)) => {
                 *self = Some(right_bv);
