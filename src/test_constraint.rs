@@ -1008,14 +1008,14 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
          println!("Constraint state was not stepped as the input string was empty and produced no tokens.");
     }
 
-    // // Ensure the parse state after stepping the constraint with all LLM tokens and committing an LLM token is the same as the parse state after stepping the parser itself tokens emitted by the tokenizer for that same LLM token.
-    // // In general, this should be true if all LLM tokens cleanly match grammar tokens (or, equivalently, if the only non-empty entry in the precompute tree is under the initial tokenizer state).
-    // // let llm_tokens: Vec<&[u8]> = vec![b"from"];
+    // Ensure the parse state after stepping the constraint with all LLM tokens and committing an LLM token is the same as the parse state after stepping the parser itself tokens emitted by the tokenizer for that same LLM token.
+    // In general, this should be true if all LLM tokens cleanly match grammar tokens (or, equivalently, if the only non-empty entry in the precompute tree is under the initial tokenizer state).
+    // let llm_tokens: Vec<&[u8]> = vec![b"from"];
     // // let grammar_tokenss = vec![vec!["\"from\""], vec!["NAME[0]"]];
     // let llm_tokens_for_comp: Vec<&[u8]> = vec![b"from", b" typing", b" import", b" Any", b",", b" List", b","];
     // let grammar_tokenss_for_comp = vec![vec!["\"from\"", "NAME[0]", "\"import\"", "NAME[0]", "\",\"", "NAME[0]", "\",\""]];
     // let llm_token_ids_for_comp = llm_tokens_for_comp.iter().map(|llm_token| llm_token_map.get_by_left(*llm_token).expect(format!("LLM token '{}' not found in llm_token_map", String::from_utf8_lossy(*llm_token)).as_str())).collect::<Vec<_>>();
-    //
+    // 
     // let mut parser_state_for_comp = grammar_constraint.parser.init_glr_parser();
     // for grammar_tokens in grammar_tokenss_for_comp {
     //     let mut this_parser_state = grammar_constraint.parser.init_glr_parser();
@@ -1026,7 +1026,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     //     }
     //     parser_state_for_comp.merge_with(this_parser_state);
     // }
-    //
+    // 
     // let mut constraint_state_for_comp = grammar_constraint.init();
     // for llm_token_for_comp in llm_tokens_for_comp {
     //     // Ensure token is allowed before committing
@@ -1035,19 +1035,19 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     //     assert!(mask_before_commit.contains(llm_token_id_for_comp.0), "Token {:?} (ID {}) not found in mask during comparison setup", String::from_utf8_lossy(llm_token_for_comp), llm_token_id_for_comp.0);
     //     constraint_state_for_comp.commit(*llm_token_id_for_comp);
     // }
-    //
+    // 
     // let initial_tokenizer_state_id = constraint_state_for_comp.parent.tokenizer.initial_state_id();
     // assert_eq!(constraint_state_for_comp.state().len(), 1, "Constraint state for comparison should have one tokenizer state");
     // let (tokenizer_state_id_comp, actual_constraint_parser_state_comp) = constraint_state_for_comp.state().iter().next().unwrap();
     // let mut actual_constraint_parser_state_comp = actual_constraint_parser_state_comp.clone();
-    //
+    // 
     // let mut comparable_parser_gss_comp = (*parser_state_for_comp.active_state.stack).clone();
     // let mut comparable_parser_active_state_comp = ParseState { stack: Arc::new(comparable_parser_gss_comp) };
-    //
-    //
+    // 
+    // 
     // Arc::make_mut(&mut comparable_parser_active_state_comp.stack).reset_tokens();
     // Arc::make_mut(&mut actual_constraint_parser_state_comp.active_state.stack).reset_tokens();
-    //
+    // 
     // assert_eq!(*tokenizer_state_id_comp, grammar_constraint.tokenizer.initial_state_id(), "Tokenizer for comparison should be in initial state");
     // assert_eq!(actual_constraint_parser_state_comp.active_state, comparable_parser_active_state_comp, "GSS structures for comparison should match");
     // println!("Number of states: {}", constraint_state_for_comp.state().len());
