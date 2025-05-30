@@ -47,11 +47,7 @@ pub(crate) fn print_finalizer(
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>
 ) {
     println!("{}  - Finalizer for GrammarTokenID({}):", indent, grammar_token_id.0);
-    for (tokenizer_state_id, llm_tokens) in &finalizer.content { // llm_tokens are internal
-        println!("{}    Tokenizer State {}:", indent, tokenizer_state_id.0);
-        // Pass original_internal_bimap to format_bv_indices
-        println!("{}      LLM Tokens: {}", indent, format_bv_indices(llm_tokens, original_internal_bimap));
-    }
+    println!("{}    LLM Tokens: {}", indent, format_bv_indices(&finalizer.content, original_internal_bimap));
 }
 
 /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
@@ -352,7 +348,7 @@ pub fn calculate_final_stats(
         }
         // Existing logic for finalizers
         for finalizer_for_gtid in node_guard.value.finalizers().values() { // Use .finalizers() method
-            stats.final_total_finalizer_entries_in_graph += finalizer_for_gtid.content.len();
+            stats.final_total_finalizer_entries_in_graph += 1; // Count each finalizer once, regardless of content
         }
     }
     crate::debug!(2, "Finished calculating final precompute statistics (within constraint_extra).");

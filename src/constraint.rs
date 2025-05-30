@@ -73,7 +73,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
 // -----------------------------------------------------------------------------
 #[derive(Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrecomputedFinalizer {
-    pub content: BTreeMap<TokenizerStateID, LLMTokenBV>,
+    pub content: LLMTokenBV,
 }
 
 impl JSONConvertible for PrecomputedFinalizer {
@@ -86,7 +86,7 @@ impl JSONConvertible for PrecomputedFinalizer {
         match node {
             JSONNode::Object(mut obj) => {
                 let content = obj.remove("content").ok_or_else(|| "Missing field content for PrecomputedFinalizer".to_string())
-                                   .and_then(|n| BTreeMap::<TokenizerStateID, LLMTokenBV>::from_json(n))?;
+                                   .and_then(LLMTokenBV::from_json)?;
                 Ok(PrecomputedFinalizer { content })
             }
             _ => Err("Expected JSONNode::Object for PrecomputedFinalizer".to_string()),
@@ -96,9 +96,9 @@ impl JSONConvertible for PrecomputedFinalizer {
 
 
 impl PrecomputedFinalizer {
-    fn new(tokens: LLMTokenBV, tokenizer_state: TokenizerStateID) -> Self {
+    fn new(tokens: LLMTokenBV) -> Self {
         Self {
-            content: BTreeMap::from([(tokenizer_state, tokens)]),
+            content: tokens,
         }
     }
 }
@@ -140,20 +140,17 @@ impl PrecomputedNodeContents {
         &mut self,
         grammar_token: GrammarTokenID,
         llm_token: LLMTokenID, 
-        tokenizer_state: TokenizerStateID,
+        _tokenizer_state: TokenizerStateID,
     ) {
         let mut bv = HybridBitset::new();
         bv.insert(llm_token.0); 
 
         self.finalizers
             .entry(grammar_token)
-            .and_modify(|f| {
-                f.content
-                    .entry(tokenizer_state)
-                    .and_modify(|existing| *existing |= &bv)
-                    .or_insert(bv.clone());
+            .and_modify(|f: &mut PrecomputedFinalizer| {
+                f.content |= &bv;
             })
-            .or_insert_with(|| PrecomputedFinalizer::new(bv, tokenizer_state));
+            .or_insert_with(|| PrecomputedFinalizer::new(bv.clone()));
     }
 }
 
@@ -650,9 +647,7 @@ impl<'r> Precomputer<'r> {
         let mut current_node_completable = node_guard.value.clean_end.as_ref().cloned().unwrap_or_else(LLMTokenBV::new);
 
         for finalizer in node_guard.value.finalizers.values() {
-            for llm_token_bv_in_finalizer in finalizer.content.values() {
-                current_node_completable |= llm_token_bv_in_finalizer;
-            }
+            current_node_completable |= &finalizer.content;
         }
 
         let children_arcs_to_visit: Vec<Arc<Mutex<PrecomputeNode>>> = node_guard.children().values()
@@ -1117,10 +1112,8 @@ impl<'a> GrammarConstraintState<'a> {
 
                     if temp_glr_s_for_finalizer_step.is_ok() {
                         let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
-                        for finalizer_llm_token_bv in finalizer.content.values() {
-                            let mask_contribution = &glr_active_after_step & finalizer_llm_token_bv;
-                            final_mask_internal |= mask_contribution;
-                        }
+                        let mask_contribution = &glr_active_after_step & &finalizer.content;
+                        final_mask_internal |= &mask_contribution;
                     }
                 }
                 true 
