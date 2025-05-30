@@ -1208,16 +1208,16 @@ impl<'a> GrammarConstraintState<'a> {
 
         self.state = new_overall_state.clone();
 
-        let mut roots_to_simplify_arcs = Vec::new();
-        for glr_parser_state in self.state.values_mut() {
-            if !glr_parser_state.active_state.stack.is_empty() {
-                roots_to_simplify_arcs.push(&mut glr_parser_state.active_state.stack);
-            }
-        }
-
-        if !roots_to_simplify_arcs.is_empty() {
-            GSSNode::simplify_together(&mut roots_to_simplify_arcs);
-        }
+        // let mut roots_to_simplify_arcs = Vec::new();
+        // for glr_parser_state in self.state.values_mut() {
+        //     if !glr_parser_state.active_state.stack.is_empty() {
+        //         roots_to_simplify_arcs.push(&mut glr_parser_state.active_state.stack);
+        //     }
+        // }
+        // 
+        // if !roots_to_simplify_arcs.is_empty() {
+        //     GSSNode::simplify_together(&mut roots_to_simplify_arcs);
+        // }
 
         crate::debug!(2, "State after committing LLM Token (Original ID: {}): {} active tokenizer states.", llm_token_id.0, self.state.len());
         for (tokenizer_id, glr_state) in &self.state {
