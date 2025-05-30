@@ -1045,6 +1045,7 @@ pub struct GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
+        crate::debug!(2, "Computing mask");
         let mut final_mask_internal = HybridBitset::new();
 
         if self.state.is_empty() {
@@ -1119,7 +1120,7 @@ impl<'a> GrammarConstraintState<'a> {
                 true 
             },
         );
-
+        crate::debug!(2, "Done computing mask");
         self.parent.internal_bv_to_original(&final_mask_internal)
     }
 
