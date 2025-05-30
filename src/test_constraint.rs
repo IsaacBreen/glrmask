@@ -945,6 +945,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // Feed in the full text
     let mut constraint_state = grammar_constraint.init();
     constraint_state.commit_bytes(full_text_to_tokenize.as_bytes());
+    constraint_state.is_active();
 
     // 5. Basic Interaction with the GrammarConstraintState
     let mut constraint_state = grammar_constraint.init();

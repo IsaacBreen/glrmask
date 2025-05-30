@@ -1129,7 +1129,7 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn commit_bytes(&mut self, llm_token_bytes: &[u8]) { // llm_token_id is original
-        crate::debug!(2, "Committing LLM Token: {:?} (Original ID: {}, Internal ID: {}), Bytes: {:?}", String::from_utf8_lossy(&llm_token_bytes), llm_token_id.0, internal_llm_id.0, llm_token_bytes);
+        crate::debug!(2, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
 
         for state in self.state.values_mut() {
             Arc::make_mut(&mut state.active_state.stack).reset_tokens();
@@ -1206,12 +1206,12 @@ impl<'a> GrammarConstraintState<'a> {
         //     GSSNode::simplify_together(&mut roots_to_simplify_arcs);
         // }
 
-        crate::debug!(2, "State after committing LLM Token (Original ID: {}): {} active tokenizer states.", llm_token_id.0, self.state.len());
+        crate::debug!(2, "State after committing text (Original ID: {}): {} active tokenizer states.", llm_token_bytes, self.state.len());
         for (tokenizer_id, glr_state) in &self.state {
             if !glr_state.active_state.stack.is_empty() { // Log only for non-empty GSS
                 glr_state.log_gss(
-                    &format!("GSS for tokenizer state {} after commit of token ID {} (internal {})", tokenizer_id.0, llm_token_id.0, internal_llm_id.0),
-                    TerminalID(internal_llm_id.0)
+                    &format!("GSS for tokenizer state {} after commit of text", tokenizer_id.0),
+                    TerminalID(0)
                 );
             }
         }
