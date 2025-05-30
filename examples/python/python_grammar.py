@@ -149,7 +149,7 @@ def define_tokens() -> list[tuple[str, Any]]:
 #     tokens["NUMBER"] = eps()
 # #     tokens["NAME"] = eat("f")
 # #     tokens["NUMBER"] = rep(eat("1"))
-    tokens["NEWLINE"] = eps()
+    tokens["NEWLINE"] = eat("\n")
     tokens["INDENT"] = eps()
     tokens["DEDENT"] = eps()
 
