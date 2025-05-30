@@ -1015,6 +1015,16 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let llm_tokens_for_comp: Vec<&[u8]> = vec![b"from", b" typing", b" import", b" Any", b",", b" List", b","];
     let grammar_tokenss_for_comp = vec![vec!["\"from\"", "NAME[0]", "\"import\"", "NAME[0]", "\",\"", "NAME[0]", "\",\""]];
     let llm_token_ids_for_comp = llm_tokens_for_comp.iter().map(|llm_token| llm_token_map.get_by_left(*llm_token).expect(format!("LLM token '{}' not found in llm_token_map", String::from_utf8_lossy(*llm_token)).as_str())).collect::<Vec<_>>();
+
+    let mut parser_state_for_comp = grammar_constraint.parser.init_glr_parser();
+    for grammar_tokens in grammar_tokenss_for_comp {
+        let mut this_parser_state = grammar_constraint.parser.init_glr_parser();
+        for grammar_token in grammar_tokens {
+            let grammar_token_id = grammar_constraint.parser.terminal_map.get_by_left(&Terminal(grammar_token.to_string())).unwrap();
+            this_parser_state.step(*grammar_token_id);
+        }
+        parser_state_for_comp.merge_with(this_parser_state);
+    }
     
     let mut constraint_state_for_comp = grammar_constraint.init();
     for llm_token_id_for_comp in llm_token_ids_for_comp {
@@ -1022,16 +1032,6 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         let mask_before_commit = constraint_state_for_comp.get_mask();
         assert!(mask_before_commit.contains(llm_token_id_for_comp.0), "Token mismatch during comparison setup for token '{}'", llm_token_id_for_comp.0);
         constraint_state_for_comp.commit(*llm_token_id_for_comp);
-    }
-
-    let mut parser_state_for_comp = constraint_state_for_comp.parent.parser.init_glr_parser();
-    for grammar_tokens in grammar_tokenss_for_comp {
-        let mut this_parser_state = constraint_state_for_comp.parent.parser.init_glr_parser();
-        for grammar_token in grammar_tokens {
-            let grammar_token_id = grammar_constraint.parser.terminal_map.get_by_left(&Terminal(grammar_token.to_string())).unwrap();
-            this_parser_state.step(*grammar_token_id);
-        }
-        parser_state_for_comp.merge_with(this_parser_state);
     }
 
     let initial_tokenizer_state_id = constraint_state_for_comp.parent.tokenizer.initial_state_id();
