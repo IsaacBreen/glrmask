@@ -459,7 +459,7 @@ pub fn subtract_tokens_and_prune_arc(
         if let Some(bv) = new_acc.as_mut() {
             *bv &= llm_tokens;
         } else {
-            new_acc = Some(llm_tokens.clone());
+            new_acc = Some(LLMTokenBV::max_ones() - llm_tokens.clone());
         }
         if new_acc.as_ref().is_none_or(|bv| !bv.is_empty()) {
             Some((new_acc, true)) // Keep node, continue recursion

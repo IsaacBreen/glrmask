@@ -1214,7 +1214,7 @@ impl<'a> GrammarConstraintState<'a> {
         //         roots_to_simplify_arcs.push(&mut glr_parser_state.active_state.stack);
         //     }
         // }
-        // 
+        //
         // if !roots_to_simplify_arcs.is_empty() {
         //     GSSNode::simplify_together(&mut roots_to_simplify_arcs);
         // }
