@@ -1019,9 +1019,10 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let mut parser_state_for_comp = grammar_constraint.parser.init_glr_parser();
     for grammar_tokens in grammar_tokenss_for_comp {
         let mut this_parser_state = grammar_constraint.parser.init_glr_parser();
-        for grammar_token in grammar_tokens {
+        for grammar_token in &grammar_tokens {
             let grammar_token_id = grammar_constraint.parser.terminal_map.get_by_left(&Terminal(grammar_token.to_string())).unwrap();
             this_parser_state.step(*grammar_token_id);
+            assert!(this_parser_state.is_ok(), "Parser failed to step with token {:?} in sequence {:?}", grammar_token, grammar_tokens);
         }
         parser_state_for_comp.merge_with(this_parser_state);
     }
