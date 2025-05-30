@@ -1101,7 +1101,7 @@ impl<'a> GrammarConstraintState<'a> {
             // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
             |precomputed_node_data, final_glr_s| {
                 if final_glr_s.active_state.stack.is_empty() {
-                    return true; 
+                    return false; 
                 }
 
                 let glr_active_tokens = final_glr_s.active_state.stack.acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
