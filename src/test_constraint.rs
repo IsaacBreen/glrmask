@@ -897,7 +897,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         }
     };
     // let full_text_to_tokenize = "from typing import Any, List";
-    let full_text_to_tokenize = "import os\n123 = x";
+    let full_text_to_tokenize = "import os\nimport sys";
     // let full_text_to_tokenize = "a";
     // let full_text_to_tokenize = "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((";
     // let full_text_to_tokenize = "a";
