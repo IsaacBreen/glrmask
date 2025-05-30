@@ -942,12 +942,9 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         println!("Successfully tokenized input string into {} tokens using VocabPrefixTree.", test_token_sequence_ids.len());
     }
 
-    // Parse it just to make sure it's valid
-    let mut parser = grammar_constraint.parser.init_glr_parser();
-    for token in test_token_sequence_ids {
-        parser
-        assert!(parser.is_ok());
-    }
+    // Feed in the full text
+    let mut constraint_state = grammar_constraint.init();
+    constraint_state.commit_bytes(full_text_to_tokenize.as_bytes());
 
     // 5. Basic Interaction with the GrammarConstraintState
     let mut constraint_state = grammar_constraint.init();
