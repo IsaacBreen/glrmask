@@ -1088,7 +1088,7 @@ impl<'a> GrammarConstraintState<'a> {
                     glr_s.step(*gtid);
                 }
 
-                if glr_s.is_ok() && !glr_s.active_state.stack.is_empty() {
+                if glr_s.is_ok() {
                     Some(glr_s)
                 } else {
                     None
@@ -1101,12 +1101,12 @@ impl<'a> GrammarConstraintState<'a> {
             // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
             |precomputed_node_data, final_glr_s| {
                 if final_glr_s.active_state.stack.is_empty() {
-                    return false; 
+                    return false;
                 }
 
-                let glr_active_tokens = final_glr_s.active_state.stack.acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
 
                 if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
+                    let glr_active_tokens = final_glr_s.active_state.stack.acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
                     let mask_contribution = &glr_active_tokens & clean_end_bv;
                     final_mask_internal |= mask_contribution;
                 }
@@ -1115,7 +1115,7 @@ impl<'a> GrammarConstraintState<'a> {
                     let mut temp_glr_s_for_finalizer_step = final_glr_s.clone();
                     temp_glr_s_for_finalizer_step.step(*grammar_token);
 
-                    if temp_glr_s_for_finalizer_step.is_ok() && !temp_glr_s_for_finalizer_step.active_state.stack.is_empty() {
+                    if temp_glr_s_for_finalizer_step.is_ok() {
                         let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
                         for finalizer_llm_token_bv in finalizer.content.values() {
                             let mask_contribution = &glr_active_after_step & finalizer_llm_token_bv;
