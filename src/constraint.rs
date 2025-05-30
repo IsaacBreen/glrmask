@@ -1119,7 +1119,7 @@ impl<'a> GrammarConstraintState<'a> {
                         let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
                         for finalizer_llm_token_bv in finalizer.content.values() {
                             let mask_contribution = &glr_active_after_step & finalizer_llm_token_bv;
-                            final_mask_internal |= &mask_contribution;
+                            final_mask_internal |= mask_contribution;
                         }
                     }
                 }
