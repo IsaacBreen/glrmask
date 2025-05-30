@@ -457,7 +457,7 @@ pub fn subtract_tokens_and_prune_arc(
     let closure = |current_acc: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
         let mut new_acc = current_acc.clone();
         if let Some(bv) = new_acc.as_mut() {
-            *bv &= llm_tokens;
+            *bv -= llm_tokens;
         } else {
             new_acc = Some(LLMTokenBV::max_ones() - llm_tokens.clone());
         }
