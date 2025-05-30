@@ -1124,24 +1124,11 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
-        let internal_llm_id = match self.parent.original_id_to_internal(llm_token_id) {
-            Some(id) => id,
-            None => {
-                crate::debug!(1, "LLM Token ID {} (original) not found in internal mapping. Clearing constraint state.", llm_token_id.0);
-                self.state.clear();
-                return;
-            }
-        };
+        let llm_token_bytes = self.parent.llm_token_map.get_by_right(&llm_token_id).unwrap();
+        self.commit_bytes(llm_token_bytes);
+    }
 
-        let llm_token_bytes = match self.parent.llm_token_map.get_by_right(&llm_token_id) {
-            Some(bytes) => bytes.clone(),
-            None => {
-                crate::debug!(1, "LLM Token bytes for original ID {} not found. Clearing constraint state.", llm_token_id.0);
-                self.state.clear();
-                return;
-            }
-        };
-
+    pub fn commit_bytes(&mut self, llm_token_bytes: &[u8]) { // llm_token_id is original
         crate::debug!(2, "Committing LLM Token: {:?} (Original ID: {}, Internal ID: {}), Bytes: {:?}", String::from_utf8_lossy(&llm_token_bytes), llm_token_id.0, internal_llm_id.0, llm_token_bytes);
 
         for state in self.state.values_mut() {
