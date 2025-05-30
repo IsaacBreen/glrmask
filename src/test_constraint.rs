@@ -1025,12 +1025,13 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         }
         parser_state_for_comp.merge_with(this_parser_state);
     }
-    
+
     let mut constraint_state_for_comp = grammar_constraint.init();
-    for llm_token_id_for_comp in llm_token_ids_for_comp {
+    for llm_token_for_comp in llm_tokens_for_comp {
         // Ensure token is allowed before committing
+        let llm_token_id_for_comp = llm_token_map.get_by_left(Terminal(llm_token_for_comp.to_string())).unwrap();
         let mask_before_commit = constraint_state_for_comp.get_mask();
-        assert!(mask_before_commit.contains(llm_token_id_for_comp.0), "Token mismatch during comparison setup for token '{}'", llm_token_id_for_comp.0);
+        assert!(mask_before_commit.contains(llm_token_id_for_comp.0), "Token mismatch during comparison setup for token {:?} (ID {})", llm_token_for_comp, llm_token_id_for_comp.0);
         constraint_state_for_comp.commit(*llm_token_id_for_comp);
     }
 
