@@ -896,7 +896,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             return Err(Box::new(e)); // Or handle as appropriate for your test
         }
     };
-    let full_text_to_tokenize = "from typing import Any, List";
+    // let full_text_to_tokenize = "from typing import Any, List";
+    let full_text_to_tokenize = "a";
     // let full_text_to_tokenize = "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((";
     // let full_text_to_tokenize = "a";
 
@@ -1019,7 +1020,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     for llm_token_id_for_comp in llm_token_ids_for_comp {
         // Ensure token is allowed before committing
         let mask_before_commit = constraint_state_for_comp.get_mask();
-        assert!(mask_before_commit.contains(llm_token_id_for_comp.0), "Token mismatch during comparison setup");
+        assert!(mask_before_commit.contains(llm_token_id_for_comp.0), "Token mismatch during comparison setup for token '{}'", llm_token_id_for_comp.0);
         constraint_state_for_comp.commit(*llm_token_id_for_comp);
     }
 
