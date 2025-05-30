@@ -958,7 +958,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         // Use tokenized_strs_for_logging for logging, as it corresponds to the llm_token_id
         let current_token_str = &tokenized_strs_for_logging[i];
         println!(
-            "Processing token {}/{}: '{}' (LLMTokenID({}))",
+            "Processing token {}/{}: {:?} (LLMTokenID({}))",
             i + 1,
             test_token_sequence_ids.len(),
             current_token_str,
