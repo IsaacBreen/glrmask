@@ -5,6 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use deterministic_hash::DeterministicHasher;
+use std::any::{Any, TypeId};
 
 use crate::glr::parser::ParseStateEdgeContent;
 use crate::constraint::{LLMTokenBV, LLMTokenInfo};
@@ -865,7 +866,7 @@ mod tests {
     }
     
     fn mock_edge(id: usize) -> ParseStateEdgeContent {
-        ParseStateEdgeContent { state_id: StateID(id) }
+        ParseStateEdgeContent { state_id: StateID(id), user_data: Arc::new(()) }
     }
 
 
@@ -998,3 +999,4 @@ mod tests {
         assert_eq!(all_nodes.len(), 6, "Incorrect number of unique nodes in simplified graph. Actual: {:?}", all_nodes.len());
     }
 }
+

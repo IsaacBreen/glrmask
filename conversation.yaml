@@ -1,10 +1,6 @@
 local_system:
   attached_files:
     - src/datastructures/gss.rs
-    - src/interface/interface.rs
-    - src/interface/mod.rs
-    - src/interface/tests.rs
-    - src/interface/tokenizer_combinators.rs
     - src/glr/analyze.rs
     - src/glr/grammar.rs
     - src/glr/items.rs
@@ -12,6 +8,10 @@ local_system:
     - src/glr/parser.rs
     - src/glr/table.rs
     - src/glr/tests.rs
+    - src/interface/interface.rs
+    - src/interface/mod.rs
+    - src/interface/tests.rs
+    - src/interface/tokenizer_combinators.rs
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -10882,7 +10882,7 @@ local_system:
       // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
       //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
 system:
   message: |2
 
@@ -10898,7 +10898,6 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - copy-all/paste
     - copy-one/paste
   code_completion_model:
     - gemini/gemini-2.5-flash-preview-05-20
@@ -16424,5 +16423,509 @@ messages:
       ```rust
       pub actions: BTreeMap<NonTerminalID, ActionFn>,
       ```
+    metadata:
+  - assistant: |-
+      Okay, I'll provide instructions to modify your Rust code as requested.
+
+      **File: `src/datastructures/gss.rs`**
+
+      1.  **Import `std::any::{Any, TypeId}`:**
+          Add this to your `use` statements at the top of the file:
+          ```rust
+          use std::any::{Any, TypeId};
+          ```
+
+      2.  **Modify `ParseStateEdgeContent` struct definition:**
+          Change the struct definition to:
+          ```rust
+          #[derive(Clone)] // Remove Debug, PartialEq, Eq, PartialOrd, Ord, Hash for now
+          pub struct ParseStateEdgeContent {
+              pub state_id: StateID,
+              pub user_data: Arc<dyn Any + Send + Sync>,
+          }
+          ```
+
+      3.  **Implement `Debug` for `ParseStateEdgeContent`:**
+          Add the following implementation:
+          ```rust
+          impl Debug for ParseStateEdgeContent {
+              fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                  f.debug_struct("ParseStateEdgeContent")
+                      .field("state_id", &self.state_id)
+                      .field("user_data_type_id", &self.user_data.type_id()) // Show TypeId for user_data
+                      .finish()
+              }
+          }
+          ```
+
+      4.  **Implement `Hash` for `ParseStateEdgeContent`:**
+          Add the following implementation:
+          ```rust
+          impl Hash for ParseStateEdgeContent {
+              fn hash<H: Hasher>(&self, state: &mut H) {
+                  self.state_id.hash(state);
+                  // Hash the pointer of the Arc for user_data
+                  (Arc::as_ptr(&self.user_data) as usize).hash(state);
+              }
+          }
+          ```
+
+      5.  **Implement `PartialEq` for `ParseStateEdgeContent`:**
+          Add the following implementation:
+          ```rust
+          impl PartialEq for ParseStateEdgeContent {
+              fn eq(&self, other: &Self) -> bool {
+                  self.state_id == other.state_id &&
+                  // Compare user_data by Arc pointer equality
+                  Arc::ptr_eq(&self.user_data, &other.user_data)
+              }
+          }
+          ```
+
+      6.  **Implement `Eq` for `ParseStateEdgeContent`:**
+          Add the following:
+          ```rust
+          impl Eq for ParseStateEdgeContent {}
+          ```
+
+      7.  **Implement `PartialOrd` for `ParseStateEdgeContent`:**
+          Add the following implementation:
+          ```rust
+          impl PartialOrd for ParseStateEdgeContent {
+              fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                  match self.state_id.partial_cmp(&other.state_id) {
+                      Some(Ordering::Equal) => {
+                          // Compare user_data by Arc pointer
+                          (Arc::as_ptr(&self.user_data) as usize).partial_cmp(&(Arc::as_ptr(&other.user_data) as usize))
+                      }
+                      other_ord => other_ord,
+                  }
+              }
+          }
+          ```
+
+      8.  **Implement `Ord` for `ParseStateEdgeContent`:**
+          Add the following implementation:
+          ```rust
+          impl Ord for ParseStateEdgeContent {
+              fn cmp(&self, other: &Self) -> Ordering {
+                  self.state_id.cmp(&other.state_id)
+                      .then_with(|| (Arc::as_ptr(&self.user_data) as usize).cmp(&(Arc::as_ptr(&other.user_data) as usize)))
+              }
+          }
+          ```
+
+      9.  **Update `JSONConvertible` for `ParseStateEdgeContent`:**
+          Modify the `to_json` and `from_json` methods:
+          ```rust
+          impl JSONConvertible for ParseStateEdgeContent {
+              fn to_json(&self) -> JSONNode {
+                  let mut obj = StdMap::new();
+                  obj.insert("state_id".to_string(), self.state_id.to_json());
+                  // Handle user_data serialization:
+                  // Option 1: Panic if not default.
+                  if self.user_data.is::<()>() { // Check if it's Arc::new(())
+                       // Optionally, add a marker: obj.insert("user_data_type".to_string(), JSONNode::String("default_unit".to_string()));
+                  } else {
+                      panic!("Cannot serialize ParseStateEdgeContent with non-default user_data of type {:?}", self.user_data.type_id());
+                  }
+                  JSONNode::Object(obj)
+              }
+
+              fn from_json(node: JSONNode) -> Result<Self, String> {
+                  match node {
+                      JSONNode::Object(mut obj) => {
+                          let state_id = obj.remove("state_id").ok_or_else(|| "Missing field state_id for ParseStateEdgeContent".to_string()) // Corrected struct name
+                                            .and_then(StateID::from_json)?;
+                          // Always deserialize user_data as default Arc::new(())
+                          let user_data: Arc<dyn Any + Send + Sync> = Arc::new(());
+                          Ok(ParseStateEdgeContent { state_id, user_data })
+                      }
+                      _ => Err("Expected JSONNode::Object for ParseStateEdgeContent".to_string()), // Corrected struct name
+                  }
+              }
+          }
+          ```
+          *Note: The `JSONConvertible` implementation for `ParseStateEdgeContent` now has limitations regarding `user_data`. It will panic during serialization if `user_data` is not `Arc::new(())` and will always deserialize `user_data` to `Arc::new(())`.*
+
+      10. **Review `compute_hash_key` function:**
+          This function uses `edge_val.hash(&mut hasher);`. Since `ParseStateEdgeContent`'s `Hash` impl now includes `user_data` (via pointer), this function will behave differently. This is likely intended. No direct code change needed here, but be aware of the semantic change.
+
+      11. **Review `process_predecessors` function:**
+          This function uses `ParseStateEdgeContent` as a key in a `BTreeMap`. The `Ord` implementation change will affect its behavior. No direct code change needed here, but be aware.
+
+      **File: `src/glr/parser.rs`**
+
+      1.  **Import `Any` and `Arc` for `user_data` if not already present at the top:**
+          ```rust
+          use std::any::Any;
+          // Arc is likely already imported via datastructures::gss
+          ```
+
+      2.  **Update `ActionFn` type alias:**
+          Change the definition of `ActionFn` to:
+          ```rust
+          pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn Any + Send + Sync>) -> bool + Send + Sync>;
+          ```
+
+      3.  **Modify `GLRParser` struct:**
+          Change the `actions` field type:
+          ```rust
+          pub struct GLRParser {
+              pub stage_7_table: Stage7Table,
+              pub productions: Vec<Production>,
+              pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
+              pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+              pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+              pub start_state_id: StateID,
+              pub actions: BTreeMap<NonTerminalID, ActionFn>, // Changed type
+          }
+          ```
+
+      4.  **Update `GLRParser::new` constructor:**
+          Modify the constructor to convert the incoming `actions` map:
+          ```rust
+          pub fn new(
+              stage_7_table: Stage7Table,
+              productions: Vec<Production>,
+              terminal_map: BiBTreeMap<Terminal, TerminalID>,
+              non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+              item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+              start_state_id: StateID,
+              actions: BTreeMap<NonTerminal, ActionFn>, // Parameter type
+          ) -> Self {
+              let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
+                  .into_iter()
+                  .map(|(nt, func)| {
+                      let nt_id = non_terminal_map.get_by_left(&nt)
+                          .unwrap_or_else(|| panic!("NonTerminal {:?} not found in non_terminal_map during GLRParser construction", nt));
+                      (*nt_id, func)
+                  })
+                  .collect();
+
+              Self {
+                  stage_7_table,
+                  productions,
+                  terminal_map,
+                  non_terminal_map,
+                  item_set_map,
+                  start_state_id,
+                  actions: converted_actions, // Assign converted actions
+              }
+          }
+          ```
+
+      5.  **Update `GLRParser::init_parse_state_with_acc`:**
+          Provide default `user_data` for the initial `ParseStateEdgeContent`:
+          ```rust
+          pub fn init_parse_state_with_acc(&self, initial_acc: LLMTokenInfo) -> ParseState { // No longer generic
+              let initial_user_data: Arc<dyn Any + Send + Sync> = Arc::new(());
+              let initial_content = ParseStateEdgeContent {
+                  state_id: self.start_state_id,
+                  user_data: initial_user_data, // Add default user_data
+              };
+              let root = Arc::new(GSSNode::new(initial_acc.clone()));
+              let stack = Arc::new(root.push(initial_content, initial_acc));
+              ParseState { stack }
+          }
+          ```
+
+      6.  **Update `GLRParserState::push_state` method:**
+          *   It needs to accept `user_data_for_new_edge`.
+          *   Construct `ParseStateEdgeContent` with this `user_data`.
+          Modify the signature and body:
+          ```rust
+          fn push_state(
+              &self,
+              stack: &Arc<GSSNode>,
+              next_state_id: StateID,
+              acc_for_new_node: LLMTokenInfo,
+              user_data_for_new_edge: Arc<dyn Any + Send + Sync>, // New parameter
+          ) -> ParseState {
+              let new_content = ParseStateEdgeContent {
+                  state_id: next_state_id,
+                  user_data: user_data_for_new_edge, // Use passed user_data
+              };
+              let new_gss_node_instance = stack.push(new_content, acc_for_new_node);
+              ParseState { stack: Arc::new(new_gss_node_instance) }
+          }
+          ```
+
+      7.  **Update `GLRParserState::pop_and_goto` method:**
+          This method needs significant changes to handle actions.
+          ```rust
+          fn pop_and_goto(
+              &self,
+              stack: &Arc<GSSNode>,
+              edge_content: &ParseStateEdgeContent, // This is the edge *leading to* parent_arc's state
+              edge_src: &Arc<GSSNode>, // This is parent_arc (the GSS node before popping len items)
+              len: usize,
+              nt_id: NonTerminalID, // Changed from NonTerminal to NonTerminalID
+          ) -> Arc<GSSNode> {
+              let cur_acc_from_reducible_node = stack.acc().clone();
+
+              let parent_gss_node = if len == 0 {
+                  // For 0-length reductions (epsilon), the 'parent' is effectively the current node (edge_src)
+                  // with the edge_content pushed onto it.
+                  // The user_data for this conceptual push should be edge_content.user_data.
+                  Arc::new(edge_src.push(edge_content.clone(), edge_src.acc().clone()))
+              } else {
+                  Arc::new(edge_src.popn(len - 1))
+              };
+
+              let mut out = GSSNode::new(Some(LLMTokenBV::new())); // Start with a default acc
+              crate::debug!(4, "Popped with {} predecessors...", parent_gss_node.num_predecessors());
+
+              for (predecessor_arc, current_top_edge_val) in parent_gss_node.pop_iter() { // current_top_edge_val is the edge from predecessor_arc to parent_gss_node
+                  let goto_result = self.parser.stage_7_table.get(&current_top_edge_val.state_id)
+                      .ok_or_else(|| format!("State {} not found in stage_7_table", current_top_edge_val.state_id.0))
+                      .and_then(|row| row.gotos.get(&nt_id)
+                          .ok_or_else(|| format!("Non-terminal {} not found in gotos for {:?} (processing predecessor {:p})", nt_id.0, current_top_edge_val.state_id, Arc::as_ptr(&predecessor_arc)))
+                      );
+
+                  match goto_result {
+                      Ok(goto_action) => {
+                          match goto_action {
+                              Goto::State(goto_state_id) => {
+                                  crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", current_top_edge_val.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
+
+                                  let mut user_data_for_goto_edge: Arc<dyn Any + Send + Sync> = Arc::new(()); // Default user_data for the new edge
+
+                                  // Apply action if present
+                                  if let Some(action_fn) = self.parser.actions.get(&nt_id) {
+                                      if !action_fn(&mut user_data_for_goto_edge) {
+                                          crate::debug!(4, "Action for NT {} returned false, pruning this reduction path.", nt_id.0);
+                                          continue; // Skip this reduction path
+                                      }
+                                  }
+
+                                  let new_acc_for_goto_child = parent_gss_node.acc().clone().intersect(cur_acc_from_reducible_node.clone());
+                                  
+                                  let goto_node_content = ParseStateEdgeContent {
+                                      state_id: *goto_state_id,
+                                      user_data: user_data_for_goto_edge, // Use (potentially modified) user_data
+                                  };
+
+                                  // Reconstruct the path segment up to predecessor_arc, then push the GOTO edge
+                                  // The user_data for current_top_edge_val is current_top_edge_val.user_data
+                                  let isolated_parent_arc = Arc::new(predecessor_arc.push(current_top_edge_val.clone(), new_acc_for_goto_child.clone()));
+                                  let new_gss_node = isolated_parent_arc.push(goto_node_content, new_acc_for_goto_child);
+                                  out.merge(&Arc::new(new_gss_node));
+                              }
+                              Goto::Accept => {
+                                  // Handle Accept: An action might still be relevant for the final reduction.
+                                  // The 'out' GSSNode might not be used further if it's an accept state,
+                                  // but actions should still run.
+                                   if let Some(action_fn) = self.parser.actions.get(&nt_id) {
+                                      let mut temp_user_data: Arc<dyn Any + Send + Sync> = Arc::new(());
+                                      if !action_fn(&mut temp_user_data) {
+                                           crate::debug!(4, "Action for NT {} on Accept path returned false.", nt_id.0);
+                                           // Depending on desired behavior, this might mean the parse is invalid.
+                                           // For now, we just don't add to 'out', but 'out' is for GOTO states.
+                                      } else {
+                                           // What to do with temp_user_data on accept? It's not put on an edge.
+                                           // This implies actions on accept might be for side-effects or final value extraction.
+                                      }
+                                  }
+                                  // No GSS node to merge for Goto::Accept in the typical sense of continuing the parse.
+                                  // The 'out' node is for states that can be further processed.
+                                  // If the goal is to check if *any* path leads to accept, this is handled by is_ok()
+                                  // on the final GLRParserState.
+                              }
+                          }
+                      }
+                      Err(e) => {
+                          // This case should ideally not happen in a well-formed table/grammar.
+                          // Log or handle error appropriately.
+                          crate::debug!(0, "Error during pop_and_goto: {}", e);
+                          // Potentially, this path of reduction is invalid.
+                          continue;
+                      }
+                  }
+              }
+              Arc::new(out)
+          }
+          ```
+
+      8.  **Update `GLRParserState::step` method:**
+          *   Pass `top_edge_content.user_data.clone()` to `push_state`.
+          *   The call to `pop_and_goto` is now `self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt)`. Note `nt` is `NonTerminalID`.
+          ```rust
+          // Inside the while loop in GLRParserState::step:
+          // ...
+          // for (parent_arc, top_edge_content) in state.stack.pop_iter() {
+          // ...
+          // Replace this line:
+          // let temp_idk = Arc::new(parent_arc.push(top_edge_content.clone(), current_path_acc.clone()));
+          // With this (it's the same, just confirming `top_edge_content` has its user_data):
+          let temp_idk = Arc::new(parent_arc.push(top_edge_content.clone(), current_path_acc.clone()));
+
+
+          // Inside the match row.shifts_and_reduces.get(&token_id)
+          // Case Some(Stage7ShiftsAndReduces::Shift(to)):
+          // Modify the call to push_state:
+          let new_parse_state = self.push_state(
+              &temp_idk,
+              *to,
+              stack_arc_for_operations.acc().clone(),
+              top_edge_content.user_data.clone(), // Pass cloned user_data
+          );
+          next.merge(new_parse_state);
+
+          // Case Some(Stage7ShiftsAndReduces::Reduce { nonterminal_id: nt, len, .. }):
+          // The call to pop_and_goto is now:
+          let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt);
+          // ...
+
+          // Case Some(Stage7ShiftsAndReduces::Split { shift, reduces }):
+          // If shift is Some(to):
+          // Modify the call to push_state:
+          let new_parse_state = self.push_state(
+              &temp_idk,
+              *to,
+              stack_arc_for_operations.acc().clone(),
+              top_edge_content.user_data.clone(), // Pass cloned user_data
+          );
+          next.merge(new_parse_state);
+          // For reduces:
+          // The call to pop_and_goto is now:
+          let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt);
+          // ...
+          // ...
+          // } // end of for loop over pop_iter
+          // ...
+          // } // end of while loop
+          ```
+
+      9.  **Update `GLRParser::JSONConvertible` implementation:**
+          In `to_json`:
+          ```rust
+          impl JSONConvertible for GLRParser {
+              fn to_json(&self) -> JSONNode {
+                  if !self.actions.is_empty() { // Check if actions map is empty
+                      panic!("Cannot serialize GLRParser with actions defined. Actions are not JSON serializable.");
+                  }
+                  // ... rest of the method
+          ```
+          In `from_json`, ensure `actions` is initialized as empty:
+          ```rust
+          // ...
+                      let item_set_map = obj.remove("item_set_map").ok_or_else(|| "Missing field item_set_map".to_string())
+                                            .and_then(|n| BiBTreeMap::<BTreeSet<Item>, StateID>::from_json(n))?;
+                      let start_state_id = obj.remove("start_state_id").ok_or_else(|| "Missing field start_state_id".to_string())
+                                              .and_then(StateID::from_json)?;
+                      Ok(GLRParser {
+                          stage_7_table,
+                          productions,
+                          terminal_map,
+                          non_terminal_map,
+                          item_set_map,
+                          start_state_id,
+                          actions: BTreeMap::new(), // Initialize actions as empty
+                      })
+          // ...
+          ```
+
+      10. **Update `GLRParser::Debug` implementation:**
+          ```rust
+          impl Debug for GLRParser {
+              fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+                  let actions_str = if self.actions.is_empty() {
+                      "None".to_string()
+                  } else {
+                      // ActionFn is not Debug, so we can't print it directly.
+                      // We can list the NonTerminalIDs that have actions.
+                      let nt_ids_with_actions: Vec<usize> = self.actions.keys().map(|id| id.0).collect();
+                      format!("[Actions defined for NT IDs: {:?}]", nt_ids_with_actions)
+                  };
+                  f.debug_struct("GLRParser")
+                      // ... other fields ...
+                      .field("actions", &actions_str)
+                      .finish()
+              }
+          }
+          ```
+
+      11. **Update `GLRParser::PartialEq` implementation:**
+          ```rust
+          impl PartialEq for GLRParser {
+              fn eq(&self, other: &Self) -> bool {
+                  // Compare actions by checking if the set of keys is the same
+                  // and if the Arc pointers for the functions are the same.
+                  let actions_are_equal = self.actions.len() == other.actions.len() &&
+                                         self.actions.iter().all(|(key, val_self)| {
+                                             other.actions.get(key).map_or(false, |val_other| Arc::ptr_eq(val_self, val_other))
+                                         });
+                  self.stage_7_table == other.stage_7_table &&
+                  // ... other fields ...
+                  self.start_state_id == other.start_state_id &&
+                  actions_are_equal
+              }
+          }
+          ```
+
+      **File: `src/glr/table.rs`**
+
+      1.  **Update `generate_glr_parser_with_maps` function:**
+          The `actions` parameter is already `BTreeMap<NonTerminal, ActionFn>`. The `GLRParser::new` call will handle the conversion to `NonTerminalID` keys. No change needed here directly for the signature or the call if `GLRParser::new` is correctly updated.
+
+      2.  **Update `generate_glr_parser` function:**
+          It calls `generate_glr_parser_with_maps` and should pass an empty `BTreeMap` for actions.
+          ```rust
+          pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
+              let terminal_map = assign_terminal_ids(productions);
+              let non_terminal_map = assign_non_terminal_ids(productions);
+              // Pass an empty BTreeMap for actions
+              generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
+          }
+          ```
+
+      3.  **Update `generate_glr_parser_with_terminal_map` function:**
+          Similar to `generate_glr_parser`, pass an empty `BTreeMap` for actions.
+          ```rust
+          pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
+              let non_terminal_map = assign_non_terminal_ids(productions);
+              // Pass an empty BTreeMap for actions
+              generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
+          }
+          ```
+
+      Remember to adjust any test code that creates `GLRParser` instances directly or calls these generation functions if they now require an `actions` map, or ensure they use versions that default it. The changes above make the public `generate_glr_parser` functions provide an empty actions map by default.
+
+      This set of changes should implement the requested modifications. Test thoroughly, especially the logic in `pop_and_goto` and `step` regarding action handling and `user_data` propagation. The `JSONConvertible` for `ParseStateEdgeContent` and `GLRParser` now has limitations due to `Arc<dyn Any>` and `ActionFn` not being serializable.
+    metadata:
+  - user: |
+      Using model 'gemini/gemini-2.5-flash-preview-05-20' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/datastructures/gss.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/glr/parser.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/glr/table.rs"
+        }
+      ]
+      Found 2 code blocks with filepaths in attempt 1.
+      Received code for required file: src/datastructures/gss.rs
+      Received code for required file: src/glr/table.rs
+      Missing code blocks for: {'src/glr/parser.rs'}
+      Requesting missing code blocks...
+
+      --- LLM Code Generation Attempt 2/5 ---
+      Found 1 code blocks with filepaths in attempt 2.
+      Received code for required file: src/glr/parser.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/datastructures/gss.rs
+      Successfully replaced file: src/glr/parser.rs
+      Successfully replaced file: src/glr/table.rs
     metadata:
 ...
