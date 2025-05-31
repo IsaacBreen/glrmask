@@ -2,7 +2,7 @@ use crate::finite_automata::{GroupID, Regex};
 use crate::types::{TerminalID as GrammarTokenID};
 use bimap::BiBTreeMap;
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use std::collections::BTreeMap as StdMap; // Added for derive macro pattern, aliased to avoid conflict
+use std::collections::{BTreeMap as StdMap, BTreeSet}; // Added for derive macro pattern, aliased to avoid conflict
 
 pub type LLMToken = Vec<u8>;
 pub type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
@@ -120,6 +120,10 @@ impl Regex {
 
     pub(crate) fn max_state(&self) -> usize {
         self.dfa.states.len()
+    }
+
+    pub(crate) fn epsilon_tokens(&self) -> &BTreeSet<GroupID> {
+        &self.dfa.states[0].finalizers
     }
 }
 
