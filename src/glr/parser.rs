@@ -460,88 +460,36 @@ impl<'a> GLRParserState<'a> { // No longer generic
     fn pop_and_goto(
         &self,
         stack: &Arc<GSSNode>, 
-        edge_content: &ParseStateEdgeContent, // This is the edge *leading to* parent_arc's state
-        edge_src: &Arc<GSSNode>, // This is parent_arc (the GSS node before popping len items)
+        edge_content: &ParseStateEdgeContent,
+        edge_src: &Arc<GSSNode>, 
         len: usize,
-        nt_id: NonTerminalID, // Changed from NonTerminal to NonTerminalID
+        nt: NonTerminalID,
     ) -> Arc<GSSNode> { 
         let cur_acc_from_reducible_node = stack.acc().clone(); // Clone before potential modification
 
         let parent_gss_node = if len == 0 { // Renamed parent to parent_gss_node
-            // For 0-length reductions (epsilon), the 'parent' is effectively the current node (edge_src)
-            // with the edge_content pushed onto it.
-            // The user_data for this conceptual push should be edge_content.user_data.
-            Arc::new(edge_src.push(edge_content.clone(), edge_src.acc().clone())) 
+            Arc::new(edge_src.push(edge_content.clone(), edge_src.acc().clone())) // Provide acc for push
         } else {
             Arc::new(edge_src.popn(len - 1))
         };
         let mut out = GSSNode::new(Some(LLMTokenBV::new())); // Start with a default acc
         crate::debug!(4, "Popped with {} predecessors...", parent_gss_node.num_predecessors());
 
-        for (predecessor_arc, current_top_edge_val) in parent_gss_node.pop_iter() { // Renamed predecessor to predecessor_arc
-            let goto_result = self.parser.stage_7_table.get(&current_top_edge_val.state_id)
-                .ok_or_else(|| format!("State {} not found in stage_7_table", current_top_edge_val.state_id.0))
-                .and_then(|row| row.gotos.get(&nt_id)
-                    .ok_or_else(|| format!("Non-terminal {} not found in gotos for {:?} (processing predecessor {:p})", nt_id.0, current_top_edge_val.state_id, Arc::as_ptr(&predecessor_arc)))
-                );
+        for (predecessor_arc, edge_value) in parent_gss_node.pop_iter() { // Renamed predecessor to predecessor_arc
+            let goto = self.parser.stage_7_table.get(&edge_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", edge_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor {:p})", nt.0, edge_value.state_id, Arc::as_ptr(&predecessor_arc))), |state_id| Ok(*state_id))).unwrap();
+            match goto {
+                Goto::State(goto_state_id) => {
+                    crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
 
-            match goto_result {
-                Ok(goto_action) => {
-                    match goto_action {
-                        Goto::State(goto_state_id) => {
-                            crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", current_top_edge_val.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
+                    let new_acc_for_goto_child = parent_gss_node.acc().clone().intersect(cur_acc_from_reducible_node.clone());
+                    let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id };
 
-                            let mut user_data_for_goto_edge: Arc<dyn UserDataTrait> = Arc::new(()); // Default user_data for the new edge
-
-                            // Apply action if present
-                            if let Some(action_fn) = self.parser.actions.get(&nt_id) {
-                                if !action_fn(&mut user_data_for_goto_edge) {
-                                    crate::debug!(4, "Action for NT {} returned false, pruning this reduction path.", nt_id.0);
-                                    continue; // Skip this reduction path
-                                }
-                            }
-
-                            let new_acc_for_goto_child = parent_gss_node.acc().clone().intersect(cur_acc_from_reducible_node.clone());
-                            
-                            let goto_node_content = ParseStateEdgeContent {
-                                state_id: *goto_state_id,
-                                user_data: user_data_for_goto_edge, // Use (potentially modified) user_data
-                            };
-
-                            // Reconstruct the path segment up to predecessor_arc, then push the GOTO edge
-                            // The user_data for current_top_edge_val is current_top_edge_val.user_data
-                            let isolated_parent_arc = Arc::new(predecessor_arc.push(current_top_edge_val.clone(), new_acc_for_goto_child.clone()));
-                            let new_gss_node = isolated_parent_arc.push(goto_node_content, new_acc_for_goto_child);
-                            out.merge(&Arc::new(new_gss_node));
-                        }
-                        Goto::Accept => {
-                            // Handle Accept: An action might still be relevant for the final reduction.
-                            // The 'out' GSSNode might not be used further if it's an accept state,
-                            // but actions should still run.
-                             if let Some(action_fn) = self.parser.actions.get(&nt_id) {
-                                let mut temp_user_data: Arc<dyn UserDataTrait> = Arc::new(());
-                                if !action_fn(&mut temp_user_data) {
-                                     crate::debug!(4, "Action for NT {} on Accept path returned false.", nt_id.0);
-                                     // Depending on desired behavior, this might mean the parse is invalid.
-                                     // For now, we just don't add to 'out', but 'out' is for GOTO states.
-                                } else {
-                                     // What to do with temp_user_data on accept? It's not put on an edge.
-                                     // This implies actions on accept might be for side-effects or final value extraction.
-                                }
-                            }
-                            // No GSS node to merge for Goto::Accept in the typical sense of continuing the parse.
-                            // The 'out' node is for states that can be further processed.
-                            // If the goal is to check if *any* path leads to accept, this is handled by is_ok()
-                            // on the final GLRParserState.
-                        }
-                    }
+                    let isolated_parent_arc = Arc::new(predecessor_arc.push(edge_value, new_acc_for_goto_child.clone()));
+                    let new_gss_node = isolated_parent_arc.push(goto_node_content, new_acc_for_goto_child);
+                    out.merge(&Arc::new(new_gss_node));
                 }
-                Err(e) => {
-                    // This case should ideally not happen in a well-formed table/grammar.
-                    // Log or handle error appropriately.
-                    crate::debug!(0, "Error during pop_and_goto: {}", e);
-                    // Potentially, this path of reduction is invalid.
-                    continue;
+                Goto::Accept => {
+                    // No action needed for Accept
                 }
             }
         }
@@ -634,12 +582,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 match row.shifts_and_reduces.get(&token_id) {
                     Some(Stage7ShiftsAndReduces::Shift(to)) => {
                         crate::debug!(4, "Shift from state {} via token {} to state {}", top_edge_content.state_id.0, token_id.0, to.0);
-                        let new_parse_state = self.push_state(
-                            &temp_idk,
-                            *to,
-                            stack_arc_for_operations.acc().clone(),
-                            top_edge_content.user_data.clone(), // Pass cloned user_data
-                        );
+                        let new_parse_state = self.push_state(&temp_idk, *to, stack_arc_for_operations.acc().clone());
                         next.merge(new_parse_state);
                     }
 
@@ -658,12 +601,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         crate::debug!(4, "Split from state {} via token {}", top_edge_content.state_id.0, token_id.0);
                         if let Some(to) = shift {
                             crate::debug!(4, " Shift from state {} via token {} to state {}", top_edge_content.state_id.0, token_id.0, to.0);
-                            let new_parse_state = self.push_state(
-                                &temp_idk,
-                                *to,
-                                stack_arc_for_operations.acc().clone(),
-                                top_edge_content.user_data.clone(), // Pass cloned user_data
-                            );
+                            let new_parse_state = self.push_state(&temp_idk, *to, stack_arc_for_operations.acc().clone());
                             next.merge(new_parse_state);
                         }
                         for (len, nts) in reduces {
