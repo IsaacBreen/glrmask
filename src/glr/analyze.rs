@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use crate::glr::grammar::{NonTerminal, Production, Symbol};
+use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal, compute_first_sets}; // Added compute_first_sets
 
 /// Computes the set of non-terminals that can derive the empty string (epsilon).
 pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
@@ -519,3 +519,42 @@ pub fn filter_productions_by_reachability(
 pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {
     todo!()
 }
+
+/// Computes a map from each terminal to a set of terminals that can immediately follow it in the grammar.
+/// This considers sequences T1 -> T2, and T1 -> NT -> T2 where NT can be a sequence of non-terminals.
+pub fn compute_terminal_follow_sets(
+    productions: &[Production],
+    nullable_nonterminals: &BTreeSet<NonTerminal>,
+    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
+) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
+    let mut terminal_follows: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
+
+    for prod in productions {
+        for i in 0..prod.rhs.len() {
+            if let Symbol::Terminal(t1) = &prod.rhs[i] {
+                // t1 is the current terminal we are finding follows for.
+                // Look at symbols S(i+1), S(i+2), ...
+                for j in (i + 1)..prod.rhs.len() {
+                    let next_symbol_in_rhs = &prod.rhs[j];
+                    match next_symbol_in_rhs {
+                        Symbol::Terminal(t2) => {
+                            terminal_follows.entry(t1.clone()).or_default().insert(t2.clone());
+                            break; // Found a terminal, stop scanning further for this t1 in this rule.
+                        }
+                        Symbol::NonTerminal(nt_after_t1) => {
+                            if let Some(first_of_nt) = first_sets.get(nt_after_t1) {
+                                terminal_follows.entry(t1.clone()).or_default().extend(first_of_nt.iter().cloned());
+                            }
+                            if !nullable_nonterminals.contains(nt_after_t1) {
+                                break; // nt_after_t1 is not nullable, so it blocks further symbols from following t1.
+                            }
+                            // nt_after_t1 is nullable, continue to the next symbol in rhs for t1.
+                        }
+                    }
+                }
+            }
+        }
+    }
+    terminal_follows
+}
+

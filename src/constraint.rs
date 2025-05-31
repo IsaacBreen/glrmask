@@ -28,6 +28,8 @@ use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 
+use crate::glr::analyze::{compute_nullable_nonterminals, compute_terminal_follow_sets};
+
 pub type LLMTokenBV = HybridBitset;
 pub type GrammarTokenBV = BitVec;
 pub type LLMTokenInfo = Option<LLMTokenBV>;
@@ -325,12 +327,42 @@ impl GrammarConstraint {
         crate::debug!(2, "Finished computing possible_matches");
         // pm_cache is dropped here as it's no longer needed.
 
+        let grammar_productions = &parser.grammar.productions; // Assuming parser is the GLRParser instance
+        let grammar_term_map = &parser.grammar.term_map;
+
+        // These might be computed elsewhere or need to be computed here.
+        // Assuming compute_first_sets is available from grammar module.
+        let first_sets = crate::glr::grammar::compute_first_sets(grammar_productions);
+        let nullable_nonterminals = compute_nullable_nonterminals(grammar_productions);
+
+        let terminal_follow_sets_named = compute_terminal_follow_sets(
+            grammar_productions,
+            &nullable_nonterminals,
+            &first_sets,
+        );
+
+        let mut terminal_follow_map_ids: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> = BTreeMap::new();
+        for (terminal1, following_terminals) in terminal_follow_sets_named {
+            if let Some(t1_id) = grammar_term_map.get_by_left(&terminal1) {
+                let mut following_ids = BTreeSet::new();
+                for t2 in following_terminals {
+                    if let Some(t2_id) = grammar_term_map.get_by_left(&t2) {
+                        following_ids.insert(*t2_id);
+                    }
+                }
+                if !following_ids.is_empty() {
+                    terminal_follow_map_ids.insert(*t1_id, following_ids);
+                }
+            }
+        }
+        crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map_ids.len());
 
         let precomputed = Self::precompute(
-            &tokenizer,
+            &tokenizer, // This is the tokenizer parameter being moved into the struct
             &internal_llm_token_map_for_precompute, 
             &token_name_map,
             internal_max_llm_token, 
+            &terminal_follow_map_ids, // Pass the new map
         );
 
         Self {
@@ -351,16 +383,19 @@ impl GrammarConstraint {
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, 
         token_name_map:   &BiBTreeMap<String, usize>,
         internal_max_llm_token: usize,                       
+        terminal_follow_map_ids: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
     ) -> Precomputed {
         let mut helper = Precomputer::new(
             tokenizer,
             internal_llm_token_map,    
             internal_max_llm_token, 
             100, 
+            terminal_follow_map_ids, // Pass to Precomputer::new
         );
 
         helper.run_dfs();
         helper.prune_precomputed_graph();
+        helper.prune_terminal_sequences(); // New pruning pass << ADD THIS LINE HERE
         helper.merge_nodes();
         helper.finish(token_name_map)
     }
@@ -477,6 +512,7 @@ struct Precomputer<'r> {
     merge_threshold:  usize,
     pb:               ProgressBar,
     stats:            PrecomputeStats,
+    terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>, // New field
 }
 
 impl<'r> Precomputer<'r> {
@@ -485,6 +521,7 @@ impl<'r> Precomputer<'r> {
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, 
         internal_max_llm_token: usize,                       
         merge_threshold:  usize,
+        terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>, // New parameter
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map 
             .iter()
@@ -523,6 +560,7 @@ impl<'r> Precomputer<'r> {
             merge_threshold,
             pb,
             stats: PrecomputeStats::default(),
+            terminal_follow_map, // Store the map
         }
     }
 
@@ -722,6 +760,80 @@ impl<'r> Precomputer<'r> {
 
         for child_arc_to_recurse_on in children_to_visit_recursively {
             self.filter_and_prune_edges_recursive(&child_arc_to_recurse_on, visited_for_pruning, completable_cache);
+        }
+    }
+
+    fn prune_terminal_sequences(&mut self) {
+        crate::debug!(2, "Starting terminal sequence pruning.");
+        let mut visited_contexts = HashSet::new(); // To avoid redundant work on same node from same context
+        for root_arc in self.roots.values() {
+            // For roots, there's no "previous terminal", so pass None.
+            self.prune_terminal_sequences_recursive(root_arc, None, &mut visited_contexts);
+        }
+        crate::debug!(2, "Finished terminal sequence pruning. Edges pruned: {}", self.stats.edges_pruned_by_terminal_sequence);
+    }
+
+    fn prune_terminal_sequences_recursive(
+        &self,
+        node_arc: &Arc<Mutex<PrecomputeNode>>,
+        prev_edge_terminal_opt: Option<GrammarTokenID>,
+        visited_contexts: &mut HashSet<(*const Mutex<PrecomputeNode>, Option<GrammarTokenID>)>,
+    ) {
+        let node_ptr = Arc::as_ptr(node_arc);
+        if !visited_contexts.insert((node_ptr, prev_edge_terminal_opt)) {
+            return; // Already processed this node from this incoming terminal context
+        }
+
+        let mut children_to_recurse: Vec<(Arc<Mutex<PrecomputeNode>>, Option<GrammarTokenID>)> = Vec::new();
+        let mut edges_before_pruning = 0;
+        let mut edges_after_pruning = 0;
+
+        { // Scoped lock for node_arc
+            let mut node_guard = node_arc.lock().expect("Mutex poisoned: prune_terminal_sequences_recursive");
+
+            let allowed_next_terminals: Option<&BTreeSet<GrammarTokenID>> =
+                prev_edge_terminal_opt.and_then(|prev_term| self.terminal_follow_map.get(&prev_term));
+
+            // Collect children before modifying map to avoid issues with iterator invalidation if retaining in place
+            let original_children_keys: Vec<Option<GrammarTokenID>> = node_guard.children().keys().cloned().collect();
+            
+            for key_k_opt_t2 in original_children_keys { // key_k_opt_t2 is the Option<GrammarTokenID> for the outgoing edge
+                if let Some(destinations_map) = node_guard.children().get(&key_k_opt_t2) {
+                     edges_before_pruning += destinations_map.len();
+                }
+
+                let mut keep_edge = true;
+                if let Some(allowed_set) = allowed_next_terminals {
+                    // Pruning applies if prev_edge_terminal_opt was Some, and thus allowed_set is Some.
+                    if let Some(t2_terminal) = key_k_opt_t2 {
+                        if !allowed_set.contains(&t2_terminal) {
+                            keep_edge = false;
+                        }
+                    }
+                    // If key_k_opt_t2 is None, it's not a terminal-terminal sequence, so keep_edge remains true.
+                }
+                // If allowed_next_terminals is None (e.g. prev_edge_terminal_opt was None, or prev_term had no followers),
+                // then keep_edge remains true (no restrictions from previous terminal).
+
+                if keep_edge {
+                    if let Some(destinations_map) = node_guard.children().get(&key_k_opt_t2) {
+                        edges_after_pruning += destinations_map.len();
+                        for child_arc_wrapper in destinations_map.keys() {
+                            children_to_recurse.push((child_arc_wrapper.as_arc().clone(), key_k_opt_t2.clone()));
+                        }
+                    }
+                } else {
+                    // Edge is pruned
+                    node_guard.children_mut().remove(&key_k_opt_t2);
+                    // self.stats.edges_pruned_by_terminal_sequence is incremented outside based on total counts
+                }
+            }
+        } // node_guard lock released
+
+        self.stats.edges_pruned_by_terminal_sequence += edges_before_pruning.saturating_sub(edges_after_pruning);
+
+        for (child_arc, current_edge_terminal_opt) in children_to_recurse {
+            self.prune_terminal_sequences_recursive(&child_arc, current_edge_terminal_opt, visited_contexts);
         }
     }
     
@@ -993,7 +1105,7 @@ impl<'r> Precomputer<'r> {
                 .entry(match_end_offset_in_segment)
                 .or_default()
                 .entry(TokenizerStateID(0)) 
-                .or_default()
+                .or_or_default()
                 .insert(handle);
         }
     }
