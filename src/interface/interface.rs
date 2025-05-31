@@ -255,7 +255,7 @@ impl GrammarDefinition {
     fn convert_grammar_expr_to_symbols(
         expr: &GrammarExpr,
         current_rule_name_or_path: &str,
-        // productions: &mut Vec<Production>, // This is now returned
+        terminal_rule_names: &HashSet<String>,
         terminal_name_to_group_id: &mut BiBTreeMap<String, usize>,
         terminal_expr_to_group_id: &mut BiBTreeMap<Expr, usize>,
         next_terminal_group_id: &mut usize,
@@ -301,7 +301,12 @@ impl GrammarDefinition {
                 }
             }
             GrammarExpr::Ref(name) => {
-                (vec![Symbol::NonTerminal(NonTerminal(name.clone()))], Vec::new()) // Return symbols and empty productions
+                if terminal_rule_names.contains(name) {
+                    // The reference is to a rule that is *itself* a terminal.
+                    (vec![Symbol::Terminal(Terminal(name.clone()))], Vec::new())
+                } else {
+                    (vec![Symbol::NonTerminal(NonTerminal(name.clone()))], Vec::new())
+                }
             }
             GrammarExpr::Sequence(exprs) => {
                 let mut combined_symbols = Vec::new();
@@ -310,7 +315,7 @@ impl GrammarDefinition {
                     let (symbols, new_productions) = Self::convert_grammar_expr_to_symbols(
                         e,
                         current_rule_name_or_path,
-                        // productions, // No longer passed
+                        terminal_rule_names,
                         terminal_name_to_group_id,
                         terminal_expr_to_group_id,
                         next_terminal_group_id,
@@ -337,7 +342,7 @@ impl GrammarDefinition {
                     let (rhs_symbols_for_arm, productions_from_arm_processing) = Self::convert_grammar_expr_to_symbols(
                         expr_choice_item,
                         &choice_nt_name, // Children named relative to this new NT
-                        // productions, // No longer passed
+                        terminal_rule_names,
                         terminal_name_to_group_id,
                         terminal_expr_to_group_id,
                         next_terminal_group_id,
@@ -360,7 +365,7 @@ impl GrammarDefinition {
                 Self::convert_grammar_expr_to_symbols(
                     &GrammarExpr::Choice(vec![*expr_box.clone(), GrammarExpr::Sequence(vec![])]),
                     current_rule_name_or_path,
-                    // productions, // No longer passed
+                    terminal_rule_names,
                     terminal_name_to_group_id,
                     terminal_expr_to_group_id,
                     next_terminal_group_id,
@@ -379,7 +384,7 @@ impl GrammarDefinition {
                 let (expr_symbols, productions_from_expr_box) = Self::convert_grammar_expr_to_symbols(
                     expr_box,
                     &repeat_nt_name, // Children named relative to this new NT
-                    // productions, // No longer passed
+                    terminal_rule_names,
                     terminal_name_to_group_id,
                     terminal_expr_to_group_id,
                     next_terminal_group_id,
@@ -417,6 +422,16 @@ impl GrammarDefinition {
             return Err("Grammar expressions list cannot be empty.".to_string());
         }
 
+        // Names whose definitions are *only* a Literal or RegexExpr.
+        // These will become terminals, not non-terminals.
+        let simple_terminal_rules: HashSet<String> = exprs
+            .iter()
+            .filter_map(|(name, expr)| match expr {
+                GrammarExpr::Literal(_) | GrammarExpr::RegexExpr(_) => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+
         let mut productions = Vec::new();
         let mut terminal_name_to_group_id = BiBTreeMap::new();
         let mut terminal_expr_to_group_id = BiBTreeMap::new();
@@ -433,13 +448,43 @@ impl GrammarDefinition {
         all_names.insert(start_production_name.clone());
         debug!(2, "Augmented start_production_name: {:?}", start_production_name);
 
+        let first_rule_name_for_start = exprs
+            .iter()
+            .find(|(name, _)| !simple_terminal_rules.contains(name))
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| "Grammar must contain at least one non-terminal rule".to_string())?;
+
+        // Augmented start rule:
         productions.push(Production {
             lhs: NonTerminal(start_production_name.clone()),
-            rhs: vec![Symbol::NonTerminal(NonTerminal(exprs[0].0.clone()))],
+            rhs: vec![Symbol::NonTerminal(NonTerminal(first_rule_name_for_start))],
         });
-        let start_production_id = 0; // The augmented start production is always the first one.
+        let start_production_id = 0;
+
+        let mut register_simple_terminal = |name: &str, regex_expr: Expr| {
+            if !terminal_name_to_group_id.contains_key(name) {
+                let group_id = next_terminal_group_id;
+                terminal_name_to_group_id.insert(name.to_string(), group_id);
+                terminal_expr_to_group_id.insert(regex_expr, group_id);
+                next_terminal_group_id += 1;
+            }
+        };
 
         for (name, expr) in tqdm!(exprs.iter()) {
+            if simple_terminal_rules.contains(name) {
+                // Turn this rule into a terminal and *do not* emit a production.
+                match expr {
+                    GrammarExpr::Literal(bytes) => {
+                        register_simple_terminal(name, Expr::U8Seq(bytes.clone()));
+                    }
+                    GrammarExpr::RegexExpr(r) => {
+                        register_simple_terminal(name, r.clone());
+                    }
+                    _ => unreachable!("simple_terminal_rules is computed precisely on Literal/RegexExpr"),
+                }
+                continue;           // Skip the normal non-terminal processing
+            }
+
             let lhs = NonTerminal(name.clone());
             let lhs_name_str = name; // Base name for generated sub-rules/terminals
 
@@ -448,7 +493,7 @@ impl GrammarDefinition {
                     let (rhs_symbols_for_arm, new_productions_for_arm) = Self::convert_grammar_expr_to_symbols(
                         choice_expr,
                         lhs_name_str,
-                        // &mut productions, // Removed
+                        &simple_terminal_rules,
                         &mut terminal_name_to_group_id,
                         &mut terminal_expr_to_group_id,
                         &mut next_terminal_group_id,
@@ -462,7 +507,7 @@ impl GrammarDefinition {
                 let (rhs_symbols, new_productions_for_rhs) = Self::convert_grammar_expr_to_symbols(
                     expr,
                     lhs_name_str,
-                    // &mut productions, // Removed
+                    &simple_terminal_rules,
                     &mut terminal_name_to_group_id,
                     &mut terminal_expr_to_group_id,
                     &mut next_terminal_group_id,
