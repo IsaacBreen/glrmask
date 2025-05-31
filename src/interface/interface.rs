@@ -423,11 +423,35 @@ impl GrammarDefinition {
         let mut next_terminal_group_id = 0;
 
         let mut all_names: HashSet<String> = exprs.iter().map(|(name, _)| name.clone()).collect();
+        // Pre-reserve names that will become terminal names to avoid conflicts in indexed naming
+        for (name, expr) in &exprs {
+            match expr {
+                GrammarExpr::RegexExpr(_) | GrammarExpr::Literal(_) => {
+                    all_names.insert(name.clone());
+                }
+                _ => {}
+            }
+        }
+
         let mut per_base_counters: HashMap<String, usize> = HashMap::new();
 
         let mut start_production_name = "start'".to_string();
         let nonterminal_names_from_exprs: HashSet<&str> = exprs.iter().map(|(name, _)| name.as_str()).collect();
-        while nonterminal_names_from_exprs.contains(start_production_name.as_str()) || all_names.contains(&start_production_name) {
+
+        // Also collect names that will become terminal names (simple RegexExpr or Literal rules)
+        let mut terminal_names_from_simple_rules: HashSet<&str> = HashSet::new();
+        for (name, expr) in &exprs {
+            match expr {
+                GrammarExpr::RegexExpr(_) | GrammarExpr::Literal(_) => {
+                    terminal_names_from_simple_rules.insert(name.as_str());
+                }
+                _ => {}
+            }
+        }
+
+        while nonterminal_names_from_exprs.contains(start_production_name.as_str())
+            || all_names.contains(&start_production_name)
+            || terminal_names_from_simple_rules.contains(start_production_name.as_str()) {
             start_production_name.push('\'');
         }
         all_names.insert(start_production_name.clone());
@@ -443,34 +467,69 @@ impl GrammarDefinition {
             let lhs = NonTerminal(name.clone());
             let lhs_name_str = name; // Base name for generated sub-rules/terminals
 
-            if let GrammarExpr::Choice(choices) = expr {
-                for choice_expr in choices {
-                    let (rhs_symbols_for_arm, new_productions_for_arm) = Self::convert_grammar_expr_to_symbols(
-                        choice_expr,
+            // Check if this is a simple terminal expression
+            match expr {
+                GrammarExpr::RegexExpr(regex_expr) => {
+                    // Use the rule name directly as the terminal name
+                    let terminal_name = name.clone();
+                    if !terminal_name_to_group_id.contains_left(&terminal_name) {
+                        let group_id = next_terminal_group_id;
+                        terminal_name_to_group_id.insert(terminal_name.clone(), group_id);
+                        terminal_expr_to_group_id.insert(regex_expr.clone(), group_id);
+                        next_terminal_group_id += 1;
+                    }
+                    // Create production: name -> terminal_name
+                    productions.push(Production {
+                        lhs,
+                        rhs: vec![Symbol::Terminal(Terminal(terminal_name))]
+                    });
+                }
+                GrammarExpr::Literal(bytes) => {
+                    // Use the rule name directly as the terminal name
+                    let terminal_name = name.clone();
+                    let regex_expr = Expr::U8Seq(bytes.clone());
+                    if !terminal_name_to_group_id.contains_left(&terminal_name) {
+                        let group_id = next_terminal_group_id;
+                        terminal_name_to_group_id.insert(terminal_name.clone(), group_id);
+                        terminal_expr_to_group_id.insert(regex_expr, group_id);
+                        next_terminal_group_id += 1;
+                    }
+                    // Create production: name -> terminal_name
+                    productions.push(Production {
+                        lhs,
+                        rhs: vec![Symbol::Terminal(Terminal(terminal_name))]
+                    });
+                }
+                GrammarExpr::Choice(choices) => {
+                    // Existing logic for choices
+                    for choice_expr in choices {
+                        let (rhs_symbols_for_arm, new_productions_for_arm) = Self::convert_grammar_expr_to_symbols(
+                            choice_expr,
+                            lhs_name_str,
+                            &mut terminal_name_to_group_id,
+                            &mut terminal_expr_to_group_id,
+                            &mut next_terminal_group_id,
+                            &mut per_base_counters,
+                            &mut all_names,
+                        );
+                        productions.push(Production { lhs: lhs.clone(), rhs: rhs_symbols_for_arm });
+                        productions.extend(new_productions_for_arm);
+                    }
+                }
+                _ => {
+                    // For all other cases (Sequence, Optional, Repeat, Ref), use existing logic
+                    let (rhs_symbols, new_productions_for_rhs) = Self::convert_grammar_expr_to_symbols(
+                        expr,
                         lhs_name_str,
-                        // &mut productions, // Removed
                         &mut terminal_name_to_group_id,
                         &mut terminal_expr_to_group_id,
                         &mut next_terminal_group_id,
                         &mut per_base_counters,
                         &mut all_names,
                     );
-                    productions.push(Production { lhs: lhs.clone(), rhs: rhs_symbols_for_arm });
-                    productions.extend(new_productions_for_arm); // Extend with productions from the arm's processing
+                    productions.push(Production { lhs, rhs: rhs_symbols });
+                    productions.extend(new_productions_for_rhs);
                 }
-            } else {
-                let (rhs_symbols, new_productions_for_rhs) = Self::convert_grammar_expr_to_symbols(
-                    expr,
-                    lhs_name_str,
-                    // &mut productions, // Removed
-                    &mut terminal_name_to_group_id,
-                    &mut terminal_expr_to_group_id,
-                    &mut next_terminal_group_id,
-                    &mut per_base_counters,
-                    &mut all_names,
-                );
-                productions.push(Production { lhs, rhs: rhs_symbols });
-                productions.extend(new_productions_for_rhs); // Extend with productions from processing the rhs
             }
         }
 
