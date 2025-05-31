@@ -1,6 +1,10 @@
 local_system:
   attached_files:
     - src/datastructures/gss.rs
+    - src/interface/interface.rs
+    - src/interface/mod.rs
+    - src/interface/tests.rs
+    - src/interface/tokenizer_combinators.rs
     - src/glr/analyze.rs
     - src/glr/grammar.rs
     - src/glr/items.rs
@@ -8,10 +12,6 @@ local_system:
     - src/glr/parser.rs
     - src/glr/table.rs
     - src/glr/tests.rs
-    - src/interface/interface.rs
-    - src/interface/mod.rs
-    - src/interface/tests.rs
-    - src/interface/tokenizer_combinators.rs
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -3469,6 +3469,8 @@ local_system:
       use std::collections::BTreeMap as StdMap;
 
 
+      pub type ActionFn = Arc<dyn Fn(&NonTerminal, &mut LLMTokenInfo) -> Result<(), String> + Send + Sync>;
+
       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
       pub struct ParseStateEdgeContent { 
           pub state_id: StateID,
@@ -3530,7 +3532,7 @@ local_system:
       }
 
 
-      #[derive(Debug, Clone, PartialEq, Eq)]
+      #[derive(Clone)]
       pub struct GLRParser {
           pub stage_7_table: Stage7Table,
           pub productions: Vec<Production>,
@@ -3538,10 +3540,14 @@ local_system:
           pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
           pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
           pub start_state_id: StateID,
+          pub actions: BTreeMap<NonTerminal, ActionFn>, // New field
       }
 
       impl JSONConvertible for GLRParser {
           fn to_json(&self) -> JSONNode {
+              if !self.actions.is_empty() {
+                  panic!("Cannot serialize GLRParser with actions defined. Actions are not JSON serializable.");
+              }
               let mut obj = StdMap::new();
               obj.insert("stage_7_table".to_string(), self.stage_7_table.to_json());
               obj.insert("productions".to_string(), self.productions.to_json());
@@ -3549,6 +3555,7 @@ local_system:
               obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
               obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
               obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
+              // Do not serialize self.actions
               JSONNode::Object(obj)
           }
 
@@ -3574,6 +3581,7 @@ local_system:
                           non_terminal_map,
                           item_set_map,
                           start_state_id,
+                          actions: BTreeMap::new(), // Initialize actions as empty
                       })
                   }
                   _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
@@ -3581,6 +3589,41 @@ local_system:
           }
       }
 
+      impl Debug for GLRParser {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              let actions_str = if self.actions.is_empty() {
+                  "None".to_string()
+              } else {
+                  // ActionFn is not Debug, so we can't print it directly.
+                  format!("[Cannot display actions]")
+              };
+              f.debug_struct("GLRParser")
+                  .field("stage_7_table", &self.stage_7_table)
+                  .field("productions", &self.productions)
+                  .field("terminal_map", &self.terminal_map)
+                  .field("non_terminal_map", &self.non_terminal_map)
+                  .field("item_set_map", &self.item_set_map)
+                  .field("start_state_id", &self.start_state_id)
+                  .field("actions", &actions_str)
+                  .finish()
+          }
+      }
+
+      impl PartialEq for GLRParser {
+          fn eq(&self, other: &Self) -> bool {
+              let actions_are_equal = self.actions.keys().collect::<BTreeSet<_>>() == other.actions.keys().collect::<BTreeSet<_>>() &&
+                                     self.actions.keys().all(|k| std::ptr::eq(self.actions.get(k).unwrap(), other.actions.get(k).unwrap()));
+              self.stage_7_table == other.stage_7_table &&
+              self.productions == other.productions &&
+              self.terminal_map == other.terminal_map &&
+              self.non_terminal_map == other.non_terminal_map &&
+              self.item_set_map == other.item_set_map &&
+              self.start_state_id == other.start_state_id &&
+              actions_are_equal
+          }
+      }
+
+      impl Eq for GLRParser {}
 
       impl GLRParser {
           pub fn new(
@@ -3590,6 +3633,7 @@ local_system:
               non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
               item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
               start_state_id: StateID,
+              actions: BTreeMap<NonTerminal, ActionFn>, // New parameter
           ) -> Self {
               Self {
                   stage_7_table,
@@ -3598,6 +3642,7 @@ local_system:
                   non_terminal_map,
                   item_set_map,
                   start_state_id,
+                  actions, // Assign new field
               }
           }
 
@@ -4012,10 +4057,10 @@ local_system:
               }
           }
       }
-    src/glr/table.rs: |+
+    src/glr/table.rs: |
       use super::items::{compute_closure, compute_goto, split_on_dot, Item};
       use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
-      use crate::glr::parser::GLRParser;
+      use crate::glr::parser::{GLRParser, ActionFn};
       use bimap::BiBTreeMap;
       use std::collections::{HashMap, VecDeque};
       use std::collections::{BTreeMap, BTreeSet};
@@ -4529,12 +4574,12 @@ local_system:
           (stage_7_table, item_set_map, start_state_id)
       }
 
-      pub fn generate_glr_parser_with_maps(productions: &[Production], mut start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
+      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>) -> GLRParser {
           let original_productions = productions.to_vec();
 
 
           crate::debug!(2, "Removing productions with undefined non-terminals");
-          let mut productions = remove_productions_with_undefined_nonterminals(productions, &[start_production_id]);
+          let productions = remove_productions_with_undefined_nonterminals(productions, &[start_production_id]);
           // (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id);
 
           crate::debug!(2, "Validating");
@@ -4563,18 +4608,18 @@ local_system:
           crate::debug!(6, &stage_7_table);
           crate::debug!(2, "Done generating GLR parser");
 
-          GLRParser::new(stage_7_table, original_productions, terminal_map, non_terminal_map, item_set_map, start_state_id)
+          GLRParser::new(stage_7_table, original_productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions)
       }
 
       pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
           let terminal_map = assign_terminal_ids(productions);
           let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
       }
 
       pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
           let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
       }
 
       pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
@@ -4607,7 +4652,6 @@ local_system:
           }
           non_terminal_map
       }
-
     src/glr/tests.rs: |
       use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::{GLRParser, GLRParserState};
@@ -8859,6 +8903,8 @@ local_system:
       use std::collections::BTreeMap as StdMap;
 
 
+      pub type ActionFn = Arc<dyn Fn(&NonTerminal, &mut LLMTokenInfo) -> Result<(), String> + Send + Sync>;
+
       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
       pub struct ParseStateEdgeContent { 
           pub state_id: StateID,
@@ -8920,7 +8966,7 @@ local_system:
       }
 
 
-      #[derive(Debug, Clone, PartialEq, Eq)]
+      #[derive(Clone)]
       pub struct GLRParser {
           pub stage_7_table: Stage7Table,
           pub productions: Vec<Production>,
@@ -8928,10 +8974,14 @@ local_system:
           pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
           pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
           pub start_state_id: StateID,
+          pub actions: BTreeMap<NonTerminal, ActionFn>, // New field
       }
 
       impl JSONConvertible for GLRParser {
           fn to_json(&self) -> JSONNode {
+              if !self.actions.is_empty() {
+                  panic!("Cannot serialize GLRParser with actions defined. Actions are not JSON serializable.");
+              }
               let mut obj = StdMap::new();
               obj.insert("stage_7_table".to_string(), self.stage_7_table.to_json());
               obj.insert("productions".to_string(), self.productions.to_json());
@@ -8939,6 +8989,7 @@ local_system:
               obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
               obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
               obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
+              // Do not serialize self.actions
               JSONNode::Object(obj)
           }
 
@@ -8964,6 +9015,7 @@ local_system:
                           non_terminal_map,
                           item_set_map,
                           start_state_id,
+                          actions: BTreeMap::new(), // Initialize actions as empty
                       })
                   }
                   _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
@@ -8971,6 +9023,41 @@ local_system:
           }
       }
 
+      impl Debug for GLRParser {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              let actions_str = if self.actions.is_empty() {
+                  "None".to_string()
+              } else {
+                  // ActionFn is not Debug, so we can't print it directly.
+                  format!("[Cannot display actions]")
+              };
+              f.debug_struct("GLRParser")
+                  .field("stage_7_table", &self.stage_7_table)
+                  .field("productions", &self.productions)
+                  .field("terminal_map", &self.terminal_map)
+                  .field("non_terminal_map", &self.non_terminal_map)
+                  .field("item_set_map", &self.item_set_map)
+                  .field("start_state_id", &self.start_state_id)
+                  .field("actions", &actions_str)
+                  .finish()
+          }
+      }
+
+      impl PartialEq for GLRParser {
+          fn eq(&self, other: &Self) -> bool {
+              let actions_are_equal = self.actions.keys().collect::<BTreeSet<_>>() == other.actions.keys().collect::<BTreeSet<_>>() &&
+                                     self.actions.keys().all(|k| std::ptr::eq(self.actions.get(k).unwrap(), other.actions.get(k).unwrap()));
+              self.stage_7_table == other.stage_7_table &&
+              self.productions == other.productions &&
+              self.terminal_map == other.terminal_map &&
+              self.non_terminal_map == other.non_terminal_map &&
+              self.item_set_map == other.item_set_map &&
+              self.start_state_id == other.start_state_id &&
+              actions_are_equal
+          }
+      }
+
+      impl Eq for GLRParser {}
 
       impl GLRParser {
           pub fn new(
@@ -8980,6 +9067,7 @@ local_system:
               non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
               item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
               start_state_id: StateID,
+              actions: BTreeMap<NonTerminal, ActionFn>, // New parameter
           ) -> Self {
               Self {
                   stage_7_table,
@@ -8988,6 +9076,7 @@ local_system:
                   non_terminal_map,
                   item_set_map,
                   start_state_id,
+                  actions, // Assign new field
               }
           }
 
@@ -9402,10 +9491,10 @@ local_system:
               }
           }
       }
-    src/glr/table.rs: |+
+    src/glr/table.rs: |
       use super::items::{compute_closure, compute_goto, split_on_dot, Item};
       use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
-      use crate::glr::parser::GLRParser;
+      use crate::glr::parser::{GLRParser, ActionFn};
       use bimap::BiBTreeMap;
       use std::collections::{HashMap, VecDeque};
       use std::collections::{BTreeMap, BTreeSet};
@@ -9919,12 +10008,12 @@ local_system:
           (stage_7_table, item_set_map, start_state_id)
       }
 
-      pub fn generate_glr_parser_with_maps(productions: &[Production], mut start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
+      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>) -> GLRParser {
           let original_productions = productions.to_vec();
 
 
           crate::debug!(2, "Removing productions with undefined non-terminals");
-          let mut productions = remove_productions_with_undefined_nonterminals(productions, &[start_production_id]);
+          let productions = remove_productions_with_undefined_nonterminals(productions, &[start_production_id]);
           // (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id);
 
           crate::debug!(2, "Validating");
@@ -9953,18 +10042,18 @@ local_system:
           crate::debug!(6, &stage_7_table);
           crate::debug!(2, "Done generating GLR parser");
 
-          GLRParser::new(stage_7_table, original_productions, terminal_map, non_terminal_map, item_set_map, start_state_id)
+          GLRParser::new(stage_7_table, original_productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions)
       }
 
       pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
           let terminal_map = assign_terminal_ids(productions);
           let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
       }
 
       pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
           let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
       }
 
       pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
@@ -9997,7 +10086,6 @@ local_system:
           }
           non_terminal_map
       }
-
     src/glr/tests.rs: |
       use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::{GLRParser, GLRParserState};
@@ -10794,7 +10882,7 @@ local_system:
       // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
       //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
-  diffs_applied_this_send: true
+  diffs_applied_this_send: false
 system:
   message: |2
 
@@ -10810,6 +10898,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
+    - copy-all/paste
     - copy-one/paste
   code_completion_model:
     - gemini/gemini-2.5-flash-preview-05-20
@@ -14319,6 +14408,8 @@ messages:
       use std::collections::BTreeMap as StdMap;
 
 
+      pub type ActionFn = Arc<dyn Fn(&NonTerminal, &mut LLMTokenInfo) -> Result<(), String> + Send + Sync>;
+
       #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
       pub struct ParseStateEdgeContent { 
           pub state_id: StateID,
@@ -14380,7 +14471,7 @@ messages:
       }
 
 
-      #[derive(Debug, Clone, PartialEq, Eq)]
+      #[derive(Clone)]
       pub struct GLRParser {
           pub stage_7_table: Stage7Table,
           pub productions: Vec<Production>,
@@ -14388,10 +14479,14 @@ messages:
           pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
           pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
           pub start_state_id: StateID,
+          pub actions: BTreeMap<NonTerminal, ActionFn>, // New field
       }
 
       impl JSONConvertible for GLRParser {
           fn to_json(&self) -> JSONNode {
+              if !self.actions.is_empty() {
+                  panic!("Cannot serialize GLRParser with actions defined. Actions are not JSON serializable.");
+              }
               let mut obj = StdMap::new();
               obj.insert("stage_7_table".to_string(), self.stage_7_table.to_json());
               obj.insert("productions".to_string(), self.productions.to_json());
@@ -14399,6 +14494,7 @@ messages:
               obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
               obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
               obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
+              // Do not serialize self.actions
               JSONNode::Object(obj)
           }
 
@@ -14424,6 +14520,7 @@ messages:
                           non_terminal_map,
                           item_set_map,
                           start_state_id,
+                          actions: BTreeMap::new(), // Initialize actions as empty
                       })
                   }
                   _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
@@ -14431,6 +14528,41 @@ messages:
           }
       }
 
+      impl Debug for GLRParser {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              let actions_str = if self.actions.is_empty() {
+                  "None".to_string()
+              } else {
+                  // ActionFn is not Debug, so we can't print it directly.
+                  format!("[Cannot display actions]")
+              };
+              f.debug_struct("GLRParser")
+                  .field("stage_7_table", &self.stage_7_table)
+                  .field("productions", &self.productions)
+                  .field("terminal_map", &self.terminal_map)
+                  .field("non_terminal_map", &self.non_terminal_map)
+                  .field("item_set_map", &self.item_set_map)
+                  .field("start_state_id", &self.start_state_id)
+                  .field("actions", &actions_str)
+                  .finish()
+          }
+      }
+
+      impl PartialEq for GLRParser {
+          fn eq(&self, other: &Self) -> bool {
+              let actions_are_equal = self.actions.keys().collect::<BTreeSet<_>>() == other.actions.keys().collect::<BTreeSet<_>>() &&
+                                     self.actions.keys().all(|k| std::ptr::eq(self.actions.get(k).unwrap(), other.actions.get(k).unwrap()));
+              self.stage_7_table == other.stage_7_table &&
+              self.productions == other.productions &&
+              self.terminal_map == other.terminal_map &&
+              self.non_terminal_map == other.non_terminal_map &&
+              self.item_set_map == other.item_set_map &&
+              self.start_state_id == other.start_state_id &&
+              actions_are_equal
+          }
+      }
+
+      impl Eq for GLRParser {}
 
       impl GLRParser {
           pub fn new(
@@ -14440,6 +14572,7 @@ messages:
               non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
               item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
               start_state_id: StateID,
+              actions: BTreeMap<NonTerminal, ActionFn>, // New parameter
           ) -> Self {
               Self {
                   stage_7_table,
@@ -14448,6 +14581,7 @@ messages:
                   non_terminal_map,
                   item_set_map,
                   start_state_id,
+                  actions, // Assign new field
               }
           }
 
@@ -14870,7 +15004,7 @@ messages:
       ```rust 'src/glr/table.rs'
       use super::items::{compute_closure, compute_goto, split_on_dot, Item};
       use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
-      use crate::glr::parser::GLRParser;
+      use crate::glr::parser::{GLRParser, ActionFn};
       use bimap::BiBTreeMap;
       use std::collections::{HashMap, VecDeque};
       use std::collections::{BTreeMap, BTreeSet};
@@ -15384,12 +15518,12 @@ messages:
           (stage_7_table, item_set_map, start_state_id)
       }
 
-      pub fn generate_glr_parser_with_maps(productions: &[Production], mut start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
+      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>) -> GLRParser {
           let original_productions = productions.to_vec();
 
 
           crate::debug!(2, "Removing productions with undefined non-terminals");
-          let mut productions = remove_productions_with_undefined_nonterminals(productions, &[start_production_id]);
+          let productions = remove_productions_with_undefined_nonterminals(productions, &[start_production_id]);
           // (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id);
 
           crate::debug!(2, "Validating");
@@ -15418,18 +15552,18 @@ messages:
           crate::debug!(6, &stage_7_table);
           crate::debug!(2, "Done generating GLR parser");
 
-          GLRParser::new(stage_7_table, original_productions, terminal_map, non_terminal_map, item_set_map, start_state_id)
+          GLRParser::new(stage_7_table, original_productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions)
       }
 
       pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
           let terminal_map = assign_terminal_ids(productions);
           let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
       }
 
       pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
           let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
       }
 
       pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
@@ -15462,7 +15596,6 @@ messages:
           }
           non_terminal_map
       }
-
 
       ```
     metadata:
@@ -16269,406 +16402,27 @@ messages:
     metadata:
       filename: src/glr/tests.rs
   - user: |-
-      Modify this so each GSS node stores no just a GLR state ID, but also some arbitrary user data.
-      Represent the user data as a dyn.
-      Make sure the code is sa compatible as possible, ie doesn't break too much existing stuff. Most of the time the user doesn't really care about this user data. It's just for custom actions, really.
-
-      And modify the code so the user is able to define custom actions in some nice and clean way.
-      Aside from potentially modifying the arbitrary user data, actions should be able to say YES or NO to their validity, potentially terminating an invalid parse path.
-
-      Actions should be an optional stored in a Production.
-      Be careful to preserve actions throughout any transformations.
-
-      In the parse table, actions should occur inside `Stage7ShiftsAndReduces::Reduce` as an optional field, and also inside `Stage7ShiftsAndReduces::split` like this:
+      Modify this so that `ParseStateEdgeContent` holds arbitrary user data, represented by an `Arc<dyn Any>`:
       ```rust
-      pub enum Stage7ShiftsAndReduces {
-          Shift(StateID),
-          Reduce { production_id: ProductionID, nonterminal_id: NonTerminalID, len: usize, action: Option<Action> },
-          Split {
-              shift: Option<StateID>,
-              reduces: BTreeMap<usize, BTreeMap<NonTerminalID, (
-                  BTreeSet<ProductionID>,        // productions with no action
-                  BTreeMap<ProductionID, Action> // productions with an action, each mapped *to* their action
-              )>>
-          },
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct ParseStateEdgeContent { 
+          pub state_id: StateID,
+          pub user_data: Arc<dyn Any>
       }
       ```
-      where `Action` is some type.
+      Make `ActionFn` this:
+      ```rust
+      pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn Any>) -> bool>
+      ```
+      where the bool indicates whether the state is valid.
 
-      To minimize the changes needed in gss.rs, just add the arbitrary user data to `ParseStateEdgeContent`.
-
-      It doesn't make sense to support JSON serialization for actions, so error if this happens.
-
-      Actually, let's no over-complicate actions. Let's represent an action by a string name rather than a function pointer or dyn or something.
-      Then, when `GLRParser` is initialized, it can be populated with the actual runnable actions, a map from action name to action.
-
-      ...
-
-      And, actually, instead of associating actions with *productions*, let's associate actions with *nonterminals*.
-      That way, we can kind of ignore actions for as long as possible, only 'tacking them on' at the parser stage. Add a field to `GLRParser` that stores a map from nonterminal name to action.
-      Then, in `step`, each time there's a reduction, look up the appropriate action, if one exists.
-      Yes, that's much better!
-      Should mean that we don't even need to modify `Stage7ShiftsAndReduces` any more. And of course `Production` can stay as it currently is.
-      Even `gss.rs` doesn't have to be modified any more. Nice!!
-    metadata:
-  - assistant: |-
-      Okay, I'll modify the code to incorporate custom actions associated with non-terminals.
-
-      Here's the plan:
-
-      1.  **Define `ActionFn`**: A type alias for `Arc<dyn Fn(&NonTerminal, &mut LLMTokenInfo) -> Result<(), String> + Send + Sync>` will be created. This function will be called upon the reduction of a non-terminal. It receives the non-terminal being reduced and a mutable reference to the `LLMTokenInfo` accumulator of the GSS node representing the successful parse of this non-terminal's right-hand side. It can modify this accumulator or return an `Err` to prune the parse path.
-
-      2.  **Modify `GLRParser`**:
-          *   Add a public field `actions: BTreeMap<NonTerminal, ActionFn>` to store the mapping from non-terminal names to their corresponding actions.
-          *   Update `GLRParser::new` to accept this `actions` map.
-          *   Update `generate_glr_parser_with_maps`, `generate_glr_parser`, and `generate_glr_parser_with_terminal_map` to accept or initialize this `actions` map (defaulting to empty).
-
-      3.  **Modify `GLRParserState::pop_and_goto`**:
-          *   After determining the GSS node (`stack`) that represents the successful parsing of a non-terminal's RHS and before performing GOTO operations:
-              *   Retrieve the `LLMTokenInfo` from this `stack` node.
-              *   Look up the `ActionFn` for the reduced non-terminal.
-              *   If an action exists, execute it with the non-terminal and the mutable `LLMTokenInfo`.
-              *   If the action fails (returns `Err`), this parse path is pruned by returning an empty/invalid GSS node.
-              *   If the action succeeds, the (potentially modified) `LLMTokenInfo` is carried forward.
-          *   The GOTO operations will then use this (potentially modified) `LLMTokenInfo` as the accumulator for the new GSS nodes they create.
-
-      4.  **JSON Serialization**:
-          *   The `JSONConvertible` implementation for `GLRParser` will be updated. Since `ActionFn` (containing a `dyn Fn`) cannot be serialized, `to_json` will panic if `actions` is not empty, as requested. `from_json` will initialize `actions` as an empty map.
-
-      This approach keeps changes localized primarily to the `GLRParser` and its state management, without altering the GSS structure itself or the parse table structure (`Stage7ShiftsAndReduces`).
-
-      Here are the detailed instructions:
-
-      **File: `src/glr/parser.rs`**
-
-      1.  **Add `ActionFn` type alias** at the top of the file, after imports:
-          ```rust
-          use std::sync::Arc; // Ensure Arc is imported
-
-          // ... other imports ...
-
-          pub type ActionFn = Arc<dyn Fn(&NonTerminal, &mut LLMTokenInfo) -> Result<(), String> + Send + Sync>;
-          ```
-
-      2.  **Modify `GLRParser` struct definition**:
-          Add the `actions` field:
-          ```rust
-          #[derive(Clone)] // Add Clone if not already present
-          pub struct GLRParser {
-              pub stage_7_table: Stage7Table,
-              pub productions: Vec<Production>,
-              pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
-              pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
-              pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
-              pub start_state_id: StateID,
-              pub actions: BTreeMap<NonTerminal, ActionFn>, // New field
-          }
-          ```
-          If `GLRParser` was not `Clone` before, you'll need to add `#[derive(Clone)]` and ensure `ActionFn` being `Arc` makes it cloneable. `Arc<...>` is `Clone`.
-
-      3.  **Update `GLRParser::new` constructor**:
-          Add the `actions` parameter and assign it:
-          ```rust
-          impl GLRParser {
-              pub fn new(
-                  stage_7_table: Stage7Table,
-                  productions: Vec<Production>,
-                  terminal_map: BiBTreeMap<Terminal, TerminalID>,
-                  non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
-                  item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
-                  start_state_id: StateID,
-                  actions: BTreeMap<NonTerminal, ActionFn>, // New parameter
-              ) -> Self {
-                  Self {
-                      stage_7_table,
-                      productions,
-                      terminal_map,
-                      non_terminal_map,
-                      item_set_map,
-                      start_state_id,
-                      actions, // Assign new field
-                  }
-              }
-              // ... rest of GLRParser impl
-          }
-          ```
-
-      4.  **Update `JSONConvertible` for `GLRParser`**:
-          Modify `to_json` to panic if actions are present, and `from_json` to initialize `actions` as empty.
-          ```rust
-          impl JSONConvertible for GLRParser {
-              fn to_json(&self) -> JSONNode {
-                  if !self.actions.is_empty() {
-                      panic!("Cannot serialize GLRParser with actions defined. Actions are not JSON serializable.");
-                  }
-                  let mut obj = StdMap::new();
-                  obj.insert("stage_7_table".to_string(), self.stage_7_table.to_json());
-                  obj.insert("productions".to_string(), self.productions.to_json());
-                  obj.insert("terminal_map".to_string(), self.terminal_map.to_json());
-                  obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
-                  obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
-                  obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
-                  // Do not serialize self.actions
-                  JSONNode::Object(obj)
-              }
-
-              fn from_json(node: JSONNode) -> Result<Self, String> {
-                  match node {
-                      JSONNode::Object(mut obj) => {
-                          let stage_7_table = obj.remove("stage_7_table").ok_or_else(|| "Missing field stage_7_table".to_string())
-                                                 .and_then(Stage7Table::from_json)?;
-                          let productions = obj.remove("productions").ok_or_else(|| "Missing field productions".to_string())
-                                               .and_then(Vec::<Production>::from_json)?;
-                          let terminal_map = obj.remove("terminal_map").ok_or_else(|| "Missing field terminal_map".to_string())
-                                                .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
-                          let non_terminal_map = obj.remove("non_terminal_map").ok_or_else(|| "Missing field non_terminal_map".to_string())
-                                                    .and_then(|n| BiBTreeMap::<NonTerminal, NonTerminalID>::from_json(n))?;
-                          let item_set_map = obj.remove("item_set_map").ok_or_else(|| "Missing field item_set_map".to_string())
-                                                .and_then(|n| BiBTreeMap::<BTreeSet<Item>, StateID>::from_json(n))?;
-                          let start_state_id = obj.remove("start_state_id").ok_or_else(|| "Missing field start_state_id".to_string())
-                                                  .and_then(StateID::from_json)?;
-                          Ok(GLRParser {
-                              stage_7_table,
-                              productions,
-                              terminal_map,
-                              non_terminal_map,
-                              item_set_map,
-                              start_state_id,
-                              actions: BTreeMap::new(), // Initialize actions as empty
-                          })
-                      }
-                      _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
-                  }
-              }
-          }
-          ```
-
-      5.  **Modify `GLRParserState::pop_and_goto` method**:
-          Remove unused `edge_content` and `edge_src` parameters. Apply actions.
-          ```rust
-          // Remove _edge_content and _edge_src from parameters
-          fn pop_and_goto(
-              &self,
-              stack: &Arc<GSSNode>, // Node representing state *after* parsing RHS of production.
-              len: usize, // Length of RHS
-              nt: NonTerminalID, // LHS non-terminal
-          ) -> Arc<GSSNode> {
-              // 1. Determine the accumulator for the action. This is the acc of the node `stack`,
-              //    which has successfully parsed the RHS.
-              let mut acc_for_action = stack.acc().clone();
-
-              // 2. Apply action if it exists for `nt`.
-              let non_terminal_name = self.parser.non_terminal_map.get_by_right(&nt)
-                  .expect("NonTerminalID not found in map during pop_and_goto action lookup");
-
-              if let Some(action_fn) = self.parser.actions.get(non_terminal_name) {
-                  // The Production is not passed, as per simplified requirement.
-                  match action_fn(non_terminal_name, &mut acc_for_action) {
-                      Ok(()) => {
-                          // Action succeeded. acc_for_action might be modified.
-                      }
-                      Err(err_msg) => {
-                          crate::debug!(3, "Action for non-terminal {} ({}) failed: {}. Pruning path.", non_terminal_name.0, nt.0, err_msg);
-                          // Return an empty GSSNode to signify this path is pruned.
-                          return Arc::new(GSSNode::new(LLMTokenInfo::default())); // Or some specific "pruned" acc
-                      }
-                  }
-              }
-              // acc_for_action now holds the final accumulator for the reduced non-terminal `nt`.
-
-              // 3. Determine the GSS node from which GOTO operations will originate.
-              // This is `stack.popn(len)`.
-              let goto_origin_node_arc = Arc::new(stack.popn(len));
-
-              // 4. Perform GOTO operations.
-              // Initialize with an empty accumulator; it will be built by merging.
-              let mut resulting_gss_node_data = GSSNode::new(LLMTokenInfo::default());
-
-              for (pred_of_goto_origin, edge_to_goto_origin) in goto_origin_node_arc.pop_iter() {
-                  let goto_lookup_state_id = edge_to_goto_origin.state_id;
-                  
-                  let goto_result = self.parser.stage_7_table.get(&goto_lookup_state_id)
-                      .and_then(|row| row.gotos.get(&nt))
-                      .copied() // Dereference Option<&Goto> to Option<Goto>
-                      .ok_or_else(|| {
-                          // This should ideally not happen in a correct table/grammar.
-                          // Log or handle as a critical error if it does.
-                          format!(
-                              "CRITICAL: GOTO not found for state {} ({:?}) and NT {} ({}). This indicates a possible issue with table generation or grammar.",
-                              goto_lookup_state_id.0,
-                              self.parser.item_set_map.get_by_right(&goto_lookup_state_id), // For more context
-                              nt.0,
-                              non_terminal_name.0
-                          )
-                      })
-                      .expect("GOTO lookup failed"); // Consider returning Result instead of panicking
-
-                  match goto_result {
-                      Goto::State(goto_state_id) => {
-                          let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id };
-                          // The new GSS node is formed by pushing from `pred_of_goto_origin`.
-                          // The accumulator for this new node is `acc_for_action`.
-                          let new_gss_node_after_goto = pred_of_goto_origin.push(goto_node_content, acc_for_action.clone());
-                          resulting_gss_node_data.merge(&Arc::new(new_gss_node_after_goto));
-                      }
-                      Goto::Accept => {
-                          // This path has successfully parsed the augmented start symbol.
-                          // The GSS node representing this acceptance should be a terminal node (no predecessors)
-                          // with the final accumulator `acc_for_action`.
-                          if pred_of_goto_origin.is_empty() { // Check if this GOTO is from the GSS root
-                              let accepted_node_data = GSSNode::new(acc_for_action.clone());
-                              resulting_gss_node_data.merge(&Arc::new(accepted_node_data));
-                          } else {
-                              // This case (GOTO Accept from a non-root GSS node predecessor) is highly unusual
-                              // for standard augmented grammars. It might indicate an issue or a very specific grammar design.
-                              crate::debug!(0, "Warning: GOTO Accept encountered from a non-root GSS node predecessor for NT {} ({}). Path acc: {:?}. This is unusual.", nt.0, non_terminal_name.0, acc_for_action);
-                              // Depending on strictness, this could be an error or handled by creating a terminal node.
-                              // For now, let's create a terminal node as if it were from root.
-                              let accepted_node_data = GSSNode::new(acc_for_action.clone());
-                              resulting_gss_node_data.merge(&Arc::new(accepted_node_data));
-                          }
-                      }
-                  }
-              }
-              Arc::new(resulting_gss_node_data)
-          }
-          ```
-
-      6.  **Update callers of `pop_and_goto` in `GLRParserState::step`**:
-          Remove the `top_edge_content` and `parent_arc` arguments from the call.
-          ```rust
-          // Inside the `while let Some((state, visited_on_this_path)) = todo.pop()` loop:
-          // ...
-          // Inside `match row.shifts_and_reduces.get(&token_id)`:
-
-          // Case: Stage7ShiftsAndReduces::Reduce
-          // Old: let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt);
-          // New:
-          let s_new_arc = self.pop_and_goto(&temp_idk, *len, *nt);
-
-
-          // Case: Stage7ShiftsAndReduces::Split
-          // Inside the `for (nt, _prod_ids) in nts` loop:
-          // Old: let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt);
-          // New:
-          let s_new_arc = self.pop_and_goto(&temp_idk, *len, *nt);
-          ```
-
-      **File: `src/glr/table.rs`**
-
-      1.  **Update `generate_glr_parser_with_maps`**:
-          Add the `actions` parameter and pass it to `GLRParser::new`.
-          ```rust
-          pub fn generate_glr_parser_with_maps(
-              productions: &[Production],
-              start_production_id: usize, // Removed mut
-              terminal_map: BiBTreeMap<Terminal, TerminalID>,
-              non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
-              actions: BTreeMap<NonTerminal, ActionFn>, // New parameter
-          ) -> GLRParser {
-              let original_productions = productions.to_vec();
-
-              crate::debug!(2, "Removing productions with undefined non-terminals");
-              let productions = remove_productions_with_undefined_nonterminals(productions, &[start_production_id]); // Renamed to 'productions'
-              // (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id); // simplify_grammar not fully implemented
-
-              crate::debug!(2, "Validating");
-              validate(&productions).expect("Validation error"); // Use the shadowed 'productions'
-
-              crate::debug!(2, "Stage 1");
-              let stage_1_table = stage_1(&productions, start_production_id); // Use the shadowed 'productions'
-              // ... (rest of stages use the shadowed 'productions')
-              crate::debug!(6, &stage_1_table);
-              crate::debug!(2, "Stage 2");
-              let stage_2_table = stage_2(stage_1_table, &productions);
-              crate::debug!(6, &stage_2_table);
-              crate::debug!(2, "Stage 3");
-              let stage_3_table = stage_3(stage_2_table, &productions);
-              crate::debug!(6, &stage_3_table);
-              crate::debug!(2, "Stage 4");
-              let stage_4_table = stage_4(stage_3_table, &productions);
-              crate::debug!(6, &stage_4_table);
-              crate::debug!(2, "Stage 5");
-              let stage_5_table = stage_5(stage_4_table, &productions);
-              crate::debug!(6, &stage_5_table);
-              crate::debug!(2, "Stage 6");
-              let stage_6_table = stage_6(stage_5_table);
-              crate::debug!(6, &stage_6_table);
-              crate::debug!(2, "Stage 7");
-              let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
-              crate::debug!(6, &stage_7_table);
-              crate::debug!(2, "Done generating GLR parser");
-
-              GLRParser::new(
-                  stage_7_table,
-                  original_productions, // Pass original_productions here
-                  terminal_map,
-                  non_terminal_map,
-                  item_set_map,
-                  start_state_id,
-                  actions, // Pass the new actions parameter
-              )
-          }
-          ```
-
-      2.  **Update `generate_glr_parser`**:
-          Pass an empty `BTreeMap` for actions.
-          ```rust
-          pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
-              let terminal_map = assign_terminal_ids(productions);
-              let non_terminal_map = assign_non_terminal_ids(productions);
-              generate_glr_parser_with_maps(
-                  productions,
-                  start_production_id,
-                  terminal_map,
-                  non_terminal_map,
-                  BTreeMap::new(), // Pass empty actions map
-              )
-          }
-          ```
-
-      3.  **Update `generate_glr_parser_with_terminal_map`**:
-          Pass an empty `BTreeMap` for actions.
-          ```rust
-          pub fn generate_glr_parser_with_terminal_map(
-              productions: &[Production],
-              start_production_id: usize,
-              terminal_map: BiBTreeMap<Terminal, TerminalID>,
-          ) -> GLRParser {
-              let non_terminal_map = assign_non_terminal_ids(productions);
-              generate_glr_parser_with_maps(
-                  productions,
-                  start_production_id,
-                  terminal_map,
-                  non_terminal_map,
-                  BTreeMap::new(), // Pass empty actions map
-              )
-          }
-          ```
-
-      This set of changes should implement the requested action mechanism. Remember to add `use std::sync::Arc;` in `src/glr/parser.rs` if it's not already there. Also, ensure `GLRParser` has `#[derive(Clone)]` if it didn't before.
-    metadata:
-  - user: |
-      Using model 'gemini/gemini-2.5-flash-preview-05-20' for code completion.
-
-      --- LLM Code Generation Attempt 1/5 ---
-      Parsed actions JSON: [
-        {
-          "action": "replace",
-          "filepath": "src/glr/parser.rs"
-        },
-        {
-          "action": "replace",
-          "filepath": "src/glr/table.rs"
-        }
-      ]
-      Found 2 code blocks with filepaths in attempt 1.
-      Received code for required file: src/glr/parser.rs
-      Received code for required file: src/glr/table.rs
-      All required file contents received or no content needed.
-
-      --- Applying Changes ---
-      Successfully replaced file: src/glr/parser.rs
-      Successfully replaced file: src/glr/table.rs
+      For `GLRParser`, the actions passed to `new` as via the parameter
+      ```rust
+      actions: BTreeMap<NonTerminal, ActionFn>,
+      ```
+      should get converted into this field in the struct
+      ```rust
+      pub actions: BTreeMap<NonTerminalID, ActionFn>,
+      ```
     metadata:
 ...

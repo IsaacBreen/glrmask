@@ -1,6 +1,6 @@
 use super::items::{compute_closure, compute_goto, split_on_dot, Item};
 use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
-use crate::glr::parser::{GLRParser, ActionFn};
+use crate::glr::parser::GLRParser;
 use bimap::BiBTreeMap;
 use std::collections::{HashMap, VecDeque};
 use std::collections::{BTreeMap, BTreeSet};
@@ -514,12 +514,12 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
     (stage_7_table, item_set_map, start_state_id)
 }
 
-pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>) -> GLRParser {
+pub fn generate_glr_parser_with_maps(productions: &[Production], mut start_production_id: usize, mut terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>) -> GLRParser {
     let original_productions = productions.to_vec();
 
 
     crate::debug!(2, "Removing productions with undefined non-terminals");
-    let productions = remove_productions_with_undefined_nonterminals(productions, &[start_production_id]);
+    let mut productions = remove_productions_with_undefined_nonterminals(productions, &[start_production_id]);
     // (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id);
 
     crate::debug!(2, "Validating");
@@ -548,18 +548,18 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     crate::debug!(6, &stage_7_table);
     crate::debug!(2, "Done generating GLR parser");
 
-    GLRParser::new(stage_7_table, original_productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions)
+    GLRParser::new(stage_7_table, original_productions, terminal_map, non_terminal_map, item_set_map, start_state_id)
 }
 
 pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
     let terminal_map = assign_terminal_ids(productions);
     let non_terminal_map = assign_non_terminal_ids(productions);
-    generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
+    generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
 }
 
 pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
     let non_terminal_map = assign_non_terminal_ids(productions);
-    generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
+    generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map)
 }
 
 pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
@@ -592,3 +592,4 @@ pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerm
     }
     non_terminal_map
 }
+
