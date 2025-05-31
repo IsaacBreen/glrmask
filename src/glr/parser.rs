@@ -1,3 +1,5 @@
+use std::any::Any;
+use std::cmp::Ordering;
 use crate::datastructures::gss::print_gss_forest;
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, PathAccumulator, GSSNode, GSSTrait, GSSStats};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
@@ -8,70 +10,71 @@ use crate::constraint::{LLMTokenBV, LLMTokenInfo}; // Import LLMTokenInfo
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display, Formatter};
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use crate::debug;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
-use std::any::Any;
-use std::cmp::Ordering;
+
+pub trait DynEq {
+    fn dyn_eq(&self, other: &dyn Any) -> bool;
+}
+pub trait DynOrd {
+    fn dyn_cmp(&self, other: &dyn Any) -> std::cmp::Ordering;
+}
+pub trait DynHash {
+    fn dyn_hash(&self, state: &mut dyn std::hash::Hasher);
+}
+impl DynEq for () {
+    fn dyn_eq(&self, _other: &dyn Any) -> bool { true }
+}
+impl DynOrd for () {
+    fn dyn_cmp(&self, _other: &dyn Any) -> std::cmp::Ordering { std::cmp::Ordering::Equal }
+}
+impl DynHash for () {
+    fn dyn_hash(&self, _state: &mut dyn std::hash::Hasher) { }
+}
+
+pub trait UserDataTrait: Any + Send + Sync + Debug + DynEq + DynOrd + DynHash {}
+impl UserDataTrait for () {}
+
+pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Sync>;
 
 
-pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn Any + Send + Sync>) -> bool + Send + Sync>;
-
-#[derive(Clone)] // Removed Debug, PartialEq, Eq, PartialOrd, Ord, Hash for user_data
+#[derive(Debug, Clone)]
 pub struct ParseStateEdgeContent { 
     pub state_id: StateID,
-    pub user_data: Arc<dyn Any + Send + Sync>, // Changed to Arc<dyn Any + Send + Sync>
+    pub user_data: Arc<dyn UserDataTrait>, // Changed to Arc<dyn UserDataTrait>
 }
-
-// Manual implementation for Debug, Hash, PartialEq, Eq, PartialOrd, Ord due to `Arc<dyn Any>`
-impl Debug for ParseStateEdgeContent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ParseStateEdgeContent")
-            .field("state_id", &self.state_id)
-            .field("user_data_type_id", &self.user_data.type_id()) // Show TypeId for user_data
-            .finish()
-    }
-}
-
-impl Hash for ParseStateEdgeContent {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.state_id.hash(state);
-        // Hash the pointer of the Arc for user_data
-        (Arc::as_ptr(&self.user_data) as usize).hash(state);
-    }
-}
-
 impl PartialEq for ParseStateEdgeContent {
     fn eq(&self, other: &Self) -> bool {
         self.state_id == other.state_id &&
-        // Compare user_data by Arc pointer equality
-        Arc::ptr_eq(&self.user_data, &other.user_data)
+        self.user_data.dyn_eq(&other.user_data)
     }
 }
-
 impl Eq for ParseStateEdgeContent {}
-
 impl PartialOrd for ParseStateEdgeContent {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match self.state_id.partial_cmp(&other.state_id) {
             Some(Ordering::Equal) => {
-                // Compare user_data by Arc pointer
-                (Arc::as_ptr(&self.user_data) as usize).partial_cmp(&(Arc::as_ptr(&other.user_data) as usize))
+                Some(self.user_data.dyn_cmp(&other.user_data))
             }
             other_ord => other_ord,
         }
     }
 }
-
 impl Ord for ParseStateEdgeContent {
     fn cmp(&self, other: &Self) -> Ordering {
         self.state_id.cmp(&other.state_id)
-            .then_with(|| (Arc::as_ptr(&self.user_data) as usize).cmp(&(Arc::as_ptr(&other.user_data) as usize)))
+            .then_with(|| self.user_data.dyn_cmp(&other.user_data))
     }
 }
-
+impl Hash for ParseStateEdgeContent {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.state_id.hash(state);
+        self.user_data.dyn_hash(state);
+    }
+}
 
 // JSONConvertible for ParseStateEdgeContent
 impl JSONConvertible for ParseStateEdgeContent {
@@ -80,7 +83,7 @@ impl JSONConvertible for ParseStateEdgeContent {
         obj.insert("state_id".to_string(), self.state_id.to_json());
         // Handle user_data serialization:
         // Option 1: Panic if not default.
-        if self.user_data.is::<()>() { // Check if it's Arc::new(())
+        if self.user_data.type_id() == std::any::TypeId::of::<()>() {
              // Optionally, add a marker: obj.insert("user_data_type".to_string(), JSONNode::String("default_unit".to_string()));
         } else {
             panic!("Cannot serialize ParseStateEdgeContent with non-default user_data of type {:?}", self.user_data.type_id());
@@ -93,7 +96,7 @@ impl JSONConvertible for ParseStateEdgeContent {
                 let state_id = obj.remove("state_id").ok_or_else(|| "Missing field state_id for ParseStateEdgeContent".to_string()) // Corrected struct name
                                   .and_then(StateID::from_json)?;
                 // Always deserialize user_data as default Arc::new(())
-                let user_data: Arc<dyn Any + Send + Sync> = Arc::new(());
+                let user_data: Arc<dyn UserDataTrait> = Arc::new(());
                 Ok(ParseStateEdgeContent { state_id, user_data })
             }
             _ => Err("Expected JSONNode::Object for ParseStateEdgeContent".to_string()), // Corrected struct name
@@ -302,7 +305,7 @@ impl GLRParser {
     }
 
     pub fn init_parse_state_with_acc(&self, initial_acc: LLMTokenInfo) -> ParseState { // No longer generic
-        let initial_user_data: Arc<dyn Any + Send + Sync> = Arc::new(());
+        let initial_user_data: Arc<dyn UserDataTrait> = Arc::new(());
         let initial_content = ParseStateEdgeContent {
             state_id: self.start_state_id,
             user_data: initial_user_data, // Add default user_data
@@ -447,7 +450,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         stack: &Arc<GSSNode>, 
         next_state_id: StateID,
         acc_for_new_node: LLMTokenInfo,
-        user_data_for_new_edge: Arc<dyn Any + Send + Sync>, // New parameter
+        user_data_for_new_edge: Arc<dyn UserDataTrait>, // New parameter
     ) -> ParseState {
         let new_content = ParseStateEdgeContent { state_id: next_state_id, user_data: user_data_for_new_edge };
         let new_gss_node_instance = stack.push(new_content, acc_for_new_node);
@@ -488,7 +491,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         Goto::State(goto_state_id) => {
                             crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", current_top_edge_val.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
 
-                            let mut user_data_for_goto_edge: Arc<dyn Any + Send + Sync> = Arc::new(()); // Default user_data for the new edge
+                            let mut user_data_for_goto_edge: Arc<dyn UserDataTrait> = Arc::new(()); // Default user_data for the new edge
 
                             // Apply action if present
                             if let Some(action_fn) = self.parser.actions.get(&nt_id) {
@@ -516,7 +519,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             // The 'out' GSSNode might not be used further if it's an accept state,
                             // but actions should still run.
                              if let Some(action_fn) = self.parser.actions.get(&nt_id) {
-                                let mut temp_user_data: Arc<dyn Any + Send + Sync> = Arc::new(());
+                                let mut temp_user_data: Arc<dyn UserDataTrait> = Arc::new(());
                                 if !action_fn(&mut temp_user_data) {
                                      crate::debug!(4, "Action for NT {} on Accept path returned false.", nt_id.0);
                                      // Depending on desired behavior, this might mean the parse is invalid.
