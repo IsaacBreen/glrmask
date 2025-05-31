@@ -411,6 +411,50 @@ impl GrammarDefinition {
         }
     }
 
+    /// Attempts to directly map a rule `rule_name -> terminal_expr` such that the terminal is named `rule_name`.
+    /// Returns true if successful, false if fallback to general conversion is needed.
+    fn try_direct_terminal_mapping(
+        rule_name: &str, // The name of the rule, e.g., "MY_TOKEN"
+        terminal_expr: Expr, // The Expr for the literal/regex, e.g., Expr::U8Seq(b"keyword")
+        productions: &mut Vec<Production>,
+        terminal_name_to_group_id: &mut BiBTreeMap<String, usize>,
+        terminal_expr_to_group_id: &mut BiBTreeMap<Expr, usize>,
+        next_terminal_group_id: &mut usize,
+    ) -> bool {
+        // Case 1: The terminal_expr already exists and is associated with a terminal.
+        if let Some(group_id) = terminal_expr_to_group_id.get_by_left(&terminal_expr) {
+            let existing_terminal_name = terminal_name_to_group_id.get_by_right(group_id)
+                .expect("Internal error: terminal_expr exists but no name for its group_id");
+            productions.push(Production {
+                lhs: NonTerminal(rule_name.to_string()),
+                rhs: vec![Symbol::Terminal(Terminal(existing_terminal_name.clone()))],
+            });
+            return true;
+        }
+
+        // Case 2: The terminal_expr is new. Check if `rule_name` can be used for this new terminal.
+        // It can be used if `rule_name` is not already a terminal name for a *different* expression.
+        if terminal_name_to_group_id.contains_left(rule_name) {
+            // `rule_name` is already in use as a terminal name. Since Case 1 didn't match,
+            // it must be for a different terminal_expr. So, we can't use `rule_name` for this new `terminal_expr`.
+            // Fallback to the general conversion logic.
+            return false;
+        }
+
+        // Case 3: The terminal_expr is new, and `rule_name` is available as a terminal name.
+        // Create a new terminal named `rule_name` for `terminal_expr`.
+        let new_group_id = *next_terminal_group_id;
+        terminal_name_to_group_id.insert(rule_name.to_string(), new_group_id);
+        terminal_expr_to_group_id.insert(terminal_expr.clone(), new_group_id); // .clone() because terminal_expr is used in key
+        *next_terminal_group_id += 1;
+
+        productions.push(Production {
+            lhs: NonTerminal(rule_name.to_string()),
+            rhs: vec![Symbol::Terminal(Terminal(rule_name.to_string()))],
+        });
+        return true;
+    }
+
     /// Constructs a `GrammarDefinition` from a list of grammar expressions.
     pub fn from_exprs(exprs: Vec<(String, GrammarExpr)>) -> Result<Self, String> {
         if exprs.is_empty() {
@@ -440,37 +484,90 @@ impl GrammarDefinition {
         let start_production_id = 0; // The augmented start production is always the first one.
 
         for (name, expr) in tqdm!(exprs.iter()) {
-            let lhs = NonTerminal(name.clone());
-            let lhs_name_str = name; // Base name for generated sub-rules/terminals
+            let lhs_nt = NonTerminal(name.clone());
+            // `name` (the rule's name) is used as the base for naming children if convert_grammar_expr_to_symbols is called.
+            let current_rule_name_for_naming_children = name;
 
-            if let GrammarExpr::Choice(choices) = expr {
-                for choice_expr in choices {
-                    let (rhs_symbols_for_arm, new_productions_for_arm) = Self::convert_grammar_expr_to_symbols(
-                        choice_expr,
-                        lhs_name_str,
-                        // &mut productions, // Removed
+            match expr {
+                GrammarExpr::Literal(bytes) => {
+                    let terminal_expr_val = Expr::U8Seq(bytes.clone());
+                    if !Self::try_direct_terminal_mapping(
+                        name,
+                        terminal_expr_val,
+                        &mut productions,
+                        &mut terminal_name_to_group_id,
+                        &mut terminal_expr_to_group_id,
+                        &mut next_terminal_group_id,
+                    ) {
+                        // Fallback to general conversion
+                        let (rhs_symbols, new_productions) = Self::convert_grammar_expr_to_symbols(
+                            expr, // Pass the original GrammarExpr::Literal
+                            current_rule_name_for_naming_children,
+                            &mut terminal_name_to_group_id,
+                            &mut terminal_expr_to_group_id,
+                            &mut next_terminal_group_id,
+                            &mut per_base_counters,
+                            &mut all_names,
+                        );
+                        productions.push(Production { lhs: lhs_nt, rhs: rhs_symbols });
+                        productions.extend(new_productions);
+                    }
+                }
+                GrammarExpr::RegexExpr(regex_e) => {
+                    let terminal_expr_val = regex_e.clone();
+                    if !Self::try_direct_terminal_mapping(
+                        name,
+                        terminal_expr_val,
+                        &mut productions,
+                        &mut terminal_name_to_group_id,
+                        &mut terminal_expr_to_group_id,
+                        &mut next_terminal_group_id,
+                    ) {
+                        // Fallback to general conversion
+                        let (rhs_symbols, new_productions) = Self::convert_grammar_expr_to_symbols(
+                            expr, // Pass the original GrammarExpr::RegexExpr
+                            current_rule_name_for_naming_children,
+                            &mut terminal_name_to_group_id,
+                            &mut terminal_expr_to_group_id,
+                            &mut next_terminal_group_id,
+                            &mut per_base_counters,
+                            &mut all_names,
+                        );
+                        productions.push(Production { lhs: lhs_nt, rhs: rhs_symbols });
+                        productions.extend(new_productions);
+                    }
+                }
+                GrammarExpr::Choice(choices) => {
+                    // For choices, each arm is processed. The direct mapping logic is for top-level rules.
+                    // So, the existing behavior for Choice is maintained.
+                    for choice_expr_item in choices {
+                        let (rhs_symbols_for_arm, new_productions_for_arm) = Self::convert_grammar_expr_to_symbols(
+                            choice_expr_item,
+                            current_rule_name_for_naming_children,
+                            &mut terminal_name_to_group_id,
+                            &mut terminal_expr_to_group_id,
+                            &mut next_terminal_group_id,
+                            &mut per_base_counters,
+                            &mut all_names,
+                        );
+                        productions.push(Production { lhs: lhs_nt.clone(), rhs: rhs_symbols_for_arm });
+                        productions.extend(new_productions_for_arm);
+                    }
+                }
+                // For Sequence, Ref, Optional, Repeat, use the general conversion logic
+                _ => {
+                    let (rhs_symbols, new_productions_for_rhs) = Self::convert_grammar_expr_to_symbols(
+                        expr,
+                        current_rule_name_for_naming_children,
                         &mut terminal_name_to_group_id,
                         &mut terminal_expr_to_group_id,
                         &mut next_terminal_group_id,
                         &mut per_base_counters,
                         &mut all_names,
                     );
-                    productions.push(Production { lhs: lhs.clone(), rhs: rhs_symbols_for_arm });
-                    productions.extend(new_productions_for_arm); // Extend with productions from the arm's processing
+                    productions.push(Production { lhs: lhs_nt, rhs: rhs_symbols });
+                    productions.extend(new_productions_for_rhs);
                 }
-            } else {
-                let (rhs_symbols, new_productions_for_rhs) = Self::convert_grammar_expr_to_symbols(
-                    expr,
-                    lhs_name_str,
-                    // &mut productions, // Removed
-                    &mut terminal_name_to_group_id,
-                    &mut terminal_expr_to_group_id,
-                    &mut next_terminal_group_id,
-                    &mut per_base_counters,
-                    &mut all_names,
-                );
-                productions.push(Production { lhs, rhs: rhs_symbols });
-                productions.extend(new_productions_for_rhs); // Extend with productions from processing the rhs
             }
         }
 
