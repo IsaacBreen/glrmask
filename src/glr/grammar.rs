@@ -2,6 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use std::collections::BTreeMap as StdMap;
 use std::fmt::{Display, Formatter};
+use crate::datastructures::gss::UserData; // Add this use if not already present for Arc<dyn UserData>
+use std::sync::Arc; // Add this use
+
 // Added for derive macro pattern
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -64,11 +67,41 @@ impl JSONConvertible for Symbol {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Action {
+    pub name: String,
+    // If actions were actual functions stored directly:
+    // #[cfg_attr(feature = "json", serde(skip))] // Example for conditional compilation if using serde
+    // pub func: Option<Arc<dyn Fn(&mut Arc<dyn UserData>, &[Arc<dyn UserData>]) -> bool + Send + Sync>>,
+}
+
+impl Action {
+    pub fn new(name: &str) -> Self {
+        Action { name: name.to_string() /* func: None */ }
+    }
+    // pub fn new_with_fn(name: &str, func: Arc<dyn Fn(&mut Arc<dyn UserData>, &[Arc<dyn UserData>]) -> bool + Send + Sync>) -> Self {
+    //     Action { name: name.to_string(), func: Some(func) }
+    // }
+}
+
+impl JSONConvertible for Action {
+    fn to_json(&self) -> JSONNode {
+        JSONNode::String(self.name.clone())
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::String(s) => Ok(Action::new(&s)),
+            _ => Err("Expected JSONNode::String for Action".to_string()),
+        }
+    }
+}
+
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Production {
     pub lhs: NonTerminal,
     pub rhs: Vec<Symbol>,
+    pub action: Option<Action>, // Added field
 }
 
 // Manual impl for Production (could be derived)
@@ -77,6 +110,7 @@ impl JSONConvertible for Production {
         let mut obj = StdMap::new();
         obj.insert("lhs".to_string(), self.lhs.to_json());
         obj.insert("rhs".to_string(), self.rhs.to_json());
+        obj.insert("action".to_string(), self.action.to_json()); // Add this line
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
@@ -86,7 +120,9 @@ impl JSONConvertible for Production {
                                  .and_then(NonTerminal::from_json)?;
                 let rhs = obj.remove("rhs").ok_or_else(|| "Missing field rhs for Production".to_string())
                                  .and_then(Vec::<Symbol>::from_json)?;
-                Ok(Production { lhs, rhs })
+                let action = obj.remove("action").ok_or_else(|| "Missing field action for Production".to_string())
+                                  .and_then(Option::<Action>::from_json)?; // Add this line
+                Ok(Production { lhs, rhs, action })
             }
             _ => Err("Expected JSONNode::Object for Production".to_string()),
         }
@@ -114,10 +150,11 @@ pub fn t(name: &str) -> Symbol {
     Symbol::Terminal(Terminal(name.to_string()))
 }
 
-pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {
+pub fn prod(name: &str, rhs: Vec<Symbol>, action: Option<Action>) -> Production {
     Production {
         lhs: NonTerminal(name.to_string()),
         rhs,
+        action,
     }
 }
 
@@ -262,3 +299,4 @@ pub fn compute_follow_sets(productions: &[Production]) -> BTreeMap<NonTerminal, 
 
     follow_sets
 }
+

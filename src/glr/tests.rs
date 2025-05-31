@@ -13,9 +13,9 @@ fn create_simple_parser() -> GLRParser {
     // A -> b
     // This grammar is left-recursive but does NOT have length-1 cycles.
     let productions = vec![
-        prod("S", vec![nt("A"), t("$")]), // Start rule
-        prod("A", vec![nt("A"), t("a")]),
-        prod("A", vec![t("b")]),
+        prod("S", vec![nt("A"), t("$")], None), // Start rule
+        prod("A", vec![nt("A"), t("a")], None),
+        prod("A", vec![t("b")], None),
     ];
 
     generate_glr_parser(&productions, 0)
@@ -32,13 +32,13 @@ fn create_expression_parser() -> GLRParser {
     // This grammar is left-recursive (E->E+T, T->T*F) and has unit productions (E->T, T->F),
     // but does NOT have length-1 cycles.
     let productions = vec![
-        prod("S", vec![nt("E"), t("$")]), // Start rule
-        prod("E", vec![nt("E"), t("+"), nt("T")]),
-        prod("E", vec![nt("T")]),
-        prod("T", vec![nt("T"), t("*"), nt("F")]),
-        prod("T", vec![nt("F")]),
-        prod("F", vec![t("("), nt("E"), t(")")]),
-        prod("F", vec![t("i")]),
+        prod("S", vec![nt("E"), t("$")], None), // Start rule
+        prod("E", vec![nt("E"), t("+"), nt("T")], None),
+        prod("E", vec![nt("T")], None),
+        prod("T", vec![nt("T"), t("*"), nt("F")], None),
+        prod("T", vec![nt("F")], None),
+        prod("F", vec![t("("), nt("E"), t(")")], None),
+        prod("F", vec![t("i")], None),
     ];
     generate_glr_parser(&productions, 0)
 }
@@ -130,21 +130,21 @@ fn test_expression_parse_table_generation_and_parse() {
 fn validation_passes_standard_grammars() {
     // Simple Grammar (already tested implicitly above, but good to be explicit)
     let simple_productions = vec![
-        prod("S", vec![nt("A"), t("$")]),
-        prod("A", vec![nt("A"), t("a")]),
-        prod("A", vec![t("b")]),
+        prod("S", vec![nt("A"), t("$")], None),
+        prod("A", vec![nt("A"), t("a")], None),
+        prod("A", vec![t("b")], None),
     ];
     assert!(analyze::validate(&simple_productions).is_ok());
 
     // Expression Grammar (already tested implicitly above)
     let expr_productions = vec![
-        prod("S", vec![nt("E"), t("$")]),
-        prod("E", vec![nt("E"), t("+"), nt("T")]),
-        prod("E", vec![nt("T")]),
-        prod("T", vec![nt("T"), t("*"), nt("F")]),
-        prod("T", vec![nt("F")]),
-        prod("F", vec![t("("), nt("E"), t(")")]),
-        prod("F", vec![t("i")]),
+        prod("S", vec![nt("E"), t("$")], None),
+        prod("E", vec![nt("E"), t("+"), nt("T")], None),
+        prod("E", vec![nt("T")], None),
+        prod("T", vec![nt("T"), t("*"), nt("F")], None),
+        prod("T", vec![nt("F")], None),
+        prod("F", vec![t("("), nt("E"), t(")")], None),
+        prod("F", vec![t("i")], None),
     ];
     assert!(analyze::validate(&expr_productions).is_ok());
 }
@@ -153,9 +153,9 @@ fn validation_passes_standard_grammars() {
 fn validation_fails_direct_length_1_recursion() {
     // A -> A
     let productions = vec![
-        prod("S", vec![nt("A")]), // Start rule
-        prod("A", vec![nt("A")]), // Direct length-1 cycle
-        prod("A", vec![t("x")]),  // To make A reachable/productive (though validation runs first)
+        prod("S", vec![nt("A")], None), // Start rule
+        prod("A", vec![nt("A")], None), // Direct length-1 cycle
+        prod("A", vec![t("x")], None),  // To make A reachable/productive (though validation runs first)
     ];
     let result = analyze::validate(&productions);
     assert!(result.is_err());
@@ -167,10 +167,10 @@ fn validation_fails_indirect_length_1_recursion() {
     // A -> B
     // B -> A
     let productions = vec![
-        prod("S", vec![nt("A")]), // Start rule
-        prod("A", vec![nt("B")]), // A derives B
-        prod("B", vec![nt("A")]), // B derives A (cycle)
-        prod("A", vec![t("x")]),  // Make productive
+        prod("S", vec![nt("A")], None), // Start rule
+        prod("A", vec![nt("B")], None), // A derives B
+        prod("B", vec![nt("A")], None), // B derives A (cycle)
+        prod("A", vec![t("x")], None),  // Make productive
     ];
     let result = analyze::validate(&productions);
     assert!(result.is_err());
@@ -181,11 +181,11 @@ fn validation_fails_indirect_length_1_recursion() {
 
     // A -> B, B -> C, C -> A
     let productions_3 = vec![
-        prod("S", vec![nt("A")]),
-        prod("A", vec![nt("B")]),
-        prod("B", vec![nt("C")]),
-        prod("C", vec![nt("A")]),
-        prod("A", vec![t("x")]),
+        prod("S", vec![nt("A")], None),
+        prod("A", vec![nt("B")], None),
+        prod("B", vec![nt("C")], None),
+        prod("C", vec![nt("A")], None),
+        prod("A", vec![t("x")], None),
     ];
     let result_3 = analyze::validate(&productions_3);
      assert!(result_3.is_err());
@@ -200,10 +200,10 @@ fn validation_fails_direct_length_1_recursion_nullable_prefix() {
     // A -> N A
     // N -> epsilon
     let productions = vec![
-        prod("S", vec![nt("A")]),
-        prod("A", vec![nt("N"), nt("A")]), // A -> Nullable A (cycle)
-        prod("N", vec![]),                // N is nullable
-        prod("A", vec![t("x")]),
+        prod("S", vec![nt("A")], None),
+        prod("A", vec![nt("N"), nt("A")], None), // A -> Nullable A (cycle)
+        prod("N", vec![], None),                // N is nullable
+        prod("A", vec![t("x")], None),
     ];
     let result = analyze::validate(&productions);
     assert!(result.is_err());
@@ -217,12 +217,12 @@ fn validation_fails_indirect_length_1_recursion_nullable_prefix() {
     // N -> epsilon
     // M -> epsilon
     let productions = vec![
-        prod("S", vec![nt("A")]),
-        prod("A", vec![nt("N"), nt("B")]), // A -> Nullable B
-        prod("B", vec![nt("M"), nt("A")]), // B -> Nullable A (cycle)
-        prod("N", vec![]),                // N is nullable
-        prod("M", vec![]),                // M is nullable
-        prod("A", vec![t("x")]),
+        prod("S", vec![nt("A")], None),
+        prod("A", vec![nt("N"), nt("B")], None), // A -> Nullable B
+        prod("B", vec![nt("M"), nt("A")], None), // B -> Nullable A (cycle)
+        prod("N", vec![], None),                // N is nullable
+        prod("M", vec![], None),                // M is nullable
+        prod("A", vec![t("x")], None),
     ];
     let result = analyze::validate(&productions);
     assert!(result.is_err());
@@ -236,18 +236,18 @@ fn validation_fails_indirect_length_1_recursion_nullable_prefix() {
 fn validation_passes_non_unit_recursion() {
     // A -> A t (Not length-1)
     let productions = vec![
-        prod("S", vec![nt("A")]),
-        prod("A", vec![nt("A"), t("t")]),
-        prod("A", vec![t("x")]),
+        prod("S", vec![nt("A")], None),
+        prod("A", vec![nt("A"), t("t")], None),
+        prod("A", vec![t("x")], None),
     ];
     assert!(analyze::validate(&productions).is_ok());
 
     // A -> B A, B -> t (B is not nullable)
     let productions_2 = vec![
-        prod("S", vec![nt("A")]),
-        prod("A", vec![nt("B"), nt("A")]),
-        prod("B", vec![t("b")]),
-        prod("A", vec![t("x")]),
+        prod("S", vec![nt("A")], None),
+        prod("A", vec![nt("B"), nt("A")], None),
+        prod("B", vec![t("b")], None),
+        prod("A", vec![t("x")], None),
     ];
      assert!(analyze::validate(&productions_2).is_ok());
 }
@@ -257,10 +257,10 @@ fn validation_fails_left_nullable_left_recursion() {
     // S -> B S a
     // B -> epsilon
     let productions = vec![
-        prod("S'", vec![nt("S"), t("$")]), // Start rule
-        prod("S", vec![nt("B"), nt("S"), t("a")]), // Problematic rule
-        prod("S", vec![t("b")]),
-        prod("B", vec![]), // B is nullable
+        prod("S'", vec![nt("S"), t("$")], None), // Start rule
+        prod("S", vec![nt("B"), nt("S"), t("a")], None), // Problematic rule
+        prod("S", vec![t("b")], None),
+        prod("B", vec![], None), // B is nullable
     ];
     let result = analyze::validate(&productions);
     assert!(result.is_err());
@@ -273,8 +273,8 @@ fn validation_fails_missing_nonterminal() {
     // S -> A
     // A -> B (B is never defined)
     let productions = vec![
-        prod("S", vec![nt("A")]),
-        prod("A", vec![nt("B")]),
+        prod("S", vec![nt("A")], None),
+        prod("A", vec![nt("B")], None),
     ];
     let result = analyze::validate(&productions);
     assert!(result.is_err());
@@ -291,15 +291,15 @@ fn validation_passes_complex_unit_rules_no_cycle() {
     // X -> Y
     // Y -> t
     let productions = vec![
-        prod("S", vec![nt("A")]),
-        prod("S", vec![nt("X")]),
-        prod("A", vec![nt("B")]),
-        prod("A", vec![nt("C")]),
-        prod("B", vec![nt("D")]),
-        prod("C", vec![nt("D")]),
-        prod("D", vec![t("t")]),
-        prod("X", vec![nt("Y")]),
-        prod("Y", vec![t("t")]),
+        prod("S", vec![nt("A")], None),
+        prod("S", vec![nt("X")], None),
+        prod("A", vec![nt("B")], None),
+        prod("A", vec![nt("C")], None),
+        prod("B", vec![nt("D")], None),
+        prod("C", vec![nt("D")], None),
+        prod("D", vec![t("t")], None),
+        prod("X", vec![nt("Y")], None),
+        prod("Y", vec![t("t")], None),
     ];
      assert!(analyze::validate(&productions).is_ok());
 }
@@ -312,12 +312,12 @@ fn test_remove_undefined_simple() {
     // A -> B (B is undefined)
     // C -> c
     let productions = vec![
-        prod("S", vec![nt("A")]),
-        prod("A", vec![nt("B")]), // This should be removed
-        prod("C", vec![t("c")]),  // This should remain
+        prod("S", vec![nt("A")], None),
+        prod("A", vec![nt("B")], None), // This should be removed
+        prod("C", vec![t("c")], None),  // This should remain
     ];
     let expected = vec![
-        prod("C", vec![t("c")]),
+        prod("C", vec![t("c")], None),
     ];
     let result = remove_productions_with_undefined_nonterminals(&productions, &[]);
     assert_eq!(result, expected);
@@ -330,13 +330,13 @@ fn test_remove_undefined_iterative() {
     // B -> C (C is undefined)
     // D -> d
     let productions = vec![
-        prod("S", vec![nt("A")]), // Removed in iteration 2 (because A becomes undefined)
-        prod("A", vec![nt("B")]), // Removed in iteration 2 (because B becomes undefined)
-        prod("B", vec![nt("C")]), // Removed in iteration 1 (because C is undefined)
-        prod("D", vec![t("d")]),  // Remains
+        prod("S", vec![nt("A")], None), // Removed in iteration 2 (because A becomes undefined)
+        prod("A", vec![nt("B")], None), // Removed in iteration 2 (because B becomes undefined)
+        prod("B", vec![nt("C")], None), // Removed in iteration 1 (because C is undefined)
+        prod("D", vec![t("d")], None),  // Remains
     ];
     let expected = vec![
-        prod("D", vec![t("d")]),
+        prod("D", vec![t("d")], None),
     ];
     let result = remove_productions_with_undefined_nonterminals(&productions, &[]);
     assert_eq!(result, expected);
@@ -347,8 +347,8 @@ fn test_remove_undefined_no_change() {
     // S -> A
     // A -> a
     let productions = vec![
-        prod("S", vec![nt("A")]),
-        prod("A", vec![t("a")]),
+        prod("S", vec![nt("A")], None),
+        prod("A", vec![t("a")], None),
     ];
     let expected = productions.clone();
     let result = remove_productions_with_undefined_nonterminals(&productions, &[]);
@@ -371,11 +371,11 @@ fn test_ambiguous_dangling_else() {
     // This is ambiguous: the 'else' can attach to the inner or outer 'if'.
     // GLR should *accept* this input by exploring both possibilities.
     let productions = vec![
-        prod("S'", vec![nt("Stmt"), t("$")]), // Start
-        prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt")]),
-        prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt"), t("else"), nt("Stmt")]),
-        prod("Stmt", vec![t("other")]),
-        prod("Expr", vec![t("id")]),
+        prod("S'", vec![nt("Stmt"), t("$")], None), // Start
+        prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt")], None),
+        prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt"), t("else"), nt("Stmt")], None),
+        prod("Stmt", vec![t("other")], None),
+        prod("Expr", vec![t("id")], None),
     ];
     let parser = generate_glr_parser(&productions, 0);
     let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
@@ -409,10 +409,10 @@ fn test_ambiguous_arithmetic() {
     // This is ambiguous: (id + id) * id or id + (id * id)
     // GLR should accept this.
      let productions = vec![
-        prod("S'", vec![nt("E"), t("$")]), // Start
-        prod("E", vec![nt("E"), t("+"), nt("E")]),
-        prod("E", vec![nt("E"), t("*"), nt("E")]),
-        prod("E", vec![t("id")]),
+        prod("S'", vec![nt("E"), t("$")], None), // Start
+        prod("E", vec![nt("E"), t("+"), nt("E")], None),
+        prod("E", vec![nt("E"), t("*"), nt("E")], None),
+        prod("E", vec![t("id")], None),
     ];
     let parser = generate_glr_parser(&productions, 0);
     let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
@@ -441,11 +441,11 @@ fn test_reduce_reduce_conflict() {
     // This grammar has a reduce/reduce conflict on 'x'.
     // GLR should handle this by performing both reductions.
     let productions = vec![
-        prod("S'", vec![nt("S"), t("$")]), // Start
-        prod("S", vec![nt("A")]),
-        prod("S", vec![nt("B")]),
-        prod("A", vec![t("x")]),
-        prod("B", vec![t("x")]),
+        prod("S'", vec![nt("S"), t("$")], None), // Start
+        prod("S", vec![nt("A")], None),
+        prod("S", vec![nt("B")], None),
+        prod("A", vec![t("x")], None),
+        prod("B", vec![t("x")], None),
     ];
      let parser = generate_glr_parser(&productions, 0);
     let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
@@ -470,12 +470,12 @@ fn test_epsilon_rules_ambiguity() {
     // Input: x
     // This is ambiguous: S -> A B => x B => x epsilon OR S -> A B => epsilon B => epsilon x
     let productions = vec![
-        prod("S'", vec![nt("S"), t("$")]), // Start
-        prod("S", vec![nt("A"), nt("B")]),
-        prod("A", vec![t("x")]),
-        prod("A", vec![]), // Epsilon
-        prod("B", vec![t("x")]),
-        prod("B", vec![]), // Epsilon
+        prod("S'", vec![nt("S"), t("$")], None), // Start
+        prod("S", vec![nt("A"), nt("B")], None),
+        prod("A", vec![t("x")], None),
+        prod("A", vec![], None), // Epsilon
+        prod("B", vec![t("x")], None),
+        prod("B", vec![], None), // Epsilon
     ];
     let parser = generate_glr_parser(&productions, 0);
     println!("Parser: {}", parser);
@@ -503,9 +503,9 @@ fn test_highly_ambiguous_potentially_slow() {
     // This grammar is highly ambiguous (Catalan numbers of parses).
     // GLR should accept it, but performance *could* degrade on larger inputs.
     let productions = vec![
-        prod("S'", vec![nt("S"), t("$")]), // Start
-        prod("S", vec![nt("S"), nt("S")]),
-        prod("S", vec![t("a")]),
+        prod("S'", vec![nt("S"), t("$")], None), // Start
+        prod("S", vec![nt("S"), nt("S")], None),
+        prod("S", vec![t("a")], None),
     ];
     let parser = generate_glr_parser(&productions, 0);
     let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
@@ -533,10 +533,10 @@ fn test_hidden_left_recursion() {
     // S -> B S a can effectively act like S -> S a.
     // GLR parsers should handle this correctly.
     let productions = vec![
-        prod("S'", vec![nt("S"), t("$")]), // Start
-        prod("S", vec![nt("B"), nt("S"), t("a")]),
-        prod("S", vec![t("b")]),
-        prod("B", vec![]), // Epsilon
+        prod("S'", vec![nt("S"), t("$")], None), // Start
+        prod("S", vec![nt("B"), nt("S"), t("a")], None),
+        prod("S", vec![t("b")], None),
+        prod("B", vec![], None), // Epsilon
     ];
 
     // Validation should fail due to left-nullable left recursion
@@ -578,10 +578,10 @@ fn test_hidden_right_recursion() {
     // S -> a S B can effectively act like S -> a S.
     // GLR parsers should handle this correctly.
     let productions = vec![
-        prod("S'", vec![nt("S"), t("$")]), // Start
-        prod("S", vec![t("a"), nt("S"), nt("B")]),
-        prod("S", vec![t("b")]),
-        prod("B", vec![]), // Epsilon
+        prod("S'", vec![nt("S"), t("$")], None), // Start
+        prod("S", vec![t("a"), nt("S"), nt("B")], None),
+        prod("S", vec![t("b")], None),
+        prod("B", vec![], None), // Epsilon
     ];
 
     // Validation should pass as it's not length-1 recursion
@@ -616,10 +616,10 @@ fn test_nullable_nonterminal_before_terminal() {
     // B  ::= 'd'
     // B  ::=  (* epsilon *)
     let productions = vec![
-        prod("S'", vec![nt("A"), t("$")]), // Start rule
-        prod("A", vec![nt("B"), t("c")]),
-        prod("B", vec![t("d")]),
-        prod("B", vec![]), // Epsilon production for B
+        prod("S'", vec![nt("A"), t("$")], None), // Start rule
+        prod("A", vec![nt("B"), t("c")], None),
+        prod("B", vec![t("d")], None),
+        prod("B", vec![], None), // Epsilon production for B
     ];
 
     // Validation should pass for this grammar
@@ -674,11 +674,11 @@ fn test_filter_productions_selectivity() {
     // Goal: If interesting is {T_int}, only X -> A T_int should be kept.
     //       X -> B should be filtered out because its RHS (B) does not lead to T_int.
     let productions = vec![
-        prod("S", vec![nt("X")]),
-        prod("X", vec![nt("A"), t("T_int")]), // P0
-        prod("X", vec![nt("B")]),             // P1
-        prod("A", vec![t("a")]),              // P2
-        prod("B", vec![t("b")]),              // P3
+        prod("S", vec![nt("X")], None),
+        prod("X", vec![nt("A"), t("T_int")], None), // P0
+        prod("X", vec![nt("B")], None),             // P1
+        prod("A", vec![t("a")], None),              // P2
+        prod("B", vec![t("b")], None),              // P3
     ];
 
     let t_int_symbol = Symbol::Terminal(Terminal("T_int".to_string()));
@@ -697,8 +697,8 @@ fn test_filter_productions_selectivity() {
         // Order might vary based on BTreeSet iteration if not careful,
         // but content should be these two.
         // The filter iterates initial_productions, so order should be preserved if input is ordered.
-        prod("S", vec![nt("X")]),
-        prod("X", vec![nt("A"), t("T_int")]),
+        prod("S", vec![nt("X")], None),
+        prod("X", vec![nt("A"), t("T_int")], None),
     ];
     
     // Convert to BTreeSet for comparison to ignore order issues if any.
@@ -709,7 +709,7 @@ fn test_filter_productions_selectivity() {
     assert_eq!(filtered_set, expected_set, "Filtered productions do not match expected. Filtered: {:?}, Expected: {:?}", filtered_set, expected_set);
 
     // Specifically check that "X -> B" is NOT in the filtered set.
-    let prod_x_b = prod("X", vec![nt("B")]);
+    let prod_x_b = prod("X", vec![nt("B")], None);
     assert!(!filtered_set.contains(&prod_x_b), "Production 'X -> B' should have been filtered out.");
 }
 
@@ -724,13 +724,13 @@ fn test_standard_expression_grammar_parse() {
     // F -> LPAREN E RPAREN
     // F -> I
     let productions = vec![
-        prod("S", vec![nt("E"), t("EOF")]), // Start production (index 0)
-        prod("E", vec![nt("E"), t("PLUS"), nt("T")]),
-        prod("E", vec![nt("T")]),
-        prod("T", vec![nt("T"), t("TIMES"), nt("F")]),
-        prod("T", vec![nt("F")]),
-        prod("F", vec![t("LPAREN"), nt("E"), t("RPAREN")]),
-        prod("F", vec![t("I")]),
+        prod("S", vec![nt("E"), t("EOF")], None), // Start production (index 0)
+        prod("E", vec![nt("E"), t("PLUS"), nt("T")], None),
+        prod("E", vec![nt("T")], None),
+        prod("T", vec![nt("T"), t("TIMES"), nt("F")], None),
+        prod("T", vec![nt("F")], None),
+        prod("F", vec![t("LPAREN"), nt("E"), t("RPAREN")], None),
+        prod("F", vec![t("I")], None),
     ];
 
     // println!("Grammar before simplification: {}", display_productions(&productions));
@@ -793,3 +793,4 @@ fn test_standard_expression_grammar_parse() {
 // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
 //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
 //    or non-productive non-terminals), which could be considered a limitation of the validation step.
+
