@@ -327,8 +327,8 @@ impl GrammarConstraint {
         crate::debug!(2, "Finished computing possible_matches");
         // pm_cache is dropped here as it's no longer needed.
 
-        let grammar_productions = &parser.grammar.productions; // Assuming parser is the GLRParser instance
-        let grammar_term_map = &parser.grammar.term_map;
+        let grammar_productions = &parser.productions; // Assuming parser is the GLRParser instance
+        let grammar_term_map = &parser.terminal_map;
 
         // These might be computed elsewhere or need to be computed here.
         // Assuming compute_first_sets is available from grammar module.
@@ -766,15 +766,15 @@ impl<'r> Precomputer<'r> {
     fn prune_terminal_sequences(&mut self) {
         crate::debug!(2, "Starting terminal sequence pruning.");
         let mut visited_contexts = HashSet::new(); // To avoid redundant work on same node from same context
-        for root_arc in self.roots.values() {
+        for root_arc in self.roots.clone().values() {
             // For roots, there's no "previous terminal", so pass None.
-            self.prune_terminal_sequences_recursive(root_arc, None, &mut visited_contexts);
+            self.prune_terminal_sequences_recursive(&root_arc, None, &mut visited_contexts);
         }
         crate::debug!(2, "Finished terminal sequence pruning. Edges pruned: {}", self.stats.edges_pruned_by_terminal_sequence);
     }
 
     fn prune_terminal_sequences_recursive(
-        &self,
+        &mut self,
         node_arc: &Arc<Mutex<PrecomputeNode>>,
         prev_edge_terminal_opt: Option<GrammarTokenID>,
         visited_contexts: &mut HashSet<(*const Mutex<PrecomputeNode>, Option<GrammarTokenID>)>,
@@ -1105,7 +1105,7 @@ impl<'r> Precomputer<'r> {
                 .entry(match_end_offset_in_segment)
                 .or_default()
                 .entry(TokenizerStateID(0)) 
-                .or_or_default()
+                .or_default()
                 .insert(handle);
         }
     }

@@ -156,6 +156,8 @@ pub struct PrecomputeStats {
     // New fields for edge pruning statistics
     pub final_edges_pruned_total: usize,
     pub final_edges_pruned_by_token: BTreeMap<GrammarTokenID, usize>,
+
+    pub edges_pruned_by_terminal_sequence: usize,
 }
 
 // Manual impl for PrecomputeStats
@@ -181,6 +183,7 @@ impl JSONConvertible for PrecomputeStats {
         obj.insert("final_grammar_token_edge_token_set_sizes_dist".to_string(), self.final_grammar_token_edge_token_set_sizes_dist.to_json());
         obj.insert("final_edges_pruned_total".to_string(), self.final_edges_pruned_total.to_json());
         obj.insert("final_edges_pruned_by_token".to_string(), self.final_edges_pruned_by_token.to_json());
+        obj.insert("edges_pruned_by_terminal_sequence".to_string(), self.edges_pruned_by_terminal_sequence.to_json());
         JSONNode::Object(obj)
     }
 
@@ -206,6 +209,7 @@ impl JSONConvertible for PrecomputeStats {
                 let final_grammar_token_edge_token_set_sizes_dist = obj.remove("final_grammar_token_edge_token_set_sizes_dist").ok_or_else(|| "Missing field final_grammar_token_edge_token_set_sizes_dist for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, Vec<usize>>::from_json(n))?;
                 let final_edges_pruned_total = obj.remove("final_edges_pruned_total").ok_or_else(|| "Missing field final_edges_pruned_total for PrecomputeStats".to_string()).and_then(usize::from_json)?;
                 let final_edges_pruned_by_token = obj.remove("final_edges_pruned_by_token").ok_or_else(|| "Missing field final_edges_pruned_by_token for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, usize>::from_json(n))?;
+                let edges_pruned_by_terminal_sequence = obj.remove("edges_pruned_by_terminal_sequence").ok_or_else(|| "Missing field edges_pruned_by_terminal_sequence for PrecomputeStats".to_string()).and_then(usize::from_json)?;
                 Ok(PrecomputeStats {
                     initial_root_nodes_created,
                     final_unique_nodes_count,
@@ -226,6 +230,7 @@ impl JSONConvertible for PrecomputeStats {
                     final_grammar_token_edge_token_set_sizes_dist,
                     final_edges_pruned_total,
                     final_edges_pruned_by_token,
+                    edges_pruned_by_terminal_sequence,
                 })
             }
             _ => Err("Expected JSONNode::Object for PrecomputeStats".to_string()),
@@ -295,6 +300,7 @@ pub fn calculate_final_stats(
     // stats.final_root_nodes_count = 0; // Already set above
     stats.final_non_root_internal_nodes_count = 0;
     stats.final_leaf_nodes_count = 0;
+    stats.edges_pruned_by_terminal_sequence = 0;
 
 
     for comp_arc_node in &all_reachable_nodes_for_final_stats {
