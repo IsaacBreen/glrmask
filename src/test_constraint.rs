@@ -1112,6 +1112,7 @@ fn causes_specific_panic(
             current_start_prod_index,
             current_terminal_map,
             current_non_terminal_map,
+            BTreeMap::new(), // No actions
         );
 
         let mut glr_state = parser.init_glr_parser();
@@ -1669,6 +1670,7 @@ fn test_minimized_grammar_causes_panic() -> Result<(), Box<dyn std::error::Error
         start_production_id_for_minimized,
         terminal_map_for_minimized.clone(), // Pass the maps specific to this grammar
         non_terminal_map_for_minimized.clone(),
+        BTreeMap::new(), // No actions
     );
     println!("Parser: {}", parser);
 

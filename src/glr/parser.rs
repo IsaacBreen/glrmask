@@ -135,6 +135,41 @@ impl JSONConvertible for GLRParser {
     }
 }
 
+impl Debug for GLRParser {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let actions_str = if self.actions.is_empty() {
+            "None".to_string()
+        } else {
+            // ActionFn is not Debug, so we can't print it directly.
+            format!("[Cannot display actions]")
+        };
+        f.debug_struct("GLRParser")
+            .field("stage_7_table", &self.stage_7_table)
+            .field("productions", &self.productions)
+            .field("terminal_map", &self.terminal_map)
+            .field("non_terminal_map", &self.non_terminal_map)
+            .field("item_set_map", &self.item_set_map)
+            .field("start_state_id", &self.start_state_id)
+            .field("actions", &actions_str)
+            .finish()
+    }
+}
+
+impl PartialEq for GLRParser {
+    fn eq(&self, other: &Self) -> bool {
+        let actions_are_equal = self.actions.keys().collect::<BTreeSet<_>>() == other.actions.keys().collect::<BTreeSet<_>>() &&
+                               self.actions.keys().all(|k| std::ptr::eq(self.actions.get(k).unwrap(), other.actions.get(k).unwrap()));
+        self.stage_7_table == other.stage_7_table &&
+        self.productions == other.productions &&
+        self.terminal_map == other.terminal_map &&
+        self.non_terminal_map == other.non_terminal_map &&
+        self.item_set_map == other.item_set_map &&
+        self.start_state_id == other.start_state_id &&
+        actions_are_equal
+    }
+}
+
+impl Eq for GLRParser {}
 
 impl GLRParser {
     pub fn new(
