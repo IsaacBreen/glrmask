@@ -152,7 +152,7 @@ def define_tokens() -> list[tuple[str, Any]]:
 # #     tokens["NUMBER"] = rep(eat("1"))
     tokens["NEWLINE"] = eat("\n")
     tokens["INDENT"] = rep1(eat(" "))
-    tokens["DEDENT"] = eps()
+#     tokens["DEDENT"] = eps()
 
     tokens["STRING"] = choice([
         seq([eat_u8(ord('"')), rep(choice([eat_u8_negation(ord('"')), eat('\"')])), eat_u8(ord('"'))]),
@@ -166,18 +166,22 @@ def define_tokens() -> list[tuple[str, Any]]:
         eat('"""'),
         eat("'''"),
     ])
-#     tokens["FSTRING_MIDDLE"] = rep(choice([
-#         eat_u8_negation(ord("{")),
-#         eat("{{"),
-#     ]))
+    tokens["FSTRING_MIDDLE"] = rep1(choice([
+        eat_u8_negation(ord("{")),
+        eat("{{"),
+    ]))
 #     # TODO: delete this
 #     tokens["STRING"] = eps()
 #     tokens["FSTRING_START"] = eps()
 #     tokens["FSTRING_END"] = eps()
 #     tokens["FSTRING_MIDDLE"] = rep(Regex.eat_any())
-    tokens["FSTRING_MIDDLE"] = eps()
+#     tokens["FSTRING_MIDDLE"] = eps()
 
-    tokens["TYPE_COMMENT"] = eps()
+    tokens["TYPE_COMMENT"] = seq([
+        eat("#"),
+        rep(eat_u8_negation(ord("\n"))),
+        opt(eat_u8(ord("\n"))),
+    ])
     tokens["ENDMARKER"] = eps()
     return [regex(expr, name) for name, expr in tokens.items()]
 #     # TODO: delete this
