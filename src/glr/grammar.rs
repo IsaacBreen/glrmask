@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
-use crate::json_serialization::{JSONConvertible, JSONNode};
+use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use std::collections::BTreeMap as StdMap;
 use std::fmt::{Display, Formatter};
-use crate::glr::parser::{ActionContainer, UserData};
-
+// Added for derive macro pattern
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[derive(Hash)]
@@ -70,19 +69,14 @@ impl JSONConvertible for Symbol {
 pub struct Production {
     pub lhs: NonTerminal,
     pub rhs: Vec<Symbol>,
-    pub action: Option<ActionContainer>,
 }
 
 // Manual impl for Production (could be derived)
 impl JSONConvertible for Production {
     fn to_json(&self) -> JSONNode {
-        if self.action.is_some() {
-            panic!("Serialization of Production with action ('{}') is not supported.", self.action.as_ref().unwrap().0.name());
-        }
         let mut obj = StdMap::new();
         obj.insert("lhs".to_string(), self.lhs.to_json());
         obj.insert("rhs".to_string(), self.rhs.to_json());
-        // action is not serialized
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
@@ -92,8 +86,7 @@ impl JSONConvertible for Production {
                                  .and_then(NonTerminal::from_json)?;
                 let rhs = obj.remove("rhs").ok_or_else(|| "Missing field rhs for Production".to_string())
                                  .and_then(Vec::<Symbol>::from_json)?;
-                // action is always None when deserializing
-                Ok(Production { lhs, rhs, action: None })
+                Ok(Production { lhs, rhs })
             }
             _ => Err("Expected JSONNode::Object for Production".to_string()),
         }
@@ -108,9 +101,6 @@ impl Display for Production {
                 Symbol::Terminal(terminal) => write!(f, " {}", terminal.0)?,
                 Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
             }
-        }
-        if let Some(action) = &self.action {
-            write!(f, " (Action: {})", action.0.name())?;
         }
         Ok(())
     }
@@ -128,15 +118,6 @@ pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {
     Production {
         lhs: NonTerminal(name.to_string()),
         rhs,
-        action: None,
-    }
-}
-
-pub fn prod_with_action(name: &str, rhs: Vec<Symbol>, action: ActionContainer) -> Production {
-    Production {
-        lhs: NonTerminal(name.to_string()),
-        rhs,
-        action: Some(action),
     }
 }
 
@@ -198,13 +179,13 @@ pub fn compute_first_sets(productions: &[Production]) -> BTreeMap<NonTerminal, B
 
             for symbol in rhs {
                 if let Symbol::NonTerminal(nt) = symbol {
-                    let first_nt = first_sets.get(nt).cloned().unwrap_or_default();
+                    let first_nt = first_sets.get(nt).cloned().unwrap_or_default(); // Handle case where nt might not be in first_sets yet
                     first_sets.get_mut(lhs).unwrap().extend(first_nt);
 
                     if !epsilon_nonterminals.contains(nt) {
                         break;
                     }
-                } else if let Symbol::Terminal(t) = symbol {
+                } else if let Symbol::Terminal(t) = symbol { // Added this case
                     first_sets.get_mut(lhs).unwrap().insert(t.clone());
                     break;
                 }
@@ -226,7 +207,7 @@ pub fn compute_follow_sets(productions: &[Production]) -> BTreeMap<NonTerminal, 
 
     for production in productions {
         follow_sets.entry(production.lhs.clone()).or_default();
-        for symbol in &production.rhs {
+        for symbol in &production.rhs { // Ensure all non-terminals in RHS are in follow_sets
             if let Symbol::NonTerminal(nt) = symbol {
                 follow_sets.entry(nt.clone()).or_default();
             }
