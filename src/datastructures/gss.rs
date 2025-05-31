@@ -10,30 +10,6 @@ use crate::glr::parser::ParseStateEdgeContent;
 use crate::constraint::{LLMTokenBV, LLMTokenInfo};
 
 
-// Define UserData trait
-pub trait UserData: Debug + Send + Sync + 'static {
-    fn clone_box(&self) -> Arc<dyn UserData>;
-    // Optional: for equality checks if user_data should be part of GSSNode identity beyond Arc pointer.
-    // fn eq_box(&self, other: &dyn UserData) -> bool; 
-    // Optional: for hashing if user_data should be part of GSSNode identity.
-    // fn hash_box(&self, state: &mut dyn Hasher);
-}
-
-// Implement UserData for () to be used as a default
-impl UserData for () {
-    fn clone_box(&self) -> Arc<dyn UserData> {
-        Arc::new(())
-    }
-    // fn eq_box(&self, other: &dyn UserData) -> bool { other.downcast_ref::<()>().is_some() }
-    // fn hash_box(&self, _state: &mut dyn Hasher) { }
-}
-
-// Helper for default user data
-pub fn default_user_data() -> Arc<dyn UserData> {
-    Arc::new(())
-}
-
-
 // Type aliases for cleaner signatures, now concrete
 type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 type NodeMap = BTreeMap<ParseStateEdgeContent, Arc<GSSNode>>;
@@ -71,7 +47,6 @@ pub struct GSSNode { // No longer generic
     acc: LLMTokenInfo,
     predecessors: NodeMap,
     hash_key_cache: u64,
-    pub user_data: Arc<dyn UserData>, // Added field
 }
 
 #[derive(Clone)]
@@ -129,23 +104,23 @@ fn process_predecessors(
 
 // Basic node creation and manipulation
 impl GSSNode {
-    pub fn new(acc: LLMTokenInfo, user_data: Arc<dyn UserData>) -> Self {
+    pub fn new(acc: LLMTokenInfo) -> Self {
         let predecessors = NodeMap::new();
         let hash_key_cache = compute_hash_key(&predecessors);
-        Self { acc, predecessors, hash_key_cache, user_data }
+        Self { acc, predecessors, hash_key_cache }
     }
     
     // Private constructor used by simplification and other internal methods
-    fn new_with_map(acc: LLMTokenInfo, predecessors: NodeMap, user_data: Arc<dyn UserData>) -> Self {
+    fn new_with_map(acc: LLMTokenInfo, predecessors: NodeMap) -> Self {
         let hash_key_cache = compute_hash_key(&predecessors);
-        Self { acc, predecessors, hash_key_cache, user_data }
+        Self { acc, predecessors, hash_key_cache }
     }
 
     // Helper to create a GSSNode with a single predecessor, used by push.
-    fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, acc: LLMTokenInfo, user_data: Arc<dyn UserData>) -> Self {
+    fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, acc: LLMTokenInfo) -> Self {
         let mut predecessors_map = NodeMap::new();
         predecessors_map.insert(edge_value, predecessor_arc);
-        Self::new_with_map(acc, predecessors_map, user_data)
+        Self::new_with_map(acc, predecessors_map)
     }
 
 
@@ -177,7 +152,6 @@ impl GSSNode {
     // Helper to clone the node and set a new accumulator. Used internally.
     fn with_acc(mut self, acc: LLMTokenInfo) -> Self {
         self.acc = acc;
-        // user_data remains self.user_data
         self.hash_key_cache = compute_hash_key(&self.predecessors); // Recalculate hash if acc changes meaning
         self
     }
@@ -187,8 +161,8 @@ impl GSSNode {
 // Core manipulation methods
 impl GSSNode {
     // Push now takes the acc for the new node
-    pub fn push(self, edge_value: ParseStateEdgeContent, acc_for_new_node: LLMTokenInfo, user_data_for_new_node: Arc<dyn UserData>) -> Self {
-        Self::new_with_single_predecessor(Arc::new(self), edge_value, acc_for_new_node, user_data_for_new_node)
+    pub fn push(self, edge_value: ParseStateEdgeContent, acc_for_new_node: LLMTokenInfo) -> Self {
+        Self::new_with_single_predecessor(Arc::new(self), edge_value, acc_for_new_node)
     }
     
     // pop_into is complex with private acc_mut, might need rethink or careful internal use
@@ -220,7 +194,7 @@ impl GSSNode {
                 }
             }
         }
-        Self::new_with_map(result_acc, result_predecessors, self.user_data.clone_box())
+        Self::new_with_map(result_acc, result_predecessors)
     }
 
 
@@ -372,15 +346,15 @@ impl Drop for GSSNode {
 
 // Simplified trait for GSS operations
 pub trait GSSTrait { // No longer generic
-    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: LLMTokenInfo, user_data_for_new_node: Arc<dyn UserData>) -> GSSNode;
+    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: LLMTokenInfo) -> GSSNode;
     // push_to is removed as it's complex with private acc_mut and less idiomatic with Arc.
     fn pop(&self) -> GSSNode;
     fn popn(&self, n: usize) -> GSSNode;
 }
 
 impl GSSTrait for GSSNode {
-    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: LLMTokenInfo, user_data_for_new_node: Arc<dyn UserData>) -> GSSNode {
-        self.clone().push(edge_value, acc_for_new_node, user_data_for_new_node)
+    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: LLMTokenInfo) -> GSSNode {
+        self.clone().push(edge_value, acc_for_new_node)
     }
 
     fn pop(&self) -> GSSNode {
@@ -393,8 +367,8 @@ impl GSSTrait for GSSNode {
 }
 
 impl GSSTrait for Arc<GSSNode> {
-    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: LLMTokenInfo, user_data_for_new_node: Arc<dyn UserData>) -> GSSNode {
-        GSSNode::new_with_single_predecessor(self.clone(), edge_value, acc_for_new_node, user_data_for_new_node)
+    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: LLMTokenInfo) -> GSSNode {
+        GSSNode::new_with_single_predecessor(self.clone(), edge_value, acc_for_new_node)
     }
 
     fn pop(&self) -> GSSNode {
@@ -442,7 +416,7 @@ fn prune_and_transform_recursive(
             // Create a new node with the transformed accumulator and new predecessors
             // GSSNode::new_with_predecessors computes its own acc by union. We want new_acc.
             let new_node_predecessors_map = process_predecessors(&new_predecessors_set);
-            let transformed_node = GSSNode::new_with_map(new_acc, new_node_predecessors_map, node_arc.user_data.clone_box());
+            let transformed_node = GSSNode::new_with_map(new_acc, new_node_predecessors_map);
             
             let result_arc = Arc::new(transformed_node);
             memo.insert(node_ptr, Some(result_arc.clone()));
@@ -472,7 +446,7 @@ pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_int
         *root_arc = new_root;
     } else {
         // The entire GSS was pruned, set root_arc to an empty GSSNode
-        *root_arc = Arc::new(GSSNode::new(Some(LLMTokenBV::new()), default_user_data()));
+        *root_arc = Arc::new(GSSNode::new(Some(LLMTokenBV::new())));
     }
 }
 
@@ -498,8 +472,8 @@ pub fn subtract_tokens_and_prune_arc(
         *root_arc = new_root;
     } else {
         // The entire GSS was pruned, set root_arc to an empty GSSNode
-        let empty_acc = Some(LLMTokenBV::new());
-        *root_arc = Arc::new(GSSNode::new(empty_acc, default_user_data()));
+        let mut empty_acc = Some(LLMTokenBV::new());
+        *root_arc = Arc::new(GSSNode::new(empty_acc));
     }
 }
 
@@ -513,8 +487,8 @@ pub fn reset_tokens(root_arc: &mut Arc<GSSNode>) {
         *root_arc = new_root;
     } else {
         // The entire GSS was pruned, set root_arc to an empty GSSNode
-        let empty_acc = Some(LLMTokenBV::new());
-        *root_arc = Arc::new(GSSNode::new(empty_acc, default_user_data()));
+        let mut empty_acc = Some(LLMTokenBV::new());
+        *root_arc = Arc::new(GSSNode::new(empty_acc));
     }
 }
 
@@ -587,7 +561,7 @@ impl GSSNode {
         if let Some(new_node_arc) = prune_and_transform_recursive(&node_arc, closure, memo) {
             *self = new_node_arc.as_ref().clone();
         } else {
-            *self = GSSNode::new(self.acc.clone(), self.user_data.clone_box());
+            *self = GSSNode::new(self.acc.clone());
         }
     }
 
@@ -733,7 +707,7 @@ pub fn print_gss_forest(
         visited.insert(node_ptr);
         *node_count += 1;
 
-        writeln!(output, "{}- Node {:p}: (Acc: {:?}, UserData: {:?})", prefix, node_ptr, node_arc.acc, node_arc.user_data)?;
+        writeln!(output, "{}- Node {:p}: (Acc: {:?})", prefix, node_ptr, node_arc.acc)?;
 
         if !node_arc.predecessors.is_empty() {
             writeln!(output, "{}  Predecessors:", prefix)?;
@@ -810,14 +784,13 @@ fn simplify_node_recursive(
                 }
                 acc
             };
-            Arc::new(GSSNode::new_with_map(unioned_acc, simplified_predecessors_map, default_user_data()))
+            Arc::new(GSSNode::new_with_map(unioned_acc, simplified_predecessors_map))
         });
 
     // The final simplified node has the structure of cached_structural_node,
     // but its accumulator is the one from the original node_arc.
     let mut final_node_data = (**cached_structural_node).clone(); // Clone GSSNode data
     final_node_data.acc = node_arc.acc.clone(); // Set the specific acc from original node
-    final_node_data.user_data = node_arc.user_data.clone_box(); // Set the specific user_data from original node
     // Recompute hash key for final_node_data as its acc might differ from cached_structural_node's acc
     final_node_data.hash_key_cache = compute_hash_key(&final_node_data.predecessors);
 
@@ -909,32 +882,32 @@ mod tests {
         // After simplification of D1's predecessors, N4 will be canonical.
         // When D2's predecessors are simplified, it should reuse the canonical N4 structure.
 
-        let n4_v1 = Arc::new(TestGSSNode::new(acc_base.clone(), default_user_data()));
-        let n4_v2 = Arc::new(TestGSSNode::new(acc_other.clone(), default_user_data()));
+        let n4_v1 = Arc::new(TestGSSNode::new(acc_base.clone()));
+        let n4_v2 = Arc::new(TestGSSNode::new(acc_other.clone()));
 
 
         // D1: C1 -> 30 -> D1(acc_base_pred_d1) -> 40 -> N4(acc_base)
         // acc_base_pred_d1 is acc_base
         let d1_orig = Arc::new(TestGSSNode::new_with_single_predecessor(
-            n4_v1.clone(), mock_edge(40), acc_base.clone(), default_user_data()
+            n4_v1.clone(), mock_edge(40), acc_base.clone()
         ));
 
         // D2: (no C layer) -> 10 -> D2(acc_other_pred_d2) -> 40 -> N4(acc_other)
         // acc_other_pred_d2 is acc_other
          let d2_orig = Arc::new(TestGSSNode::new_with_single_predecessor(
-            n4_v2.clone(), mock_edge(40), acc_other.clone(), default_user_data()
+            n4_v2.clone(), mock_edge(40), acc_other.clone()
         ));
 
         // C1: B1 -> 20 -> C1(acc_base_pred_c1) -> 30 -> D1
         // acc_base_pred_c1 is acc_base
         let c1_orig = Arc::new(TestGSSNode::new_with_single_predecessor(
-            d1_orig.clone(), mock_edge(30), acc_base.clone(), default_user_data()
+            d1_orig.clone(), mock_edge(30), acc_base.clone()
         ));
 
         // B1: A1 -> 10 -> B1(acc_base_pred_b1) -> 20 -> C1
         // acc_base_pred_b1 is acc_base
         let b1_orig = Arc::new(TestGSSNode::new_with_single_predecessor(
-            c1_orig.clone(), mock_edge(20), acc_base.clone(), default_user_data()
+            c1_orig.clone(), mock_edge(20), acc_base.clone()
         ));
         
         // A1: (root)
@@ -952,7 +925,7 @@ mod tests {
         // Acc for A1 is the union of paths leading to it.
         // Let's assume A1's acc is a union of acc_base and acc_other for this test.
         let acc_a1 = acc_base.clone().union(acc_other.clone());
-        let a1_orig = Arc::new(TestGSSNode::new_with_map(acc_a1.clone(), process_predecessors(&a1_preds_set), default_user_data()));
+        let a1_orig = Arc::new(TestGSSNode::new_with_map(acc_a1.clone(), process_predecessors(&a1_preds_set)));
 
 
         let mut roots_to_simplify = vec![a1_orig.clone()];
@@ -1025,4 +998,3 @@ mod tests {
         assert_eq!(all_nodes.len(), 6, "Incorrect number of unique nodes in simplified graph. Actual: {:?}", all_nodes.len());
     }
 }
-

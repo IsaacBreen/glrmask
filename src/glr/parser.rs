@@ -4,8 +4,6 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID};
 use crate::constraint::{LLMTokenBV, LLMTokenInfo}; // Import LLMTokenInfo
-use crate::datastructures::gss::{UserData, default_user_data}; // Add this use
-use crate::glr::grammar::Action; // Add this use
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,7 +46,7 @@ pub struct ParseState { // No longer generic
 
 impl ParseState {
     pub fn new() -> Self {
-        ParseState { stack: Arc::new(GSSNode::new(LLMTokenInfo::default(), default_user_data())) }
+        ParseState { stack: Arc::new(GSSNode::new(LLMTokenInfo::default())) }
     }
 }
 
@@ -150,7 +148,7 @@ impl GLRParser {
     }
 
     pub fn init_glr_parser(&self) -> GLRParserState { // No longer generic
-        self.init_glr_parser_with_acc(LLMTokenInfo::default(), default_user_data())
+        self.init_glr_parser_with_acc(LLMTokenInfo::default())
     }
 
     pub fn init_glr_parser_null(&self) -> GLRParserState { // No longer generic
@@ -162,8 +160,8 @@ impl GLRParser {
         }
     }
 
-    pub fn init_glr_parser_with_acc(&self, initial_acc: LLMTokenInfo, initial_user_data: Arc<dyn UserData>) -> GLRParserState { // No longer generic
-        let initial_parse_state = self.init_parse_state_with_acc(initial_acc, initial_user_data);
+    pub fn init_glr_parser_with_acc(&self, initial_acc: LLMTokenInfo) -> GLRParserState { // No longer generic
+        let initial_parse_state = self.init_parse_state_with_acc(initial_acc);
         GLRParserState {
             parser: self,
             active_state: initial_parse_state,
@@ -181,16 +179,16 @@ impl GLRParser {
     }
 
     pub fn init_parse_state(&self) -> ParseState { // No longer generic
-        self.init_parse_state_with_acc(LLMTokenInfo::default(), default_user_data())
+        self.init_parse_state_with_acc(LLMTokenInfo::default())
     }
 
-    pub fn init_parse_state_with_acc(&self, initial_acc: LLMTokenInfo, initial_user_data: Arc<dyn UserData>) -> ParseState { // No longer generic
+    pub fn init_parse_state_with_acc(&self, initial_acc: LLMTokenInfo) -> ParseState { // No longer generic
         let initial_content = ParseStateEdgeContent {
             state_id: self.start_state_id,
         };
-        let root = Arc::new(GSSNode::new(initial_acc.clone(), initial_user_data.clone_box())); // initial_acc for the root
+        let root = Arc::new(GSSNode::new(initial_acc.clone())); // initial_acc for the root
         // Push creates a new node. Its acc should be derived from the parent (root in this case).
-        let stack = Arc::new(root.push(initial_content, initial_acc, initial_user_data.clone_box())); 
+        let stack = Arc::new(root.push(initial_content, initial_acc)); 
         ParseState { stack }
     }
 
@@ -265,26 +263,22 @@ impl Display for GLRParser {
                     Stage7ShiftsAndReduces::Shift(next_state_id) => {
                         writeln!(f, "      - {} -> Shift {}", terminal.0, next_state_id.0)?;
                     }
-                    Stage7ShiftsAndReduces::Reduce { production_id: _ , nonterminal_id: nonterminal, len, action: action_opt } => { // production_id ignored
+                    Stage7ShiftsAndReduces::Reduce { production_id: _ , nonterminal_id: nonterminal, len } => { // production_id ignored
                         let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-                        writeln!(f, "      - {} -> Reduce {} (len {}), Action: {:?}", terminal.0, nt_name.0, len, action_opt)?;
+                        writeln!(f, "      - {} -> Reduce {} (len {})", terminal.0, nt_name.0, len)?;
                     }
                     Stage7ShiftsAndReduces::Split { shift, reduces } => {
                         writeln!(f, "      - {} -> Conflict:", terminal.0)?;
                         if let Some(shift_state) = shift {
                             writeln!(f, "        - Shift {}", shift_state.0)?;
                         }
-                        for (len, nts_map) in reduces {
+                        for (len, nts) in reduces {
                             writeln!(f, "        - Reduce (len {}):", len)?;
-                            for (nt_id, (prods_no_action, prods_with_action)) in nts_map {
+                            for (nt_id, prod_ids) in nts {
                                 let nt = non_terminal_map.get_by_right(nt_id).unwrap();
-                                for prod_id_val in prods_no_action {
+                                for prod_id_val in prod_ids {
                                     let prod = self.productions.get(prod_id_val.0).unwrap();
-                                    writeln!(f, "          - {} -> {} (no action)", nt.0, prod.lhs.0)?;
-                                }
-                                for (prod_id_val, action_val) in prods_with_action {
-                                    let prod = self.productions.get(prod_id_val.0).unwrap();
-                                    writeln!(f, "          - {} -> {} (action: {:?})", nt.0, prod.lhs.0, action_val)?;
+                                    writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
                                 }
                             }
 
@@ -329,33 +323,31 @@ pub struct GLRParserState<'a> { // No longer generic
 impl<'a> GLRParserState<'a> { // No longer generic
     fn push_state(
         &self,
-        stack: &Arc<GSSNode>, // This is the GSS parent node
+        stack: &Arc<GSSNode>, 
         next_state_id: StateID,
         acc_for_new_node: LLMTokenInfo,
     ) -> ParseState {
         let new_content = ParseStateEdgeContent { state_id: next_state_id };
-        // The new node's user_data is cloned from the parent GSS node 'stack'
-        let new_gss_node_instance = stack.push(new_content, acc_for_new_node, stack.user_data.clone_box());
+        let new_gss_node_instance = stack.push(new_content, acc_for_new_node);
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
     fn pop_and_goto(
         &self,
         stack: &Arc<GSSNode>, 
-        edge_content: &ParseStateEdgeContent, // state content of the node 'stack' is an edge to
-        edge_src: &Arc<GSSNode>, // the GSSNode 'stack' is an edge to (i.e. stack.predecessors[edge_content])
+        edge_content: &ParseStateEdgeContent,
+        edge_src: &Arc<GSSNode>, 
         len: usize,
         nt: NonTerminalID,
-        user_data_for_lhs: Arc<dyn UserData>, // Added: user_data for the new LHS node
     ) -> Arc<GSSNode> { 
         let cur_acc_from_reducible_node = stack.acc().clone(); // Clone before potential modification
 
         let parent_gss_node = if len == 0 { // Renamed parent to parent_gss_node
-            Arc::new(edge_src.push(edge_content.clone(), edge_src.acc().clone(), edge_src.user_data.clone_box())) // Provide acc for push
+            Arc::new(edge_src.push(edge_content.clone(), edge_src.acc().clone())) // Provide acc for push
         } else {
             Arc::new(edge_src.popn(len - 1))
         };
-        let mut out = GSSNode::new(Some(LLMTokenBV::new()), user_data_for_lhs.clone_box()); // Start with a default acc
+        let mut out = GSSNode::new(Some(LLMTokenBV::new())); // Start with a default acc
         crate::debug!(4, "Popped with {} predecessors...", parent_gss_node.num_predecessors());
 
         for (predecessor_arc, edge_value) in parent_gss_node.pop_iter() { // Renamed predecessor to predecessor_arc
@@ -367,8 +359,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let new_acc_for_goto_child = parent_gss_node.acc().clone().intersect(cur_acc_from_reducible_node.clone());
                     let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id };
 
-                    let isolated_parent_arc = Arc::new(predecessor_arc.push(edge_value, new_acc_for_goto_child.clone(), predecessor_arc.user_data.clone_box()));
-                    let new_gss_node = isolated_parent_arc.push(goto_node_content, new_acc_for_goto_child, user_data_for_lhs.clone_box());
+                    let isolated_parent_arc = Arc::new(predecessor_arc.push(edge_value, new_acc_for_goto_child.clone()));
+                    let new_gss_node = isolated_parent_arc.push(goto_node_content, new_acc_for_goto_child);
                     out.merge(&Arc::new(new_gss_node));
                 }
                 Goto::Accept => {
@@ -458,8 +450,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let stack_arc_for_operations = &state.stack; 
             for (parent_arc, top_edge_content) in state.stack.pop_iter() { // Renamed top to top_edge_content
                 let current_path_acc = state.stack.acc().clone().intersect(parent_arc.acc().clone());
-                // temp_idk is the GSS node that represents the state *before* the current token is consumed (i.e., the top of the RHS being reduced)
-                let temp_idk = Arc::new(parent_arc.push(top_edge_content.clone(), current_path_acc.clone(), stack_arc_for_operations.user_data.clone_box())); 
+                let temp_idk = Arc::new(parent_arc.push(top_edge_content.clone(), current_path_acc.clone())); // Acc for push
 
                 let row = &self.parser.stage_7_table[&top_edge_content.state_id];
 
@@ -471,43 +462,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
 
                     Some(Stage7ShiftsAndReduces::Reduce {
-                             production_id: _pid, // pid might be useful for action context
                              nonterminal_id: nt,
-                             len,
-                             action: action_opt, // Action from the table!
+                             len, ..
                          }) => {
                         crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", top_edge_content.state_id.0, token_id.0, nt.0, len);
-
-                        let mut user_data_for_lhs = stack_arc_for_operations.user_data.clone_box(); // UserData of the node representing completed RHS
-                        let mut action_is_valid = true;
-
-                        if let Some(action_def) = action_opt {
-                            // HERE: You would look up action_def.name in a registry to get the actual function.
-                            // let action_fn = action_registry.get(&action_def.name).expect("Action not found in registry");
-                            // For now, we'll simulate. The action_fn would have signature:
-                            // Fn(&mut Arc<dyn UserData>, &Vec<Arc<dyn UserData>>) -> bool
-                            // or simpler: Fn(&mut Arc<dyn UserData>) -> bool
-                            // To get children_user_data, you'd need to traverse the GSS for 'len' steps from stack_arc_for_operations.
-                            // This is complex. Let's simplify the action signature for now to only modify the current node's user_data.
-                            // Placeholder for actual action execution:
-                            // action_is_valid = action_fn(&mut user_data_for_lhs);
-                            
-                            // Example: if action_def.name == "MyAction" {
-                            //     if let Some(specific_data) = user_data_for_lhs.downcast_mut::<MySpecificUserData>() {
-                            //         action_is_valid = specific_data.perform_my_action();
-                            //     } else { action_is_valid = false; /* Wrong user data type */ }
-                            // }
-                            crate::debug!(5, "Action {:?} would be executed here.", action_def.name);
-                        }
-
-                        if action_is_valid {
-                            let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt, user_data_for_lhs);
-                            if !s_new_arc.is_empty() {
-                               todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
-                            }
-                        } else {
-                            crate::debug!(5, "Action invalidated parse path for reduction to {}.", nt.0);
-                            // Path is pruned by not adding to 'todo'
+                        let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt);
+                        if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
+                           todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
                         }
                     }
 
@@ -515,40 +476,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         crate::debug!(4, "Split from state {} via token {}", top_edge_content.state_id.0, token_id.0);
                         if let Some(to) = shift {
                             crate::debug!(4, " Shift from state {} via token {} to state {}", top_edge_content.state_id.0, token_id.0, to.0);
-                            // user_data for shift inherits from temp_idk (which got it from stack_arc_for_operations)
                             let new_parse_state = self.push_state(&temp_idk, *to, stack_arc_for_operations.acc().clone());
                             next.merge(new_parse_state);
                         }
-                        for (len, nts_map) in reduces {
-                            crate::debug!(4, " Reduce (len {}) from state {} via token {} to nonterminals {:?}", len, top_edge_content.state_id.0, token_id.0, nts_map.keys());
-                            for (nt, (prods_no_action, prods_with_action)) in nts_map {
-                                // Reductions without actions
-                                for _prod_id in prods_no_action {
-                                    crate::debug!(4, "  Reducing (no action) via nonterminal {} of length {}", nt.0, len);
-                                    // user_data for LHS is inherited from stack_arc_for_operations (top of RHS)
-                                    let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt, stack_arc_for_operations.user_data.clone_box());
-                                    if !s_new_arc.is_empty() {
-                                        todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
-                                    }
-                                }
-                                // Reductions with actions
-                                for (_prod_id, action_def) in prods_with_action {
-                                    crate::debug!(4, "  Reducing (with action {:?}) via nonterminal {} of length {}", action_def.name, nt.0, len);
-                                    let mut user_data_for_lhs = stack_arc_for_operations.user_data.clone_box();
-                                    let mut action_is_valid = true;
-                                    
-                                    // Placeholder for actual action execution:
-                                    // action_is_valid = action_fn_lookup(action_def.name)(&mut user_data_for_lhs);
-                                    crate::debug!(5, "Action {:?} would be executed here.", action_def.name);
-
-                                    if action_is_valid {
-                                        let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt, user_data_for_lhs);
-                                        if !s_new_arc.is_empty() {
-                                            todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
-                                        }
-                                    } else {
-                                        crate::debug!(5, "Action {:?} invalidated parse path for reduction to {}.", action_def.name, nt.0);
-                                    }
+                        for (len, nts) in reduces {
+                            crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top_edge_content.state_id.0, token_id.0, nts);
+                            for (nt, _prod_ids) in nts {
+                                crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
+                                let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt);
+                                if !s_new_arc.is_empty() {
+                                    todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
                                 }
                             }
                         }
@@ -621,4 +558,3 @@ impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
         }
     }
 }
-
