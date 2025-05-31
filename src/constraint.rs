@@ -280,7 +280,7 @@ impl GrammarConstraint {
         max_original_llm_token_id: usize, 
     ) -> Self {
         let epsilon_tokens = tokenizer.epsilon_tokens();
-        assert!(epsilon_tokens.is_empty(), "Epsilon tokens (tokens that can match an empty string) are not supported by the grammar constraint.");
+        assert!(epsilon_tokens.is_empty(), "Epsilon tokens (tokens that can match an empty string) are not supported by the grammar constraint. Got: {:?}", epsilon_tokens);
         let original_to_internal_id_bimap = Self::setup_llm_token_mappings(&llm_token_map);
 
         let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap_or(0);
