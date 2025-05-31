@@ -571,7 +571,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             next_visited_on_this_path.insert(state.stack.clone());
 
             let stack_arc_for_operations = &state.stack; 
-            for (parent_arc, top_edge_content) in state.stack.pop_iter() { // Renamed top to top_edge_content
+            for (parent_arc, mut top_edge_content) in state.stack.pop_iter() { // Renamed top to top_edge_content
                 let current_path_acc = state.stack.acc().clone().intersect(parent_arc.acc().clone());
                 let temp_idk = Arc::new(parent_arc.push(top_edge_content.clone(), current_path_acc.clone())); // Acc for push
 
@@ -590,6 +590,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                              len, ..
                          }) => {
                         crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", top_edge_content.state_id.0, token_id.0, nt.0, len);
+                        if let Some(action_fn) = self.parser.actions.get(&nt) {
+                            let is_ok = action_fn(&mut top_edge_content.user_data);
+                            if !is_ok {
+                                crate::debug!(4, "Action for non-terminal {} returned false, pruning this reduction path.", nt.0);
+                                continue;
+                            }
+                        }
                         let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt);
                         if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
                            todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
@@ -608,6 +615,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top_edge_content.state_id.0, token_id.0, nts);
                             for (nt, _prod_ids) in nts {
                                 crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
+                                if let Some(action_fn) = self.parser.actions.get(&nt) {
+                                    let is_ok = action_fn(&mut top_edge_content.user_data);
+                                    if !is_ok {
+                                        crate::debug!(4, "Action for non-terminal {} returned false, pruning this reduction path.", nt.0);
+                                        continue;
+                                    }
+                                }
                                 let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt);
                                 if !s_new_arc.is_empty() {
                                     todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
