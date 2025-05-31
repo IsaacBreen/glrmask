@@ -379,88 +379,41 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     fn pop_and_goto(
         &self,
-        stack: &Arc<GSSNode>, // Node representing state *after* parsing RHS of production.
-        len: usize, // Length of RHS
-        nt: NonTerminalID, // LHS non-terminal
+        stack: &Arc<GSSNode>, 
+        edge_content: &ParseStateEdgeContent,
+        edge_src: &Arc<GSSNode>, 
+        len: usize,
+        nt: NonTerminalID,
     ) -> Arc<GSSNode> { 
-        // 1. Determine the accumulator for the action. This is the acc of the node `stack`,
-        //    which has successfully parsed the RHS.
-        let mut acc_for_action = stack.acc().clone();
+        let cur_acc_from_reducible_node = stack.acc().clone(); // Clone before potential modification
 
-        // 2. Apply action if it exists for `nt`.
-        let non_terminal_name = self.parser.non_terminal_map.get_by_right(&nt)
-            .expect("NonTerminalID not found in map during pop_and_goto action lookup");
+        let parent_gss_node = if len == 0 { // Renamed parent to parent_gss_node
+            Arc::new(edge_src.push(edge_content.clone(), edge_src.acc().clone())) // Provide acc for push
+        } else {
+            Arc::new(edge_src.popn(len - 1))
+        };
+        let mut out = GSSNode::new(Some(LLMTokenBV::new())); // Start with a default acc
+        crate::debug!(4, "Popped with {} predecessors...", parent_gss_node.num_predecessors());
 
-        if let Some(action_fn) = self.parser.actions.get(non_terminal_name) {
-            // The Production is not passed, as per simplified requirement.
-            match action_fn(non_terminal_name, &mut acc_for_action) {
-                Ok(()) => {
-                    // Action succeeded. acc_for_action might be modified.
-                }
-                Err(err_msg) => {
-                    crate::debug!(3, "Action for non-terminal {} ({}) failed: {}. Pruning path.", non_terminal_name.0, nt.0, err_msg);
-                    // Return an empty GSSNode to signify this path is pruned.
-                    return Arc::new(GSSNode::new(LLMTokenInfo::default())); // Or some specific "pruned" acc
-                }
-            }
-        }
-        // acc_for_action now holds the final accumulator for the reduced non-terminal `nt`.
-
-        // 3. Determine the GSS node from which GOTO operations will originate.
-        // This is `stack.popn(len)`.
-        let goto_origin_node_arc = Arc::new(stack.popn(len));
-
-        // 4. Perform GOTO operations.
-        // Initialize with an empty accumulator; it will be built by merging.
-        let mut resulting_gss_node_data = GSSNode::new(LLMTokenInfo::default());
-
-        for (pred_of_goto_origin, edge_to_goto_origin) in goto_origin_node_arc.pop_iter() {
-            let goto_lookup_state_id = edge_to_goto_origin.state_id;
-            
-            let goto_result = self.parser.stage_7_table.get(&goto_lookup_state_id)
-                .and_then(|row| row.gotos.get(&nt))
-                .copied() // Dereference Option<&Goto> to Option<Goto>
-                .ok_or_else(|| {
-                    // This should ideally not happen in a correct table/grammar.
-                    // Log or handle as a critical error if it does.
-                    format!(
-                        "CRITICAL: GOTO not found for state {} ({:?}) and NT {} ({}). This indicates a possible issue with table generation or grammar.",
-                        goto_lookup_state_id.0,
-                        self.parser.item_set_map.get_by_right(&goto_lookup_state_id), // For more context
-                        nt.0,
-                        non_terminal_name.0
-                    )
-                })
-                .expect("GOTO lookup failed"); // Consider returning Result instead of panicking
-
-            match goto_result {
+        for (predecessor_arc, edge_value) in parent_gss_node.pop_iter() { // Renamed predecessor to predecessor_arc
+            let goto = self.parser.stage_7_table.get(&edge_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", edge_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor {:p})", nt.0, edge_value.state_id, Arc::as_ptr(&predecessor_arc))), |state_id| Ok(*state_id))).unwrap();
+            match goto {
                 Goto::State(goto_state_id) => {
+                    crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
+
+                    let new_acc_for_goto_child = parent_gss_node.acc().clone().intersect(cur_acc_from_reducible_node.clone());
                     let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id };
-                    // The new GSS node is formed by pushing from `pred_of_goto_origin`.
-                    // The accumulator for this new node is `acc_for_action`.
-                    let new_gss_node_after_goto = pred_of_goto_origin.push(goto_node_content, acc_for_action.clone());
-                    resulting_gss_node_data.merge(&Arc::new(new_gss_node_after_goto));
+
+                    let isolated_parent_arc = Arc::new(predecessor_arc.push(edge_value, new_acc_for_goto_child.clone()));
+                    let new_gss_node = isolated_parent_arc.push(goto_node_content, new_acc_for_goto_child);
+                    out.merge(&Arc::new(new_gss_node));
                 }
                 Goto::Accept => {
-                    // This path has successfully parsed the augmented start symbol.
-                    // The GSS node representing this acceptance should be a terminal node (no predecessors)
-                    // with the final accumulator `acc_for_action`.
-                    if pred_of_goto_origin.is_empty() { // Check if this GOTO is from the GSS root
-                        let accepted_node_data = GSSNode::new(acc_for_action.clone());
-                        resulting_gss_node_data.merge(&Arc::new(accepted_node_data));
-                    } else {
-                        // This case (GOTO Accept from a non-root GSS node predecessor) is highly unusual
-                        // for standard augmented grammars. It might indicate an issue or a very specific grammar design.
-                        crate::debug!(0, "Warning: GOTO Accept encountered from a non-root GSS node predecessor for NT {} ({}). Path acc: {:?}. This is unusual.", nt.0, non_terminal_name.0, acc_for_action);
-                        // Depending on strictness, this could be an error or handled by creating a terminal node.
-                        // For now, let's create a terminal node as if it were from root.
-                        let accepted_node_data = GSSNode::new(acc_for_action.clone());
-                        resulting_gss_node_data.merge(&Arc::new(accepted_node_data));
-                    }
+                    // No action needed for Accept
                 }
             }
         }
-        Arc::new(resulting_gss_node_data)
+        Arc::new(out)
     }
 
     pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
@@ -558,7 +511,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                              len, ..
                          }) => {
                         crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", top_edge_content.state_id.0, token_id.0, nt.0, len);
-                        let s_new_arc = self.pop_and_goto(&temp_idk, *len, *nt);
+                        let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt);
                         if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
                            todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
                         }
@@ -575,7 +528,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top_edge_content.state_id.0, token_id.0, nts);
                             for (nt, _prod_ids) in nts {
                                 crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
-                                let s_new_arc = self.pop_and_goto(&temp_idk, *len, *nt);
+                                let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt);
                                 if !s_new_arc.is_empty() {
                                     todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
                                 }
