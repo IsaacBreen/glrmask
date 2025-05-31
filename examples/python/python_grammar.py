@@ -101,6 +101,7 @@ def define_tokens() -> list[tuple[str, Any]]:
     rep = Regex.rep
     rep1 = Regex.rep1
     eps = Regex.eps
+    opt = Regex.opt
 
     def eat_u8_choice(s):
         return choice([eat_u8(ord(c)) for c in s])
