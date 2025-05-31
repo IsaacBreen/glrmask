@@ -153,7 +153,7 @@ def define_tokens() -> list[tuple[str, Any]]:
 # #     tokens["NUMBER"] = rep(eat("1"))
     tokens["NEWLINE"] = eat("\n")
     tokens["INDENT"] = rep1(eat(" "))
-#     tokens["DEDENT"] = eps()
+    tokens["DEDENT"] = eps()
 
     tokens["STRING"] = choice([
         seq([eat_u8(ord('"')), rep(choice([eat_u8_negation(ord('"')), eat('\"')])), eat_u8(ord('"'))]),
