@@ -19,13 +19,6 @@ pub trait UserData: Debug + Send + Sync + 'static {
     // fn hash_box(&self, state: &mut dyn Hasher);
 }
 
-// Implement Clone for Arc<dyn UserData>
-impl Clone for Arc<dyn UserData> {
-    fn clone(&self) -> Self {
-        self.clone_box()
-    }
-}
-
 // Implement UserData for () to be used as a default
 impl UserData for () {
     fn clone_box(&self) -> Arc<dyn UserData> {
