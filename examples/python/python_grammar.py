@@ -99,6 +99,7 @@ def define_tokens() -> list[tuple[str, Any]]:
     eat_u8_negation = Regex.eat_u8_negation
     seq = Regex.seq
     rep = Regex.rep
+    rep1 = Regex.rep1
     eps = Regex.eps
 
     def eat_u8_choice(s):
@@ -141,7 +142,7 @@ def define_tokens() -> list[tuple[str, Any]]:
 
     tokens["NAME"] = seq([name_start, rep(name_middle)])
     tokens["NUMBER"] = choice([
-        rep(digit),
+        rep1(digit),
         seq([rep(digit), eat_u8(ord(".")), rep(digit)]),
     ])
 #     # TODO: delete this
