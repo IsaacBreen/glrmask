@@ -281,7 +281,7 @@ impl GrammarConstraint {
         token_name_map:   BiBTreeMap<String, usize>,
         max_original_llm_token_id: usize, 
     ) -> Self {
-        let epsilon_terminal_group_ids = tokenizer.epsilon_tokens();
+        let epsilon_terminal_group_ids = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
         let epsilon_terminals: BTreeSet<&String> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
         assert!(epsilon_terminals.is_empty(), "Epsilon tokens (tokens that can match an empty string) are not supported by the grammar constraint. Got: {:?}", epsilon_terminals);
         let original_to_internal_id_bimap = Self::setup_llm_token_mappings(&llm_token_map);

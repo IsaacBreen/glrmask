@@ -121,9 +121,5 @@ impl Regex {
     pub(crate) fn max_state(&self) -> usize {
         self.dfa.states.len()
     }
-
-    pub(crate) fn epsilon_tokens(&self) -> BTreeSet<GroupID> {
-        self.execute_from_state(&[], self.initial_state_id()).matches.iter().map(|token| token.id).collect()
-    }
 }
 
