@@ -475,7 +475,7 @@ impl GrammarDefinition {
         }
 
         #[derive(PartialEq)]
-enum Nullability {
+        enum Nullability {
             NeverNull,
             CanBeNull,
             AlwaysNull,
