@@ -1,6 +1,6 @@
 use crate::constraint::GrammarConstraint;
 use crate::debug;
-use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, Regex};
+use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{
@@ -473,6 +473,57 @@ impl GrammarDefinition {
                 productions.extend(new_productions_for_rhs); // Extend with productions from processing the rhs
             }
         }
+
+        enum Nullability {
+            NeverNull,
+            CanBeNull,
+            AlwaysNull,
+        }
+
+        fn get_nullability(expr: Expr) -> Nullability {
+            match expr {
+                Expr::U8Seq(bytes) => bytes.is_empty().then(|| Nullability::NeverNull).unwrap_or(Nullability::AlwaysNull),
+                Expr::U8Class(u8s) => Nullability::NeverNull,
+                Expr::Quantifier(expr, q_type) => match q_type {
+                    QuantifierType::ZeroOrMore => get_nullability(*expr),
+                    QuantifierType::OneOrMore => Nullability::CanBeNull,
+                    QuantifierType::ZeroOrOne => Nullability::CanBeNull,
+                },
+                Expr::Choice(exprs) => {
+                    let nullabilities: Vec<Nullability> = exprs.iter().map(get_nullability).collect();
+                    if nullabilities.iter().all(|n| *n == Nullability::AlwaysNull) {
+                        Nullability::AlwaysNull
+                    } else if nullabilities.iter().all(|n| *n == Nullability::NeverNull) {
+                        Nullability::NeverNull
+                    } else {
+                        Nullability::CanBeNull
+                    }
+                }
+                Expr::Seq(exprs) => {
+                    let nullabilities: Vec<Nullability> = exprs.iter().map(get_nullability).collect();
+                    if nullabilities.len() == 0 {
+                        Nullability::AlwaysNull
+                    } else if nullabilities.iter().all(|n| *n == Nullability::AlwaysNull) {
+                        Nullability::AlwaysNull
+                    } else if nullabilities.iter().any(|n| *n == Nullability::NeverNull) {
+                        Nullability::NeverNull
+                    } else {
+                        Nullability::CanBeNull
+                    }
+                }
+                Expr::Epsilon => Nullability::AlwaysNull,
+            }
+        }
+
+        // Transfer nullability to the productions.
+        // If a terminal is always null, remove it from all productions.
+        // If it is sometimes null, make it optional.
+        // If it is never null, do nothing.
+        // In the sometimes-null case, avoid making too many extra productions.
+        // If the terminal appears in exactly one production, and it is the only symbol in that production, modify 'make' that production 'optional' by creating a new production with the same LHS but empty RHS.
+        // Otherwise, Create a new nonterminal for that terminal (with a new name) and replace all occurrences of the terminal with the new nonterminal.
+        // Then, make that new nonterminal optional by creating two productions for it: one with the terminal as the sole RHS symbol, and one with an empty RHS.
+        todo!();
 
         Ok(GrammarDefinition {
             productions,
