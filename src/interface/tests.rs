@@ -7,7 +7,7 @@ mod tests {
     use crate::datastructures::hybrid_bitset::HybridBitset;
     use bimap::BiBTreeMap; // Add this line
     use crate::glr::grammar::{NonTerminal as NT, Production as Prod, Symbol as Sym, Terminal as Term};
-    use std::collections::HashSet;
+    use std::collections::{BTreeSet, HashSet};
 
     #[test]
     fn test_incremental_parser_simple() {
@@ -519,14 +519,14 @@ mod tests {
         let augmented_start_nt_name = grammar_def.productions[grammar_def.start_production_id].lhs.0.clone();
 
         // Define the set of expected productions
-        let expected_prods_set = HashSet::from([
+        let expected_prods_set = BTreeSet::from([
             Prod { lhs: NT(augmented_start_nt_name), rhs: vec![Sym::NonTerminal(NT("Root".to_string()))] },
             Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(Term(name_term_z.clone()))] },
             Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(Term(name_term_x_opt.clone()))] },
             Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![] }, // Epsilon production
         ]);
 
-        let actual_prods_set: HashSet<_> = grammar_def.productions.iter().cloned().collect();
+        let actual_prods_set: BTreeSet<_> = grammar_def.productions.iter().cloned().collect();
         
         // Assert that the actual productions match the expected ones
         if expected_prods_set != actual_prods_set {
