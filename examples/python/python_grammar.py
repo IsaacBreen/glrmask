@@ -184,11 +184,12 @@ def define_tokens() -> list[tuple[str, Any]]:
         opt(eat_u8(ord("\n"))),
     ])
     tokens["ENDMARKER"] = eps()
-    return [regex(expr, name) for name, expr in tokens.items()]
+#     return [regex(expr, name) for name, expr in tokens.items()]
 #     # TODO: delete this
 #     return []
 #     assert len(tokens) == len(set(tokens.keys()))
 #     return [(name, ge.regex(expr)) for name, expr in tokens.items()]
+    return [regex(expr if name == "FSTRING_MIDDLE" else eps(), name) for name, expr in tokens.items()]
 
 def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # Changed Grammar to CompiledGrammar
     memo = {}
