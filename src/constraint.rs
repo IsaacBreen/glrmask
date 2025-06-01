@@ -643,11 +643,11 @@ impl<'r> Precomputer<'r> {
             //     .unwrap()
             //     .clone();
             // *root = new_root;
-            if let Some(new_root) = unique.get(&root.lock().unwrap().clone()) {
+            if let Some(new_root) = unique.get(&root.clone().lock().unwrap().clone()) {
                 *root = new_root.clone();
             } else {
                 eprintln!("Warning: Root {:?} not found in unique nodes map. This should not happen.", root.lock().unwrap().clone());
-            }
+            };
         }
     }
 
