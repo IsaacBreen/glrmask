@@ -64,10 +64,10 @@ where
 
         // --- Step 1: Serialize `self` (the root node for this call) ---
         // `self` is node at index 0.
-        let root_idx = 0;
         // We need to store the JSON representation of `self`'s direct data.
         // Since `self` is not an Arc here, we handle it specially as the first node.
         // Its children, which are Arcs, will be processed via the BFS queue.
+        let root_idx = 0;
         nodes_json_list.push(JSONNode::Null); // Placeholder for root, will be filled after processing its children.
 
         let mut root_children_json_data = Vec::new(); // Stores [EK_json, [[ChildIdx, EV_json], ...]]
@@ -703,9 +703,16 @@ where
             return true;
         }
 
+        // Ensure canonical cache key: (min_ptr, max_ptr).
+        // The boolean result of equality is symmetric, so order doesn't change the meaning of 'true' or 'false'.
+        let (cache_key_ptr1, cache_key_ptr2) = if self_ptr < other_ptr {
+            (self_ptr, other_ptr)
+        } else {
+            (other_ptr, self_ptr)
+        };
+
         // Check cache for prior comparison result of this specific pair.
-        // The key order (self_ptr, other_ptr) matters.
-        if let Some(&cached_result) = comparison_cache.get(&(self_ptr, other_ptr)) {
+        if let Some(&cached_result) = comparison_cache.get(&(cache_key_ptr1, cache_key_ptr2)) {
             return cached_result;
         }
 
@@ -713,21 +720,21 @@ where
         // If a cycle is encountered leading back to this pair, this 'true' will be returned,
         // assuming consistency unless a mismatch is found later down the path.
         // If any subsequent comparison fails, this cache entry will be updated to false.
-        comparison_cache.insert((self_ptr, other_ptr), true);
+        comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), true);
 
         // Attempt to lock both nodes. If locking fails (e.g., poisoned mutex, or would block
         // in a more complex scenario not expected here), treat them as unequal for safety.
         let self_node_guard = match self_arc.try_lock() {
             Ok(g) => g,
             Err(_) => {
-                comparison_cache.insert((self_ptr, other_ptr), false); // Update cache to reflect failure
+                comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false); // Update cache to reflect failure
                 return false;
             }
         };
         let other_node_guard = match other_arc.try_lock() {
             Ok(g) => g,
             Err(_) => {
-                comparison_cache.insert((self_ptr, other_ptr), false); // Update cache
+                comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false); // Update cache
                 return false;
             }
         };
@@ -739,13 +746,13 @@ where
 
         // 1. Compare non-recursive fields: value and max_depth.
         if self_node.value != other_node.value || self_node.max_depth != other_node.max_depth {
-            comparison_cache.insert((self_ptr, other_ptr), false); // Update cache
+            comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false); // Update cache
             return false;
         }
 
         // 2. Compare children structure (number of distinct edge keys).
         if self_node.children.len() != other_node.children.len() {
-            comparison_cache.insert((self_ptr, other_ptr), false); // Update cache
+            comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false); // Update cache
             return false;
         }
 
@@ -753,13 +760,13 @@ where
         for (self_ek, self_dest_map) in &self_node.children {
             match other_node.children.get(self_ek) {
                 None => { // Edge key present in self but not in other.
-                    comparison_cache.insert((self_ptr, other_ptr), false); // Update cache
+                    comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false); // Update cache
                     return false;
                 }
                 Some(other_dest_map) => {
                     // Number of destinations for this edge key must match.
                     if self_dest_map.len() != other_dest_map.len() {
-                        comparison_cache.insert((self_ptr, other_ptr), false); // Update cache
+                        comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false); // Update cache
                         return false;
                     }
 
@@ -795,7 +802,7 @@ where
                         }
                         if !found_match_for_current_self_pair {
                             // No match found in other_child_pairs for the current s_arc/s_ev.
-                            comparison_cache.insert((self_ptr, other_ptr), false); // Update cache
+                            comparison_cache.insert((cache_key_ptr1, cache_key_ptr2), false); // Update cache
                             return false;
                         }
                     }
@@ -1652,7 +1659,7 @@ mod tests {
         assert!(retrieved_data_a.contains(&("edge_a3", arc_ptr(&child3))));
 
         // Test get for 'b'
-        let retrieved_children_b = root.get(&"b").expect("Failed to get child 'b'"); // Now a &BTreeMap
+        let retrieved_children_b = root.children().get(&"b").expect("Failed to get child 'b'"); // Now a &BTreeMap
         assert_eq!(retrieved_children_b.len(), 1);
         let (wrapper_arc, ev_ref) = retrieved_children_b.iter().next().unwrap(); // Get the single entry
         assert_eq!(*ev_ref, "edge_b"); // Check edge value
