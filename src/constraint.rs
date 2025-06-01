@@ -313,7 +313,7 @@ impl GrammarConstraint {
         // Cache for the possible_matches computation
         let mut pm_cache: HashMap<(*const VocabPrefixTreeNode, TokenizerStateID), BTreeMap<GrammarTokenID, LLMTokenBV>> = HashMap::new();
 
-        crate::debug!(2, "Computing possible_matches for all tokenizer states");
+        crate::debug!(2, "Computing possible_matches for all tokenizer {} states", tokenizer.iter_states().count());
         for sid in tokenizer.iter_states() { // Use the `tokenizer` parameter passed to `new`
             let matches_for_sid = Self::compute_possible_matches_for_vocab_node(
                 &tokenizer, // Pass the tokenizer parameter from `new`
