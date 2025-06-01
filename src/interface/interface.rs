@@ -474,56 +474,193 @@ impl GrammarDefinition {
             }
         }
 
+        // --- Start of new code for nullability ---
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         enum Nullability {
-            NeverNull,
-            CanBeNull,
-            AlwaysNull,
+            NeverNull,  // Matches only non-empty strings
+            CanBeNull,  // Matches empty and potentially non-empty strings
+            AlwaysNull, // Matches only the empty string
         }
 
-        fn get_nullability(expr: Expr) -> Nullability {
+        fn get_nullability(expr: &Expr) -> Nullability {
             match expr {
-                Expr::U8Seq(bytes) => bytes.is_empty().then(|| Nullability::NeverNull).unwrap_or(Nullability::AlwaysNull),
-                Expr::U8Class(u8s) => Nullability::NeverNull,
-                Expr::Quantifier(expr, q_type) => match q_type {
-                    QuantifierType::ZeroOrMore => get_nullability(*expr),
-                    QuantifierType::OneOrMore => Nullability::CanBeNull,
-                    QuantifierType::ZeroOrOne => Nullability::CanBeNull,
-                },
-                Expr::Choice(exprs) => {
-                    let nullabilities: Vec<Nullability> = exprs.iter().map(get_nullability).collect();
-                    if nullabilities.iter().all(|n| *n == Nullability::AlwaysNull) {
-                        Nullability::AlwaysNull
-                    } else if nullabilities.iter().all(|n| *n == Nullability::NeverNull) {
-                        Nullability::NeverNull
-                    } else {
-                        Nullability::CanBeNull
-                    }
-                }
-                Expr::Seq(exprs) => {
-                    let nullabilities: Vec<Nullability> = exprs.iter().map(get_nullability).collect();
-                    if nullabilities.len() == 0 {
-                        Nullability::AlwaysNull
-                    } else if nullabilities.iter().all(|n| *n == Nullability::AlwaysNull) {
-                        Nullability::AlwaysNull
-                    } else if nullabilities.iter().any(|n| *n == Nullability::NeverNull) {
-                        Nullability::NeverNull
-                    } else {
-                        Nullability::CanBeNull
-                    }
-                }
                 Expr::Epsilon => Nullability::AlwaysNull,
+                Expr::U8Seq(bytes) => {
+                    if bytes.is_empty() {
+                        Nullability::AlwaysNull
+                    } else {
+                        Nullability::NeverNull
+                    }
+                }
+                Expr::U8Class(_) => Nullability::NeverNull,
+                Expr::Quantifier(inner_expr_box, q_type) => {
+                    // Dereference the Box<Expr> to get &Expr, then pass it.
+                    let inner_nullability = get_nullability(&**inner_expr_box);
+                    match q_type {
+                        QuantifierType::ZeroOrMore => { // e.g., X*
+                            // If inner is AlwaysNull (like epsilon*), result is AlwaysNull.
+                            // Otherwise (like a* or (a?)*), result is CanBeNull.
+                            if inner_nullability == Nullability::AlwaysNull {
+                                Nullability::AlwaysNull
+                            } else {
+                                Nullability::CanBeNull
+                            }
+                        }
+                        QuantifierType::OneOrMore => { // e.g., X+
+                            // Nullability of X+ is same as X. (a+ is NeverNull, epsilon+ is AlwaysNull, (a?)+ is CanBeNull)
+                            inner_nullability
+                        }
+                        QuantifierType::ZeroOrOne => { // e.g., X?
+                            // If inner is AlwaysNull (like epsilon?), result is AlwaysNull.
+                            // Otherwise (like a? or (NeverNull)?), result is CanBeNull.
+                            if inner_nullability == Nullability::AlwaysNull {
+                                Nullability::AlwaysNull
+                            } else {
+                                Nullability::CanBeNull
+                            }
+                        }
+                    }
+                }
+                Expr::Choice(exprs_vec) => {
+                    if exprs_vec.is_empty() {
+                        // A choice of zero options can never be satisfied.
+                        return Nullability::NeverNull;
+                    }
+                    let nullabilities: Vec<Nullability> = exprs_vec.iter().map(|e| get_nullability(e)).collect();
+
+                    if nullabilities.iter().any(|&n| n == Nullability::AlwaysNull) {
+                        // If any arm is AlwaysNull (e.g., "epsilon | a" or "epsilon | epsilon")
+                        // If all arms are AlwaysNull, the choice is AlwaysNull.
+                        // Otherwise, it's CanBeNull.
+                        if nullabilities.iter().all(|&n| n == Nullability::AlwaysNull) {
+                            Nullability::AlwaysNull
+                        } else {
+                            Nullability::CanBeNull
+                        }
+                    } else if nullabilities.iter().any(|&n| n == Nullability::CanBeNull) {
+                        // No AlwaysNull arms, but at least one CanBeNull arm (e.g., "a? | b" or "a? | b?")
+                        Nullability::CanBeNull
+                    } else {
+                        // All arms are NeverNull (e.g., "a | b")
+                        Nullability::NeverNull
+                    }
+                }
+                Expr::Seq(exprs_vec) => {
+                    if exprs_vec.is_empty() {
+                        // An empty sequence is like epsilon.
+                        return Nullability::AlwaysNull;
+                    }
+                    let nullabilities: Vec<Nullability> = exprs_vec.iter().map(|e| get_nullability(e)).collect();
+
+                    if nullabilities.iter().any(|&n| n == Nullability::NeverNull) {
+                        // If any part of the sequence is NeverNull, the whole sequence is NeverNull.
+                        Nullability::NeverNull
+                    } else if nullabilities.iter().all(|&n| n == Nullability::AlwaysNull) {
+                        // All parts are AlwaysNull (e.g., "epsilon epsilon"), so sequence is AlwaysNull.
+                        Nullability::AlwaysNull
+                    } else {
+                        // No NeverNull parts, and not all parts are AlwaysNull.
+                        // This means all parts are (CanBeNull or AlwaysNull), with at least one CanBeNull.
+                        // Example: "a? epsilon" or "a? b?". Sequence is CanBeNull.
+                        Nullability::CanBeNull
+                    }
+                }
             }
         }
 
-        // Transfer nullability to the productions.
-        // If a terminal is always null, remove it from all productions.
-        // If it is sometimes null, make it optional.
-        // If it is never null, do nothing.
-        // In the sometimes-null case, avoid making too many extra productions.
-        // If the terminal appears in exactly one production, and it is the only symbol in that production, modify 'make' that production 'optional' by creating a new production with the same LHS but empty RHS.
-        // Otherwise, Create a new nonterminal for that terminal (with a new name) and replace all occurrences of the terminal with the new nonterminal.
-        // Then, make that new nonterminal optional by creating two productions for it: one with the terminal as the sole RHS symbol, and one with an empty RHS.
-        todo!();
+        // Calculate nullability for all terminal expressions
+        let mut terminal_nullability_map: HashMap<GroupID, Nullability> = HashMap::new();
+        for (expr, group_id) in &terminal_expr_to_group_id {
+            terminal_nullability_map.insert(*group_id, get_nullability(expr));
+        }
+
+        // Handle AlwaysNull terminals: remove them from production RHS
+        let always_null_terminal_names: HashSet<String> = terminal_name_to_group_id
+            .iter()
+            .filter_map(|(name, group_id)| {
+                if terminal_nullability_map.get(group_id) == Some(&Nullability::AlwaysNull) {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if !always_null_terminal_names.is_empty() {
+            debug!(2, "Nullability: Removing AlwaysNull terminals from productions: {:?}", always_null_terminal_names);
+            for production in &mut productions {
+                production.rhs.retain(|symbol| match symbol {
+                    Symbol::Terminal(Terminal(t_name)) => !always_null_terminal_names.contains(t_name),
+                    _ => true,
+                });
+            }
+        }
+
+        // Handle CanBeNull terminals: replace T with T_opt, add T_opt -> T | epsilon
+        let can_be_null_terminals_info: Vec<(String, GroupID)> = terminal_name_to_group_id
+            .iter()
+            .filter_map(|(name, group_id)| {
+                if terminal_nullability_map.get(group_id) == Some(&Nullability::CanBeNull) {
+                    Some((name.clone(), *group_id))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if !can_be_null_terminals_info.is_empty() {
+            debug!(2, "Nullability: Processing CanBeNull terminals: {:?}", can_be_null_terminals_info.iter().map(|(name,_)| name.clone()).collect::<Vec<_>>());
+            let mut new_productions_for_optional_nts = Vec::new();
+            let mut terminal_to_optional_nt_name_map: HashMap<String, String> = HashMap::new();
+
+            for (t_name, _t_group_id) in can_be_null_terminals_info {
+                // Sanitize base name for the new optional non-terminal to avoid issues with quotes in names
+                let base_opt_nt_name = format!("{}_opt", t_name.trim_matches(|c: char| c == '"' || c == '\''));
+                let opt_nt_name = Self::generate_unique_indexed_name(
+                    &base_opt_nt_name,
+                    &mut per_base_counters,
+                    &mut all_names,
+                );
+                // `all_names` is updated by `generate_unique_indexed_name`
+
+                terminal_to_optional_nt_name_map.insert(t_name.clone(), opt_nt_name.clone());
+
+                // Add T_opt -> T
+                new_productions_for_optional_nts.push(Production {
+                    lhs: NonTerminal(opt_nt_name.clone()),
+                    rhs: vec![Symbol::Terminal(Terminal(t_name.clone()))],
+                });
+                // Add T_opt -> epsilon
+                new_productions_for_optional_nts.push(Production {
+                    lhs: NonTerminal(opt_nt_name.clone()),
+                    rhs: vec![], // Epsilon production
+                });
+            }
+
+            // Substitute original CanBeNull terminals with their new _opt NonTerminals in all productions
+            for production in &mut productions {
+                let mut updated_rhs = Vec::with_capacity(production.rhs.len());
+                for symbol in production.rhs.drain(..) { // Draining allows taking ownership of symbols
+                    match symbol {
+                        Symbol::Terminal(Terminal(original_t_name)) => {
+                            if let Some(opt_nt_name) = terminal_to_optional_nt_name_map.get(&original_t_name) {
+                                updated_rhs.push(Symbol::NonTerminal(NonTerminal(opt_nt_name.clone())));
+                            } else {
+                                // Not a CanBeNull terminal, or already processed, push back original
+                                updated_rhs.push(Symbol::Terminal(Terminal(original_t_name)));
+                            }
+                        }
+                        non_terminal_symbol => { // NonTerminals or Terminals not in the map
+                            updated_rhs.push(non_terminal_symbol);
+                        }
+                    }
+                }
+                production.rhs = updated_rhs;
+            }
+            productions.extend(new_productions_for_optional_nts);
+        }
+        // --- End of new code for nullability ---
 
         Ok(GrammarDefinition {
             productions,
