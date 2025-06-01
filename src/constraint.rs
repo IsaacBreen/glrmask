@@ -638,11 +638,16 @@ impl<'r> Precomputer<'r> {
 
         crate::debug!(2, "Merging nodes: second pass rewriting roots");
         for (_tokenizer_state_id, root) in &mut self.roots {
-            let new_root = unique
-                .get(&root.lock().unwrap().clone())
-                .unwrap()
-                .clone();
-            *root = new_root;
+            // let new_root = unique
+            //     .get(&root.lock().unwrap().clone())
+            //     .unwrap()
+            //     .clone();
+            // *root = new_root;
+            if let Some(new_root) = unique.get(&root.lock().unwrap().clone()) {
+                *root = new_root.clone();
+            } else {
+                eprintln!("Warning: Root {:?} not found in unique nodes map. This should not happen.", root.lock().unwrap().clone());
+            }
         }
     }
 
