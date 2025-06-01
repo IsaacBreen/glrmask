@@ -122,8 +122,9 @@ impl Regex {
         self.dfa.states.len()
     }
 
-    pub(crate) fn epsilon_tokens(&self) -> &BTreeSet<GroupID> {
-        &self.dfa.states[0].finalizers
+    pub(crate) fn epsilon_tokens(&self) -> BTreeSet<GroupID> {
+        let result = self.execute_from_state(&[], self.initial_state_id());
+        result.matches.iter().map(|token| token.id).collect()
     }
 }
 
