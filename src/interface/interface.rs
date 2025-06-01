@@ -481,35 +481,31 @@ enum Nullability {
             AlwaysNull,
         }
 
-        fn get_nullability(expr: &Expr) -> Nullability {
+        fn get_nullability(expr: Expr) -> Nullability {
             match expr {
-                Expr::U8Seq(bytes) => bytes.is_empty().then(|| Nullability::NeverNull).unwrap_or(Nullability::AlwaysNull),
-                Expr::U8Class(u8s) => Nullability::NeverNull,
+                Expr::U8Seq(bytes) => bytes.is_empty().then(|| Nullability::AlwaysNull).unwrap_or(Nullability::NeverNull),
+                Expr::U8Class(_u8s) => Nullability::NeverNull,
                 Expr::Quantifier(expr, q_type) => match q_type {
-                    QuantifierType::ZeroOrMore => get_nullability(expr),
-                    QuantifierType::OneOrMore => Nullability::CanBeNull,
+                    QuantifierType::ZeroOrMore => Nullability::CanBeNull,
+                    QuantifierType::OneOrMore => get_nullability(*expr),
                     QuantifierType::ZeroOrOne => Nullability::CanBeNull,
                 },
                 Expr::Choice(exprs) => {
-                    let nullabilities: Vec<Nullability> = exprs.iter().map(get_nullability).collect();
-                    if nullabilities.iter().all(|n| *n == Nullability::AlwaysNull) {
-                        Nullability::AlwaysNull
-                    } else if nullabilities.iter().all(|n| *n == Nullability::NeverNull) {
-                        Nullability::NeverNull
-                    } else {
+                    let nullabilities: Vec<Nullability> = exprs.iter().map(|e| get_nullability(e.clone())).collect();
+                    if nullabilities.iter().any(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
                         Nullability::CanBeNull
+                    } else {
+                        Nullability::NeverNull
                     }
                 }
                 Expr::Seq(exprs) => {
-                    let nullabilities: Vec<Nullability> = exprs.iter().map(get_nullability).collect();
-                    if nullabilities.len() == 0 {
-                        Nullability::AlwaysNull
-                    } else if nullabilities.iter().all(|n| *n == Nullability::AlwaysNull) {
-                        Nullability::AlwaysNull
+                    let nullabilities: Vec<Nullability> = exprs.iter().map(|e| get_nullability(e.clone())).collect();
+                    if nullabilities.iter().all(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)) {
+                        Nullability::CanBeNull
                     } else if nullabilities.iter().any(|n| *n == Nullability::NeverNull) {
                         Nullability::NeverNull
                     } else {
-                        Nullability::CanBeNull
+                        Nullability::NeverNull
                     }
                 }
                 Expr::Epsilon => Nullability::AlwaysNull,
@@ -524,7 +520,90 @@ enum Nullability {
         // If the terminal appears in exactly one production, and it is the only symbol in that production, modify 'make' that production 'optional' by creating a new production with the same LHS but empty RHS.
         // Otherwise, Create a new nonterminal for that terminal (with a new name) and replace all occurrences of the terminal with the new nonterminal.
         // Then, make that new nonterminal optional by creating two productions for it: one with the terminal as the sole RHS symbol, and one with an empty RHS.
-        todo!();
+        // ------------------------------------------------------------------
+        // 1.  Work out the nullability of every *terminal* in the grammar
+        // ------------------------------------------------------------------
+        let mut always_null_terminals: HashSet<String>   = HashSet::new();
+        let mut may_be_null_terminals:    HashSet<String> = HashSet::new();
+
+        for (terminal_name, group_id) in terminal_name_to_group_id.iter() {
+            let expr = terminal_expr_to_group_id
+                .get_by_right(group_id)
+                .expect("terminal_name_to_group_id / terminal_expr_to_group_id out of sync")
+                .clone();
+
+            match get_nullability(expr) {
+                Nullability::AlwaysNull => { always_null_terminals.insert(terminal_name.clone()); }
+                Nullability::CanBeNull  => { may_be_null_terminals.insert(terminal_name.clone()); }
+                Nullability::NeverNull  => { /* nothing to do  */ }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // 2.  Remove the “always-null” terminals completely
+        // ------------------------------------------------------------------
+        let mut updated_productions: Vec<Production> = Vec::with_capacity(productions.len());
+        for prod in productions.into_iter() {
+            let filtered_rhs: Vec<Symbol> = prod.rhs
+                .into_iter()
+                .filter(|sym| {
+                    match sym {
+                        Symbol::Terminal(t) => !always_null_terminals.contains(&t.0),
+                        _                   => true,
+                    }
+                })
+                .collect();
+
+            updated_productions.push(Production {
+                lhs: prod.lhs,
+                rhs: filtered_rhs,
+            });
+        }
+
+        // `productions` is no longer needed – we continue working with the
+        // local `updated_productions` vector from now on.
+        let mut productions = updated_productions;
+
+        // ------------------------------------------------------------------
+        // 3.  Turn the “sometimes null” terminals into *optional* non-terminals
+        // ------------------------------------------------------------------
+        for terminal_name in may_be_null_terminals {
+            // (a) generate a fresh non-terminal name that will stand for
+            //       “   <terminal> | ε   ”.
+            let opt_nt_name = Self::generate_unique_indexed_name(
+                &format!("{}Opt", terminal_name.trim_matches('"')), // base for uniqueness
+                &mut per_base_counters,
+                &mut all_names,
+            );
+            let opt_nt = NonTerminal(opt_nt_name.clone());
+
+            // (b) create the two new productions:
+            //         <opt_nt>  ->  <terminal_name>
+            //         <opt_nt>  ->  ε
+            productions.push(Production {
+                lhs: opt_nt.clone(),
+                rhs: vec![Symbol::Terminal(Terminal(terminal_name.clone()))],
+            });
+            productions.push(Production {
+                lhs: opt_nt.clone(),
+                rhs: Vec::new(), // ε
+            });
+
+            // (c) replace every occurrence of the terminal in all existing
+            //     productions with the new optional non-terminal.
+            for prod in productions.iter_mut() {
+                for sym in &mut prod.rhs {
+                    if let Symbol::Terminal(t) = sym {
+                        if t.0 == terminal_name {
+                            *sym = Symbol::NonTerminal(opt_nt.clone());
+                        }
+                    }
+                }
+            }
+        }
+        // ------------------------------------------------------------------
+        //  End of nullability processing
+        // ------------------------------------------------------------------
 
         Ok(GrammarDefinition {
             productions,
