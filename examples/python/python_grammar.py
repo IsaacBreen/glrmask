@@ -189,7 +189,8 @@ def define_tokens() -> list[tuple[str, Any]]:
 #     return []
 #     assert len(tokens) == len(set(tokens.keys()))
 #     return [(name, ge.regex(expr)) for name, expr in tokens.items()]
-    return [regex(expr if name == "FSTRING_MIDDLE" else eat("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"*10), name) for name, expr in tokens.items()]
+#     return [regex(expr if name == "FSTRING_MIDDLE" else eat("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"*20), name) for name, expr in tokens.items()]
+    return [regex(tokens["FSTRING_MIDDLE"], name) for name, expr in tokens.items()]
 
 def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # Changed Grammar to CompiledGrammar
     memo = {}
