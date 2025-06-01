@@ -118,8 +118,12 @@ impl Regex {
         regex_state.possible_future_group_ids().iter().cloned().map(|id| GrammarTokenID(id)).collect()
     }
 
-    pub(crate) fn max_state(&self) -> usize {
+    fn max_state(&self) -> usize {
         self.dfa.states.len()
+    }
+
+    pub(crate) fn iter_states(&self) -> impl Iterator<Item=TokenizerStateID> {
+        (0..self.max_state()).map(|id| TokenizerStateID(id))
     }
 }
 

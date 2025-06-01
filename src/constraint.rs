@@ -281,7 +281,7 @@ impl GrammarConstraint {
         token_name_map:   BiBTreeMap<String, usize>,
         max_original_llm_token_id: usize, 
     ) -> Self {
-        let epsilon_terminal_group_ids = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
+        let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
         let epsilon_terminals: BTreeSet<&String> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
         assert!(epsilon_terminals.is_empty(), "Epsilon tokens (tokens that can match an empty string) are not supported by the grammar constraint. Got: {:?}", epsilon_terminals);
         let original_to_internal_id_bimap = Self::setup_llm_token_mappings(&llm_token_map);
@@ -314,8 +314,7 @@ impl GrammarConstraint {
         let mut pm_cache: HashMap<(*const VocabPrefixTreeNode, TokenizerStateID), BTreeMap<GrammarTokenID, LLMTokenBV>> = HashMap::new();
 
         crate::debug!(2, "Computing possible_matches for all tokenizer states");
-        for sid_val in 0..tokenizer.max_state() { // Use the `tokenizer` parameter passed to `new`
-            let sid = TokenizerStateID(sid_val);
+        for sid in tokenizer.iter_states() { // Use the `tokenizer` parameter passed to `new`
             let matches_for_sid = Self::compute_possible_matches_for_vocab_node(
                 &tokenizer, // Pass the tokenizer parameter from `new`
                 &vocab_for_possible_matches.root,
@@ -533,9 +532,9 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Done building vocab prefix tree");
 
         let mut roots = BTreeMap::new();
-        for sid in 0..tokenizer.max_state() {
+        for sid in tokenizer.iter_states() {
             roots.insert(
-                TokenizerStateID(sid),
+                sid,
                 Arc::new(Mutex::new(PrecomputeNode::new(
                     PrecomputedNodeContents::default(),
                 ))),
