@@ -474,18 +474,19 @@ impl GrammarDefinition {
             }
         }
 
-        enum Nullability {
+        #[derive(PartialEq)]
+enum Nullability {
             NeverNull,
             CanBeNull,
             AlwaysNull,
         }
 
-        fn get_nullability(expr: Expr) -> Nullability {
+        fn get_nullability(expr: &Expr) -> Nullability {
             match expr {
                 Expr::U8Seq(bytes) => bytes.is_empty().then(|| Nullability::NeverNull).unwrap_or(Nullability::AlwaysNull),
                 Expr::U8Class(u8s) => Nullability::NeverNull,
                 Expr::Quantifier(expr, q_type) => match q_type {
-                    QuantifierType::ZeroOrMore => get_nullability(*expr),
+                    QuantifierType::ZeroOrMore => get_nullability(expr),
                     QuantifierType::OneOrMore => Nullability::CanBeNull,
                     QuantifierType::ZeroOrOne => Nullability::CanBeNull,
                 },
