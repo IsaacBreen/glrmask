@@ -1230,8 +1230,7 @@ where
         let ptr = Arc::as_ptr(arc);
 
         if let Some(visited_depth) = recursion_marker.get(&ptr) {
-            // Node already visited in this hashing traversal. Hash pointer and depth to break cycle.
-            ptr.hash(state);
+            // Node already visited in this hashing traversal. Hash depth to break cycle.
             visited_depth.hash(state); // Include depth to distinguish different cycle points/sharing levels
             return;
         }
