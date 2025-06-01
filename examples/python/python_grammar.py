@@ -429,7 +429,7 @@ if __name__ == "__main__":
         return tokenizer.decode(tokenizer.get_vocab()[token])
     def restore_weird_chars(token):
         encoded = tokenizer.encode(token)
-        assert len(encoded) == 1
+        assert len(encoded) == 1, f"Expected 1 token for {token}, got {encoded}"
         return tokenizer.decode(encoded[0])
     tokenizer_vocab = {restore_weird_chars(token): i for token, i in tokenizer_vocab.items()}
     tokenizer_vocab = {replace_weird_chars(token): actual_vocab[token] for token in tokenizer_vocab}
