@@ -56,12 +56,12 @@ impl JSONConvertible for U8Set {
                 // End of current range/item, push it
                 if current_start == current_prev {
                     // Single item
-                    members_json.push(JSONNode::UInt(current_start as u64));
+                    members_json.push(JSONNode::UInt(current_start as u128));
                 } else {
                     // Range
                     members_json.push(JSONNode::Array(vec![
-                        JSONNode::UInt(current_start as u64),
-                        JSONNode::UInt(current_prev as u64),
+                        JSONNode::UInt(current_start as u128),
+                        JSONNode::UInt(current_prev as u128),
                     ]));
                 }
                 // Start a new range/item
@@ -72,11 +72,11 @@ impl JSONConvertible for U8Set {
 
         // Push the last accumulated range/item
         if current_start == current_prev {
-            members_json.push(JSONNode::UInt(current_start as u64));
+            members_json.push(JSONNode::UInt(current_start as u128));
         } else {
             members_json.push(JSONNode::Array(vec![
-                JSONNode::UInt(current_start as u64),
-                JSONNode::UInt(current_prev as u64),
+                JSONNode::UInt(current_start as u128),
+                JSONNode::UInt(current_prev as u128),
             ]));
         }
 
@@ -90,7 +90,7 @@ impl JSONConvertible for U8Set {
                 for item_node in arr {
                     match item_node {
                         JSONNode::UInt(n) => {
-                            if n <= u8::MAX as u64 {
+                            if n <= u8::MAX as u128 {
                                 set.insert(n as u8);
                             } else {
                                 return Err(format!("Number {} is too large for u8", n));
@@ -100,14 +100,14 @@ impl JSONConvertible for U8Set {
                             if pair_arr.len() == 2 {
                                 let start_val = match &pair_arr[0] {
                                     JSONNode::UInt(n) => {
-                                        if *n <= u8::MAX as u64 { *n as u8 }
+                                        if *n <= u8::MAX as u128 { *n as u8 }
                                         else { return Err(format!("Start of range {} is too large for u8", n)); }
                                     }
                                     _ => return Err("Expected JSONNode::UInt for start of range value".to_string()),
                                 };
                                 let end_val = match &pair_arr[1] {
                                     JSONNode::UInt(n) => {
-                                        if *n <= u8::MAX as u64 { *n as u8 }
+                                        if *n <= u8::MAX as u128 { *n as u8 }
                                         else { return Err(format!("End of range {} is too large for u8", n)); }
                                     }
                                     _ => return Err("Expected JSONNode::UInt for end of range value".to_string()),
@@ -561,7 +561,7 @@ mod tests {
             JSONNode::Array(ref arr) => {
                 assert_eq!(arr.len(), 1, "Full set should serialize to a single range array");
                 match &arr[0] {
-                    JSONNode::Array(ref range_arr) => {
+                    JSONNode::Array(range_arr) => {
                         assert_eq!(range_arr.len(), 2, "Range array should have two elements");
                         assert_eq!(range_arr[0], JSONNode::UInt(0), "Range start should be 0");
                         assert_eq!(range_arr[1], JSONNode::UInt(255), "Range end should be 255");
