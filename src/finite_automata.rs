@@ -648,7 +648,6 @@ impl Expr {
                 match quantifier_type {
                     QuantifierType::ZeroOrMore => {
                         let loop_start_state = nfa.add_state();
-                        let loop_end_state = nfa.add_state();
 
                         // Epsilon transition from current state to loop start state
                         nfa.add_epsilon_transition(current_state, loop_start_state);
@@ -659,58 +658,43 @@ impl Expr {
                         // Epsilon transition from expr end state back to loop start state for repetition
                         nfa.add_epsilon_transition(expr_end_state, loop_start_state);
 
-                        // Epsilon transition from loop start state to loop end state to allow skipping
-                        nfa.add_epsilon_transition(loop_start_state, loop_end_state);
-
-                        // The loop end state becomes the new current state
-                        loop_end_state
+                        // The loop start state becomes the new current state
+                        loop_start_state
                     }
                     QuantifierType::OneOrMore => {
                         let loop_start_state = nfa.add_state();
 
-                        // Process the expr first to ensure at least one occurrence
-                        let expr_end_state = Self::handle_expr(*expr, nfa, current_state);
+                        // Epsilon transition from current state to loop start state
+                        nfa.add_epsilon_transition(current_state, loop_start_state);
+
+                        // Process the expr
+                        let expr_end_state = Self::handle_expr(*expr, nfa, loop_start_state);
 
                         // Epsilon transition from expr end state back to loop start state for repetition
                         nfa.add_epsilon_transition(expr_end_state, loop_start_state);
-
-                        // Epsilon transition from loop start state back to expr start state to allow repetition
-                        nfa.add_epsilon_transition(loop_start_state, current_state);
 
                         // The expr end state becomes the new current state
                         expr_end_state
                     }
                     QuantifierType::ZeroOrOne => {
-                        let optional_end_state = nfa.add_state();
-
-                        // Epsilon transition from current state to optional end state to allow skipping
-                        nfa.add_epsilon_transition(current_state, optional_end_state);
-
                         // Process the expr
                         let expr_end_state = Self::handle_expr(*expr, nfa, current_state);
 
-                        // Epsilon transition from expr end state to optional end state
-                        nfa.add_epsilon_transition(expr_end_state, optional_end_state);
+                        // Epsilon transition from current state to expr end state
+                        nfa.add_epsilon_transition(expr_end_state, expr_end_state);
 
-                        // The optional end state becomes the new current state
-                        optional_end_state
+                        // The expr end state becomes the new current state
+                        expr_end_state
                     }
                 }
             }
             Expr::Choice(exprs) => {
-                let choice_start_state = nfa.add_state(); // New start state for choice
+                // New start state for choice
                 let choice_end_state = nfa.add_state();   // New end state for choice
 
-                // Epsilon transition from the current state to the start state of the choice
-                nfa.add_epsilon_transition(current_state, choice_start_state);
-
                 for expr in exprs {
-                    // For each expr, connect the start state of the choice to the start state of the expr
-                    let expr_start_state = nfa.add_state();
-                    nfa.add_epsilon_transition(choice_start_state, expr_start_state);
-
                     // Process the expr and get its end state
-                    let expr_end_state = Self::handle_expr(expr, nfa, expr_start_state);
+                    let expr_end_state = Self::handle_expr(expr, nfa, current_state);
 
                     // Connect the end state of the expr to the end state of the choice
                     nfa.add_epsilon_transition(expr_end_state, choice_end_state);
@@ -725,11 +709,7 @@ impl Expr {
                 }
                 current_state
             }
-            Expr::Epsilon => {
-                let new_state = nfa.add_state();
-                nfa.add_epsilon_transition(current_state, new_state);
-                new_state
-            }
+            Expr::Epsilon => current_state
         }
     }
 }
