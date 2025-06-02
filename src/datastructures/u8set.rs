@@ -1,6 +1,5 @@
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
 use crate::json_serialization::{JSONConvertible, JSONNode};
-use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct U8Set {
@@ -33,14 +32,55 @@ impl JSONConvertible for u8 {
 }
 */
 
-// More elegant and readable JSON conversion for U8Set
+// Space-efficient JSON conversion for U8Set using ranges.
 impl JSONConvertible for U8Set {
     fn to_json(&self) -> JSONNode {
-        let members: Vec<JSONNode> = self
-            .iter()
-            .map(|byte_val| byte_val.to_json()) // Relies on u8 implementing JSONConvertible
-            .collect();
-        JSONNode::Array(members)
+        if self.is_empty() {
+            return JSONNode::Array(Vec::new());
+        }
+
+        let mut members_json = Vec::new();
+        let mut iter = self.iter(); // self.iter() is guaranteed to be sorted
+
+        // Get the first item to initialize current_start and current_prev
+        // This is safe due to the is_empty() check above.
+        let first_val = iter.next().unwrap();
+        let mut current_start = first_val;
+        let mut current_prev = first_val;
+
+        for val in iter {
+            if val == current_prev + 1 {
+                // Continues the range
+                current_prev = val;
+            } else {
+                // End of current range/item, push it
+                if current_start == current_prev {
+                    // Single item
+                    members_json.push(JSONNode::UInt(current_start as u64));
+                } else {
+                    // Range
+                    members_json.push(JSONNode::Array(vec![
+                        JSONNode::UInt(current_start as u64),
+                        JSONNode::UInt(current_prev as u64),
+                    ]));
+                }
+                // Start a new range/item
+                current_start = val;
+                current_prev = val;
+            }
+        }
+
+        // Push the last accumulated range/item
+        if current_start == current_prev {
+            members_json.push(JSONNode::UInt(current_start as u64));
+        } else {
+            members_json.push(JSONNode::Array(vec![
+                JSONNode::UInt(current_start as u64),
+                JSONNode::UInt(current_prev as u64),
+            ]));
+        }
+
+        JSONNode::Array(members_json)
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
@@ -48,9 +88,43 @@ impl JSONConvertible for U8Set {
             JSONNode::Array(arr) => {
                 let mut set = U8Set::none();
                 for item_node in arr {
-                    // Relies on u8 implementing JSONConvertible
-                    let byte_val = u8::from_json(item_node)?;
-                    set.insert(byte_val);
+                    match item_node {
+                        JSONNode::UInt(n) => {
+                            if n <= u8::MAX as u64 {
+                                set.insert(n as u8);
+                            } else {
+                                return Err(format!("Number {} is too large for u8", n));
+                            }
+                        }
+                        JSONNode::Array(pair_arr) => {
+                            if pair_arr.len() == 2 {
+                                let start_val = match &pair_arr[0] {
+                                    JSONNode::UInt(n) => {
+                                        if *n <= u8::MAX as u64 { *n as u8 }
+                                        else { return Err(format!("Start of range {} is too large for u8", n)); }
+                                    }
+                                    _ => return Err("Expected JSONNode::UInt for start of range value".to_string()),
+                                };
+                                let end_val = match &pair_arr[1] {
+                                    JSONNode::UInt(n) => {
+                                        if *n <= u8::MAX as u64 { *n as u8 }
+                                        else { return Err(format!("End of range {} is too large for u8", n)); }
+                                    }
+                                    _ => return Err("Expected JSONNode::UInt for end of range value".to_string()),
+                                };
+
+                                if start_val > end_val {
+                                    return Err(format!("Range start {} > end {} is invalid", start_val, end_val));
+                                }
+                                for val_in_range in start_val..=end_val {
+                                    set.insert(val_in_range);
+                                }
+                            } else {
+                                return Err("Range array in U8Set JSON must have 2 elements".to_string());
+                            }
+                        }
+                        _ => return Err("U8Set JSON array elements must be UInt (single value) or 2-element Array of UInts (range)".to_string()),
+                    }
                 }
                 Ok(set)
             }
@@ -453,10 +527,10 @@ mod tests {
         let json_node = set.to_json();
         match json_node {
             JSONNode::Array(ref arr) => {
-                assert_eq!(arr.len(), 3);
-                assert_eq!(arr[0], JSONNode::UInt(10));
-                assert_eq!(arr[1], JSONNode::UInt(20));
-                assert_eq!(arr[2], JSONNode::UInt(30));
+                assert_eq!(arr.len(), 3, "JSON array should have 3 individual numbers");
+                assert_eq!(arr[0], JSONNode::UInt(10), "First element should be 10");
+                assert_eq!(arr[1], JSONNode::UInt(20), "Second element should be 20");
+                assert_eq!(arr[2], JSONNode::UInt(30), "Third element should be 30");
             }
             _ => panic!("Expected JSONNode::Array"),
         }
@@ -483,13 +557,49 @@ mod tests {
         // Test full set (might be slow to construct JSON, but check logic)
         let full_set = U8Set::all();
         let full_json = full_set.to_json();
-         match full_json {
-            JSONNode::Array(ref arr) => assert_eq!(arr.len(), 256),
+        match full_json {
+            JSONNode::Array(ref arr) => {
+                assert_eq!(arr.len(), 1, "Full set should serialize to a single range array");
+                match &arr[0] {
+                    JSONNode::Array(ref range_arr) => {
+                        assert_eq!(range_arr.len(), 2, "Range array should have two elements");
+                        assert_eq!(range_arr[0], JSONNode::UInt(0), "Range start should be 0");
+                        assert_eq!(range_arr[1], JSONNode::UInt(255), "Range end should be 255");
+                    }
+                    _ => panic!("Expected inner JSONNode::Array for the range"),
+                }
+            }
             _ => panic!("Expected JSONNode::Array for full set"),
         }
         let deserialized_full = U8Set::from_json(full_json).unwrap();
         assert_eq!(deserialized_full.len(), 256);
         assert_eq!(full_set, deserialized_full);
+    }
+
+    #[test]
+    fn test_u8set_json_serialization_ranges() {
+        let mut set = U8Set::none();
+        // {0, 1, 2, 5, 10, 11, 12, 14}
+        set.insert(0); set.insert(1); set.insert(2); // Range 0-2
+        set.insert(5); // Single
+        set.insert(10); set.insert(11); set.insert(12); // Range 10-12
+        set.insert(14); // Single
+
+        let json_node = set.to_json();
+        match json_node {
+            JSONNode::Array(ref arr) => {
+                assert_eq!(arr.len(), 4, "Expected 4 items: [0..2], 5, [10..12], 14");
+                assert_eq!(arr[0], JSONNode::Array(vec![JSONNode::UInt(0), JSONNode::UInt(2)]));
+                assert_eq!(arr[1], JSONNode::UInt(5));
+                assert_eq!(arr[2], JSONNode::Array(vec![JSONNode::UInt(10), JSONNode::UInt(12)]));
+                assert_eq!(arr[3], JSONNode::UInt(14));
+            }
+            _ => panic!("Expected JSONNode::Array"),
+        }
+
+        let deserialized_set = U8Set::from_json(json_node).unwrap();
+        assert_eq!(deserialized_set.len(), 8, "Deserialized set should have 8 members");
+        assert_eq!(set, deserialized_set, "Deserialized set should match original");
     }
 
     #[test]
