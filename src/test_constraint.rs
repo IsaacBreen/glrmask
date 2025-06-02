@@ -1411,18 +1411,22 @@ fn inline_sole_productions_pass(
 #[test]
 fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Error>> {
     // --- Initial Setup (same as before) ---
-    let serialized_grammar_path = "src/serialized_compiled_grammar.json";
-    println!("[Minimizer] Loading base CompiledGrammar from: {}", serialized_grammar_path);
-    let json_string = match fs::read_to_string(serialized_grammar_path) {
+    let serialized_definition_path = "src/serialized_grammar_definition.json";
+    println!("[Minimizer] Loading base GrammarDefinition from: {}", serialized_definition_path);
+    let json_string = match fs::read_to_string(serialized_definition_path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[Minimizer] Failed to read serialized grammar file '{}': {}", serialized_grammar_path, e);
+            eprintln!("[Minimizer] Failed to read serialized grammar definition file '{}': {}", serialized_definition_path, e);
             return Err(Box::new(e));
         }
     };
     let json_node = JSONNode::from_json_string(&json_string)?;
-    let compiled_grammar = CompiledGrammar::from_json(json_node)?;
-    println!("[Minimizer] Successfully loaded CompiledGrammar.");
+    let grammar_definition = GrammarDefinition::from_json(json_node)?;
+    println!("[Minimizer] Successfully loaded GrammarDefinition.");
+
+    println!("[Minimizer] Compiling GrammarDefinition into CompiledGrammar...");
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    println!("[Minimizer] Successfully compiled GrammarDefinition into CompiledGrammar.");
 
     let initial_productions = compiled_grammar.definition.productions.clone();
     let augmented_start_rule_lhs = compiled_grammar.definition.productions
