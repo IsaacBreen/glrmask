@@ -2,7 +2,7 @@ use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode, Precompu
 use crate::types::{TerminalID as GrammarTokenID};
 use crate::datastructures::trie::{Trie, node_ptr};
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
-use std::collections::{HashSet, VecDeque, BTreeMap};
+use std::collections::{HashSet, VecDeque, BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use bitvec::prelude::BitVec;
 use crate::datastructures::hybrid_bitset::HybridBitset;
@@ -276,7 +276,7 @@ pub fn calculate_final_stats(
         }
     }
     stats.final_unique_nodes_count = all_reachable_nodes_for_final_stats.len();
-    stats.final_root_nodes_count = precomputed_roots.len(); // Calculate root count
+    stats.final_root_nodes_count = precomputed_roots.iter().map(|(_, node)| Arc::as_ptr(node)).collect::<BTreeSet<_>>().len(); // Calculate root count
 
     // Create a set of root node wrappers for efficient lookup
     let root_node_wrappers: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = precomputed_roots
