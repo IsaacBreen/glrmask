@@ -1061,69 +1061,7 @@ where
             other => return other,
         }
 
-        // Iterate over both BTreeMaps of children, comparing entry by entry.
-        // BTreeMap iteration is sorted by key (EK).
-        let mut iter1 = node1.children.iter();
-        let mut iter2 = node2.children.iter();
-
-        loop {
-            match (iter1.next(), iter2.next()) {
-                (Some((ek1, dm1)), Some((ek2, dm2))) => {
-                    // Compare edge keys
-                    match ek1.cmp(ek2) {
-                        std::cmp::Ordering::Equal => {} // Keys are equal, proceed to compare destination maps
-                        other_ordering => return other_ordering, // Keys differ, Trie ordering determined
-                    }
-
-                    // Edge keys are equal, now compare the destination maps (dm1 and dm2)
-                    // dm1, dm2: &BTreeMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>
-
-                    // First, compare lengths of destination maps.
-                    match dm1.len().cmp(&dm2.len()) {
-                        std::cmp::Ordering::Equal => {} // Lengths are equal, proceed to compare contents
-                        other_ordering => return other_ordering,
-                    }
-
-                    // Lengths are equal. Collect (Arc, EV) pairs from each destination map.
-                    let mut pairs1: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = dm1
-                        .iter()
-                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
-                        .collect();
-                    let mut pairs2: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = dm2
-                        .iter()
-                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
-                        .collect();
-
-                    // Sort these vectors of pairs. The sorting key for a pair (arc, ev) is (ev, structural_comparison_of_arc).
-                    pairs1.sort_unstable_by(|(arc_a, ev_a), (arc_b, ev_b)| {
-                        match ev_a.cmp(ev_b) {
-                            std::cmp::Ordering::Equal => Self::compare_arcs_ord(arc_a, arc_b, cache),
-                            other => other,
-                        }
-                    });
-                    pairs2.sort_unstable_by(|(arc_a, ev_a), (arc_b, ev_b)| {
-                        match ev_a.cmp(ev_b) {
-                            std::cmp::Ordering::Equal => Self::compare_arcs_ord(arc_a, arc_b, cache),
-                            other => other,
-                        }
-                    });
-
-                    // Compare the sorted lists of pairs lexicographically.
-                    match pairs1.iter().cmp_by(pairs2.iter(), |(arc_a, ev_a), (arc_b, ev_b)| {
-                        match ev_a.cmp(ev_b) {
-                            std::cmp::Ordering::Equal => Self::compare_arcs_ord(arc_a, arc_b, cache),
-                            other => other,
-                        }
-                    }) {
-                        std::cmp::Ordering::Equal => continue, // These destination maps are equal, check next EK
-                        other_ordering => return other_ordering,
-                    }
-                }
-                (None, None) => return std::cmp::Ordering::Equal, // Both iterators exhausted, Tries are equal.
-                (Some(_), None) => return std::cmp::Ordering::Greater, // node1 has more edge keys.
-                (None, Some(_)) => return std::cmp::Ordering::Less,    // node2 has more edge keys.
-            }
-        }
+        todo!()
     }
 
     /// Helper function to compare two Arcs pointing to Trie nodes. Handles cycles using a cache.
