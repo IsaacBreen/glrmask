@@ -1562,6 +1562,18 @@ mod complex_tests {
         assert!(!regex.definitely_matches(b"c"));
         assert!(!regex.could_match(b"d"));
     }
+
+    #[test]
+    fn test_complex_epsilon() {
+        let expr = groups![
+            eps(),
+            eat_u8(b'a'),
+        ];
+        let regex = expr.build();
+        let mut state = regex.init();
+        state.execute(b"a");
+        assert_eq!(state.matches, BTreeMap::from([(0, 0), (1, 1)]));
+    }
 }
 
 #[cfg(test)]
