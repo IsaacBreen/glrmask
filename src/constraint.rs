@@ -148,14 +148,9 @@ impl PrecomputedNodeContents {
     ) {
         self.finalizers
             .entry(grammar_token)
-            .and_modify(|f: &mut PrecomputedFinalizer| {
-                f.content.insert(llm_token.0);
-            })
-            .or_insert_with(|| {
-                let mut new_bv = HybridBitset::new();
-                new_bv.insert(llm_token.0);
-                PrecomputedFinalizer::new(new_bv)
-            });
+            .or_default()
+            .content
+            .insert(llm_token.0);
     }
 }
 
