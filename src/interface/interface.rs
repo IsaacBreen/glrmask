@@ -637,7 +637,7 @@ impl GrammarDefinition {
 }
 
 // --- CompiledGrammar: Grammar with compiled tokenizer and parser ---
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompiledGrammar {
     pub definition: Arc<GrammarDefinition>,
     pub tokenizer: Regex,

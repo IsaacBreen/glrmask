@@ -622,11 +622,15 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     assert_eq!(grammar_definition, GrammarDefinition::from_json(grammar_definition.to_json())?);
 
     println!("Compiling GrammarDefinition into CompiledGrammar...");
-    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition.clone()));
     println!("Successfully compiled GrammarDefinition into CompiledGrammar.");
     println!("{}", compiled_grammar);
     // --- New test section for grammar terminal sequences ---
     println!("\nTesting GLR parser with specific grammar terminal sequences...");
+
+    // Ensure compilation is deterministic
+    let compiled_grammar_2 = CompiledGrammar::from_definition(Arc::new(grammar_definition.clone()));
+    assert_eq!(compiled_grammar, compiled_grammar_2);
 
     // Define the sequences of terminal names to test
     let mut test_sequences_str = vec![
