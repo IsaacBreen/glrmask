@@ -629,8 +629,8 @@ impl<'r> Precomputer<'r> {
             let new_root = unique
                 .entry(root.lock().unwrap().clone())
                 .or_insert_with(|| root.clone());
-            assert!(unique.contains_key(&root.clone().lock().unwrap().clone()));
             *new_root = root.clone();
+            assert!(unique.contains_key(&root.clone().lock().unwrap().clone()));
         }
 
         crate::debug!(2, "Merging nodes: second pass rewriting roots");
