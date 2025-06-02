@@ -314,17 +314,37 @@ impl GrammarConstraint {
         let mut computed_possible_matches = BTreeMap::new();
         // Cache for the possible_matches computation
         let mut pm_cache: HashMap<(*const VocabPrefixTreeNode, TokenizerStateID), BTreeMap<GrammarTokenID, LLMTokenBV>> = HashMap::new();
+        let num_vocab_nodes_for_pm = count_vocab_nodes(&vocab_for_possible_matches.root);
+        let num_tokenizer_states_for_pm = tokenizer.iter_states().count() as u64;
+        // Handle potential multiplication by zero if either is zero, to avoid ProgressBar panic with len 0 if inc is called.
+        // However, ProgressBar::new(0) is okay, and inc(1) on a 0-len bar is also okay (it's pos/len, 1/0).
+        // Let's ensure total_pm_computations is at least 1 if there's any work, or 0 if no work.
+        // ProgressBar handles len=0 gracefully by not displaying, but inc() will still advance pos.
+        let total_pm_computations = if num_vocab_nodes_for_pm > 0 && num_tokenizer_states_for_pm > 0 {
+            num_vocab_nodes_for_pm * num_tokenizer_states_for_pm
+        } else {
+            0 // Or 1, if you want to always show a bar even for trivial cases. 0 is fine.
+        };
 
-        crate::debug!(2, "Computing possible_matches for all {} tokenizer states", tokenizer.iter_states().count());
+        let pm_pb = ProgressBar::new(total_pm_computations);
+        pm_pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [PM Compute: {elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})")
+                .expect("progress-bar style for PM"),
+        );
+        crate::debug!(2, "Computing possible_matches (ProgressBar total: {}) for {} tokenizer states and {} vocab nodes", total_pm_computations, num_tokenizer_states_for_pm, num_vocab_nodes_for_pm);
+
         for sid in tokenizer.iter_states() { // Use the `tokenizer` parameter passed to `new`
             let matches_for_sid = Self::compute_possible_matches_for_vocab_node(
                 &tokenizer, // Pass the tokenizer parameter from `new`
                 &vocab_for_possible_matches.root,
                 sid,
                 &mut pm_cache,
+                &pm_pb, // Add this argument
             );
             computed_possible_matches.insert(sid, matches_for_sid);
         }
+        pm_pb.finish_with_message("Possible_matches computation complete");
         crate::debug!(2, "Finished computing possible_matches");
         // pm_cache is dropped here as it's no longer needed.
 
@@ -451,11 +471,13 @@ impl GrammarConstraint {
         vocab_node: &VocabPrefixTreeNode,
         tokenizer_state_id: TokenizerStateID,
         cache: &mut HashMap<(*const VocabPrefixTreeNode, TokenizerStateID), BTreeMap<GrammarTokenID, LLMTokenBV>>,
+        pb: &ProgressBar, // Add this parameter
     ) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
         let cache_key = (vocab_node as *const VocabPrefixTreeNode, tokenizer_state_id);
         if let Some(cached_result) = cache.get(&cache_key) {
             return cached_result.clone();
         }
+        pb.inc(1); // Increment progress bar for each unique computation
 
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
 
@@ -492,6 +514,7 @@ impl GrammarConstraint {
                         child_vocab_node_ref, // Recurse with the child node
                         final_tokenizer_state_id,
                         cache,
+                        pb, // Pass pb
                     );
                     for (token, bv) in next_results {
                         *result_map.entry(token).or_insert_with(LLMTokenBV::new) |= bv;
@@ -963,6 +986,9 @@ impl<'r> Precomputer<'r> {
                     .execute_from_state(suffix, state_before);
 
                 let possible_future_matches: BTreeMap<GrammarTokenID, LLMTokenBV> = exec_result.end_state.map_or_else(BTreeMap::new, |end_state_id| {
+                    // Note: Here, Precomputer::possible_matches is used, not GrammarConstraint::compute_possible_matches_for_vocab_node.
+                    // Precomputer::possible_matches uses an internal cache and does not increment the _main_ progress bar
+                    // since it's already accounted for by GrammarConstraint::new.
                     self.possible_matches(&child_vocab_of_segment, TokenizerStateID(end_state_id))
                 });
 
