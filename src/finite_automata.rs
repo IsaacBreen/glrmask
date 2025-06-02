@@ -646,7 +646,7 @@ impl Expr {
             }
             Expr::Quantifier(expr, quantifier_type) => {
                 match quantifier_type {
-                    QuantifierType::ZeroOrMore => {
+                    QuantifierType::ZeroOrMore | QuantifierType::OneOrMore => {
                         let loop_start_state = nfa.add_state();
 
                         // Epsilon transition from current state to loop start state
@@ -658,23 +658,11 @@ impl Expr {
                         // Epsilon transition from expr end state back to loop start state for repetition
                         nfa.add_epsilon_transition(expr_end_state, loop_start_state);
 
-                        // The loop start state becomes the new current state
-                        loop_start_state
-                    }
-                    QuantifierType::OneOrMore => {
-                        let loop_start_state = nfa.add_state();
-
-                        // Epsilon transition from current state to loop start state
-                        nfa.add_epsilon_transition(current_state, loop_start_state);
-
-                        // Process the expr
-                        let expr_end_state = Self::handle_expr(*expr, nfa, loop_start_state);
-
-                        // Epsilon transition from expr end state back to loop start state for repetition
-                        nfa.add_epsilon_transition(expr_end_state, loop_start_state);
-
-                        // The expr end state becomes the new current state
-                        expr_end_state
+                        match quantifier_type {
+                            QuantifierType::ZeroOrMore => loop_start_state, // The loop start state becomes the new current state
+                            QuantifierType::OneOrMore => expr_end_state, // The expr end state becomes the new current state
+                            _ => unreachable!()
+                        }
                     }
                     QuantifierType::ZeroOrOne => {
                         // Process the expr
