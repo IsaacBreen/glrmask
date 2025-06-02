@@ -103,14 +103,14 @@ impl JSONConvertible for U8Set {
                                         if *n <= u8::MAX as u128 { *n as u8 }
                                         else { return Err(format!("Start of range {} is too large for u8", n)); }
                                     }
-                                    _ => return Err("Expected JSONNode::UInt for start of range value".to_string()),
+                                    _ => return Err(format!("Expected JSONNode::UInt for start of range value, got {:?}", pair_arr[0])),
                                 };
                                 let end_val = match &pair_arr[1] {
                                     JSONNode::UInt(n) => {
                                         if *n <= u8::MAX as u128 { *n as u8 }
                                         else { return Err(format!("End of range {} is too large for u8", n)); }
                                     }
-                                    _ => return Err("Expected JSONNode::UInt for end of range value".to_string()),
+                                    _ => return Err(format!("Expected JSONNode::UInt for end of range value, got {:?}", pair_arr[1])),
                                 };
 
                                 if start_val > end_val {
