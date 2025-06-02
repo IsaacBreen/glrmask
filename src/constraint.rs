@@ -565,12 +565,12 @@ impl<'r> Precomputer<'r> {
         }
     }
 
-    fn possible_matches(&self, vocab_node: &VocabPrefixTreeNode, tokenizer_state_id: TokenizerStateID) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
+    fn possible_matches(&self, vocab_node: &VocabPrefixTreeNode, tokenizer_state_id: TokenizerStateID) -> &BTreeMap<GrammarTokenID, LLMTokenBV> {
         let cache_key_ptr = vocab_node as *const VocabPrefixTreeNode;
 
         if let Some(cached_for_vocab_node) = self.possible_matches.borrow().get(&cache_key_ptr) {
             if let Some(cached_result) = cached_for_vocab_node.get(&tokenizer_state_id) {
-                return cached_result.clone();
+                return cached_result;
             }
         }
 
@@ -590,7 +590,7 @@ impl<'r> Precomputer<'r> {
                 if !possible_new_matches.is_empty() {
                     let next_results = self.possible_matches(child_vocab_arc, TokenizerStateID(final_state_val));
                     for (token, bv) in next_results {
-                        *result_map.entry(token).or_insert_with(LLMTokenBV::new) |= bv;
+                        *result_map.entry(*token).or_insert_with(LLMTokenBV::new) |= bv;
                     }
                 }
             }
@@ -598,7 +598,7 @@ impl<'r> Precomputer<'r> {
 
         self.possible_matches.borrow_mut().entry(cache_key_ptr).or_default().insert(tokenizer_state_id, result_map.clone());
 
-        result_map
+        &self.possible_matches.borrow()[&cache_key_ptr][&tokenizer_state_id]
     }
 
     fn run_dfs(&mut self) {
@@ -962,7 +962,8 @@ impl<'r> Precomputer<'r> {
                     .tokenizer
                     .execute_from_state(suffix, state_before);
 
-                let possible_future_matches: BTreeMap<GrammarTokenID, LLMTokenBV> = exec_result.end_state.map_or_else(BTreeMap::new, |end_state_id| {
+                let temp = BTreeMap::new();
+                let possible_future_matches: &BTreeMap<GrammarTokenID, LLMTokenBV> = exec_result.end_state.map_or(&temp, |end_state_id| {
                     self.possible_matches(&child_vocab_of_segment, TokenizerStateID(end_state_id))
                 });
 
