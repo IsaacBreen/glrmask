@@ -628,10 +628,6 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // --- New test section for grammar terminal sequences ---
     println!("\nTesting GLR parser with specific grammar terminal sequences...");
 
-    // Ensure compilation is deterministic
-    let compiled_grammar_2 = CompiledGrammar::from_definition(Arc::new(grammar_definition.clone()));
-    assert_eq!(compiled_grammar, compiled_grammar_2);
-
     // Define the sequences of terminal names to test
     let mut test_sequences_str = vec![
         // Sequence 0
@@ -882,12 +878,21 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let dummy_eof_placeholder = 0;
     println!("Constructing GrammarConstraint...");
     let grammar_constraint = GrammarConstraint::from_compiled_grammar(
-        compiled_grammar,
+        compiled_grammar.clone(),
         llm_token_map.clone(),
         dummy_eof_placeholder,
         max_original_llm_token_id_val
     );
     println!("GrammarConstraint constructed successfully.");
+
+    // Ensure grammar constraint creation is deterministic
+    assert_eq!(grammar_constraint, GrammarConstraint::from_compiled_grammar(
+        compiled_grammar,
+        llm_token_map.clone(),
+        dummy_eof_placeholder,
+        max_original_llm_token_id_val
+    ));
+
     return Ok(());
     // grammar_constraint.dump_precomputed(); // Temporarily commented out due to potential verbosity
 
