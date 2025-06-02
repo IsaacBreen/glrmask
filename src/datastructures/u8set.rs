@@ -56,12 +56,12 @@ impl JSONConvertible for U8Set {
                 // End of current range/item, push it
                 if current_start == current_prev {
                     // Single item
-                    members_json.push(JSONNode::UInt(current_start as u128));
+                    members_json.push(JSONNode::Int(current_start as i128));
                 } else {
                     // Range
                     members_json.push(JSONNode::Array(vec![
-                        JSONNode::UInt(current_start as u128),
-                        JSONNode::UInt(current_prev as u128),
+                        JSONNode::Int(current_start as i128),
+                        JSONNode::Int(current_prev as i128),
                     ]));
                 }
                 // Start a new range/item
@@ -72,11 +72,11 @@ impl JSONConvertible for U8Set {
 
         // Push the last accumulated range/item
         if current_start == current_prev {
-            members_json.push(JSONNode::UInt(current_start as u128));
+            members_json.push(JSONNode::Int(current_start as i128));
         } else {
             members_json.push(JSONNode::Array(vec![
-                JSONNode::UInt(current_start as u128),
-                JSONNode::UInt(current_prev as u128),
+                JSONNode::Int(current_start as i128),
+                JSONNode::Int(current_prev as i128),
             ]));
         }
 
@@ -89,8 +89,8 @@ impl JSONConvertible for U8Set {
                 let mut set = U8Set::none();
                 for item_node in arr {
                     match item_node {
-                        JSONNode::UInt(n) => {
-                            if n <= u8::MAX as u128 {
+                        JSONNode::Int(n) => {
+                            if n <= u8::MAX as i128 {
                                 set.insert(n as u8);
                             } else {
                                 return Err(format!("Number {} is too large for u8", n));
@@ -99,18 +99,18 @@ impl JSONConvertible for U8Set {
                         JSONNode::Array(pair_arr) => {
                             if pair_arr.len() == 2 {
                                 let start_val = match &pair_arr[0] {
-                                    JSONNode::UInt(n) => {
-                                        if *n <= u8::MAX as u128 { *n as u8 }
+                                    JSONNode::Int(n) => {
+                                        if *n <= u8::MAX as i128 { *n as u8 }
                                         else { return Err(format!("Start of range {} is too large for u8", n)); }
                                     }
-                                    _ => return Err(format!("Expected JSONNode::UInt for start of range value, got {:?}", pair_arr[0])),
+                                    _ => return Err(format!("Expected JSONNode::Int for start of range value, got {:?}", pair_arr[0])),
                                 };
                                 let end_val = match &pair_arr[1] {
-                                    JSONNode::UInt(n) => {
-                                        if *n <= u8::MAX as u128 { *n as u8 }
+                                    JSONNode::Int(n) => {
+                                        if *n <= u8::MAX as i128 { *n as u8 }
                                         else { return Err(format!("End of range {} is too large for u8", n)); }
                                     }
-                                    _ => return Err(format!("Expected JSONNode::UInt for end of range value, got {:?}", pair_arr[1])),
+                                    _ => return Err(format!("Expected JSONNode::Int for end of range value, got {:?}", pair_arr[1])),
                                 };
 
                                 if start_val > end_val {
@@ -123,7 +123,7 @@ impl JSONConvertible for U8Set {
                                 return Err("Range array in U8Set JSON must have 2 elements".to_string());
                             }
                         }
-                        _ => return Err("U8Set JSON array elements must be UInt (single value) or 2-element Array of UInts (range)".to_string()),
+                        _ => return Err("U8Set JSON array elements must be Int (single value) or 2-element Array of Ints (range)".to_string()),
                     }
                 }
                 Ok(set)
@@ -528,9 +528,9 @@ mod tests {
         match json_node {
             JSONNode::Array(ref arr) => {
                 assert_eq!(arr.len(), 3, "JSON array should have 3 individual numbers");
-                assert_eq!(arr[0], JSONNode::UInt(10), "First element should be 10");
-                assert_eq!(arr[1], JSONNode::UInt(20), "Second element should be 20");
-                assert_eq!(arr[2], JSONNode::UInt(30), "Third element should be 30");
+                assert_eq!(arr[0], JSONNode::Int(10), "First element should be 10");
+                assert_eq!(arr[1], JSONNode::Int(20), "Second element should be 20");
+                assert_eq!(arr[2], JSONNode::Int(30), "Third element should be 30");
             }
             _ => panic!("Expected JSONNode::Array"),
         }
@@ -563,8 +563,8 @@ mod tests {
                 match &arr[0] {
                     JSONNode::Array(range_arr) => {
                         assert_eq!(range_arr.len(), 2, "Range array should have two elements");
-                        assert_eq!(range_arr[0], JSONNode::UInt(0), "Range start should be 0");
-                        assert_eq!(range_arr[1], JSONNode::UInt(255), "Range end should be 255");
+                        assert_eq!(range_arr[0], JSONNode::Int(0), "Range start should be 0");
+                        assert_eq!(range_arr[1], JSONNode::Int(255), "Range end should be 255");
                     }
                     _ => panic!("Expected inner JSONNode::Array for the range"),
                 }
@@ -589,10 +589,10 @@ mod tests {
         match json_node {
             JSONNode::Array(ref arr) => {
                 assert_eq!(arr.len(), 4, "Expected 4 items: [0..2], 5, [10..12], 14");
-                assert_eq!(arr[0], JSONNode::Array(vec![JSONNode::UInt(0), JSONNode::UInt(2)]));
-                assert_eq!(arr[1], JSONNode::UInt(5));
-                assert_eq!(arr[2], JSONNode::Array(vec![JSONNode::UInt(10), JSONNode::UInt(12)]));
-                assert_eq!(arr[3], JSONNode::UInt(14));
+                assert_eq!(arr[0], JSONNode::Array(vec![JSONNode::Int(0), JSONNode::Int(2)]));
+                assert_eq!(arr[1], JSONNode::Int(5));
+                assert_eq!(arr[2], JSONNode::Array(vec![JSONNode::Int(10), JSONNode::Int(12)]));
+                assert_eq!(arr[3], JSONNode::Int(14));
             }
             _ => panic!("Expected JSONNode::Array"),
         }
