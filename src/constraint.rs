@@ -934,12 +934,7 @@ impl<'r> Precomputer<'r> {
         > = BTreeMap::new();
 
         for (sid, set) in sources_per_state {
-            queue
-                .entry(0)
-                .or_default()
-                .entry(*sid)
-                .or_default()
-                .extend(set.clone());
+            queue.entry(0).or_default().insert(*sid, set.clone());
         }
 
         while let Some((offset, map_at_offset)) = queue.pop_first() {
