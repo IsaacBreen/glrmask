@@ -931,11 +931,7 @@ impl<'r> Precomputer<'r> {
         let mut queue: BTreeMap<
             usize,
             BTreeMap<TokenizerStateID, BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
-        > = BTreeMap::new();
-
-        for (sid, set) in sources_per_state {
-            queue.entry(0).or_default().insert(*sid, set.clone());
-        }
+        > = BTreeMap::from([(0, sources_per_state.clone())]);
 
         while let Some((offset, map_at_offset)) = queue.pop_first() {
             for (state_before, src_set_val) in map_at_offset { // Renamed src_set
