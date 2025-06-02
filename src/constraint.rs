@@ -577,7 +577,7 @@ impl<'r> Precomputer<'r> {
             // The original cache_read_borrow is consumed by Ref::map and its lifetime extended.
             return Ref::map(cache_read_borrow, |cache| {
                 // These unwraps are safe because we've checked for existence.
-                &cache.get(&cache_key_ptr).unwrap().get(&tokenizer_state_id).unwrap()
+                cache.get(&cache_key_ptr).unwrap().get(&tokenizer_state_id).unwrap()
             });
         }
         // If we are here, the item was not in the cache. Drop the immutable borrow before computing.
@@ -619,7 +619,7 @@ impl<'r> Precomputer<'r> {
         let final_cache_read_borrow = self.possible_matches.borrow();
         return Ref::map(final_cache_read_borrow, |cache| {
             // These unwraps are safe because we just inserted the entry.
-            &cache.get(&cache_key_ptr).unwrap().get(&tokenizer_state_id).unwrap()
+            cache.get(&cache_key_ptr).unwrap().get(&tokenizer_state_id).unwrap()
         });
     }
 
@@ -1140,7 +1140,7 @@ impl<'r> Precomputer<'r> {
                 .entry(match_end_offset_in_segment)
                 .or_default()
                 .entry(TokenizerStateID(0)) 
-                .or_or_default()
+                .or_default()
                 .insert(handle);
         }
     }
