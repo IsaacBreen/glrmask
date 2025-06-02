@@ -453,6 +453,17 @@ if __name__ == "__main__":
     print("Defining grammar...")
     grammar_definition = define_python_grammar()
 
+    # Serialize the grammar definition to JSON string
+    print("Serializing grammar definition to JSON...")
+    json_string = grammar_definition.to_json_string()
+    print(f"Serialized GrammarDefinition JSON (length: {len(json_string)}):")
+    # Indent it.
+    json_string = json.dumps(json.loads(json_string), indent=4)
+    # Optionally, print a snippet or save to file if too long to print
+    # print(textwrap.shorten(json_string, width=200, placeholder="..."))
+    with open("serialized_grammar_definition.json", "w") as f:
+        f.write(json_string)
+
 #     grammar_definition.simplify()
     grammar = grammar_definition.compile()
     grammar.print()
