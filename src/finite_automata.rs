@@ -669,7 +669,7 @@ impl Expr {
                         let expr_end_state = Self::handle_expr(*expr, nfa, current_state);
 
                         // Epsilon transition from current state to expr end state
-                        nfa.add_epsilon_transition(expr_end_state, expr_end_state);
+                        nfa.add_epsilon_transition(current_state, expr_end_state);
 
                         // The expr end state becomes the new current state
                         expr_end_state
