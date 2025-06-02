@@ -1567,10 +1567,11 @@ mod complex_tests {
     fn test_complex_epsilon() {
         let expr = groups![
             eps(),
-            eat_u8(b'a'),
+            rep1(eat_u8(b'a')),
         ];
         let regex = expr.build();
         let mut state = regex.init();
+        dbg!(&regex);
         state.execute(b"a");
         assert_eq!(state.matches, BTreeMap::from([(0, 0), (1, 1)]));
     }
