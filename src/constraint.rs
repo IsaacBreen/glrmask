@@ -34,7 +34,7 @@ pub type LLMTokenBV = HybridBitset;
 pub type GrammarTokenBV = BitVec;
 pub type LLMTokenInfo = Option<LLMTokenBV>;
 
-const MERGE_THRESHOLD: usize = 100;
+const MERGE_THRESHOLD: usize = 10;
 
 // -----------------------------------------------------------------------------
 // Small data-types used by the constraint
