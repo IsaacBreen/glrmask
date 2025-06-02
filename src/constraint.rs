@@ -143,18 +143,19 @@ impl PrecomputedNodeContents {
     fn push_finalizer_info(
         &mut self,
         grammar_token: GrammarTokenID,
-        llm_token: LLMTokenID, 
+        llm_token_id_val: usize,
         _tokenizer_state: TokenizerStateID,
     ) {
-        let mut bv = HybridBitset::new();
-        bv.insert(llm_token.0); 
-
         self.finalizers
             .entry(grammar_token)
             .and_modify(|f: &mut PrecomputedFinalizer| {
-                f.content |= &bv;
+                f.content.insert(llm_token_id_val);
             })
-            .or_insert_with(|| PrecomputedFinalizer::new(bv.clone()));
+            .or_insert_with(|| {
+                let mut new_bv = HybridBitset::new();
+                new_bv.insert(llm_token_id_val);
+                PrecomputedFinalizer::new(new_bv)
+            });
     }
 }
 
@@ -1001,11 +1002,12 @@ impl<'r> Precomputer<'r> {
                         for gtid in self
                             .tokenizer
                             .tokens_accessible_from_state(final_sid)
-                        {
+                        {   
+                            let llm_token_to_insert = child_vocab_of_segment.token_id(); // This is a usize
                             crate::debug!(5, "Pushing finalizer info for token {:?} in state {:?}", gtid.0, final_sid.0);
                             guard.value.push_finalizer_info(
                                 gtid,
-                                LLMTokenID(child_vocab_of_segment.token_id()), 
+                                llm_token_to_insert,
                                 final_sid,
                             );
                         }
