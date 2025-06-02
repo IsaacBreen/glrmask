@@ -630,7 +630,7 @@ impl<'r> Precomputer<'r> {
                 .entry(root.lock().unwrap().clone())
                 .or_insert_with(|| root.clone());
             *new_root = root.clone();
-            assert!(unique.contains_key(&root.clone().lock().unwrap().clone()));
+            assert!(unique.contains_key(&root.clone().lock().unwrap().clone()), "Root not found in unique nodes map. This should not happen.");
         }
 
         crate::debug!(2, "Merging nodes: second pass rewriting roots");
