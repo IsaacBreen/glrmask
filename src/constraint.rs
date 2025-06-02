@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::BitOr;
 use std::sync::{Arc, Mutex};
-use std::cell::RefCell;
+use std::cell::{RefCell, Ref};
 
 use bimap::BiBTreeMap;
 use bitvec::prelude::*;
@@ -565,14 +565,23 @@ impl<'r> Precomputer<'r> {
         }
     }
 
-    fn possible_matches(&self, vocab_node: &VocabPrefixTreeNode, tokenizer_state_id: TokenizerStateID) -> &BTreeMap<GrammarTokenID, LLMTokenBV> {
+    fn possible_matches<'s>(&'s self, vocab_node: &VocabPrefixTreeNode, tokenizer_state_id: TokenizerStateID) -> Ref<'s, BTreeMap<GrammarTokenID, LLMTokenBV>> {
         let cache_key_ptr = vocab_node as *const VocabPrefixTreeNode;
 
-        if let Some(cached_for_vocab_node) = self.possible_matches.borrow().get(&cache_key_ptr) {
-            if let Some(cached_result) = cached_for_vocab_node.get(&tokenizer_state_id) {
-                return cached_result;
-            }
+        // First, attempt to get an immutable borrow and check if the item is in the cache.
+        let cache_read_borrow = self.possible_matches.borrow();
+        if cache_read_borrow.get(&cache_key_ptr)
+            .map_or(false, |inner_map| inner_map.contains_key(&tokenizer_state_id))
+        {
+            // If it exists, we can map the Ref and return it.
+            // The original cache_read_borrow is consumed by Ref::map and its lifetime extended.
+            return Ref::map(cache_read_borrow, |cache| {
+                // These unwraps are safe because we've checked for existence.
+                &cache.get(&cache_key_ptr).unwrap().get(&tokenizer_state_id).unwrap()
+            });
         }
+        // If we are here, the item was not in the cache. Drop the immutable borrow before computing.
+        drop(cache_read_borrow);
 
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
 
@@ -588,17 +597,30 @@ impl<'r> Precomputer<'r> {
                 let matches_here: BTreeSet<_> = exec_result.matches.iter().map(|m| GrammarTokenID(m.id)).collect();
                 let possible_new_matches = &matches_possible_from_tokenizer_state - &matches_here;
                 if !possible_new_matches.is_empty() {
-                    let next_results = self.possible_matches(child_vocab_arc, TokenizerStateID(final_state_val));
-                    for (token, bv) in next_results {
-                        *result_map.entry(*token).or_insert_with(LLMTokenBV::new) |= bv;
+                    // Recursive call now returns a Ref. Dereference it for use.
+                    // The Ref ('next_results_ref') lives for the scope of this 'if' block.
+                    let next_results_ref = self.possible_matches(child_vocab_arc, TokenizerStateID(final_state_val));
+                    // Dereference to get &BTreeMap for iteration
+                    let next_results_btree_map_ref: &BTreeMap<GrammarTokenID, LLMTokenBV> = &*next_results_ref;
+                    for (token_id_key, bv_value) in next_results_btree_map_ref {
+                        *result_map.entry(*token_id_key).or_insert_with(LLMTokenBV::new) |= bv_value;
                     }
+                    // next_results_ref (the guard) is dropped here automatically.
                 }
             }
         }
 
-        self.possible_matches.borrow_mut().entry(cache_key_ptr).or_default().insert(tokenizer_state_id, result_map.clone());
+        self.possible_matches.borrow_mut()
+            .entry(cache_key_ptr)
+            .or_default()
+            .insert(tokenizer_state_id, result_map); // Moves result_map
 
-        &self.possible_matches.borrow()[&cache_key_ptr][&tokenizer_state_id]
+        // Now that it's inserted, get a new immutable borrow and return a Ref::map to the new entry.
+        let final_cache_read_borrow = self.possible_matches.borrow();
+        return Ref::map(final_cache_read_borrow, |cache| {
+            // These unwraps are safe because we just inserted the entry.
+            &cache.get(&cache_key_ptr).unwrap().get(&tokenizer_state_id).unwrap()
+        });
     }
 
     fn run_dfs(&mut self) {
@@ -962,16 +984,22 @@ impl<'r> Precomputer<'r> {
                     .tokenizer
                     .execute_from_state(suffix, state_before);
 
-                let temp = BTreeMap::new();
-                let possible_future_matches: &BTreeMap<GrammarTokenID, LLMTokenBV> = exec_result.end_state.map_or(&temp, |end_state_id| {
-                    self.possible_matches(&child_vocab_of_segment, TokenizerStateID(end_state_id))
-                });
-
                 for m in &exec_result.matches {
                     let grammar_tok = GrammarTokenID(m.id);
                     let match_end_offset = offset + m.width;
                     let active_tokens = child_vocab_of_segment.reachable_token_ids();
-                    let tokens_with_future_match = possible_future_matches.get(&grammar_tok).cloned().unwrap_or_default();
+
+                    let tokens_with_future_match = if let Some(end_state_val) = exec_result.end_state {
+                        let end_tokenizer_state_id = TokenizerStateID(end_state_val);
+                        // self.possible_matches returns a Ref. It's used here and its guard is dropped
+                        // at the end of this expression.
+                        let matches_ref = self.possible_matches(&child_vocab_of_segment, end_tokenizer_state_id);
+                        matches_ref.get(&grammar_tok).cloned().unwrap_or_default()
+                    } else {
+                        // If there's no end_state, it implies no future matches from this path.
+                        // This matches the original behavior of using an empty BTreeMap (temp).
+                        LLMTokenBV::default()
+                    };
                     let edge_tokens = active_tokens.clone() - tokens_with_future_match;
 
                     if !edge_tokens.is_empty() {
@@ -1112,7 +1140,7 @@ impl<'r> Precomputer<'r> {
                 .entry(match_end_offset_in_segment)
                 .or_default()
                 .entry(TokenizerStateID(0)) 
-                .or_default()
+                .or_or_default()
                 .insert(handle);
         }
     }
@@ -1348,4 +1376,3 @@ impl<'a> GrammarConstraintState<'a> {
         &self.state
     }
 }
-
