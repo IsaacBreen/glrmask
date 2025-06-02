@@ -126,7 +126,7 @@ pub fn repeat(expr: GrammarExpr) -> GrammarExpr { GrammarExpr::Repeat(Box::new(e
 pub fn literal(bytes: Vec<u8>) -> GrammarExpr { GrammarExpr::Literal(bytes) }
 
 // --- GrammarDefinition: Abstract representation of the grammar ---
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GrammarDefinition {
     pub productions: Vec<Production>,
     pub start_production_id: usize, // Index into productions

@@ -618,6 +618,9 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let grammar_definition = GrammarDefinition::from_json(json_node)?;
     println!("Successfully loaded GrammarDefinition from JSON.");
 
+    // Test serialization/deserialization
+    assert_eq!(grammar_definition, GrammarDefinition::from_json(grammar_definition.to_json())?);
+
     println!("Compiling GrammarDefinition into CompiledGrammar...");
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
     println!("Successfully compiled GrammarDefinition into CompiledGrammar.");
