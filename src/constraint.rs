@@ -629,6 +629,7 @@ impl<'r> Precomputer<'r> {
             let new_root = unique
                 .entry(root.lock().unwrap().clone())
                 .or_insert_with(|| root.clone());
+            assert!(unique.contains_key(&root.clone().lock().unwrap().clone()));
             *new_root = root.clone();
         }
 
@@ -642,7 +643,8 @@ impl<'r> Precomputer<'r> {
             if let Some(new_root) = unique.get(&root.clone().lock().unwrap().clone()) {
                 *root = new_root.clone();
             } else {
-                eprintln!("Warning: Root not found in unique nodes map. This should not happen.");
+                // eprintln!("Warning: Root not found in unique nodes map. This should not happen.");
+                panic!("Warning: Root not found in unique nodes map. This should not happen.");
             };
         }
     }
