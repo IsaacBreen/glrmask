@@ -463,8 +463,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         len: usize,
         nt: NonTerminalID,
     ) -> Arc<GSSNode> { 
-        let cur_acc_from_reducible_node = stack.acc().clone(); // Clone before potential modification
-
         let parent_gss_node = if len == 0 { // Renamed parent to parent_gss_node
             Arc::new(edge_src.push(edge_content.clone(), edge_src.acc().clone())) // Provide acc for push
         } else {
@@ -479,11 +477,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Goto::State(goto_state_id) => {
                     crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
 
-                    let new_acc_for_goto_child = parent_gss_node.acc().clone().intersect(cur_acc_from_reducible_node.clone());
                     let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id, user_data: edge_content.user_data.clone() };
 
-                    let isolated_parent_arc = Arc::new(predecessor_arc.push(edge_value, new_acc_for_goto_child.clone()));
-                    let new_gss_node = isolated_parent_arc.push(goto_node_content, new_acc_for_goto_child);
+                    let isolated_parent_arc = Arc::new(predecessor_arc.push(edge_value, predecessor_arc.acc().clone()));
+                    let new_gss_node = isolated_parent_arc.push(goto_node_content, isolated_parent_arc.acc().clone());
                     out.merge(&Arc::new(new_gss_node));
                 }
                 Goto::Accept => {
