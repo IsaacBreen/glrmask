@@ -11749,13 +11749,44 @@
             "rhs": [
                 {
                     "value": "IGNORE[0][0]",
-                    "variant": "Terminal"
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "IGNORE[0]",
+                    "variant": "NonTerminal"
                 }
             ]
         },
         {
             "lhs": "IGNORE[0]",
             "rhs": []
+        },
+        {
+            "lhs": "IGNORE[0][0]",
+            "rhs": [
+                {
+                    "value": "IGNORE[0][0][0]",
+                    "variant": "Terminal"
+                }
+            ]
+        },
+        {
+            "lhs": "IGNORE[0][0]",
+            "rhs": [
+                {
+                    "value": "IGNORE[0][0][1]",
+                    "variant": "Terminal"
+                }
+            ]
+        },
+        {
+            "lhs": "IGNORE[0][0]",
+            "rhs": [
+                {
+                    "value": "IGNORE[0][0][2]",
+                    "variant": "Terminal"
+                }
+            ]
         },
         {
             "lhs": "NAME",
@@ -11791,7 +11822,7 @@
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "NEWLINE[0]",
+                    "value": "IGNORE[0][0][1]",
                     "variant": "Terminal"
                 }
             ]
@@ -11804,7 +11835,7 @@
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "INDENT[0]",
+                    "value": "IGNORE[0][0][0]",
                     "variant": "Terminal"
                 }
             ]
@@ -11902,7 +11933,7 @@
                 ],
                 "variant": "U8Seq"
             },
-            90
+            88
         ],
         [
             {
@@ -12857,64 +12888,6 @@
                 "q_type": "OneOrMore",
                 "variant": "Quantifier"
             },
-            91
-        ],
-        [
-            {
-                "expr": {
-                    "exprs": [
-                        {
-                            "bytes": [
-                                32
-                            ],
-                            "variant": "U8Seq"
-                        },
-                        {
-                            "bytes": [
-                                10
-                            ],
-                            "variant": "U8Seq"
-                        },
-                        {
-                            "exprs": [
-                                {
-                                    "bytes": [
-                                        35
-                                    ],
-                                    "variant": "U8Seq"
-                                },
-                                {
-                                    "expr": {
-                                        "u8set": [
-                                            [
-                                                0,
-                                                9
-                                            ],
-                                            [
-                                                11,
-                                                255
-                                            ]
-                                        ],
-                                        "variant": "U8Class"
-                                    },
-                                    "q_type": "ZeroOrMore",
-                                    "variant": "Quantifier"
-                                },
-                                {
-                                    "bytes": [
-                                        10
-                                    ],
-                                    "variant": "U8Seq"
-                                }
-                            ],
-                            "variant": "Seq"
-                        }
-                    ],
-                    "variant": "Choice"
-                },
-                "q_type": "OneOrMore",
-                "variant": "Quantifier"
-            },
             87
         ],
         [
@@ -13183,7 +13156,7 @@
                 ],
                 "variant": "Choice"
             },
-            89
+            91
         ],
         [
             {
@@ -13336,6 +13309,37 @@
                 "variant": "Choice"
             },
             93
+        ],
+        [
+            {
+                "exprs": [
+                    {
+                        "bytes": [
+                            35
+                        ],
+                        "variant": "U8Seq"
+                    },
+                    {
+                        "expr": {
+                            "u8set": [
+                                [
+                                    0,
+                                    9
+                                ],
+                                [
+                                    11,
+                                    255
+                                ]
+                            ],
+                            "variant": "U8Class"
+                        },
+                        "q_type": "ZeroOrMore",
+                        "variant": "Quantifier"
+                    }
+                ],
+                "variant": "Seq"
+            },
+            89
         ],
         [
             {
@@ -14124,7 +14128,7 @@
                 ],
                 "variant": "Seq"
             },
-            88
+            90
         ],
         [
             {
@@ -14495,24 +14499,24 @@
             94
         ],
         [
-            "IGNORE[0][0]",
+            "IGNORE[0][0][0]",
             87
         ],
         [
-            "INDENT[0]",
-            91
-        ],
-        [
-            "NAME[0]",
+            "IGNORE[0][0][1]",
             88
         ],
         [
-            "NEWLINE[0]",
+            "IGNORE[0][0][2]",
+            89
+        ],
+        [
+            "NAME[0]",
             90
         ],
         [
             "NUMBER[0]",
-            89
+            91
         ],
         [
             "STRING[0]",
