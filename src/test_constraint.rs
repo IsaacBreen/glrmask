@@ -1059,7 +1059,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         assert!(mask_before_commit.contains(llm_token_id_for_comp.0), "Token {:?} (ID {}) not found in mask during comparison setup", String::from_utf8_lossy(llm_token_for_comp), llm_token_id_for_comp.0);
         constraint_state_for_comp.commit(*llm_token_id_for_comp);
     }
-    
+
     // assert_eq!(constraint_state_for_comp.state().len(), 1, "Constraint state for comparison should have one tokenizer state");
     // let initial_tokenizer_state_id = constraint_state_for_comp.parent.tokenizer.initial_state_id();
     // let mut actual_constraint_parser_state_comp = constraint_state_for_comp.state()[&initial_tokenizer_state_id].clone();
