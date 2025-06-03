@@ -600,7 +600,7 @@ impl<'r> Precomputer<'r> {
     fn run_dfs(&mut self) {
         let mut assoc: BTreeMap<
             TokenizerStateID,
-            BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+            HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         > = BTreeMap::new();
 
         for (sid, arc) in &self.roots {
@@ -738,7 +738,7 @@ impl<'r> Precomputer<'r> {
             let mut new_children_map_for_current_node = BTreeMap::new();
 
             for (edge_key, destinations_map) in original_children_map {
-                let mut new_destinations_for_this_edge_key = BTreeMap::new();
+                let mut new_destinations_for_this_edge_key = HashMap::new();
                 for (child_arc_ptr_wrapper, current_edge_value) in destinations_map {
                     let child_arc = child_arc_ptr_wrapper.as_arc();
                     let child_ptr = Arc::as_ptr(child_arc);
@@ -887,14 +887,14 @@ impl<'r> Precomputer<'r> {
         vocab_node: &VocabPrefixTreeNode,
         assoc_by_state: BTreeMap<
             TokenizerStateID,
-            BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+            HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
     ) {
         self.pb.inc(1);
 
         let mut effective: BTreeMap<
             TokenizerStateID,
-            BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+            HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         > = BTreeMap::new();
 
         for (sid, set) in assoc_by_state {
@@ -923,17 +923,17 @@ impl<'r> Precomputer<'r> {
         child_vocab_of_segment: &VocabPrefixTreeNode,
         sources_per_state: &BTreeMap<
             TokenizerStateID,
-            BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+            HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
     ) {
         let mut next_level: BTreeMap<
             TokenizerStateID,
-            BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+            HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         > = BTreeMap::new();
 
         let mut queue: BTreeMap<
             usize,
-            BTreeMap<TokenizerStateID, BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
+            BTreeMap<TokenizerStateID, HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
         > = BTreeMap::from([(0, sources_per_state.clone())]);
 
         while let Some((offset, map_at_offset)) = queue.pop_first() {
@@ -1018,11 +1018,11 @@ impl<'r> Precomputer<'r> {
         segment_len: usize,
         queue: &mut BTreeMap<
             usize,
-            BTreeMap<TokenizerStateID, BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
+            BTreeMap<TokenizerStateID, HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
         >,
         next_level: &mut BTreeMap<
             TokenizerStateID,
-            BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+            HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
     ) {
         let mut inserter = EdgeInserter::new(
@@ -1036,7 +1036,7 @@ impl<'r> Precomputer<'r> {
 
         let mut pot: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
 
-        let gather_set = |set: &BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+        let gather_set = |set: &HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
                           pot_val: &mut Vec<Arc<Mutex<PrecomputeNode>>>| {
             pot_val.extend(
                 set.iter()
@@ -1108,8 +1108,8 @@ impl<'r> Precomputer<'r> {
 
     fn merge_handles(
         &self,
-        set: &BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
-    ) -> BTreeSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> {
+        set: &HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+    ) -> HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> {
         if set.len() <= self.merge_threshold {
             return set.clone();
         }
@@ -1134,7 +1134,7 @@ impl<'r> Precomputer<'r> {
             }
         }
 
-        let mut out = BTreeSet::new();
+        let mut out = HashSet::new();
         out.insert(ArcPtrWrapper::new(merged_node_arc)); 
         out
     }

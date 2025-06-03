@@ -42,7 +42,7 @@ impl Error for CycleDetectedError {}
 pub struct Trie<EK: Ord, EV, T> {
     pub value: T,
     /// Stores a map from EdgeKey to (a map from ChildArc (wrapped) to EdgeValue).
-    children: BTreeMap<EK, BTreeMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>,
+    children: BTreeMap<EK, HashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>,
     /// The “longest distance” from some source node (as computed during insertion).
     /// This value is set (or updated) when an edge is inserted.
     /// If A -> B, then A.max_depth < B.max_depth.
@@ -213,7 +213,7 @@ where
                                                 let dest_map_json_array = &ek_pair[1];
 
                                                 let edge_key = EK::from_json(ek_json.clone())?;
-                                                let mut destinations_for_this_ek = BTreeMap::new();
+                                                let mut destinations_for_this_ek = HashMap::new();
 
                                                 match dest_map_json_array {
                                                     JSONNode::Array(dest_array_inner) => {
@@ -512,7 +512,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     pub fn get(
         &self,
         edge_key: &EK,
-    ) -> Option<&BTreeMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>
+    ) -> Option<&HashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>
     {
         self.children.get(edge_key)
     }
@@ -521,17 +521,17 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     pub fn get_mut(
         &mut self,
         edge_key: &EK,
-    ) -> Option<&mut BTreeMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>
+    ) -> Option<&mut HashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>
     {
         self.children.get_mut(edge_key)
     }
 
     // children remains unchanged
-    pub fn children(&self) -> &BTreeMap<EK, BTreeMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
+    pub fn children(&self) -> &BTreeMap<EK, HashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
         &self.children
     }
 
-    pub fn children_mut(&mut self) -> &mut BTreeMap<EK, BTreeMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
+    pub fn children_mut(&mut self) -> &mut BTreeMap<EK, HashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
         &mut self.children
     }
 
@@ -845,7 +845,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         // ------------------------------------------------------------------
         let mut values   : HashMap<*const Mutex<Self>, V> = HashMap::new();
         let mut done     : HashSet <*const Mutex<Self>>   = HashSet ::new();
-        let mut todo     : BTreeMap<usize, BTreeSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
+        let mut todo     : BTreeMap<usize, HashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
 
         // Seed with the user-supplied starting set
         for (node_arc, v0) in initial_nodes_and_values {
