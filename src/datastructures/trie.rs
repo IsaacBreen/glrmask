@@ -14,7 +14,6 @@ use std::cell::RefCell; // Not strictly needed with the chosen direct BFS approa
 use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
 use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use std::collections::BTreeMap as StdMap;
 use deterministic_hash::DeterministicHasher;
 // Added for derive macro pattern
 
@@ -99,7 +98,7 @@ where
         }
 
         // Fill in the root node's (self's) data
-        nodes_json_list[root_idx] = JSONNode::Object(StdMap::from_iter(vec![
+        nodes_json_list[root_idx] = JSONNode::Object(BTreeMap::from_iter(vec![
             ("value".to_string(), self.value.to_json()),
             ("max_depth".to_string(), self.max_depth.to_json()),
             ("children".to_string(), JSONNode::Array(root_children_json_data)),
@@ -141,14 +140,14 @@ where
             }
 
             // Fill in the data for the current node from the BFS queue
-            nodes_json_list[current_node_json_idx] = JSONNode::Object(StdMap::from_iter(vec![
+            nodes_json_list[current_node_json_idx] = JSONNode::Object(BTreeMap::from_iter(vec![
                 ("value".to_string(), node_guard.value.to_json()),
                 ("max_depth".to_string(), node_guard.max_depth.to_json()),
                 ("children".to_string(), JSONNode::Array(current_node_children_json_bfs)),
             ]));
         }
 
-        JSONNode::Object(StdMap::from_iter(vec![
+        JSONNode::Object(BTreeMap::from_iter(vec![
             ("nodes".to_string(), JSONNode::Array(nodes_json_list)),
             ("root_idx".to_string(), root_idx.to_json()),
         ]))
