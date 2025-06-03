@@ -893,7 +893,6 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         max_original_llm_token_id_val
     ));
 
-    return Ok(());
     // grammar_constraint.dump_precomputed(); // Temporarily commented out due to potential verbosity
 
     // --- TOKENIZATION AND SEQUENCE TESTING ---
