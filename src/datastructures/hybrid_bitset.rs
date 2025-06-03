@@ -1,6 +1,6 @@
 #![allow(dead_code)] // Allow unused code for the example
 
-use range_set_blaze::RangeSetBlaze; // Import RangeSetBlaze
+use range_set_blaze::{MultiwayRangeSetBlaze, RangeSetBlaze}; // Import RangeSetBlaze
 use std::convert::TryInto;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
@@ -365,11 +365,10 @@ impl Sub for &HybridBitset {
 }
 
 // --- In-place Bitwise Operations ---
-// RangeSetBlaze does not implement these assign operators directly.
-// We implement them by using the non-assigning versions.
 
 impl BitAndAssign for HybridBitset {
     fn bitand_assign(&mut self, rhs: Self) {
+        // self.inner.intersection(rhs.inner);
         self.inner = &self.inner & &rhs.inner;
     }
 }
