@@ -952,50 +952,22 @@ where
                         return false;
                     }
 
-                    // Convert BTreeMaps of (ArcPtrWrapper, EV) to Vecs of (Arc, EV) for comparison.
-                    // The Arcs will be compared recursively for structural equality.
-                    let self_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = self_dest_map
-                        .iter()
-                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
-                        .collect();
-                    
-                    let mut other_child_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = other_dest_map
-                        .iter()
-                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
-                        .collect();
-
-                    // Compare self_child_pairs and other_child_pairs as multisets.
-                    // For each (s_arc, s_ev) in self_child_pairs:
-                    //   Find (o_arc, o_ev) in other_child_pairs such that:
-                    //     s_ev == o_ev AND Trie::compare_arcs_recursive(s_arc, o_arc, &mut comparison_cache)
-                    //   If found, remove from other_child_pairs and continue.
-                    //   If not found, return false.
-                    'self_pair_loop_corrected: for (s_arc, s_ev) in &self_child_pairs {
-                        let mut found_match_for_current_self_pair = false;
-                        // Iterate backwards by index to allow stable removal from other_child_pairs (Vec)
-                        for i in (0..other_child_pairs.len()).rev() {
-                            let (o_arc, o_ev) = &other_child_pairs[i]; // Borrow element at index i
-                            if s_ev == o_ev { // Compare EV
-                                // Edge values match, now recursively compare the pointed-to Trie nodes.
-                                // Pass the existing comparison_cache for cycle handling.
-                                if Trie::compare_arcs_recursive(s_arc, o_arc, &mut comparison_cache) {
-                                    other_child_pairs.remove(i); // Match found, remove from other_list.
-                                    found_match_for_current_self_pair = true;
-                                    break; // Found match for current s_arc, move to next s_arc in 'self_pair_loop_corrected.
-                                }
-                                // If recursive compare is false, this o_arc is not a match. Continue inner loop.
+                    let mut remaining_other_child_pairs = other_dest_map.clone();
+                    'self_pair_loop: for (self_apw, self_ev) in self_dest_map {
+                        // Find a child pair in other's child trees that matches self's.
+                        for (other_apw, other_ev) in remaining_other_child_pairs.iter_mut() {
+                            if self_apw == other_apw && self_ev == other_ev {
+                                // Found a match.
+                                // Remove matched child pair from remaining_other_child_pairs.
+                                remaining_other_child_pairs.remove(other_apw);
+                                continue 'self_pair_loop;
                             }
                         }
-                        if !found_match_for_current_self_pair {
-                            // No match found in other_child_pairs for the current s_arc/s_ev.
-                            return false;
-                        }
+                        // None of self's child trees matched other's.
+                        return false;
                     }
-                    // If all self_child_pairs found matches, other_child_pairs should be empty
-                    // (due to initial length check and removals).
-                    if !other_child_pairs.is_empty() {
-                        return false; // Should be redundant if logic is correct, but safe to have.
-                    }
+                    // If all self_child_pairs found matches, other_child_pairs should be empty.
+                    assert!(remaining_other_child_pairs.is_empty());
                 }
             }
         }
@@ -1061,7 +1033,68 @@ where
             other => return other,
         }
 
-        todo!()
+        // 3. Compare children for each edge key.
+        // Iterate through edge keys in sorted order (guaranteed by BTreeMap).
+        let mut self_children_iter = node1.children.iter();
+        let mut other_children_iter = node2.children.iter();
+
+        loop {
+            match (self_children_iter.next(), other_children_iter.next()) {
+                (Some((s_ek, s_dest_map)), Some((o_ek, o_dest_map))) => {
+                    match s_ek.cmp(o_ek) {
+                        std::cmp::Ordering::Equal => {}
+                        other => return other,
+                    }
+
+                    // Edge keys are equal, compare destination maps (number of children for this EK).
+                    match s_dest_map.len().cmp(&o_dest_map.len()) {
+                        std::cmp::Ordering::Equal => {}
+                        other => return other,
+                    }
+
+                    // Collect (Arc, EV) pairs for canonical sorting and comparison.
+                    let mut s_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = s_dest_map
+                        .iter()
+                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
+                        .collect();
+                    
+                    let mut o_pairs: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, EV)> = o_dest_map
+                        .iter()
+                        .map(|(apw, ev)| (apw.as_arc().clone(), ev.clone()))
+                        .collect();
+
+                    // Sort pairs canonically: by EV, then by recursively comparing Arcs.
+                    s_pairs.sort_unstable_by(|(arc_a, ev_a), (arc_b, ev_b)| {
+                        ev_a.cmp(ev_b).then_with(|| Self::compare_arcs_ord(arc_a, arc_b, cache))
+                    });
+                    o_pairs.sort_unstable_by(|(arc_a, ev_a), (arc_b, ev_b)| {
+                        ev_a.cmp(ev_b).then_with(|| Self::compare_arcs_ord(arc_a, arc_b, cache))
+                    });
+                    
+                    // Lexicographically compare the sorted lists of pairs.
+                    for (s_pair, o_pair) in s_pairs.iter().zip(o_pairs.iter()) {
+                        let (s_arc, s_ev) = s_pair;
+                        let (o_arc, o_ev) = o_pair;
+
+                        match s_ev.cmp(o_ev) {
+                            std::cmp::Ordering::Equal => {}
+                            other => return other,
+                        }
+                        // EV's are equal, compare Arcs.
+                        // This call primarily relies on cache for already sorted items,
+                        // but correctly handles the comparison if needed.
+                        match Self::compare_arcs_ord(s_arc, o_arc, cache) {
+                            std::cmp::Ordering::Equal => {}
+                            other => return other,
+                        }
+                    }
+                }
+                (None, None) => break, // Both iterators exhausted, all compared equal so far.
+                (Some(_), None) => return std::cmp::Ordering::Greater, // self has more edge keys.
+                (None, Some(_)) => return std::cmp::Ordering::Less,    // other has more edge keys.
+            }
+        }
+        std::cmp::Ordering::Equal // All checks passed.
     }
 
     /// Helper function to compare two Arcs pointing to Trie nodes. Handles cycles using a cache.
@@ -1149,7 +1182,32 @@ where
         node.value.hash(state);
         node.max_depth.hash(state);
 
-        todo!()
+        // Hash children.
+        // Iterate edge keys in sorted order (BTreeMap).
+        node.children.len().hash(state);
+        for (ek, dest_map) in &node.children {
+            ek.hash(state);
+            
+            // For the destinations under this edge key, their order due to ArcPtrWrapper (pointers)
+            // is not canonical. To be consistent with PartialEq (which treats them as a multiset),
+            // we hash each (Arc, EV) pair, collect these hashes, sort them, and then hash the sorted list.
+            dest_map.len().hash(state);
+            let mut pair_hashes = Vec::with_capacity(dest_map.len());
+
+            for (apw, ev) in dest_map { // Iterates in ArcPtrWrapper order
+                let child_arc = apw.as_arc();
+                // Create a temporary hasher for the (EV, Arc_content) pair.
+                let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
+                ev.hash(&mut pair_hasher);
+                Self::hash_arc_recursive(child_arc, &mut pair_hasher, recursion_marker, current_depth);
+                pair_hashes.push(pair_hasher.finish());
+            }
+
+            pair_hashes.sort_unstable(); // Sort the hashes of the (EV, Arc_content) pairs.
+            for h in pair_hashes {
+                h.hash(state);
+            }
+        }
     }
 
     /// Helper function to hash an Arc<Mutex<Trie>>. Handles cycles.
