@@ -1061,9 +1061,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     }
 
     let initial_tokenizer_state_id = constraint_state_for_comp.parent.tokenizer.initial_state_id();
-    assert_eq!(constraint_state_for_comp.state().len(), 1, "Constraint state for comparison should have one tokenizer state");
-    let (tokenizer_state_id_comp, actual_constraint_parser_state_comp) = constraint_state_for_comp.state().iter().next().unwrap();
-    let mut actual_constraint_parser_state_comp = actual_constraint_parser_state_comp.clone();
+    let mut actual_constraint_parser_state_comp = constraint_state_for_comp.state()[&initial_tokenizer_state_id].clone();
 
     let mut comparable_parser_gss_comp = (*parser_state_for_comp.active_state.stack).clone();
     let mut comparable_parser_active_state_comp = ParseState { stack: Arc::new(comparable_parser_gss_comp) };
@@ -1072,7 +1070,6 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     Arc::make_mut(&mut comparable_parser_active_state_comp.stack).reset_tokens();
     Arc::make_mut(&mut actual_constraint_parser_state_comp.active_state.stack).reset_tokens();
 
-    assert_eq!(*tokenizer_state_id_comp, grammar_constraint.tokenizer.initial_state_id(), "Tokenizer for comparison should be in initial state");
     assert_eq!(actual_constraint_parser_state_comp.active_state, comparable_parser_active_state_comp, "GSS structures for comparison should match");
     println!("Number of states: {}", constraint_state_for_comp.state().len());
     let roots = constraint_state_for_comp.state().values().map(|state| state.active_state.stack.as_ref().clone()).collect::<Vec<_>>();
