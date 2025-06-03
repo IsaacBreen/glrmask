@@ -918,6 +918,11 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // let full_text_to_tokenize = "a";
     // let full_text_to_tokenize = "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((";
     // let full_text_to_tokenize = "a";
+    let mut full_text_to_tokenize = "#".to_string();
+    // Add * to it
+    for _ in 0..1000 {
+        full_text_to_tokenize.push_str("*");
+    }
 
     // Tokenize the full_text_to_tokenize using the VocabPrefixTree
     let mut test_token_sequence_ids = Vec::new();
