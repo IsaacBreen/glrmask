@@ -1,6 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
+use ordered_hash_map::OrderedHashMap;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -735,10 +736,10 @@ impl<'r> Precomputer<'r> {
             let mut node_guard = node_arc.lock().expect("Mutex poisoned: filter_and_prune_edges_recursive lock (modify children)");
             
             let original_children_map = std::mem::take(node_guard.children_mut());
-            let mut new_children_map_for_current_node = BTreeMap::new();
+            let mut new_children_map_for_current_node: BTreeMap<_, OrderedHashMap<_, _>> = BTreeMap::new();
 
             for (edge_key, destinations_map) in original_children_map {
-                let mut new_destinations_for_this_edge_key = HashMap::new();
+                let mut new_destinations_for_this_edge_key: OrderedHashMap<_, _> = OrderedHashMap::new();
                 for (child_arc_ptr_wrapper, current_edge_value) in destinations_map {
                     let child_arc = child_arc_ptr_wrapper.as_arc();
                     let child_ptr = Arc::as_ptr(child_arc);

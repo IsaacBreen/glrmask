@@ -9,6 +9,7 @@ use std::cmp::Reverse;          // min-heap helper
 use std::collections::BinaryHeap;
 use std::hash::{DefaultHasher, Hash, Hasher}; // Added for Hash implementation
 use std::cell::RefCell; // Not strictly needed with the chosen direct BFS approach in to_json, but good to keep in mind for context-passing alternatives.
+use ordered_hash_map::OrderedHashMap;
 
 
 use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
@@ -42,7 +43,7 @@ impl Error for CycleDetectedError {}
 pub struct Trie<EK: Ord, EV, T> {
     pub value: T,
     /// Stores a map from EdgeKey to (a map from ChildArc (wrapped) to EdgeValue).
-    children: BTreeMap<EK, HashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>,
+    children: BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>,
     /// The “longest distance” from some source node (as computed during insertion).
     /// This value is set (or updated) when an edge is inserted.
     /// If A -> B, then A.max_depth < B.max_depth.
@@ -216,7 +217,7 @@ where
                                                 let dest_map_json_array = &ek_pair[1];
 
                                                 let edge_key = EK::from_json(ek_json.clone())?;
-                                                let mut destinations_for_this_ek = HashMap::new();
+                                                let mut destinations_for_this_ek = OrderedHashMap::new();
 
                                                 match dest_map_json_array {
                                                     JSONNode::Array(dest_array_inner) => {
@@ -515,7 +516,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     pub fn get(
         &self,
         edge_key: &EK,
-    ) -> Option<&HashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>
+    ) -> Option<&OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>
     {
         self.children.get(edge_key)
     }
@@ -524,17 +525,17 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     pub fn get_mut(
         &mut self,
         edge_key: &EK,
-    ) -> Option<&mut HashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>
+    ) -> Option<&mut OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>>
     {
         self.children.get_mut(edge_key)
     }
 
     // children remains unchanged
-    pub fn children(&self) -> &BTreeMap<EK, HashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
+    pub fn children(&self) -> &BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
         &self.children
     }
 
-    pub fn children_mut(&mut self) -> &mut BTreeMap<EK, HashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
+    pub fn children_mut(&mut self) -> &mut BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>> {
         &mut self.children
     }
 
