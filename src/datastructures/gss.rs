@@ -238,10 +238,6 @@ impl GSSNode {
     pub fn merge(&mut self, other: &Self) {
         if self == other { return; }
         
-        // Before unioning self.acc, ensure its current state is pushed down if necessary.
-        // This is complex. Let's assume merge is about combining structures and unioning top-level acc.
-        // self.push_down_acc(); // This might be too aggressive or incorrect here.
-
         self.acc.union_assign(other.acc.clone());
 
         for (other_pred_arc, edge_val) in &other.pop_iter() { // pop_iter gives arcs with correct path acc
