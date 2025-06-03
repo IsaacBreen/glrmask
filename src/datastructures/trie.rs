@@ -1,3 +1,4 @@
+#![deny(clippy::iter_over_hash_type)]
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt::{self, Debug};
