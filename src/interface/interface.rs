@@ -758,23 +758,13 @@ impl GrammarConstraint {
         // _eof_llm_token_id is not directly used by GrammarConstraint::new, but was part of the old signature.
         // It's used by GrammarConstraintState for EOF handling.
         // The terminal_name_to_group_id is cloned from the Arc'd definition.
-        // TODO: delete this
-        let result1 = GrammarConstraint::new(
-            grammar.tokenizer.clone(), // Cloned if grammar is passed by value, or if Regex is Clone
-            grammar.glr_parser.clone(), // Cloned if grammar is passed by value, or if GLRParser is Clone
-            llm_tokens.clone(),
-            grammar.definition.terminal_name_to_group_id.clone(),
-            max_llm_token_id
-        );
-        let result2 = GrammarConstraint::new(
+        GrammarConstraint::new(
             grammar.tokenizer, // Cloned if grammar is passed by value, or if Regex is Clone
             grammar.glr_parser, // Cloned if grammar is passed by value, or if GLRParser is Clone
             llm_tokens,
             grammar.definition.terminal_name_to_group_id.clone(),
             max_llm_token_id
-        );
-        assert_eq!(result1, result2);
-        result1
+        )
     }
 }
 
