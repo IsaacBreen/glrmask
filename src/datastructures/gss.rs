@@ -237,10 +237,10 @@ impl GSSNode {
 
     pub fn merge(&mut self, other: &Self) {
         if self == other { return; }
-        
+
         self.acc.union_assign(other.acc.clone());
 
-        for (other_pred_arc, edge_val) in &other.pop_iter() { // pop_iter gives arcs with correct path acc
+        for (edge_val, other_pred_arc) in &other.predecessors {
             match self.predecessors.entry(edge_val.clone()) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     entry.insert(other_pred_arc.clone());
