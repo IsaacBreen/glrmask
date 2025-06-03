@@ -3,7 +3,7 @@
 use range_set_blaze::{MultiwayRangeSetBlaze, RangeSetBlaze}; // Import RangeSetBlaze
 use std::convert::TryInto;
 use std::fmt::{Debug, Formatter};
-use std::hash::{Hash, Hasher};
+use std::hash::{Hash, Hasher}; // Added
 use std::iter::FromIterator; // Needed for collect into BTreeSet in tests
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Index, IndexMut, RangeInclusive, Sub, SubAssign};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
@@ -368,8 +368,15 @@ impl Sub for &HybridBitset {
 
 impl BitAndAssign for HybridBitset {
     fn bitand_assign(&mut self, rhs: Self) {
-        // self.inner.intersection(rhs.inner);
+        let start_time = std::time::Instant::now();
         self.inner = &self.inner & &rhs.inner;
+        let duration = start_time.elapsed();
+        if duration.as_millis() > 100 {
+            println!(
+                "HybridBitset::bitand_assign (owned) took {}ms",
+                duration.as_millis()
+            );
+        }
     }
 }
 
@@ -416,7 +423,15 @@ impl SubAssign for HybridBitset {
 
 impl BitAndAssign<&HybridBitset> for HybridBitset {
     fn bitand_assign(&mut self, rhs: &HybridBitset) {
+        let start_time = std::time::Instant::now();
         self.inner = &self.inner & &rhs.inner;
+        let duration = start_time.elapsed();
+        if duration.as_millis() > 100 {
+            println!(
+                "HybridBitset::bitand_assign (ref) took {}ms",
+                duration.as_millis()
+            );
+        }
     }
 }
 
