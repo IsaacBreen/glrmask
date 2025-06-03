@@ -625,7 +625,7 @@ impl<'r> Precomputer<'r> {
 
     fn merge_nodes(&mut self) {
         crate::debug!(2, "Merging nodes: first collecting unique roots and their canonical Arcs");
-        let mut content_to_canonical_arc_map: BTreeMap<PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = BTreeMap::new();
+        let mut content_to_canonical_arc_map: HashMap<PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = HashMap::new();
         
         for (_tokenizer_state_id, root_arc_ref) in &self.roots {
             let node_content = root_arc_ref.lock().unwrap().clone();
