@@ -157,6 +157,10 @@ impl HybridBitset {
         self.inner.contains(index)
     }
 
+    pub fn is_subset(&self, other: &Self) -> bool {
+        self.inner.is_subset(&other.inner)
+    }
+
     /// Inserts an index into the set. Returns true if the index was not already present.
     pub fn insert(&mut self, index: usize) -> bool {
         self.inner.insert(index)

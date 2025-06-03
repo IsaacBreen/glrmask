@@ -72,6 +72,24 @@ impl PathAccumulator for Option<LLMTokenBV> {
             (None, None) => {}
         }
     }
+
+    fn intersect_has_effect(&self, right: &Self) -> bool {
+        // self.clone().intersect(right.clone()) != *self
+        match (self, right) {
+            (Some(self_bv), Some(right_bv)) => {
+                self_bv.is_subset(right_bv)
+            }
+            (None, Some(right_bv)) => {
+                true
+            }
+            (Some(_), None) => {
+                false
+            }
+            (None, None) => {
+                false
+            }
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------

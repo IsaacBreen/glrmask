@@ -27,11 +27,13 @@ pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + Partia
         self.intersect_assign(right);
         self
     }
+    fn intersect_has_effect(&self, right: &Self) -> bool;
 }
 
 impl PathAccumulator for () {
     fn union_assign(&mut self, _other: Self) { }
     fn intersect_assign(&mut self, _right: Self) { } // Renamed from pop_assign
+    fn intersect_has_effect(&self, _right: &Self) -> bool { false }
 }
 
 fn compute_hash_key(predecessors: &NodeMap) -> u64 {
@@ -212,8 +214,8 @@ impl GSSNode {
             let mut pred_arc = pred_arc.clone();
             // The acc for the path ending at pred_arc (after popping self)
             // is self.acc intersected with pred_arc's original acc.
-            let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
-            if path_acc != *pred_arc.acc() {
+            if self.acc.intersect_has_effect(&pred_arc.acc) {
+                let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
                 pred_arc = Arc::new(pred_arc.as_ref().clone().with_acc(path_acc));
             }
             (pred_arc, edge_val.clone())
@@ -436,7 +438,7 @@ pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_int
             new_acc = Some(tokens_to_intersect.clone());
         }
         if new_acc.as_ref().is_none_or(|bv| !bv.is_empty()) {
-            Some((new_acc, true)) // Keep node, continue recursion
+            Some((new_acc, false))
         } else {
             None // Prune this node
         }
@@ -463,7 +465,7 @@ pub fn subtract_tokens_and_prune_arc(
             new_acc = Some(LLMTokenBV::max_ones() - llm_tokens.clone());
         }
         if new_acc.as_ref().is_none_or(|bv| !bv.is_empty()) {
-            Some((new_acc, true)) // Keep node, continue recursion
+            Some((new_acc, false))
         } else {
             None // Prune this node
         }
