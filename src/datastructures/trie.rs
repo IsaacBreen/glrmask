@@ -1,4 +1,4 @@
-#![deny(clippy::iter_over_hash_type)]
+// #![deny(clippy::iter_over_hash_type)]
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt::{self, Debug};
@@ -76,7 +76,7 @@ where
         for (edge_key, destinations_map) in &self.children {
             let ek_json = edge_key.to_json();
             let mut dest_map_json_array = Vec::new();
-            #[allow(clippy::iter_over_hash_type)]
+            // #[allow(clippy::iter_over_hash_type)]
             for (child_arc_ptr_wrapper, edge_val) in destinations_map {
                 let child_arc = child_arc_ptr_wrapper.as_arc();
                 let child_arc_ptr = Arc::as_ptr(child_arc);
@@ -120,7 +120,7 @@ where
             for (edge_key, destinations_map) in &node_guard.children {
                 let ek_json = edge_key.to_json();
                 let mut dest_map_json_array_bfs = Vec::new();
-                #[allow(clippy::iter_over_hash_type)]
+                // #[allow(clippy::iter_over_hash_type)]
                 for (child_arc_ptr_wrapper, edge_val) in destinations_map {
                     let child_arc = child_arc_ptr_wrapper.as_arc();
                     let child_arc_ptr = Arc::as_ptr(child_arc);
@@ -563,7 +563,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
             // Lock the node to get its children
             let node_guard = node_arc.lock().expect("Mutex poisoned during BFS"); // Renamed node to node_guard
             for children_map in node_guard.children.values() { // Use node_guard
-                #[allow(clippy::iter_over_hash_type)]
+                // #[allow(clippy::iter_over_hash_type)]
                 for child_wrapper_arc in children_map.keys() { // Iterate over ArcPtrWrapper keys
                     let child_arc = child_wrapper_arc.as_arc();
                     let child_arc_ptr = Arc::as_ptr(child_arc);
@@ -865,7 +865,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
         // Main loop ---------------------------------------------------------
         while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
-            #[allow(clippy::iter_over_hash_type)]
+            // #[allow(clippy::iter_over_hash_type)]
             for node_arc_ptr_wrapper in &node_arc_ptr_wrappers {
                 let ptr = Arc::as_ptr(node_arc_ptr_wrapper.as_arc());
                 if done.contains(&ptr) { continue; }               // already processed

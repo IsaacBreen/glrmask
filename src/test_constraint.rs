@@ -1010,7 +1010,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         constraint_state.commit(llm_token_id);
         let commit_duration = commit_start.elapsed();
         println!("  commit LLMTokenID({}) took: {:?}", llm_token_id.0, commit_duration);
-        println!("  Committed LLMTokenID({}) for '{}'.", llm_token_id.0, current_token_str);
+        println!("  Committed LLMTokenID({}) for '{:?}'.", llm_token_id.0, current_token_str);
 
         assert!(
             constraint_state.is_active(),
