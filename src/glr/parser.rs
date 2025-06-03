@@ -570,7 +570,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
 
             let mut next_visited_on_this_path = visited_on_this_path; 
-            next_visited_on_this_path.insert(state.stack.clone());
+            // next_visited_on_this_path.insert(state.stack.clone());
 
             let stack_arc_for_operations = &state.stack; 
             for (parent_arc, mut top_edge_content) in state.stack.pop_iter() { // Renamed top to top_edge_content
