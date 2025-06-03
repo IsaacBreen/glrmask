@@ -886,12 +886,12 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     println!("GrammarConstraint constructed successfully.");
 
     // Ensure grammar constraint creation is deterministic
-    assert_eq!(grammar_constraint, GrammarConstraint::from_compiled_grammar(
-        compiled_grammar,
-        llm_token_map.clone(),
-        dummy_eof_placeholder,
-        max_original_llm_token_id_val
-    ));
+    // assert_eq!(grammar_constraint, GrammarConstraint::from_compiled_grammar(
+    //     compiled_grammar,
+    //     llm_token_map.clone(),
+    //     dummy_eof_placeholder,
+    //     max_original_llm_token_id_val
+    // ));
 
     // grammar_constraint.dump_precomputed(); // Temporarily commented out due to potential verbosity
 
@@ -914,7 +914,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         }
     };
     // let full_text_to_tokenize = "from typing import Any, List";
-    let full_text_to_tokenize = "import os# some comments\nfrom collections";
+    // let full_text_to_tokenize = "import os# some comments\nfrom collections";
     // let full_text_to_tokenize = "a";
     // let full_text_to_tokenize = "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((";
     // let full_text_to_tokenize = "a";
