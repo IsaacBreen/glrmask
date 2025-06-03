@@ -111,12 +111,11 @@ def define_tokens() -> list[tuple[str, Any]]:
 
     # TODO: Use eg eat("a") instead of eat_u8(ord("a")). It's a bit more readable.
 
-    ignore = ge.optional(ge.regex(rep1(choice([
-        eat_u8(ord(" ")),
-        # TODO: delete this?
-        eat_u8(ord("\n")),
-        seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n")))]),
-    ]))))
+    ignore = ge.repeat(ge.choice([
+        ge.regex(rep1(eat_u8(ord(" ")))),
+        ge.regex(eat_u8(ord("\n"))),
+        ge.regex(seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n")))])),
+    ]))
     tokens["IGNORE"] = ignore
 #     # TODO: delete this
 #     tokens["IGNORE"] = eps()
