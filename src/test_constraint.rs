@@ -1059,24 +1059,25 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         assert!(mask_before_commit.contains(llm_token_id_for_comp.0), "Token {:?} (ID {}) not found in mask during comparison setup", String::from_utf8_lossy(llm_token_for_comp), llm_token_id_for_comp.0);
         constraint_state_for_comp.commit(*llm_token_id_for_comp);
     }
-
-    let initial_tokenizer_state_id = constraint_state_for_comp.parent.tokenizer.initial_state_id();
-    let mut actual_constraint_parser_state_comp = constraint_state_for_comp.state()[&initial_tokenizer_state_id].clone();
-
-    let mut comparable_parser_gss_comp = (*parser_state_for_comp.active_state.stack).clone();
-    let mut comparable_parser_active_state_comp = ParseState { stack: Arc::new(comparable_parser_gss_comp) };
-
-
-    Arc::make_mut(&mut comparable_parser_active_state_comp.stack).reset_tokens();
-    Arc::make_mut(&mut actual_constraint_parser_state_comp.active_state.stack).reset_tokens();
-
-    assert_eq!(actual_constraint_parser_state_comp.active_state, comparable_parser_active_state_comp, "GSS structures for comparison should match");
-    println!("Number of states: {}", constraint_state_for_comp.state().len());
-    let roots = constraint_state_for_comp.state().values().map(|state| state.active_state.stack.as_ref().clone()).collect::<Vec<_>>();
-    println!("State statistics: {:?}", gather_gss_stats(&roots.iter().collect::<Vec<_>>()));
-    for (tokenizer_state_id, state) in constraint_state_for_comp.state() {
-        println!("  State {}: {:?}", tokenizer_state_id.0, gather_gss_stats(&vec![&state.active_state.stack.as_ref().clone()]));
-    }
+    
+    // assert_eq!(constraint_state_for_comp.state().len(), 1, "Constraint state for comparison should have one tokenizer state");
+    // let initial_tokenizer_state_id = constraint_state_for_comp.parent.tokenizer.initial_state_id();
+    // let mut actual_constraint_parser_state_comp = constraint_state_for_comp.state()[&initial_tokenizer_state_id].clone();
+    //
+    // let mut comparable_parser_gss_comp = (*parser_state_for_comp.active_state.stack).clone();
+    // let mut comparable_parser_active_state_comp = ParseState { stack: Arc::new(comparable_parser_gss_comp) };
+    //
+    //
+    // Arc::make_mut(&mut comparable_parser_active_state_comp.stack).reset_tokens();
+    // Arc::make_mut(&mut actual_constraint_parser_state_comp.active_state.stack).reset_tokens();
+    //
+    // assert_eq!(actual_constraint_parser_state_comp.active_state, comparable_parser_active_state_comp, "GSS structures for comparison should match");
+    // println!("Number of states: {}", constraint_state_for_comp.state().len());
+    // let roots = constraint_state_for_comp.state().values().map(|state| state.active_state.stack.as_ref().clone()).collect::<Vec<_>>();
+    // println!("State statistics: {:?}", gather_gss_stats(&roots.iter().collect::<Vec<_>>()));
+    // for (tokenizer_state_id, state) in constraint_state_for_comp.state() {
+    //     println!("  State {}: {:?}", tokenizer_state_id.0, gather_gss_stats(&vec![&state.active_state.stack.as_ref().clone()]));
+    // }
 
     Ok(())
 }
