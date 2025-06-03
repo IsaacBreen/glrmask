@@ -371,8 +371,10 @@ impl BitAndAssign for HybridBitset {
         let start_time = std::time::Instant::now();
         self.inner = &self.inner & &rhs.inner;
         let duration = start_time.elapsed();
-        println!("HybridBitset::bitand_assign (owned) took {:?}", duration);
         if duration.as_millis() > 1 {
+            println!("HybridBitset::bitand_assign (owned) took {:?}", duration);
+        }
+        if duration.as_millis() > 10 {
             panic!("HybridBitset::bitand_assign (owned) took {:?}", duration);
         }
     }
