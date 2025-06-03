@@ -574,8 +574,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
             let stack_arc_for_operations = &state.stack; 
             for (parent_arc, mut top_edge_content) in state.stack.pop_iter() { // Renamed top to top_edge_content
-                let current_path_acc = state.stack.acc().clone().intersect(parent_arc.acc().clone());
-                let temp_idk = Arc::new(parent_arc.push(top_edge_content.clone(), current_path_acc.clone())); // Acc for push
+                let temp_idk = Arc::new(parent_arc.push(top_edge_content.clone(), parent_arc.acc().clone())); // Acc for push
 
                 let row = &self.parser.stage_7_table[&top_edge_content.state_id];
 
