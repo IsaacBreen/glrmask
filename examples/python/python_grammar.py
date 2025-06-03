@@ -115,7 +115,7 @@ def define_tokens() -> list[tuple[str, Any]]:
         eat_u8(ord(" ")),
         # TODO: delete this?
         eat_u8(ord("\n")),
-        seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]),
+        seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n")))]),
     ]))))
     tokens["IGNORE"] = ignore
 #     # TODO: delete this
