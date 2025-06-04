@@ -851,6 +851,12 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let vocab_file_name = "gpt2_vocab.json";
     let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
     // let gpt2_raw_vocab = BTreeMap::from([("________________________________________________________________", 0)]);
+    // Just fill with all bytes
+    let mut gpt2_raw_vocab = BTreeMap::new();
+    for i in 0..256 {
+        let s = String::from_utf8(vec![i as u8]).unwrap();
+        gpt2_raw_vocab.insert(s, i as usize);
+    }
 
     let mut llm_token_map = LLMTokenMap::new();
     let mut max_original_llm_token_id_val: usize = 0;
@@ -921,7 +927,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let mut full_text_to_tokenize = "#".to_string();
     // Add * to it
     for _ in 0..1000 {
-        full_text_to_tokenize.push_str("+");
+        full_text_to_tokenize.push_str("*"); // Causes stack overflow
+        // full_text_to_tokenize.push_str("+"); // Causes major slowdown
     }
 
     // Tokenize the full_text_to_tokenize using the VocabPrefixTree
