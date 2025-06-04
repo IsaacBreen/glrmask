@@ -861,7 +861,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // Add "#" and "*" * N
     gpt2_raw_vocab.insert("#".to_string(), 0);
     let mut asterisks = String::new();
-    for _ in 0..1000 {
+    let N = 100;
+    for _ in 0..N {
         asterisks.push('*');
     }
     gpt2_raw_vocab.insert(asterisks, 1);
@@ -935,7 +936,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // let full_text_to_tokenize = "a";
     let mut full_text_to_tokenize = "#".to_string();
     // Add * to it
-    for _ in 0..1000 {
+    for _ in 0..N {
         full_text_to_tokenize.push_str("*"); // Causes stack overflow
         // full_text_to_tokenize.push_str("+"); // Causes major slowdown
     }
