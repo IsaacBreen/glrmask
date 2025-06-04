@@ -569,6 +569,86 @@ fn test_aborted_tokenizer_restart_equivalence() {
 }
 
 #[test]
+fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
+    // Tokenizer:
+    // Group 0: "a" (A_T)
+    // Group 1: "#" followed by an optional "aa" (HASH_OPT_AA_T)
+    let tokenizer_expr = groups![
+        eat_u8_fast(b'a'), // Tokenizer Group ID 0
+        seq_fast![ // Tokenizer Group ID 1
+            eat_u8_fast(b'#'),
+            repeat01_fast(seq_fast![eat_u8_fast(b'a'), eat_u8_fast(b'a')]) // optional 'aa'
+        ]
+    ];
+    let tokenizer = tokenizer_expr.build();
+
+    // Grammar: S -> HASH_OPT_AA_T | HASH_OPT_AA_T A_T A_T
+    let productions = vec![
+        prod("S", vec![t("HASH_OPT_AA_GRAMMAR_T")]),
+        prod("S", vec![t("HASH_OPT_AA_GRAMMAR_T"), t("A_GRAMMAR_T"), t("A_GRAMMAR_T")]),
+    ];
+
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    let terminal_a = Terminal("A_GRAMMAR_T".to_string());
+    let terminal_hash_opt_aa = Terminal("HASH_OPT_AA_GRAMMAR_T".to_string());
+    grammar_token_map.insert(terminal_a.clone(), TerminalID(0)); // Maps to tokenizer group 0
+    grammar_token_map.insert(terminal_hash_opt_aa.clone(), TerminalID(1)); // Maps to tokenizer group 1
+
+    let parser = generate_glr_parser_with_terminal_map(
+        &productions,
+        0, // start_production_id
+        grammar_token_map.clone()
+    );
+
+    // LLM Tokens
+    let mut llm_token_map = LLMTokenMap::new();
+    let llm_hash = LLMTokenID(0);    // "#"
+    let llm_a = LLMTokenID(1);       // "a"
+    let llm_hash_aa = LLMTokenID(2); // "#aa"
+    llm_token_map.insert(b"#".to_vec(), llm_hash);
+    llm_token_map.insert(b"a".to_vec(), llm_a);
+    llm_token_map.insert(b"#aa".to_vec(), llm_hash_aa);
+
+    let max_original_llm_token_id = 2;
+
+    let mut token_name_map_for_constraint = BiBTreeMap::new();
+    token_name_map_for_constraint.insert("A_GRAMMAR_T".to_string(), 0);
+    token_name_map_for_constraint.insert("HASH_OPT_AA_GRAMMAR_T".to_string(), 1);
+
+    let constraint = GrammarConstraint::new(
+        tokenizer,
+        parser,
+        llm_token_map.clone(),
+        token_name_map_for_constraint,
+        max_original_llm_token_id,
+    );
+
+    // Scenario 1: Commit "#", then "a", then "a"
+    let mut constraint_state1 = constraint.init();
+    println!("Scenario 1: Committing LLM Token '#' (ID {})", llm_hash.0);
+    constraint_state1.commit(llm_hash);
+    println!("Scenario 1: State after '#': {:?}", constraint_state1.state().keys().map(|k|k.0).collect::<Vec<_>>());
+
+    println!("\nScenario 1: Committing LLM Token 'a' (ID {})", llm_a.0);
+    constraint_state1.commit(llm_a);
+    println!("Scenario 1: State after '#a': {:?}", constraint_state1.state().keys().map(|k|k.0).collect::<Vec<_>>());
+
+    println!("\nScenario 1: Committing LLM Token 'a' (ID {})", llm_a.0);
+    constraint_state1.commit(llm_a);
+    println!("Scenario 1: State after '#aa': {:?}", constraint_state1.state().keys().map(|k|k.0).collect::<Vec<_>>());
+
+    // Scenario 2: Commit "#aa"
+    let mut constraint_state2 = constraint.init();
+    println!("\nScenario 2: Committing LLM Token '#aa' (ID {})", llm_hash_aa.0);
+    constraint_state2.commit(llm_hash_aa);
+    println!("Scenario 2: State after '#aa': {:?}", constraint_state2.state().keys().map(|k|k.0).collect::<Vec<_>>());
+
+    // Assert equivalence
+    assert_eq!(constraint_state1.state(), constraint_state2.state(), "States from (commit '#' then 'a' then 'a') and (commit '#aa') should be equivalent.");
+    println!("\nAssertion passed: States are equivalent for multi-commit scenario.");
+}
+
+#[test]
 fn test_hideous_ambiguity() {
     // 1. Define the grammar
     let productions = vec![
