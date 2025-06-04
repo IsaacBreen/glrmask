@@ -577,7 +577,7 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
         eat_u8_fast(b'a'), // Tokenizer Group ID 0
         seq_fast![ // Tokenizer Group ID 1
             eat_u8_fast(b'#'),
-            repeat01_fast(seq_fast![eat_u8_fast(b'a'), eat_u8_fast(b'a')]) // optional 'aa'
+            opt_fast(seq_fast![eat_u8_fast(b'a'), eat_u8_fast(b'a')]) // optional 'aa'
         ]
     ];
     let tokenizer = tokenizer_expr.build();
