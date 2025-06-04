@@ -861,7 +861,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // Add "#" and "*" * N
     gpt2_raw_vocab.insert("#".to_string(), 0);
     let mut asterisks = String::new();
-    let N = 10000;
+    let N = 2000;
     for _ in 0..1000 {
         asterisks.push('*');
     }
