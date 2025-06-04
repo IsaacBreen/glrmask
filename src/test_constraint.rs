@@ -7,7 +7,7 @@ use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal
 use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
 use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
 use std::hash::{Hash, Hasher};
-use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast, eat_string_fast, choice_fast, eat_bytestring_fast, repeat1_fast, CompiledGrammar, GrammarDefinition, display_productions}; // Added eat_any_fast, CompiledGrammar
+use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast, eat_string_fast, choice_fast, eat_bytestring_fast, repeat1_fast, CompiledGrammar, GrammarDefinition, display_productions, repeat01_fast}; // Added eat_any_fast, CompiledGrammar, repeat01_fast
 use crate::glr::analyze; // Import the analyze module
 
 use std::fs::{self, File};
@@ -474,6 +474,98 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[test]
+fn test_aborted_tokenizer_restart_equivalence() {
+    // Tokenizer:
+    // Group 0: "a" (A_T)
+    // Group 1: "#" followed by an optional "a" (HASH_OPT_A_T)
+    let tokenizer_expr = groups![
+        eat_u8_fast(b'a'), // Tokenizer Group ID 0
+        seq_fast![ // Tokenizer Group ID 1
+            eat_u8_fast(b'#'),
+            repeat01_fast(eat_u8_fast(b'a')) // optional 'a'
+        ]
+    ];
+    let tokenizer = tokenizer_expr.build();
+
+    // Grammar: S -> HASH_OPT_A_T | HASH_OPT_A_T A_T
+    // Terminals in grammar:
+    // "A_GRAMMAR_T" maps to tokenizer group 0
+    // "HASH_OPT_A_GRAMMAR_T" maps to tokenizer group 1
+    let productions = vec![
+        prod("S", vec![t("HASH_OPT_A_GRAMMAR_T")]),
+        prod("S", vec![t("HASH_OPT_A_GRAMMAR_T"), t("A_GRAMMAR_T")]),
+    ];
+
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    let terminal_a = Terminal("A_GRAMMAR_T".to_string());
+    let terminal_hash_opt_a = Terminal("HASH_OPT_A_GRAMMAR_T".to_string());
+    grammar_token_map.insert(terminal_a.clone(), TerminalID(0)); // Maps to tokenizer group 0
+    grammar_token_map.insert(terminal_hash_opt_a.clone(), TerminalID(1)); // Maps to tokenizer group 1
+
+    let parser = generate_glr_parser_with_terminal_map(
+        &productions,
+        0, // Assuming S -> HASH_OPT_A_GRAMMAR_T is the first rule for start_production_id if S' is not explicit.
+           // generate_glr_parser adds S' -> S EOF, so the first user prod is 0.
+        grammar_token_map.clone()
+    );
+
+    // LLM Tokens
+    let mut llm_token_map = LLMTokenMap::new();
+    let llm_hash = LLMTokenID(0);
+    let llm_a = LLMTokenID(1);
+    let llm_hash_a = LLMTokenID(2);
+    llm_token_map.insert(b"#".to_vec(), llm_hash);
+    llm_token_map.insert(b"a".to_vec(), llm_a);
+    llm_token_map.insert(b"#a".to_vec(), llm_hash_a);
+
+    let max_original_llm_token_id = 2;
+
+    // Token name map for GrammarConstraint (maps grammar terminal name to tokenizer group ID)
+    let mut token_name_map_for_constraint = BiBTreeMap::new();
+    token_name_map_for_constraint.insert("A_GRAMMAR_T".to_string(), 0);
+    token_name_map_for_constraint.insert("HASH_OPT_A_GRAMMAR_T".to_string(), 1);
+
+    let constraint = GrammarConstraint::new(
+        tokenizer,
+        parser,
+        llm_token_map.clone(),
+        token_name_map_for_constraint,
+        max_original_llm_token_id,
+    );
+
+    // Scenario 1: Commit "#", then "a"
+    let mut constraint_state1 = constraint.init();
+    println!("Scenario 1: Committing LLM Token '#' (ID {})", llm_hash.0);
+    constraint_state1.commit(llm_hash);
+    println!("Scenario 1: State after committing '#': {:?}", constraint_state1.state().keys().map(|k|k.0).collect::<Vec<_>>());
+    for (tid, glr_state) in constraint_state1.state() {
+        glr_state.log_gss(&format!("Scenario 1, after '#', GSS for tokenizer state {}", tid.0), TerminalID(0));
+    }
+
+    println!("\nScenario 1: Committing LLM Token 'a' (ID {})", llm_a.0);
+    constraint_state1.commit(llm_a);
+    println!("Scenario 1: State after committing 'a': {:?}", constraint_state1.state().keys().map(|k|k.0).collect::<Vec<_>>());
+     for (tid, glr_state) in constraint_state1.state() {
+        glr_state.log_gss(&format!("Scenario 1, after 'a', GSS for tokenizer state {}", tid.0), TerminalID(0));
+    }
+
+    // Scenario 2: Commit "#a"
+    let mut constraint_state2 = constraint.init();
+    println!("\nScenario 2: Committing LLM Token '#a' (ID {})", llm_hash_a.0);
+    constraint_state2.commit(llm_hash_a);
+    println!("Scenario 2: State after committing '#a': {:?}", constraint_state2.state().keys().map(|k|k.0).collect::<Vec<_>>());
+    for (tid, glr_state) in constraint_state2.state() {
+        glr_state.log_gss(&format!("Scenario 2, after '#a', GSS for tokenizer state {}", tid.0), TerminalID(0));
+    }
+
+    // Assert equivalence
+    // Note: GLRParserState uses Arc for GSSNode, direct comparison works if structures are identical.
+    // The reset_tokens() at the start of commit_bytes helps make states comparable.
+    assert_eq!(constraint_state1.state(), constraint_state2.state(), "States from (commit '#' then 'a') and (commit '#a') should be equivalent.");
+    println!("\nAssertion passed: States are equivalent.");
 }
 
 #[test]
