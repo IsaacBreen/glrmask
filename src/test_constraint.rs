@@ -495,6 +495,7 @@ fn test_aborted_tokenizer_restart_equivalence() {
     // "A_GRAMMAR_T" maps to tokenizer group 0
     // "HASH_OPT_A_GRAMMAR_T" maps to tokenizer group 1
     let productions = vec![
+        prod("S'", vec![nt("S")]),
         prod("S", vec![t("HASH_OPT_A_GRAMMAR_T")]),
         prod("S", vec![t("HASH_OPT_A_GRAMMAR_T"), t("A_GRAMMAR_T")]),
     ];
@@ -584,6 +585,7 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
 
     // Grammar: S -> HASH_OPT_AA_T | HASH_OPT_AA_T A_T A_T
     let productions = vec![
+        prod("S'", vec![nt("S")]),
         prod("S", vec![t("HASH_OPT_AA_GRAMMAR_T")]),
         prod("S", vec![t("HASH_OPT_AA_GRAMMAR_T"), t("A_GRAMMAR_T"), t("A_GRAMMAR_T")]),
     ];
