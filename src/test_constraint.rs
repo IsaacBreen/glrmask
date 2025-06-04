@@ -563,8 +563,6 @@ fn test_aborted_tokenizer_restart_equivalence() {
     }
 
     // Assert equivalence
-    // Note: GLRParserState uses Arc for GSSNode, direct comparison works if structures are identical.
-    // The reset_tokens() at the start of commit_bytes helps make states comparable.
     assert_eq!(constraint_state1.state(), constraint_state2.state(), "States from (commit '#' then 'a') and (commit '#a') should be equivalent.");
     println!("\nAssertion passed: States are equivalent.");
 }
