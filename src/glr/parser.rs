@@ -465,7 +465,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         nt: NonTerminalID,
     ) -> Arc<GSSNode> { 
         let parent_gss_node = if len == 0 { // Renamed parent to parent_gss_node
-            Arc::new(edge_src.push(edge_content.clone(), edge_src.acc().clone())) // Provide acc for push
+            Arc::new(edge_src.push(edge_content.clone(), edge_src.acc2().clone())) // Provide acc for push
         } else {
             Arc::new(edge_src.popn(len - 1))
         };
@@ -480,8 +480,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id, user_data: edge_content.user_data.clone() };
 
-                    let isolated_parent_arc = Arc::new(predecessor_arc.push(edge_value, predecessor_arc.acc().clone()));
-                    let new_gss_node = isolated_parent_arc.push(goto_node_content, isolated_parent_arc.acc().clone());
+                    let isolated_parent_arc = Arc::new(predecessor_arc.push(edge_value, predecessor_arc.acc2().clone()));
+                    let new_gss_node = isolated_parent_arc.push(goto_node_content, isolated_parent_arc.acc2().clone());
                     out.merge(&Arc::new(new_gss_node));
                 }
                 Goto::Accept => {
@@ -572,7 +572,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
             let stack_arc_for_operations = &state.stack; 
             for (parent_arc, mut top_edge_content) in state.stack.pop_iter() { // Renamed top to top_edge_content
-                let temp_idk = Arc::new(parent_arc.push(top_edge_content.clone(), parent_arc.acc().clone())); // Acc for push
+                let temp_idk = Arc::new(parent_arc.push(top_edge_content.clone(), parent_arc.acc2().clone())); // Acc for push
 
                 let row = &self.parser.stage_7_table[&top_edge_content.state_id];
 
@@ -580,7 +580,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     Some(Stage7ShiftsAndReduces::Shift(to)) => {
                         crate::debug!(4, "Shift from state {} via token {} to state {}", top_edge_content.state_id.0, token_id.0, to.0);
                         let new_content = ParseStateEdgeContent { state_id: *to, user_data: top_edge_content.user_data.clone() };
-                        let new_parse_state = self.push_state(&temp_idk, new_content, stack_arc_for_operations.acc().clone());
+                        let new_parse_state = self.push_state(&temp_idk, new_content, stack_arc_for_operations.acc2().clone());
                         next.merge(new_parse_state);
                     }
 
@@ -607,7 +607,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         if let Some(to) = shift {
                             crate::debug!(4, " Shift from state {} via token {} to state {}", top_edge_content.state_id.0, token_id.0, to.0);
                             let new_content = ParseStateEdgeContent { state_id: *to, user_data: top_edge_content.user_data.clone() };
-                            let new_parse_state = self.push_state(&temp_idk, new_content, stack_arc_for_operations.acc().clone());
+                            let new_parse_state = self.push_state(&temp_idk, new_content, stack_arc_for_operations.acc2().clone());
                             next.merge(new_parse_state);
                         }
                         for (len, nts) in reduces {

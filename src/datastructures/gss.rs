@@ -135,6 +135,14 @@ pub mod acc_mod {
         pub fn is_default(&self) -> bool {
             self.acc.is_none() && self.forbidden_terminals.is_empty()
         }
+
+        pub fn is_dead(&self) -> bool {
+            self.acc.clone().is_none_or(|bv| bv.is_empty())
+        }
+
+        pub fn is_alive(&self) -> bool {
+            !self.is_dead()
+        }
     }
 
     impl PathAccumulator for Acc {
@@ -267,11 +275,11 @@ impl GSSNode {
         self.acc.acc_mut()
     }
 
-    pub fn acc(&self) -> &Acc {
+    pub fn acc2(&self) -> &Acc {
         &self.acc
     }
 
-    pub fn acc_mut(&mut self) -> &mut Acc {
+    pub fn acc_mut2(&mut self) -> &mut Acc {
         &mut self.acc
     }
 
@@ -516,7 +524,7 @@ fn prune_and_transform_recursive(
         return cached_result.clone();
     }
 
-    match closure(&node_arc.acc()) {
+    match closure(&node_arc.acc2()) {
         None => { // Prune this node
             memo.insert(node_ptr, None);
             None
@@ -556,7 +564,7 @@ pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_int
         } else {
             new_acc = Acc::new(Some(tokens_to_intersect.clone()), current_acc.forbidden_terminals().clone());
         }
-        if new_acc.acc().clone().is_none_or(|bv| !bv.is_empty()) {
+        if new_acc.is_alive() {
             Some((new_acc, false))
         } else {
             None // Prune this node
@@ -568,7 +576,7 @@ pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_int
         *root_arc = new_root;
     } else {
         // The entire GSS was pruned, set root_arc to an empty GSSNode
-        *root_arc = Arc::new(GSSNode::new(root_arc.acc().clone()));
+        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
     }
 }
 
@@ -594,7 +602,7 @@ pub fn subtract_tokens_and_prune_arc(
         *root_arc = new_root;
     } else {
         // The entire GSS was pruned, set root_arc to an empty GSSNode
-        *root_arc = Arc::new(GSSNode::new(root_arc.acc().clone()));
+        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
     }
 }
 
@@ -608,7 +616,7 @@ pub fn reset_tokens(root_arc: &mut Arc<GSSNode>) {
         *root_arc = new_root;
     } else {
         // The entire GSS was pruned, set root_arc to an empty GSSNode
-        *root_arc = Arc::new(GSSNode::new(root_arc.acc().clone()));
+        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
     }
 }
 
@@ -681,7 +689,7 @@ impl GSSNode {
         if let Some(new_node_arc) = prune_and_transform_recursive(&node_arc, closure, memo) {
             *self = new_node_arc.as_ref().clone();
         } else {
-            *self = GSSNode::new(self.acc().clone());
+            *self = GSSNode::new(self.acc2().clone());
         }
     }
 
@@ -898,9 +906,9 @@ fn simplify_node_recursive(
                 Acc::new_for_merging()
             } else {
                 let mut iter = simplified_predecessors_map.values();
-                let mut acc = iter.next().unwrap().acc().clone();
+                let mut acc = iter.next().unwrap().acc2().clone();
                 for p_arc in iter { // Renamed p
-                    acc.union_assign(p_arc.acc().clone());
+                    acc.union_assign(p_arc.acc2().clone());
                 }
                 acc
             };
@@ -1061,13 +1069,13 @@ mod tests {
         assert_eq!(edge10.state_id.0, 10, "Edge from A1 should be 10");
 
         // Accumulator of A1 should remain as it was.
-        assert_eq!(s_a1.acc(), &acc_a1, "A1 accumulator mismatch");
+        assert_eq!(s_a1.acc2(), &acc_a1, "A1 accumulator mismatch");
 
         // The merged_b1_d2_node is the result of B1 and D2 paths.
         // Its acc should be the union of B1's original acc and D2's original acc.
         // B1's original acc was acc_base. D2's original acc was acc_other.
         let expected_merged_acc = acc_base.clone().union(acc_other.clone());
-        assert_eq!(merged_b1_d2_node.acc(), &expected_merged_acc, "Merged B1/D2 node accumulator mismatch");
+        assert_eq!(merged_b1_d2_node.acc2(), &expected_merged_acc, "Merged B1/D2 node accumulator mismatch");
 
         // Structure of merged_b1_d2_node:
         // It should have two distinct predecessor edges:
@@ -1080,21 +1088,21 @@ mod tests {
 
         // Check acc of s_c1_via_b1 (this is the simplified C1)
         // Original C1's acc was acc_base.
-        assert_eq!(s_c1_via_b1.acc(), &acc_base, "Simplified C1 accumulator mismatch");
+        assert_eq!(s_c1_via_b1.acc2(), &acc_base, "Simplified C1 accumulator mismatch");
         // Structure of s_c1_via_b1: edge 30 to simplified D1
         assert_eq!(s_c1_via_b1.predecessors.len(), 1);
         let (_edge30, s_d1_via_c1) = s_c1_via_b1.predecessors.iter().next().unwrap();
-        assert_eq!(s_d1_via_c1.acc(), &acc_base, "Simplified D1 accumulator mismatch");
+        assert_eq!(s_d1_via_c1.acc2(), &acc_base, "Simplified D1 accumulator mismatch");
         // Structure of s_d1_via_c1: edge 40 to simplified N4 (v1)
         assert_eq!(s_d1_via_c1.predecessors.len(), 1);
         let (_edge40_d1, s_n4_v1_via_d1) = s_d1_via_c1.predecessors.iter().next().unwrap();
-        assert_eq!(s_n4_v1_via_d1.acc(), &acc_base, "Simplified N4_v1 accumulator mismatch");
+        assert_eq!(s_n4_v1_via_d1.acc2(), &acc_base, "Simplified N4_v1 accumulator mismatch");
         assert!(s_n4_v1_via_d1.predecessors.is_empty(), "Simplified N4_v1 should be a leaf");
 
 
         // Check acc of s_n4_via_d2 (this is the simplified N4 from D2's path)
         // Original N4 from D2's path (n4_v2) had acc_other.
-        assert_eq!(s_n4_via_d2.acc(), &acc_other, "Simplified N4_v2 accumulator mismatch");
+        assert_eq!(s_n4_via_d2.acc2(), &acc_other, "Simplified N4_v2 accumulator mismatch");
         assert!(s_n4_via_d2.predecessors.is_empty(), "Simplified N4_v2 should be a leaf");
         
         // Crucially, s_n4_v1_via_d1 and s_n4_via_d2 should point to different Arc<GSSNode> instances
