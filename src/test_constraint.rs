@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use bimap::BiBTreeMap;
 use reqwest::blocking;
 use serde_json;
-use crate::constraint::{GrammarConstraint, LLMTokenInfo};
+use crate::constraint::{GrammarConstraint};
 use crate::datastructures::trie::Trie;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 // Already a main dependency, but good to be explicit if used directly
@@ -32,7 +32,7 @@ use rand::seq::SliceRandom;
 use crate::glr::analyze::{filter_productions_by_reachability, remove_productions_with_undefined_nonterminals};
 use std::panic::{self, AssertUnwindSafe}; // Added for panic catching
 use std::collections::HashMap;
-use crate::datastructures::gss::{gather_gss_stats, reset_tokens};
+use crate::datastructures::gss::{gather_gss_stats, reset_tokens, LLMTokenInfo};
 // For the symbol removal helper
 
 

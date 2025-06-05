@@ -8,7 +8,7 @@ use deterministic_hash::DeterministicHasher;
 use std::any::{Any, TypeId};
 
 use crate::glr::parser::ParseStateEdgeContent;
-use crate::constraint::{LLMTokenBV, LLMTokenInfo};
+use crate::constraint::{LLMTokenBV};
 
 
 // Type aliases for cleaner signatures, now concrete
@@ -99,8 +99,7 @@ fn compute_hash_key(predecessors: &NodeMap) -> u64 {
 }
 
 pub mod acc_mod {
-    use crate::constraint::LLMTokenInfo;
-    use crate::datastructures::gss::PathAccumulator;
+    use crate::datastructures::gss::{LLMTokenInfo, PathAccumulator};
 
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Acc {
@@ -262,7 +261,7 @@ impl GSSNode {
 
         for (pred_arc, _edge_val) in self.predecessors_with_values() {
             // The acc of the path *through* self to pred_arc is self.acc intersected with pred_arc.acc
-            let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
+            let path_acc = self.acc.acc().clone().intersect(pred_arc.acc.acc().clone());
             result_acc.union_assign(path_acc.clone()); // Union accs of all popped paths
 
             // Merge predecessors of pred_arc into result_predecessors

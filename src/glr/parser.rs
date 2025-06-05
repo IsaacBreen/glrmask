@@ -1,11 +1,11 @@
 use std::any::Any;
 use std::cmp::Ordering;
-use crate::datastructures::gss::print_gss_forest;
+use crate::datastructures::gss::{print_gss_forest, LLMTokenInfo};
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, PathAccumulator, GSSNode, GSSTrait, GSSStats};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID};
-use crate::constraint::{LLMTokenBV, LLMTokenInfo}; // Import LLMTokenInfo
+use crate::constraint::{LLMTokenBV}; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};
