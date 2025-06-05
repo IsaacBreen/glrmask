@@ -1271,8 +1271,8 @@ impl<'a> GrammarConstraintState<'a> {
                                 // Prevent this token from being matched again.
                                 allowed_terminals_for_end_state.remove(match_info.id);
                                 allowed_terminals.insert(TokenizerStateID(end_state_id), allowed_terminals_for_end_state);
-                                intersect_allowed_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &allowed_terminals);
                             }
+                            intersect_allowed_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &allowed_terminals);
                             new_overall_state.entry(next_tokenizer_id_for_segment).and_modify(|existing| existing.merge_with(cloned_glr_s.clone())).or_insert(cloned_glr_s);
                         } else {
                             processing_queue.entry(new_offset).or_default().entry(next_tokenizer_id_for_segment).and_modify(|existing| existing.merge_with(cloned_glr_s.clone())).or_insert(cloned_glr_s);

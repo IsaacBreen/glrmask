@@ -102,14 +102,26 @@ fn compute_hash_key(predecessors: &NodeMap) -> u64 {
 }
 
 pub fn allowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-    for (terminal_id, allowed_terminals) in right {
-        *left.entry(terminal_id).or_insert_with(TerminalBV::max_ones) |= allowed_terminals;
+    let mut common_keys = BTreeSet::new();
+    common_keys.extend(left.keys());
+    common_keys.extend(right.keys());
+    for terminal_id in common_keys {
+        let left_value = left.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
+        let right_value = right.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
+        let union = &left_value | &right_value;
+        left.insert(terminal_id, union);
     }
 }
 
 pub fn allowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-    for (terminal_id, allowed_terminals) in right {
-        *left.entry(terminal_id).or_insert_with(TerminalBV::max_ones) &= allowed_terminals;
+    let mut common_keys = BTreeSet::new();
+    common_keys.extend(left.keys());
+    common_keys.extend(right.keys());
+    for terminal_id in common_keys {
+        let left_value = left.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
+        let right_value = right.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
+        let intersection = &left_value & &right_value;
+        left.insert(terminal_id, intersection);
     }
 }
 
