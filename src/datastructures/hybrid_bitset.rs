@@ -218,13 +218,6 @@ impl HybridBitset {
     }
 }
 
-// --- Default Implementation ---
-impl Default for HybridBitset {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // --- Iterator ---
 pub struct Iter<'a> {
     iter_inner: range_set_blaze::Iter<usize, range_set_blaze::RangesIter<'a, usize>>,

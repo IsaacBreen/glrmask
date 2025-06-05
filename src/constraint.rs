@@ -40,9 +40,15 @@ const MERGE_THRESHOLD: usize = 10;
 // -----------------------------------------------------------------------------
 // Pre-computation node values
 // -----------------------------------------------------------------------------
-#[derive(Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrecomputedFinalizer {
     pub content: LLMTokenBV,
+}
+
+impl Default for PrecomputedFinalizer {
+    fn default() -> Self {
+        Self { content: LLMTokenBV::new() }
+    }
 }
 
 impl JSONConvertible for PrecomputedFinalizer {
@@ -925,7 +931,7 @@ impl<'r> Precomputer<'r> {
                     let grammar_tok = GrammarTokenID(m.id);
                     let match_end_offset = offset + m.width;
                     let active_tokens = child_vocab_of_segment.reachable_token_ids();
-                    let tokens_with_future_match = possible_future_matches.get(&grammar_tok).cloned().unwrap_or_default();
+                    let tokens_with_future_match = possible_future_matches.get(&grammar_tok).cloned().unwrap_or(LLMTokenBV::new());
                     let edge_tokens = active_tokens.clone() - tokens_with_future_match;
 
                     if !edge_tokens.is_empty() {
