@@ -973,10 +973,10 @@ mod tests {
 
     type TestGSSNode = GSSNode; // GSSNode is now concrete
 
-    fn mock_llm_token_info(active_val: usize, intersection_val: usize) -> LLMTokenInfo {
+    fn mock_llm_token_info(active_val: usize, intersection_val: usize) -> Acc {
         let mut active = LLMTokenBV::new();
         active.insert(active_val);
-        Some(active)
+        Acc::new_for_merging(Some(active))
     }
     
     fn mock_edge(id: usize) -> ParseStateEdgeContent {
@@ -997,32 +997,32 @@ mod tests {
         // After simplification of D1's predecessors, N4 will be canonical.
         // When D2's predecessors are simplified, it should reuse the canonical N4 structure.
 
-        let n4_v1 = Arc::new(TestGSSNode::new(Acc::new_for_merging(acc_base.clone())));
-        let n4_v2 = Arc::new(TestGSSNode::new(Acc::new_for_merging(acc_other.clone())));
+        let n4_v1 = Arc::new(TestGSSNode::new(acc_base.clone()));
+        let n4_v2 = Arc::new(TestGSSNode::new(acc_other.clone()));
 
 
         // D1: C1 -> 30 -> D1(acc_base_pred_d1) -> 40 -> N4(acc_base)
         // acc_base_pred_d1 is acc_base
         let d1_orig = Arc::new(TestGSSNode::new_with_single_predecessor(
-            n4_v1.clone(), mock_edge(40), Acc::new_for_merging(acc_base.clone())
+            n4_v1.clone(), mock_edge(40), acc_base.clone()
         ));
 
         // D2: (no C layer) -> 10 -> D2(acc_other_pred_d2) -> 40 -> N4(acc_other)
         // acc_other_pred_d2 is acc_other
          let d2_orig = Arc::new(TestGSSNode::new_with_single_predecessor(
-            n4_v2.clone(), mock_edge(40), Acc::new_for_merging(acc_other.clone())
+            n4_v2.clone(), mock_edge(40), acc_other.clone()
         ));
 
         // C1: B1 -> 20 -> C1(acc_base_pred_c1) -> 30 -> D1
         // acc_base_pred_c1 is acc_base
         let c1_orig = Arc::new(TestGSSNode::new_with_single_predecessor(
-            d1_orig.clone(), mock_edge(30), Acc::new_for_merging(acc_base.clone())
+            d1_orig.clone(), mock_edge(30), acc_base.clone()
         ));
 
         // B1: A1 -> 10 -> B1(acc_base_pred_b1) -> 20 -> C1
         // acc_base_pred_b1 is acc_base
         let b1_orig = Arc::new(TestGSSNode::new_with_single_predecessor(
-            c1_orig.clone(), mock_edge(20), Acc::new_for_merging(acc_base.clone())
+            c1_orig.clone(), mock_edge(20), acc_base.clone()
         ));
         
         // A1: (root)
@@ -1040,7 +1040,7 @@ mod tests {
         // acc_mod::Acc for A1 is the union of paths leading to it.
         // Let's assume A1's acc is a union of acc_base and acc_other for this test.
         let acc_a1 = acc_base.clone().union(acc_other.clone());
-        let a1_orig = Arc::new(TestGSSNode::new_with_map(Acc::new_for_merging(acc_a1.clone()), process_predecessors(&a1_preds_set)));
+        let a1_orig = Arc::new(TestGSSNode::new_with_map(acc_a1.clone(), process_predecessors(&a1_preds_set)));
 
 
         let mut roots_to_simplify = vec![a1_orig.clone()];
@@ -1056,13 +1056,13 @@ mod tests {
         assert_eq!(edge10.state_id.0, 10, "Edge from A1 should be 10");
 
         // Accumulator of A1 should remain as it was.
-        assert_eq!(s_a1.acc_acc(), &acc_a1, "A1 accumulator mismatch");
+        assert_eq!(s_a1.acc(), &acc_a1, "A1 accumulator mismatch");
 
         // The merged_b1_d2_node is the result of B1 and D2 paths.
         // Its acc should be the union of B1's original acc and D2's original acc.
         // B1's original acc was acc_base. D2's original acc was acc_other.
         let expected_merged_acc = acc_base.clone().union(acc_other.clone());
-        assert_eq!(merged_b1_d2_node.acc_acc(), &expected_merged_acc, "Merged B1/D2 node accumulator mismatch");
+        assert_eq!(merged_b1_d2_node.acc(), &expected_merged_acc, "Merged B1/D2 node accumulator mismatch");
 
         // Structure of merged_b1_d2_node:
         // It should have two distinct predecessor edges:
@@ -1075,21 +1075,21 @@ mod tests {
 
         // Check acc of s_c1_via_b1 (this is the simplified C1)
         // Original C1's acc was acc_base.
-        assert_eq!(s_c1_via_b1.acc_acc(), &acc_base, "Simplified C1 accumulator mismatch");
+        assert_eq!(s_c1_via_b1.acc(), &acc_base, "Simplified C1 accumulator mismatch");
         // Structure of s_c1_via_b1: edge 30 to simplified D1
         assert_eq!(s_c1_via_b1.predecessors.len(), 1);
         let (_edge30, s_d1_via_c1) = s_c1_via_b1.predecessors.iter().next().unwrap();
-        assert_eq!(s_d1_via_c1.acc_acc(), &acc_base, "Simplified D1 accumulator mismatch");
+        assert_eq!(s_d1_via_c1.acc(), &acc_base, "Simplified D1 accumulator mismatch");
         // Structure of s_d1_via_c1: edge 40 to simplified N4 (v1)
         assert_eq!(s_d1_via_c1.predecessors.len(), 1);
         let (_edge40_d1, s_n4_v1_via_d1) = s_d1_via_c1.predecessors.iter().next().unwrap();
-        assert_eq!(s_n4_v1_via_d1.acc_acc(), &acc_base, "Simplified N4_v1 accumulator mismatch");
+        assert_eq!(s_n4_v1_via_d1.acc(), &acc_base, "Simplified N4_v1 accumulator mismatch");
         assert!(s_n4_v1_via_d1.predecessors.is_empty(), "Simplified N4_v1 should be a leaf");
 
 
         // Check acc of s_n4_via_d2 (this is the simplified N4 from D2's path)
         // Original N4 from D2's path (n4_v2) had acc_other.
-        assert_eq!(s_n4_via_d2.acc_acc(), &acc_other, "Simplified N4_v2 accumulator mismatch");
+        assert_eq!(s_n4_via_d2.acc(), &acc_other, "Simplified N4_v2 accumulator mismatch");
         assert!(s_n4_via_d2.predecessors.is_empty(), "Simplified N4_v2 should be a leaf");
         
         // Crucially, s_n4_v1_via_d1 and s_n4_via_d2 should point to different Arc<GSSNode> instances
