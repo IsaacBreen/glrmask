@@ -19,7 +19,7 @@ type NodeMap = BTreeMap<ParseStateEdgeContent, Arc<GSSNode>>;
 type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 
 pub type LLMTokenInfo = Option<LLMTokenBV>;
-pub type TerminalInfo = BTreeMap<TerminalID, TerminalBV>;
+pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalBV>;
 
 pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
     fn union_assign(&mut self, other: Self);
@@ -168,6 +168,9 @@ pub mod acc_mod {
                 if acc.is_empty() {
                     return true;
                 }
+            }
+            if self.allowed_terminals.is_empty() {
+                return false;
             }
             for allowed_terminals in self.allowed_terminals.values() {
                 if !allowed_terminals.is_empty() {
@@ -679,11 +682,11 @@ pub fn subtract_allowed_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     terminals_to_subtract: &TerminalInfo,
 ) {
-    todo!()
+    // todo!()
 }
 
 pub fn reset_allowed_terminals(root_arc: &mut Arc<GSSNode>) {
-    todo!()
+    // todo!()
 }
 
 pub fn map_allowed_terminals_tokenizer_states(
@@ -691,7 +694,7 @@ pub fn map_allowed_terminals_tokenizer_states(
     map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
 ) {
     // If there isn't an entry in the map for a given tokenizer state, remove that state from the existing allowed terminals map.
-    todo!()
+    // todo!()
 }
 
 pub fn find_longest_path(
