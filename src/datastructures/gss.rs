@@ -221,11 +221,6 @@ impl GSSNode {
         &self.acc.acc()
     }
 
-    // Made private as requested
-    fn acc_mut(&mut self) -> &mut LLMTokenInfo {
-        self.acc.acc_mut()
-    }
-
     // Helper to clone the node and set a new accumulator. Used internally.
     fn with_acc(mut self, acc: LLMTokenInfo) -> Self {
         *self.acc.acc_mut() = acc;
