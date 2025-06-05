@@ -98,8 +98,9 @@ fn compute_hash_key(predecessors: &NodeMap) -> u64 {
 
 pub mod acc_mod {
     use crate::constraint::LLMTokenInfo;
+    use crate::datastructures::gss::PathAccumulator;
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Acc {
         acc: LLMTokenInfo
     }
@@ -115,6 +116,18 @@ pub mod acc_mod {
 
         pub fn acc_mut(&mut self) -> &mut LLMTokenInfo {
             &mut self.acc
+        }
+    }
+
+    impl PathAccumulator for Acc {
+        fn union_assign(&mut self, other: Self) {
+            self.acc.union_assign(other.acc);
+        }
+        fn intersect_assign(&mut self, right: Self) {
+            self.acc.intersect_assign(right.acc);
+        }
+        fn intersect_has_effect(&self, right: &Self) -> bool {
+            self.acc.intersect_has_effect(&right.acc)
         }
     }
 }
