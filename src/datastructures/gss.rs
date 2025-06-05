@@ -137,7 +137,11 @@ pub mod acc_mod {
         }
 
         pub fn is_dead(&self) -> bool {
-            self.acc.clone().is_none_or(|bv| bv.is_empty())
+            if let Some(acc) = &self.acc {
+                acc.is_empty()
+            } else {
+                false
+            }
         }
 
         pub fn is_alive(&self) -> bool {
