@@ -1265,9 +1265,9 @@ impl<'a> GrammarConstraintState<'a> {
                         // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
                         let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
                         processing_queue.entry(new_offset).or_default().entry(next_tokenizer_id_for_segment).and_modify(|existing| existing.merge_with(cloned_glr_s.clone())).or_insert(cloned_glr_s);
-                        if let Some(end_state_id) = exec_result.end_state {
-
-                        }
+                        // if let Some(end_state_id) = exec_result.end_state {
+                        //
+                        // }
                     }
                 }
 
@@ -1275,7 +1275,7 @@ impl<'a> GrammarConstraintState<'a> {
                     // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
                     // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
                     let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
-                    processing_queue.entry(offset).or_default().entry(final_tokenizer_state).and_modify(|existing| existing.merge_with(glr_s_at_offset.clone())).or_insert(glr_s_at_offset.clone());
+                    new_overall_state.entry(final_tokenizer_state).and_modify(|existing| existing.merge_with(glr_s_at_offset.clone())).or_insert(glr_s_at_offset.clone());
                 }
             }
 
