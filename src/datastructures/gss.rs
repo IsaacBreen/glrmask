@@ -264,7 +264,7 @@ impl GSSNode {
 // Core manipulation methods
 impl GSSNode {
     // Push now takes the acc for the new node
-    pub fn push(self, edge_value: ParseStateEdgeContent, acc_for_new_node: LLMTokenInfo) -> Self {
+    pub fn push(self, edge_value: ParseStateEdgeContent, acc_for_new_node: Acc) -> Self {
         Self::new_with_single_predecessor(Arc::new(self), edge_value, acc_for_new_node)
     }
     
@@ -485,7 +485,7 @@ impl GSSTrait for Arc<GSSNode> {
 // Pruning and Transformation
 fn prune_and_transform_recursive(
     node_arc: &Arc<GSSNode>,
-    closure: &impl Fn(&LLMTokenInfo) -> Option<(LLMTokenInfo, bool)>,
+    closure: &impl Fn(&Acc) -> Option<(Acc, bool)>,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) -> Option<Arc<GSSNode>> {
     let node_ptr = Arc::as_ptr(node_arc);
@@ -493,7 +493,7 @@ fn prune_and_transform_recursive(
         return cached_result.clone();
     }
 
-    match closure(&node_arc.acc.acc()) {
+    match closure(&node_arc.acc()) {
         None => { // Prune this node
             memo.insert(node_ptr, None);
             None
@@ -526,14 +526,14 @@ fn prune_and_transform_recursive(
 
 
 pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_intersect: &LLMTokenBV) {
-    let closure = |current_acc: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
+    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
-        if let Some(bv) = new_acc.as_mut() {
+        if let Some(bv) = new_acc.acc_mut() {
             *bv &= tokens_to_intersect;
         } else {
-            new_acc = Some(tokens_to_intersect.clone());
+            new_acc = Acc::new(Some(tokens_to_intersect.clone()));
         }
-        if new_acc.as_ref().is_none_or(|bv| !bv.is_empty()) {
+        if new_acc.acc().clone().is_none_or(|bv| !bv.is_empty()) {
             Some((new_acc, false))
         } else {
             None // Prune this node
@@ -545,7 +545,7 @@ pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_int
         *root_arc = new_root;
     } else {
         // The entire GSS was pruned, set root_arc to an empty GSSNode
-        *root_arc = Arc::new(GSSNode::new(Some(LLMTokenBV::new())));
+        *root_arc = Arc::new(GSSNode::new(Acc::new(Some(LLMTokenBV::new()))));
     }
 }
 
@@ -553,14 +553,14 @@ pub fn subtract_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     llm_tokens: &LLMTokenBV,
 ) {
-    let closure = |current_acc: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
+    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
-        if let Some(bv) = new_acc.as_mut() {
+        if let Some(bv) = new_acc.acc_mut() {
             *bv -= llm_tokens;
         } else {
-            new_acc = Some(LLMTokenBV::max_ones() - llm_tokens.clone());
+            new_acc = Acc::new(Some(LLMTokenBV::max_ones() - llm_tokens.clone()));
         }
-        if new_acc.as_ref().is_none_or(|bv| !bv.is_empty()) {
+        if new_acc.acc().clone().is_none_or(|bv| !bv.is_empty()) {
             Some((new_acc, false))
         } else {
             None // Prune this node
@@ -571,22 +571,22 @@ pub fn subtract_tokens_and_prune_arc(
         *root_arc = new_root;
     } else {
         // The entire GSS was pruned, set root_arc to an empty GSSNode
-        let mut empty_acc = Some(LLMTokenBV::new());
+        let mut empty_acc = Acc::new(Some(LLMTokenBV::new()));
         *root_arc = Arc::new(GSSNode::new(empty_acc));
     }
 }
 
 pub fn reset_tokens(root_arc: &mut Arc<GSSNode>) {
-    let closure = |current_acc: &LLMTokenInfo| -> Option<(LLMTokenInfo, bool)> {
-        let continue_recursion = current_acc.is_some();
-        Some((None, continue_recursion)) // Keep node, continue recursion
+    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
+        let continue_recursion = current_acc.acc().is_some();
+        Some((Acc::new(None), continue_recursion)) // Keep node, continue recursion
     };
     let mut memo = HashMap::new();
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
         *root_arc = new_root;
     } else {
         // The entire GSS was pruned, set root_arc to an empty GSSNode
-        let mut empty_acc = Some(LLMTokenBV::new());
+        let mut empty_acc = Acc::new(Some(LLMTokenBV::new()));
         *root_arc = Arc::new(GSSNode::new(empty_acc));
     }
 }
@@ -653,14 +653,14 @@ pub fn find_longest_path(
 impl GSSNode {
     pub fn prune_and_transform_recursive(
         &mut self,
-        closure: &impl Fn(&LLMTokenInfo) -> Option<(LLMTokenInfo, bool)>,
+        closure: &impl Fn(&Acc) -> Option<(Acc, bool)>,
         memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
     ) {
         let node_arc = Arc::new(self.clone());
         if let Some(new_node_arc) = prune_and_transform_recursive(&node_arc, closure, memo) {
             *self = new_node_arc.as_ref().clone();
         } else {
-            *self = GSSNode::new(self.acc.acc().clone());
+            *self = GSSNode::new(self.acc().clone());
         }
     }
 
@@ -874,14 +874,14 @@ fn simplify_node_recursive(
     let cached_structural_node = cache.entry(simplified_predecessors_map.clone())
         .or_insert_with(|| {
             let unioned_acc = if simplified_predecessors_map.is_empty() {
-                Some(LLMTokenBV::new())
+                Acc::new(Some(LLMTokenBV::new()))
             } else {
                 let mut iter = simplified_predecessors_map.values();
                 let mut acc = iter.next().unwrap().acc.acc().clone();
                 for p_arc in iter { // Renamed p
                     acc.union_assign(p_arc.acc.acc().clone());
                 }
-                acc
+                Acc::new(acc)
             };
             Arc::new(GSSNode::new_with_map(unioned_acc, simplified_predecessors_map))
         });
@@ -981,32 +981,32 @@ mod tests {
         // After simplification of D1's predecessors, N4 will be canonical.
         // When D2's predecessors are simplified, it should reuse the canonical N4 structure.
 
-        let n4_v1 = Arc::new(TestGSSNode::new(acc_base.clone()));
-        let n4_v2 = Arc::new(TestGSSNode::new(acc_other.clone()));
+        let n4_v1 = Arc::new(TestGSSNode::new(Acc::new(acc_base.clone())));
+        let n4_v2 = Arc::new(TestGSSNode::new(Acc::new(acc_other.clone())));
 
 
         // D1: C1 -> 30 -> D1(acc_base_pred_d1) -> 40 -> N4(acc_base)
         // acc_base_pred_d1 is acc_base
         let d1_orig = Arc::new(TestGSSNode::new_with_single_predecessor(
-            n4_v1.clone(), mock_edge(40), acc_base.clone()
+            n4_v1.clone(), mock_edge(40), Acc::new(acc_base.clone())
         ));
 
         // D2: (no C layer) -> 10 -> D2(acc_other_pred_d2) -> 40 -> N4(acc_other)
         // acc_other_pred_d2 is acc_other
          let d2_orig = Arc::new(TestGSSNode::new_with_single_predecessor(
-            n4_v2.clone(), mock_edge(40), acc_other.clone()
+            n4_v2.clone(), mock_edge(40), Acc::new(acc_other.clone())
         ));
 
         // C1: B1 -> 20 -> C1(acc_base_pred_c1) -> 30 -> D1
         // acc_base_pred_c1 is acc_base
         let c1_orig = Arc::new(TestGSSNode::new_with_single_predecessor(
-            d1_orig.clone(), mock_edge(30), acc_base.clone()
+            d1_orig.clone(), mock_edge(30), Acc::new(acc_base.clone())
         ));
 
         // B1: A1 -> 10 -> B1(acc_base_pred_b1) -> 20 -> C1
         // acc_base_pred_b1 is acc_base
         let b1_orig = Arc::new(TestGSSNode::new_with_single_predecessor(
-            c1_orig.clone(), mock_edge(20), acc_base.clone()
+            c1_orig.clone(), mock_edge(20), Acc::new(acc_base.clone())
         ));
         
         // A1: (root)
@@ -1024,7 +1024,7 @@ mod tests {
         // acc_mod::Acc for A1 is the union of paths leading to it.
         // Let's assume A1's acc is a union of acc_base and acc_other for this test.
         let acc_a1 = acc_base.clone().union(acc_other.clone());
-        let a1_orig = Arc::new(TestGSSNode::new_with_map(acc_a1.clone(), process_predecessors(&a1_preds_set)));
+        let a1_orig = Arc::new(TestGSSNode::new_with_map(Acc::new(acc_a1.clone()), process_predecessors(&a1_preds_set)));
 
 
         let mut roots_to_simplify = vec![a1_orig.clone()];

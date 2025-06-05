@@ -29,7 +29,7 @@ use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
-
+use crate::datastructures::gss::acc_mod::Acc;
 use crate::glr::analyze::{compute_nullable_nonterminals, compute_terminal_follow_sets};
 
 pub type LLMTokenBV = HybridBitset;
@@ -364,7 +364,7 @@ impl GrammarConstraint {
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
         let base_set_for_info = HybridBitset::ones(self.internal_max_llm_token + 1);
-        let initial_llm_token_acc: Option<LLMTokenBV> = None;
+        let initial_llm_token_acc: Acc = Acc::new(None);
         let mut state = BTreeMap::new();
         state.insert(
             self.tokenizer.initial_state_id(),
