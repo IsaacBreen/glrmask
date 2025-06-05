@@ -11,6 +11,7 @@ use crate::glr::parser::ParseStateEdgeContent;
 use crate::constraint::{LLMTokenBV, TerminalBV};
 use crate::datastructures::gss::acc_mod::Acc;
 use crate::tokenizer::TokenizerStateID;
+use crate::types::TerminalID;
 
 // Type aliases for cleaner signatures, now concrete
 type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
@@ -18,7 +19,7 @@ type NodeMap = BTreeMap<ParseStateEdgeContent, Arc<GSSNode>>;
 type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 
 pub type LLMTokenInfo = Option<LLMTokenBV>;
-pub type TerminalInfo = Option<TerminalBV>;
+pub type TerminalInfo = BTreeMap<TerminalID, TerminalBV>;
 
 pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
     fn union_assign(&mut self, other: Self);
@@ -100,10 +101,22 @@ fn compute_hash_key(predecessors: &NodeMap) -> u64 {
     hasher.finish()
 }
 
+pub fn allowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
+    for (terminal_id, allowed_terminals) in right {
+        *left.entry(terminal_id).or_insert_with(TerminalBV::max_ones) |= allowed_terminals;
+    }
+}
+
+pub fn allowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
+    for (terminal_id, allowed_terminals) in right {
+        *left.entry(terminal_id).or_insert_with(TerminalBV::max_ones) &= allowed_terminals;
+    }
+}
+
 pub mod acc_mod {
     use std::collections::{BTreeMap, BTreeSet};
     use crate::constraint::{LLMTokenBV, TerminalBV};
-    use crate::datastructures::gss::{LLMTokenInfo, PathAccumulator, TerminalInfo};
+    use crate::datastructures::gss::{allowed_terminals_intersect_assign, allowed_terminals_union_assign, LLMTokenInfo, PathAccumulator, TerminalInfo};
     use crate::glr::grammar::Symbol::Terminal;
     use crate::tokenizer::TokenizerStateID;
     use crate::types::TerminalID;
@@ -120,7 +133,7 @@ pub mod acc_mod {
         }
 
         pub fn new_for_merging() -> Self {
-            Self { acc: Some(LLMTokenBV::zeros()), allowed_terminals: Some(TerminalBV::zeros()) }
+            Self { acc: Some(LLMTokenBV::zeros()), allowed_terminals: BTreeMap::new() }
         }
 
         pub fn acc(&self) -> &LLMTokenInfo {
@@ -135,16 +148,26 @@ pub mod acc_mod {
             &self.allowed_terminals
         }
 
+        pub fn allowed_terminals_mut(&mut self) -> &mut TerminalInfo {
+            &mut self.allowed_terminals
+        }
+
         pub fn is_default(&self) -> bool {
-            self.acc.is_none() && self.allowed_terminals.is_none()
+            self.acc.is_none() && self.allowed_terminals.is_empty()
         }
 
         pub fn is_dead(&self) -> bool {
             if let Some(acc) = &self.acc {
-                acc.is_empty()
-            } else {
-                false
+                if acc.is_empty() {
+                    return true;
+                }
             }
+            for allowed_terminals in self.allowed_terminals.values() {
+                if allowed_terminals.is_empty() {
+                    return true;
+                }
+            }
+            false
         }
 
         pub fn is_alive(&self) -> bool {
@@ -155,11 +178,11 @@ pub mod acc_mod {
     impl PathAccumulator for Acc {
         fn union_assign(&mut self, other: Self) {
             self.acc.union_assign(other.acc);
-            self.allowed_terminals.union_assign(other.allowed_terminals);
+            allowed_terminals_union_assign(&mut self.allowed_terminals, other.allowed_terminals);
         }
         fn intersect_assign(&mut self, right: Self) {
             self.acc.intersect_assign(right.acc);
-            self.allowed_terminals.intersect_assign(right.allowed_terminals);
+            allowed_terminals_intersect_assign(&mut self.allowed_terminals, right.allowed_terminals);
         }
         fn intersect_has_effect(&self, right: &Self) -> bool {
             self.acc.intersect_has_effect(&right.acc)
@@ -168,7 +191,7 @@ pub mod acc_mod {
 
     impl Default for Acc {
         fn default() -> Self {
-            Self::new(None, None)
+            Self::new(None, BTreeMap::new())
         }
     }
 }
@@ -625,15 +648,11 @@ pub fn reset_llm_tokens(root_arc: &mut Arc<GSSNode>) {
 
 pub fn intersect_allowed_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
-    allowed_terminals: &TerminalBV
+    allowed_terminals: &TerminalInfo
 ) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
-        if let Some(bv) = new_acc.acc_mut() {
-            *bv &= allowed_terminals;
-        } else {
-            new_acc = Acc::new(current_acc.acc().clone(), Some(allowed_terminals.clone()));
-        }
+        allowed_terminals_intersect_assign(new_acc.allowed_terminals_mut(), allowed_terminals.clone());
         if new_acc.is_alive() {
             Some((new_acc, false))
         } else {
