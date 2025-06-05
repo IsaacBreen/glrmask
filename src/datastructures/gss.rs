@@ -591,7 +591,7 @@ pub fn subtract_tokens_and_prune_arc(
         } else {
             new_acc = Acc::new(Some(LLMTokenBV::max_ones() - llm_tokens.clone()), current_acc.forbidden_terminals().clone());
         }
-        if new_acc.acc().clone().is_none_or(|bv| !bv.is_empty()) {
+        if new_acc.is_alive() {
             Some((new_acc, false))
         } else {
             None // Prune this node
@@ -608,7 +608,7 @@ pub fn subtract_tokens_and_prune_arc(
 
 pub fn reset_tokens(root_arc: &mut Arc<GSSNode>) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-        let continue_recursion = current_acc.acc().is_some();
+        let continue_recursion = !current_acc.is_default();
         Some((Acc::new(None, current_acc.forbidden_terminals().clone()), continue_recursion)) // Keep node, continue recursion
     };
     let mut memo = HashMap::new();
@@ -918,7 +918,7 @@ fn simplify_node_recursive(
     // The final simplified node has the structure of cached_structural_node,
     // but its accumulator is the one from the original node_arc.
     let mut final_node_data = (**cached_structural_node).clone(); // Clone GSSNode data
-    *final_node_data.acc.acc_mut() = node_arc.acc.acc().clone(); // Set the specific acc from original node
+    final_node_data.acc = node_arc.acc.clone(); // Set the specific acc from original node
     // Recompute hash key for final_node_data as its acc might differ from cached_structural_node's acc
     final_node_data.hash_key_cache = compute_hash_key(&final_node_data.predecessors);
 
