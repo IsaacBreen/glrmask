@@ -11,6 +11,7 @@ use crate::glr::parser::ParseStateEdgeContent;
 use crate::constraint::{LLMTokenBV};
 use crate::datastructures::gss::acc_mod::Acc;
 use crate::datastructures::hybrid_bitset::HybridBitset;
+use crate::tokenizer::TokenizerStateID;
 
 // Type aliases for cleaner signatures, now concrete
 type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
@@ -725,6 +726,30 @@ impl GSSNode {
     pub fn reset_llm_tokens(&mut self) {
         let mut node_arc = Arc::new(self.clone());
         reset_llm_tokens(&mut node_arc);
+        *self = node_arc.as_ref().clone();
+    }
+
+    pub fn forbid_terminals(&mut self, forbidden_terminals: &BTreeMap<TokenizerStateID, TerminalBV>) {
+        let mut node_arc = Arc::new(self.clone());
+        forbid_terminals(&mut node_arc, forbidden_terminals);
+        *self = node_arc.as_ref().clone();
+    }
+
+    pub fn prune_forbidden_terminals(&mut self, forbidden_terminals: &BTreeMap<TokenizerStateID, TerminalBV>) {
+        let mut node_arc = Arc::new(self.clone());
+        prune_forbidden_terminals(&mut node_arc, forbidden_terminals);
+        *self = node_arc.as_ref().clone();
+    }
+
+    pub fn map_forbidden_terminal_tokenizer_state_ids(&mut self, map: &BTreeMap<TokenizerStateID, TokenizerStateID>) {
+        let mut node_arc = Arc::new(self.clone());
+        map_forbidden_terminal_tokenizer_state_ids(&mut node_arc, map);
+        *self = node_arc.as_ref().clone();
+    }
+
+    pub fn reset_forbidden_terminals(&mut self) {
+        let mut node_arc = Arc::new(self.clone());
+        reset_forbidden_terminals(&mut node_arc);
         *self = node_arc.as_ref().clone();
     }
 
