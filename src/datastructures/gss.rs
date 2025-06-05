@@ -19,7 +19,7 @@ type NodeMap = BTreeMap<ParseStateEdgeContent, Arc<GSSNode>>;
 type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 
 pub type LLMTokenInfo = Option<LLMTokenBV>;
-pub type TerminalBV = HybridBitset;
+pub type TerminalBV = Option<HybridBitset>;
 
 pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
     fn union_assign(&mut self, other: Self);
@@ -105,6 +105,7 @@ pub mod acc_mod {
     use std::collections::{BTreeMap, BTreeSet};
     use crate::constraint::LLMTokenBV;
     use crate::datastructures::gss::{LLMTokenInfo, PathAccumulator, TerminalBV};
+    use crate::datastructures::hybrid_bitset::HybridBitset;
     use crate::glr::grammar::Symbol::Terminal;
     use crate::tokenizer::TokenizerStateID;
     use crate::types::TerminalID;
@@ -112,16 +113,16 @@ pub mod acc_mod {
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Acc {
         acc: LLMTokenInfo,
-        forbidden_terminals: BTreeMap<TokenizerStateID, TerminalBV>,
+        forbidden_terminals: TerminalBV,
     }
 
     impl Acc {
-        pub fn new(acc: LLMTokenInfo, forbidden_terminals: BTreeMap<TokenizerStateID, TerminalBV>) -> Self {
+        pub fn new(acc: LLMTokenInfo, forbidden_terminals: TerminalBV) -> Self {
             Self { acc, forbidden_terminals }
         }
 
         pub fn new_for_merging() -> Self {
-            Self { acc: Some(LLMTokenBV::zeros()), forbidden_terminals: BTreeMap::new() }
+            Self { acc: Some(LLMTokenBV::zeros()), forbidden_terminals: Some(HybridBitset::zeros()) }
         }
 
         pub fn acc(&self) -> &LLMTokenInfo {
@@ -132,12 +133,12 @@ pub mod acc_mod {
             &mut self.acc
         }
 
-        pub fn forbidden_terminals(&self) -> &BTreeMap<TokenizerStateID, TerminalBV> {
+        pub fn forbidden_terminals(&self) -> &TerminalBV {
             &self.forbidden_terminals
         }
 
         pub fn is_default(&self) -> bool {
-            self.acc.is_none() && self.forbidden_terminals.is_empty()
+            self.acc.is_none() && self.forbidden_terminals.is_none()
         }
 
         pub fn is_dead(&self) -> bool {
@@ -156,19 +157,11 @@ pub mod acc_mod {
     impl PathAccumulator for Acc {
         fn union_assign(&mut self, other: Self) {
             self.acc.union_assign(other.acc);
-            for (tokenizer_state_id, other_terminals) in other.forbidden_terminals {
-                self.forbidden_terminals.entry(tokenizer_state_id)
-                    .and_modify(|existing_bv| *existing_bv |= other_terminals)
-                    .or_insert_with(TerminalBV::max_ones);
-            }
+            self.forbidden_terminals.union_assign(other.forbidden_terminals);
         }
         fn intersect_assign(&mut self, right: Self) {
             self.acc.intersect_assign(right.acc);
-            for (tokenizer_state_id, other_terminals) in right.forbidden_terminals {
-                self.forbidden_terminals.entry(tokenizer_state_id)
-                    .and_modify(|existing_bv| *existing_bv &= &other_terminals)
-                    .or_insert(other_terminals);
-            }
+            self.forbidden_terminals.intersect_assign(right.forbidden_terminals);
         }
         fn intersect_has_effect(&self, right: &Self) -> bool {
             self.acc.intersect_has_effect(&right.acc)
@@ -177,7 +170,7 @@ pub mod acc_mod {
 
     impl Default for Acc {
         fn default() -> Self {
-            Self::new(None, BTreeMap::new())
+            Self::new(None, None)
         }
     }
 }
@@ -729,29 +722,29 @@ impl GSSNode {
         *self = node_arc.as_ref().clone();
     }
 
-    pub fn forbid_terminals(&mut self, forbidden_terminals: &BTreeMap<TokenizerStateID, TerminalBV>) {
-        let mut node_arc = Arc::new(self.clone());
-        forbid_terminals(&mut node_arc, forbidden_terminals);
-        *self = node_arc.as_ref().clone();
-    }
-
-    pub fn prune_forbidden_terminals(&mut self, forbidden_terminals: &BTreeMap<TokenizerStateID, TerminalBV>) {
-        let mut node_arc = Arc::new(self.clone());
-        prune_forbidden_terminals(&mut node_arc, forbidden_terminals);
-        *self = node_arc.as_ref().clone();
-    }
-
-    pub fn map_forbidden_terminal_tokenizer_state_ids(&mut self, map: &BTreeMap<TokenizerStateID, TokenizerStateID>) {
-        let mut node_arc = Arc::new(self.clone());
-        map_forbidden_terminal_tokenizer_state_ids(&mut node_arc, map);
-        *self = node_arc.as_ref().clone();
-    }
-
-    pub fn reset_forbidden_terminals(&mut self) {
-        let mut node_arc = Arc::new(self.clone());
-        reset_forbidden_terminals(&mut node_arc);
-        *self = node_arc.as_ref().clone();
-    }
+    // pub fn forbid_terminals(&mut self, forbidden_terminals: &BTreeMap<TokenizerStateID, TerminalBV>) {
+    //     let mut node_arc = Arc::new(self.clone());
+    //     forbid_terminals(&mut node_arc, forbidden_terminals);
+    //     *self = node_arc.as_ref().clone();
+    // }
+    //
+    // pub fn prune_forbidden_terminals(&mut self, forbidden_terminals: &BTreeMap<TokenizerStateID, TerminalBV>) {
+    //     let mut node_arc = Arc::new(self.clone());
+    //     prune_forbidden_terminals(&mut node_arc, forbidden_terminals);
+    //     *self = node_arc.as_ref().clone();
+    // }
+    //
+    // pub fn map_forbidden_terminal_tokenizer_state_ids(&mut self, map: &BTreeMap<TokenizerStateID, TokenizerStateID>) {
+    //     let mut node_arc = Arc::new(self.clone());
+    //     map_forbidden_terminal_tokenizer_state_ids(&mut node_arc, map);
+    //     *self = node_arc.as_ref().clone();
+    // }
+    //
+    // pub fn reset_forbidden_terminals(&mut self) {
+    //     let mut node_arc = Arc::new(self.clone());
+    //     reset_forbidden_terminals(&mut node_arc);
+    //     *self = node_arc.as_ref().clone();
+    // }
 
     pub fn find_longest_path(&self) -> Option<Vec<(ParseStateEdgeContent, Arc<GSSNode>)>> {
         find_longest_path(&self)
@@ -1025,7 +1018,7 @@ mod tests {
     fn mock_llm_token_info(active_val: usize, intersection_val: usize) -> Acc {
         let mut active = LLMTokenBV::zeros();
         active.insert(active_val);
-        Acc::new(Some(active), BTreeMap::new())
+        Acc::new(Some(active), None)
     }
     
     fn mock_edge(id: usize) -> ParseStateEdgeContent {
