@@ -723,6 +723,13 @@ pub fn reset_allowed_terminals(root_arc: &mut Arc<GSSNode>) {
     }
 }
 
+pub fn map_allowed_terminals_tokenizer_states(
+    root_arc: &mut Arc<GSSNode>,
+    map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
+) {
+    todo!()
+}
+
 pub fn find_longest_path(
     root_node: &GSSNode
 ) -> Option<Vec<(ParseStateEdgeContent, Arc<GSSNode>)>> {
@@ -841,6 +848,12 @@ impl GSSNode {
     pub fn reset_allowed_terminals(&mut self) {
         let mut node_arc = Arc::new(self.clone());
         reset_allowed_terminals(&mut node_arc);
+        *self = node_arc.as_ref().clone();
+    }
+
+    pub fn map_allowed_terminals_tokenizer_states(&mut self, map: &BTreeMap<TokenizerStateID, TokenizerStateID>) {
+        let mut node_arc = Arc::new(self.clone());
+        map_allowed_terminals_tokenizer_states(&mut node_arc, map);
         *self = node_arc.as_ref().clone();
     }
 
