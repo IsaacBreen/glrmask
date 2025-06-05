@@ -100,6 +100,7 @@ fn compute_hash_key(predecessors: &NodeMap) -> u64 {
 
 pub mod acc_mod {
     use std::collections::{BTreeMap, BTreeSet};
+    use crate::constraint::LLMTokenBV;
     use crate::datastructures::gss::{LLMTokenInfo, PathAccumulator};
     use crate::tokenizer::TokenizerStateID;
     use crate::types::TerminalID;
@@ -115,8 +116,8 @@ pub mod acc_mod {
             Self { acc, forbidden_terminals }
         }
 
-        pub fn new_for_merging(acc: LLMTokenInfo) -> Self {
-            Self { acc, forbidden_terminals: BTreeMap::new() }
+        pub fn new_for_merging() -> Self {
+            Self { acc: Some(LLMTokenBV::new()), forbidden_terminals: BTreeMap::new() }
         }
 
         pub fn acc(&self) -> &LLMTokenInfo {
@@ -291,7 +292,7 @@ impl GSSNode {
     // If pop_into is essential, it would need to return a new Self or take &mut Self and manage acc carefully.
 
     pub fn pop(&self) -> Self {
-        let mut result_acc = Acc::new_for_merging(Some(LLMTokenBV::new()));
+        let mut result_acc = Acc::new_for_merging();
         let mut result_predecessors = NodeMap::new();
 
         for (pred_arc, _edge_val) in self.predecessors_with_values() {
@@ -890,7 +891,7 @@ fn simplify_node_recursive(
     let cached_structural_node = cache.entry(simplified_predecessors_map.clone())
         .or_insert_with(|| {
             let unioned_acc = if simplified_predecessors_map.is_empty() {
-                Acc::new_for_merging(Some(LLMTokenBV::new()))
+                Acc::new_for_merging()
             } else {
                 let mut iter = simplified_predecessors_map.values();
                 let mut acc = iter.next().unwrap().acc().clone();
@@ -976,7 +977,7 @@ mod tests {
     fn mock_llm_token_info(active_val: usize, intersection_val: usize) -> Acc {
         let mut active = LLMTokenBV::new();
         active.insert(active_val);
-        Acc::new_for_merging(Some(active))
+        Acc::new(Some(active), BTreeMap::new())
     }
     
     fn mock_edge(id: usize) -> ParseStateEdgeContent {
