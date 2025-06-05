@@ -260,7 +260,7 @@ impl GSSNode {
 
         for (pred_arc, _edge_val) in self.predecessors_with_values() {
             // The acc of the path *through* self to pred_arc is self.acc intersected with pred_arc.acc
-            let path_acc = self.acc.acc().clone().intersect(pred_arc.acc.acc().clone());
+            let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
             result_acc.union_assign(path_acc.clone()); // Union accs of all popped paths
 
             // Merge predecessors of pred_arc into result_predecessors
