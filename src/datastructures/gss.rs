@@ -96,14 +96,18 @@ fn compute_hash_key(predecessors: &NodeMap) -> u64 {
     hasher.finish()
 }
 
-#[derive(Debug, Clone)]
-pub struct Acc {
-    acc: LLMTokenInfo
+pub mod acc_mod {
+    use crate::constraint::LLMTokenInfo;
+
+    #[derive(Debug, Clone)]
+    pub struct Acc {
+        acc: LLMTokenInfo
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct GSSNode {
-    acc: Acc,
+    acc: acc_mod::Acc,
     predecessors: NodeMap,
     hash_key_cache: u64,
 }
@@ -166,13 +170,13 @@ impl GSSNode {
     pub fn new(acc: LLMTokenInfo) -> Self {
         let predecessors = NodeMap::new();
         let hash_key_cache = compute_hash_key(&predecessors);
-        Self { acc: Acc { acc }, predecessors, hash_key_cache }
+        Self { acc: acc_mod::Acc { acc }, predecessors, hash_key_cache }
     }
     
     // Private constructor used by simplification and other internal methods
     fn new_with_map(acc: LLMTokenInfo, predecessors: NodeMap) -> Self {
         let hash_key_cache = compute_hash_key(&predecessors);
-        Self { acc: Acc { acc }, predecessors, hash_key_cache }
+        Self { acc: acc_mod::Acc { acc }, predecessors, hash_key_cache }
     }
 
     // Helper to create a GSSNode with a single predecessor, used by push.
@@ -762,7 +766,7 @@ pub fn print_gss_forest(
         visited.insert(node_ptr);
         *node_count += 1;
 
-        writeln!(output, "{}- Node {:p}: (Acc: {:?})", prefix, node_ptr, node_arc.acc.acc)?;
+        writeln!(output, "{}- Node {:p}: (acc_mod::Acc: {:?})", prefix, node_ptr, node_arc.acc.acc)?;
 
         if !node_arc.predecessors.is_empty() {
             writeln!(output, "{}  Predecessors:", prefix)?;
@@ -977,7 +981,7 @@ mod tests {
         a1_preds_set.insert((b1_orig.clone(), mock_edge(10)));
         a1_preds_set.insert((d2_orig.clone(), mock_edge(10)));
         
-        // Acc for A1 is the union of paths leading to it.
+        // acc_mod::Acc for A1 is the union of paths leading to it.
         // Let's assume A1's acc is a union of acc_base and acc_other for this test.
         let acc_a1 = acc_base.clone().union(acc_other.clone());
         let a1_orig = Arc::new(TestGSSNode::new_with_map(acc_a1.clone(), process_predecessors(&a1_preds_set)));
