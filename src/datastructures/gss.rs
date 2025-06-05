@@ -10,6 +10,7 @@ use std::any::{Any, TypeId};
 use crate::glr::parser::ParseStateEdgeContent;
 use crate::constraint::{LLMTokenBV};
 use crate::datastructures::gss::acc_mod::Acc;
+use crate::datastructures::hybrid_bitset::HybridBitset;
 
 // Type aliases for cleaner signatures, now concrete
 type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
@@ -17,6 +18,7 @@ type NodeMap = BTreeMap<ParseStateEdgeContent, Arc<GSSNode>>;
 type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 
 pub type LLMTokenInfo = Option<LLMTokenBV>;
+pub type TerminalBV = HybridBitset;
 
 pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
     fn union_assign(&mut self, other: Self);
@@ -101,18 +103,18 @@ fn compute_hash_key(predecessors: &NodeMap) -> u64 {
 pub mod acc_mod {
     use std::collections::{BTreeMap, BTreeSet};
     use crate::constraint::LLMTokenBV;
-    use crate::datastructures::gss::{LLMTokenInfo, PathAccumulator};
+    use crate::datastructures::gss::{LLMTokenInfo, PathAccumulator, TerminalBV};
     use crate::tokenizer::TokenizerStateID;
     use crate::types::TerminalID;
 
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Acc {
         acc: LLMTokenInfo,
-        forbidden_terminals: BTreeMap<TokenizerStateID, BTreeSet<TerminalID>>,
+        forbidden_terminals: BTreeMap<TokenizerStateID, TerminalBV>,
     }
 
     impl Acc {
-        pub fn new(acc: LLMTokenInfo, forbidden_terminals: BTreeMap<TokenizerStateID, BTreeSet<TerminalID>>) -> Self {
+        pub fn new(acc: LLMTokenInfo, forbidden_terminals: BTreeMap<TokenizerStateID, TerminalBV>) -> Self {
             Self { acc, forbidden_terminals }
         }
 
@@ -128,7 +130,7 @@ pub mod acc_mod {
             &mut self.acc
         }
 
-        pub fn forbidden_terminals(&self) -> &BTreeMap<TokenizerStateID, BTreeSet<TerminalID>> {
+        pub fn forbidden_terminals(&self) -> &BTreeMap<TokenizerStateID, TerminalBV> {
             &self.forbidden_terminals
         }
 
