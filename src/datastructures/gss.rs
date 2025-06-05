@@ -113,16 +113,16 @@ pub mod acc_mod {
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Acc {
         acc: LLMTokenInfo,
-        forbidden_terminals: TerminalBV,
+        allowed_terminals: TerminalBV,
     }
 
     impl Acc {
-        pub fn new(acc: LLMTokenInfo, forbidden_terminals: TerminalBV) -> Self {
-            Self { acc, forbidden_terminals }
+        pub fn new(acc: LLMTokenInfo, allowed_terminals: TerminalBV) -> Self {
+            Self { acc, allowed_terminals }
         }
 
         pub fn new_for_merging() -> Self {
-            Self { acc: Some(LLMTokenBV::zeros()), forbidden_terminals: Some(HybridBitset::zeros()) }
+            Self { acc: Some(LLMTokenBV::zeros()), allowed_terminals: Some(HybridBitset::zeros()) }
         }
 
         pub fn acc(&self) -> &LLMTokenInfo {
@@ -133,12 +133,12 @@ pub mod acc_mod {
             &mut self.acc
         }
 
-        pub fn forbidden_terminals(&self) -> &TerminalBV {
-            &self.forbidden_terminals
+        pub fn allowed_terminals(&self) -> &TerminalBV {
+            &self.allowed_terminals
         }
 
         pub fn is_default(&self) -> bool {
-            self.acc.is_none() && self.forbidden_terminals.is_none()
+            self.acc.is_none() && self.allowed_terminals.is_none()
         }
 
         pub fn is_dead(&self) -> bool {
@@ -157,11 +157,11 @@ pub mod acc_mod {
     impl PathAccumulator for Acc {
         fn union_assign(&mut self, other: Self) {
             self.acc.union_assign(other.acc);
-            self.forbidden_terminals.union_assign(other.forbidden_terminals);
+            self.allowed_terminals.union_assign(other.allowed_terminals);
         }
         fn intersect_assign(&mut self, right: Self) {
             self.acc.intersect_assign(right.acc);
-            self.forbidden_terminals.intersect_assign(right.forbidden_terminals);
+            self.allowed_terminals.intersect_assign(right.allowed_terminals);
         }
         fn intersect_has_effect(&self, right: &Self) -> bool {
             self.acc.intersect_has_effect(&right.acc)
@@ -567,7 +567,7 @@ pub fn intersect_llm_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to
         if let Some(bv) = new_acc.acc_mut() {
             *bv &= tokens_to_intersect;
         } else {
-            new_acc = Acc::new(Some(tokens_to_intersect.clone()), current_acc.forbidden_terminals().clone());
+            new_acc = Acc::new(Some(tokens_to_intersect.clone()), current_acc.allowed_terminals().clone());
         }
         if new_acc.is_alive() {
             Some((new_acc, false))
@@ -594,7 +594,7 @@ pub fn subtract_llm_tokens_and_prune_arc(
         if let Some(bv) = new_acc.acc_mut() {
             *bv -= llm_tokens;
         } else {
-            new_acc = Acc::new(Some(LLMTokenBV::max_ones() - llm_tokens.clone()), current_acc.forbidden_terminals().clone());
+            new_acc = Acc::new(Some(LLMTokenBV::max_ones() - llm_tokens.clone()), current_acc.allowed_terminals().clone());
         }
         if new_acc.is_alive() {
             Some((new_acc, false))
@@ -614,7 +614,74 @@ pub fn subtract_llm_tokens_and_prune_arc(
 pub fn reset_llm_tokens(root_arc: &mut Arc<GSSNode>) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let continue_recursion = !current_acc.is_default();
-        Some((Acc::new(None, current_acc.forbidden_terminals().clone()), continue_recursion)) // Keep node, continue recursion
+        Some((Acc::new(None, current_acc.allowed_terminals().clone()), continue_recursion)) // Keep node, continue recursion
+    };
+    let mut memo = HashMap::new();
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+        *root_arc = new_root;
+    } else {
+        // The entire GSS was pruned, set root_arc to an empty GSSNode
+        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
+    }
+}
+
+pub fn intersect_allowed_terminals_and_prune_arc(
+    root_arc: &mut Arc<GSSNode>,
+    allowed_terminals: &HybridBitset
+) {
+    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
+        let mut new_acc = current_acc.clone();
+        if let Some(bv) = new_acc.acc_mut() {
+            *bv &= allowed_terminals;
+        } else {
+            new_acc = Acc::new(current_acc.acc().clone(), Some(allowed_terminals.clone()));
+        }
+        if new_acc.is_alive() {
+            Some((new_acc, false))
+        } else {
+            None // Prune this node
+        }
+    };
+    let mut memo = HashMap::new();
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+        *root_arc = new_root;
+    } else {
+        // The entire GSS was pruned, set root_arc to an empty GSSNode
+        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
+    }
+}
+
+pub fn subtract_allowed_terminals_and_prune_arc(
+    root_arc: &mut Arc<GSSNode>,
+    allowed_terminals: &HybridBitset
+) {
+    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
+        let mut new_acc = current_acc.clone();
+        if let Some(bv) = new_acc.acc_mut() {
+            *bv -= allowed_terminals;
+        } else {
+            // new_acc = Acc::new(Some(LLMTokenBV::max_ones() - llm_tokens.clone()), current_acc.allowed_terminals().clone());
+            new_acc = Acc::new(current_acc.acc().clone(), Some(HybridBitset::max_ones() - allowed_terminals.clone()));
+        }
+        if new_acc.is_alive() {
+            Some((new_acc, false))
+        } else {
+            None // Prune this node
+        }
+    };
+    let mut memo = HashMap::new();
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+        *root_arc = new_root;
+    } else {
+        // The entire GSS was pruned, set root_arc to an empty GSSNode
+        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
+    }
+}
+
+pub fn reset_allowed_terminals(root_arc: &mut Arc<GSSNode>) {
+    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
+        let continue_recursion = !current_acc.is_default();
+        Some((Acc::new(current_acc.acc().clone(), None), continue_recursion)) // Keep node, continue recursion
     };
     let mut memo = HashMap::new();
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
@@ -722,29 +789,29 @@ impl GSSNode {
         *self = node_arc.as_ref().clone();
     }
 
-    // pub fn forbid_terminals(&mut self, forbidden_terminals: &BTreeMap<TokenizerStateID, TerminalBV>) {
-    //     let mut node_arc = Arc::new(self.clone());
-    //     forbid_terminals(&mut node_arc, forbidden_terminals);
-    //     *self = node_arc.as_ref().clone();
-    // }
-    //
-    // pub fn prune_forbidden_terminals(&mut self, forbidden_terminals: &BTreeMap<TokenizerStateID, TerminalBV>) {
-    //     let mut node_arc = Arc::new(self.clone());
-    //     prune_forbidden_terminals(&mut node_arc, forbidden_terminals);
-    //     *self = node_arc.as_ref().clone();
-    // }
-    //
-    // pub fn map_forbidden_terminal_tokenizer_state_ids(&mut self, map: &BTreeMap<TokenizerStateID, TokenizerStateID>) {
-    //     let mut node_arc = Arc::new(self.clone());
-    //     map_forbidden_terminal_tokenizer_state_ids(&mut node_arc, map);
-    //     *self = node_arc.as_ref().clone();
-    // }
-    //
-    // pub fn reset_forbidden_terminals(&mut self) {
-    //     let mut node_arc = Arc::new(self.clone());
-    //     reset_forbidden_terminals(&mut node_arc);
-    //     *self = node_arc.as_ref().clone();
-    // }
+    pub fn intersect_allowed_terminals_and_prune_arc(
+        &mut self,
+        allowed_terminals: &HybridBitset,
+    ) {
+        let mut node_arc = Arc::new(self.clone());
+        intersect_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals);
+        *self = node_arc.as_ref().clone();
+    }
+
+    pub fn subtract_allowed_terminals_and_prune_arc(
+        &mut self,
+        allowed_terminals: &HybridBitset,
+    ) {
+        let mut node_arc = Arc::new(self.clone());
+        subtract_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals);
+        *self = node_arc.as_ref().clone();
+    }
+
+    pub fn reset_allowed_terminals(&mut self) {
+        let mut node_arc = Arc::new(self.clone());
+        reset_allowed_terminals(&mut node_arc);
+        *self = node_arc.as_ref().clone();
+    }
 
     pub fn find_longest_path(&self) -> Option<Vec<(ParseStateEdgeContent, Arc<GSSNode>)>> {
         find_longest_path(&self)
