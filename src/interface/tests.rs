@@ -240,7 +240,7 @@ mod tests {
 
         // Helper to create expected HybridBitset mask
         let ids_to_mask = |ids: &[LLMTokenID]| -> HybridBitset {
-            let mut bs = HybridBitset::new();
+            let mut bs = HybridBitset::zeros();
             for id in ids {
                 bs.insert(id.0);
             }
@@ -281,7 +281,7 @@ mod tests {
         // After "apple eats", the rule "start -> A IGNORE B" is complete.
         // The augmented rule "start' -> start" is also complete.
         // So, we expect EOF to be allowed.
-        let mut expected_eof_mask = HybridBitset::new();
+        let mut expected_eof_mask = HybridBitset::zeros();
         assert_eq!(current_mask, expected_eof_mask);
 
         println!("Sentence grammar test completed successfully.");
@@ -342,7 +342,7 @@ mod tests {
 
         // Helper to create expected HybridBitset mask
         let ids_to_mask = |ids: &[LLMTokenID]| -> HybridBitset {
-            let mut bs = HybridBitset::new();
+            let mut bs = HybridBitset::zeros();
             for id in ids {
                 bs.insert(id.0);
             }

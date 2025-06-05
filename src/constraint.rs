@@ -47,7 +47,7 @@ pub struct PrecomputedFinalizer {
 
 impl Default for PrecomputedFinalizer {
     fn default() -> Self {
-        Self { content: LLMTokenBV::new() }
+        Self { content: LLMTokenBV::zeros() }
     }
 }
 
@@ -392,7 +392,7 @@ impl GrammarConstraint {
 
     #[allow(dead_code)] 
     fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
-        let mut internal_bv = HybridBitset::new();
+        let mut internal_bv = HybridBitset::zeros();
         for original_id_val in original_bv.iter() {
             let internal_id_val = self.original_to_internal_id_bimap.get_by_left(&(original_id_val as usize)).expect(format!("Original ID {} not found in original_to_internal_id_bimap", original_id_val).as_str());
             internal_bv.insert(*internal_id_val as usize);
@@ -401,7 +401,7 @@ impl GrammarConstraint {
     }
 
     fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
-        let mut original_bv = HybridBitset::new();
+        let mut original_bv = HybridBitset::zeros();
         for internal_id_val in internal_bv.iter() {
             let original_id_val = self.original_to_internal_id_bimap.get_by_right(&(internal_id_val as usize)).expect(format!("Internal ID {} not found in original_to_internal_id_bimap", internal_id_val).as_str());
             original_bv.insert(*original_id_val as usize);
@@ -434,7 +434,7 @@ impl GrammarConstraint {
                 let grammar_token_id = GrammarTokenID(token_match.id);
                 // LLM tokens reachable under child_vocab_node_ref are those that start with segment_bytes
                 let applicable_tokens = child_vocab_node_ref.reachable_token_ids();
-                *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::new) |= applicable_tokens;
+                *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
             }
 
             if let Some(final_state_val) = exec_result.end_state {
@@ -461,7 +461,7 @@ impl GrammarConstraint {
                         cache,
                     );
                     for (token, bv) in next_results {
-                        *result_map.entry(token).or_insert_with(LLMTokenBV::new) |= bv;
+                        *result_map.entry(token).or_insert_with(LLMTokenBV::zeros) |= bv;
                     }
                 }
             }
@@ -548,7 +548,7 @@ impl<'r> Precomputer<'r> {
             for token in &exec_result.matches {
                 let grammar_token_id = GrammarTokenID(token.id);
                 let applicable_tokens = child_vocab_arc.reachable_token_ids();
-                *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::new) |= applicable_tokens;
+                *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
             }
             if let Some(final_state_val) = exec_result.end_state {
                 let matches_possible_from_tokenizer_state: BTreeSet<_> = self.tokenizer.tokens_accessible_from_state(TokenizerStateID(final_state_val)).into_iter().collect();
@@ -557,7 +557,7 @@ impl<'r> Precomputer<'r> {
                 if !possible_new_matches.is_empty() {
                     let next_results = self.possible_matches(child_vocab_arc, TokenizerStateID(final_state_val));
                     for (token, bv) in next_results {
-                        *result_map.entry(token).or_insert_with(LLMTokenBV::new) |= bv;
+                        *result_map.entry(token).or_insert_with(LLMTokenBV::zeros) |= bv;
                     }
                 }
             }
@@ -654,14 +654,14 @@ impl<'r> Precomputer<'r> {
         }
 
         if recursion_stack.contains(&node_ptr) {
-            return LLMTokenBV::new(); 
+            return LLMTokenBV::zeros();
         }
 
         recursion_stack.insert(node_ptr);
 
         let node_guard = node_arc.lock().expect("Mutex poisoned during compute_completable_tokens_recursive lock");
         
-        let mut current_node_completable = node_guard.value.clean_end.as_ref().cloned().unwrap_or_else(LLMTokenBV::new);
+        let mut current_node_completable = node_guard.value.clean_end.as_ref().cloned().unwrap_or_else(LLMTokenBV::zeros);
 
         for finalizer in node_guard.value.finalizers.values() {
             current_node_completable |= &finalizer.content;
@@ -716,7 +716,7 @@ impl<'r> Precomputer<'r> {
 
                     let completable_tokens_for_child = completable_cache.get(&child_ptr)
                                                       .cloned()
-                                                      .unwrap_or_else(LLMTokenBV::new);
+                                                      .unwrap_or_else(LLMTokenBV::zeros);
                     
                     let mut filtered_edge_value = current_edge_value.clone(); 
                     filtered_edge_value &= &completable_tokens_for_child;
@@ -931,7 +931,7 @@ impl<'r> Precomputer<'r> {
                     let grammar_tok = GrammarTokenID(m.id);
                     let match_end_offset = offset + m.width;
                     let active_tokens = child_vocab_of_segment.reachable_token_ids();
-                    let tokens_with_future_match = possible_future_matches.get(&grammar_tok).cloned().unwrap_or(LLMTokenBV::new());
+                    let tokens_with_future_match = possible_future_matches.get(&grammar_tok).cloned().unwrap_or(LLMTokenBV::zeros());
                     let edge_tokens = active_tokens.clone() - tokens_with_future_match;
 
                     if !edge_tokens.is_empty() {
@@ -1065,7 +1065,7 @@ impl<'r> Precomputer<'r> {
             let mut g = target.lock().unwrap();
             g.value
                 .clean_end
-                .get_or_insert_with(HybridBitset::new)
+                .get_or_insert_with(HybridBitset::zeros)
                 .insert(final_llm_token_id_at_child_vocab); 
         } else {
             queue
@@ -1128,7 +1128,7 @@ pub struct GrammarConstraintState<'a> {
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
         crate::debug!(2, "Computing mask");
-        let mut final_mask_internal = HybridBitset::new();
+        let mut final_mask_internal = HybridBitset::zeros();
 
         if self.state.is_empty() {
             return self.parent.internal_bv_to_original(&final_mask_internal);

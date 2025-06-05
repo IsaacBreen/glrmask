@@ -759,7 +759,7 @@ fn test_simple_def_match_non_zero_llm_id() {
 
     // 9. Define the expected mask.
     //    It should contain the original LLMTokenID for "def".
-    let mut expected_mask = HybridBitset::new();
+    let mut expected_mask = HybridBitset::zeros();
     expected_mask.insert(def_original_llm_id); // Expecting the original LLM ID
 
     // 10. Assert that the mask matches the expected mask.

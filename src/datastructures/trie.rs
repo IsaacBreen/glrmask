@@ -2206,7 +2206,7 @@ mod tests {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let dest: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest".to_string())));
         // Pre-insert edge with empty HybridBitset
-        let initial_edge_val = HybridBitset::new();
+        let initial_edge_val = HybridBitset::zeros();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
         source.lock().unwrap().try_insert("key", &mut Some(initial_edge_val), dest.clone()).unwrap();
@@ -2231,7 +2231,7 @@ mod tests {
     fn test_ei_try_destination_fail_cycle() {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let dest: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest".to_string())));
-         let dummy_edge_val = HybridBitset::new();
+         let dummy_edge_val = HybridBitset::zeros();
 
         // Create cycle manually for test setup
         dest.lock().unwrap().force_insert_to_node("dest_to_src", dummy_edge_val.clone(), &source); // dest -> source edge
@@ -2253,7 +2253,7 @@ mod tests {
         let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
         let dest2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest2".to_string())));
         let dest3: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest3".to_string())));
-        let dummy_edge_val = HybridBitset::new();
+        let dummy_edge_val = HybridBitset::zeros();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
         // Setup: dest2 -> source creates a cycle if we try source -> dest2
@@ -2282,7 +2282,7 @@ mod tests {
         let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
         let dest2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest2".to_string())));
         let dest3: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest3".to_string())));
-        let dummy_edge_val = HybridBitset::new();
+        let dummy_edge_val = HybridBitset::zeros();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
 
@@ -2311,7 +2311,7 @@ mod tests {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
         let dest2: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest2".to_string())));
-        let dummy_edge_val = HybridBitset::new();
+        let dummy_edge_val = HybridBitset::zeros();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
         // Setup: Both destinations cause cycles
@@ -2348,7 +2348,7 @@ mod tests {
             let mut s = source.lock().unwrap();
             s.try_insert(edge_key, &mut Some(initial_ev_c1), child1.clone()).unwrap();
             s.try_insert(edge_key, &mut Some(initial_ev_c2.clone()), child2.clone()).unwrap();
-            s.try_insert("other_key", &mut Some(HybridBitset::new()), child_other_key.clone()).unwrap();
+            s.try_insert("other_key", &mut Some(HybridBitset::zeros()), child_other_key.clone()).unwrap();
         }
 
         // 1. Test successful merge with the first child under the key.
@@ -2482,7 +2482,7 @@ mod tests {
     fn test_ei_chaining_try_then_else() {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-        let dummy_edge_val = HybridBitset::new();
+        let dummy_edge_val = HybridBitset::zeros();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
         // Setup: dest1 causes cycle
@@ -2532,7 +2532,7 @@ mod tests {
     fn test_ei_unwrap_panic() {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-        let dummy_edge_val = HybridBitset::new();
+        let dummy_edge_val = HybridBitset::zeros();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
         // Setup: dest1 causes cycle
@@ -2547,7 +2547,7 @@ mod tests {
     fn test_ei_get() {
         let source: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("source".to_string())));
         let dest1: TestNodeEI = Arc::new(Mutex::new(TestTrieEI::new("dest1".to_string())));
-        let dummy_edge_val = HybridBitset::new();
+        let dummy_edge_val = HybridBitset::zeros();
         let new_edge_val: HybridBitset = vec![1].into_iter().collect();
 
         // Setup: dest1 causes cycle
@@ -2620,7 +2620,7 @@ mod tests {
             let mut s = source.lock().unwrap();
             s.try_insert(edge_key, &mut Some(initial_ev_c1), child1.clone()).unwrap();
             s.try_insert(edge_key, &mut Some(initial_ev_c2.clone()), child2.clone()).unwrap();
-            s.try_insert("other_key", &mut Some(HybridBitset::new()), child_other_key.clone()).unwrap();
+            s.try_insert("other_key", &mut Some(HybridBitset::zeros()), child_other_key.clone()).unwrap();
         }
 
         // 1. Test successful merge with the first child under the key.

@@ -482,7 +482,7 @@ mod tests {
 
     #[test]
     fn test_format_bv_indices_empty() {
-        let bv = HybridBitset::new();
+        let bv = HybridBitset::zeros();
         assert_eq!(format_bv_indices(&bv, None), "[]");
 
         // let bv = HybridBitset::new(); // Duplicate test removed
@@ -509,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_format_bv_indices_with_mapping() {
-        let mut bv = HybridBitset::new();
+        let mut bv = HybridBitset::zeros();
         bv.insert(0); // internal ID 0
         bv.insert(1); // internal ID 1
         let mut mapping = BiBTreeMap::new();

@@ -108,7 +108,7 @@ impl Debug for HybridBitset {
 // --- Core Implementation (`impl HybridBitset`) ---
 impl HybridBitset {
     /// Creates a new, empty HybridBitset.
-    pub fn new() -> Self {
+    pub fn zeros() -> Self {
         HybridBitset {
             inner: RangeSetBlaze::new(),
         }
@@ -117,7 +117,7 @@ impl HybridBitset {
     /// Creates a new HybridBitset with all indices from 0 up to `max_value` (inclusive) set to true.
     pub fn ones(len: usize) -> Self {
         if len == 0 {
-            HybridBitset::new()
+            HybridBitset::zeros()
         } else {
             HybridBitset {
                 inner: RangeSetBlaze::from_iter([0..=len - 1]),
@@ -489,14 +489,14 @@ mod tests {
 
     #[test]
     fn test_new_empty_len() {
-        let set = HybridBitset::new();
+        let set = HybridBitset::zeros();
         assert_eq!(set.len(), 0);
         assert!(set.is_empty());
     }
 
     #[test]
     fn test_insert_basic() {
-        let mut set = HybridBitset::new();
+        let mut set = HybridBitset::zeros();
         assert!(set.insert(10));
         assert!(!set.insert(10)); // Already present
         assert!(set.insert(20));
@@ -613,7 +613,7 @@ mod tests {
         let set1 = HybridBitset::from_iter(vec![1, 5, 10]);
         let set1_clone = HybridBitset::from_iter(vec![1, 5, 10]); // Same elements
         let set2 = HybridBitset::from_iter(vec![1, 5, 11]);    // Different elements
-        let empty_set = HybridBitset::new();
+        let empty_set = HybridBitset::zeros();
 
         assert_eq!(set1, set1_clone);
         assert_ne!(set1, set2);
@@ -645,7 +645,7 @@ mod tests {
 
     #[test]
     fn test_large_index() {
-        let mut set = HybridBitset::new();
+        let mut set = HybridBitset::zeros();
         let large_idx = 1_000_000;
         set.insert(large_idx);
         set.insert(0);
@@ -733,8 +733,8 @@ mod tests {
 
     #[test]
     fn test_dense_dense_edge_cases() { // Conceptual names
-        let d1 = HybridBitset::new();
-        let d2 = HybridBitset::new();
+        let d1 = HybridBitset::zeros();
+        let d2 = HybridBitset::zeros();
         let d3 = HybridBitset::from_iter(0..DENSE_TO_SPARSE_THRESHOLD);
 
         assert_eq!(&d1 & &d2, d1);
@@ -778,7 +778,7 @@ mod tests {
 
     #[test]
     fn test_iter_bits() {
-        let empty_set = HybridBitset::new();
+        let empty_set = HybridBitset::zeros();
         assert_eq!(empty_set.iter_bits().collect::<Vec<bool>>(), Vec::<bool>::new());
         assert_eq!(empty_set.iter_bits().len(), 0);
 

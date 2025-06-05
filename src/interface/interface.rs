@@ -1000,7 +1000,7 @@ mod tests {
         grammar_constraint_state.commit(LLMTokenID(0)); // Commit "a"
 
         let mask = grammar_constraint_state.get_mask();
-        let mut expected_mask = HybridBitset::new(); // Empty mask initially
+        let mut expected_mask = HybridBitset::zeros(); // Empty mask initially
         // After "a", only EOF is possible if the grammar is just "a".
         // The step_with_all_llm_tokens will populate based on what the grammar can accept next.
         // If "a" completes the rule "E", and "start' -> E" is the only path, then EOF is expected.

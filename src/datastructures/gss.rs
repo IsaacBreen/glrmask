@@ -104,6 +104,7 @@ pub mod acc_mod {
     use std::collections::{BTreeMap, BTreeSet};
     use crate::constraint::LLMTokenBV;
     use crate::datastructures::gss::{LLMTokenInfo, PathAccumulator, TerminalBV};
+    use crate::glr::grammar::Symbol::Terminal;
     use crate::tokenizer::TokenizerStateID;
     use crate::types::TerminalID;
 
@@ -119,7 +120,7 @@ pub mod acc_mod {
         }
 
         pub fn new_for_merging() -> Self {
-            Self { acc: Some(LLMTokenBV::new()), forbidden_terminals: BTreeMap::new() }
+            Self { acc: Some(LLMTokenBV::zeros()), forbidden_terminals: BTreeMap::new() }
         }
 
         pub fn acc(&self) -> &LLMTokenInfo {
@@ -155,13 +156,17 @@ pub mod acc_mod {
         fn union_assign(&mut self, other: Self) {
             self.acc.union_assign(other.acc);
             for (tokenizer_state_id, other_terminals) in other.forbidden_terminals {
-                todo!()
+                self.forbidden_terminals.entry(tokenizer_state_id)
+                    .and_modify(|existing_bv| *existing_bv |= other_terminals)
+                    .or_insert_with(TerminalBV::max_ones);
             }
         }
         fn intersect_assign(&mut self, right: Self) {
             self.acc.intersect_assign(right.acc);
             for (tokenizer_state_id, other_terminals) in right.forbidden_terminals {
-                todo!()
+                self.forbidden_terminals.entry(tokenizer_state_id)
+                    .and_modify(|existing_bv| *existing_bv &= &other_terminals)
+                    .or_insert(other_terminals);
             }
         }
         fn intersect_has_effect(&self, right: &Self) -> bool {
@@ -993,7 +998,7 @@ mod tests {
     type TestGSSNode = GSSNode; // GSSNode is now concrete
 
     fn mock_llm_token_info(active_val: usize, intersection_val: usize) -> Acc {
-        let mut active = LLMTokenBV::new();
+        let mut active = LLMTokenBV::zeros();
         active.insert(active_val);
         Acc::new(Some(active), BTreeMap::new())
     }

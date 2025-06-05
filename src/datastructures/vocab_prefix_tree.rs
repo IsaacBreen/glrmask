@@ -51,7 +51,7 @@ impl VocabPrefixTreeNode {
             prefix_length,
             children: BTreeMap::new(),
             // Initialize empty; will be computed after tree structure is built.
-            reachable_token_ids: HybridBitset::new(),
+            reachable_token_ids: HybridBitset::zeros(),
         }
     }
 
@@ -300,7 +300,7 @@ impl VocabPrefixTree {
         }
 
         // Convert the final HashSet to a HybridBitset and store it in the node.
-        let mut final_bitvec = HybridBitset::new(); // Create empty HybridBitset
+        let mut final_bitvec = HybridBitset::zeros(); // Create empty HybridBitset
         for token_id_val in &current_node_ids_set { // Renamed token_id
             // Check bounds implicitly handled by HybridBitset's potential conversion
             final_bitvec.insert(*token_id_val); // Use token_id_val
