@@ -16,7 +16,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, print_precompute_stats, PrecomputeStats};
 use crate::datastructures::charmap::TrieMap;
-use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_tokens_and_prune_arc, gather_gss_stats, reset_tokens};
+use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -1160,7 +1160,7 @@ impl<'a> GrammarConstraintState<'a> {
             |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
                 let mut glr_s = glr_s.clone();
                 
-                intersect_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv);
+                intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv);
 
                 if let Some(gtid) = grammar_token_opt {
                     glr_s.step(*gtid);
@@ -1215,7 +1215,7 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(2, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
 
         for state in self.state.values_mut() {
-            Arc::make_mut(&mut state.active_state.stack).reset_tokens();
+            Arc::make_mut(&mut state.active_state.stack).reset_llm_tokens();
         }
 
         let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
@@ -1250,7 +1250,7 @@ impl<'a> GrammarConstraintState<'a> {
                 for match_info in &exec_result.matches {
                     let mut cloned_glr_s = glr_s_at_offset.clone();
                     if let Some(bv) = possible_matches.get(&TerminalID(match_info.id)) {
-                        Arc::make_mut(&mut cloned_glr_s.active_state.stack).subtract_tokens_and_prune_arc(&bv);
+                        Arc::make_mut(&mut cloned_glr_s.active_state.stack).subtract_llm_tokens_and_prune_arc(&bv);
                     }
 
                     cloned_glr_s.step(TerminalID(match_info.id));

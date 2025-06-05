@@ -567,7 +567,7 @@ fn prune_and_transform_recursive(
 }
 
 
-pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_intersect: &LLMTokenBV) {
+pub fn intersect_llm_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_intersect: &LLMTokenBV) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
         if let Some(bv) = new_acc.acc_mut() {
@@ -591,7 +591,7 @@ pub fn intersect_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_int
     }
 }
 
-pub fn subtract_tokens_and_prune_arc(
+pub fn subtract_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     llm_tokens: &LLMTokenBV,
 ) {
@@ -617,7 +617,7 @@ pub fn subtract_tokens_and_prune_arc(
     }
 }
 
-pub fn reset_tokens(root_arc: &mut Arc<GSSNode>) {
+pub fn reset_llm_tokens(root_arc: &mut Arc<GSSNode>) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let continue_recursion = !current_acc.is_default();
         Some((Acc::new(None, current_acc.forbidden_terminals().clone()), continue_recursion)) // Keep node, continue recursion
@@ -704,27 +704,27 @@ impl GSSNode {
         }
     }
 
-    pub fn intersect_tokens_and_prune_arc(
+    pub fn intersect_llm_tokens_and_prune_arc(
         &mut self,
         llm_tokens: &LLMTokenBV,
     ) {
         let mut node_arc = Arc::new(self.clone());
-        intersect_tokens_and_prune_arc(&mut node_arc, &llm_tokens);
+        intersect_llm_tokens_and_prune_arc(&mut node_arc, &llm_tokens);
         *self = node_arc.as_ref().clone();
     }
 
-    pub fn subtract_tokens_and_prune_arc(
+    pub fn subtract_llm_tokens_and_prune_arc(
         &mut self,
         llm_tokens: &LLMTokenBV,
     ) {
         let mut node_arc = Arc::new(self.clone());
-        subtract_tokens_and_prune_arc(&mut node_arc, &llm_tokens);
+        subtract_llm_tokens_and_prune_arc(&mut node_arc, &llm_tokens);
         *self = node_arc.as_ref().clone();
     }
 
-    pub fn reset_tokens(&mut self) {
+    pub fn reset_llm_tokens(&mut self) {
         let mut node_arc = Arc::new(self.clone());
-        reset_tokens(&mut node_arc);
+        reset_llm_tokens(&mut node_arc);
         *self = node_arc.as_ref().clone();
     }
 
