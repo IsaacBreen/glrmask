@@ -39,60 +39,6 @@ pub type LLMTokenInfo = Option<LLMTokenBV>;
 const MERGE_THRESHOLD: usize = 10;
 
 // -----------------------------------------------------------------------------
-// Small data-types used by the constraint
-// -----------------------------------------------------------------------------
-impl PathAccumulator for Option<LLMTokenBV> {
-    fn union_assign(&mut self, other: Self) {
-        match (self.as_mut(), other) {
-            (Some(self_bv), Some(other_bv)) => {
-                *self_bv |= &other_bv;
-                // An empty bitset resulting from a union is still Some(empty_bv), not None.
-            }
-            (None, Some(other_bv)) => {
-                *self = Some(LLMTokenBV::max_ones());
-            }
-            (Some(_), None) => {
-                *self = Some(LLMTokenBV::max_ones());
-            }
-            (None, None) => {
-                // self remains None
-            }
-        }
-    }
-
-    fn intersect_assign(&mut self, right: Self) {
-        match (self.as_mut(), right) {
-            (Some(self_bv), Some(right_bv)) => {
-                *self_bv &= right_bv;
-            }
-            (None, Some(right_bv)) => {
-                *self = Some(right_bv);
-            }
-            (Some(_), None) => {}
-            (None, None) => {}
-        }
-    }
-
-    fn intersect_has_effect(&self, right: &Self) -> bool {
-        // self.clone().intersect(right.clone()) != *self
-        match (self, right) {
-            (Some(self_bv), Some(right_bv)) => {
-                self_bv.is_subset(right_bv)
-            }
-            (None, Some(right_bv)) => {
-                true
-            }
-            (Some(_), None) => {
-                false
-            }
-            (None, None) => {
-                false
-            }
-        }
-    }
-}
-
-// -----------------------------------------------------------------------------
 // Pre-computation node values
 // -----------------------------------------------------------------------------
 #[derive(Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
