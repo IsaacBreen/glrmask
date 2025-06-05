@@ -97,8 +97,13 @@ fn compute_hash_key(predecessors: &NodeMap) -> u64 {
 }
 
 #[derive(Debug, Clone)]
-pub struct GSSNode { // No longer generic
-    acc: LLMTokenInfo,
+pub struct Acc {
+    acc: LLMTokenInfo
+}
+
+#[derive(Debug, Clone)]
+pub struct GSSNode {
+    acc: Acc,
     predecessors: NodeMap,
     hash_key_cache: u64,
 }
@@ -161,13 +166,13 @@ impl GSSNode {
     pub fn new(acc: LLMTokenInfo) -> Self {
         let predecessors = NodeMap::new();
         let hash_key_cache = compute_hash_key(&predecessors);
-        Self { acc, predecessors, hash_key_cache }
+        Self { acc: Acc { acc }, predecessors, hash_key_cache }
     }
     
     // Private constructor used by simplification and other internal methods
     fn new_with_map(acc: LLMTokenInfo, predecessors: NodeMap) -> Self {
         let hash_key_cache = compute_hash_key(&predecessors);
-        Self { acc, predecessors, hash_key_cache }
+        Self { acc: Acc { acc }, predecessors, hash_key_cache }
     }
 
     // Helper to create a GSSNode with a single predecessor, used by push.
@@ -195,17 +200,17 @@ impl GSSNode {
     }
 
     pub fn acc(&self) -> &LLMTokenInfo {
-        &self.acc
+        &self.acc.acc
     }
 
     // Made private as requested
     fn acc_mut(&mut self) -> &mut LLMTokenInfo {
-        &mut self.acc
+        &mut self.acc.acc
     }
 
     // Helper to clone the node and set a new accumulator. Used internally.
     fn with_acc(mut self, acc: LLMTokenInfo) -> Self {
-        self.acc = acc;
+        self.acc.acc = acc;
         self.hash_key_cache = compute_hash_key(&self.predecessors); // Recalculate hash if acc changes meaning
         self
     }
@@ -229,14 +234,14 @@ impl GSSNode {
 
         for (pred_arc, _edge_val) in self.predecessors_with_values() {
             // The acc of the path *through* self to pred_arc is self.acc intersected with pred_arc.acc
-            let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
+            let path_acc = self.acc.acc.clone().intersect(pred_arc.acc.acc.clone());
             result_acc.union_assign(path_acc.clone()); // Union accs of all popped paths
 
             // Merge predecessors of pred_arc into result_predecessors
             // Each merged predecessor needs its acc updated based on path_acc
             for (inner_edge, inner_pred_arc) in &pred_arc.predecessors {
                 let mut new_inner_pred_node_data = (**inner_pred_arc).clone();
-                new_inner_pred_node_data.acc = path_acc.clone().intersect(inner_pred_arc.acc.clone());
+                new_inner_pred_node_data.acc.acc = path_acc.clone().intersect(inner_pred_arc.acc.acc.clone());
 
                 match result_predecessors.entry(inner_edge.clone()) {
                     std::collections::btree_map::Entry::Vacant(entry) => {
@@ -265,8 +270,8 @@ impl GSSNode {
             let mut pred_arc = pred_arc.clone();
             // The acc for the path ending at pred_arc (after popping self)
             // is self.acc intersected with pred_arc's original acc.
-            if self.acc.intersect_has_effect(&pred_arc.acc) {
-                let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
+            if self.acc.acc.intersect_has_effect(&pred_arc.acc.acc) {
+                let path_acc = self.acc.acc.clone().intersect(pred_arc.acc.acc.clone());
                 pred_arc = Arc::new(pred_arc.as_ref().clone().with_acc(path_acc));
             }
             (pred_arc, edge_val.clone())
@@ -277,7 +282,7 @@ impl GSSNode {
     fn push_down_acc(&mut self) {
         for pred_arc_val in self.predecessors.values_mut() { // Renamed pred_arc
             let mut_pred_node = Arc::make_mut(pred_arc_val);
-            mut_pred_node.acc.intersect_assign(self.acc.clone());
+            mut_pred_node.acc.acc.intersect_assign(self.acc.acc.clone());
             // After modifying acc, hash_key_cache might need update if acc is part of it.
             // Current compute_hash_key does not include self.acc, only predecessors.
             // However, if the acc of a predecessor changes, its own hash_key_cache changes.
@@ -289,7 +294,7 @@ impl GSSNode {
     pub fn merge(&mut self, other: &Self) {
         if self == other { return; }
 
-        self.acc.union_assign(other.acc.clone());
+        self.acc.acc.union_assign(other.acc.acc.clone());
 
         for (edge_val, other_pred_arc) in &other.predecessors {
             match self.predecessors.entry(edge_val.clone()) {
@@ -327,7 +332,7 @@ impl GSSNode {
             } else {
                 for (edge_val, pred_arc) in &node.predecessors {
                     let mut new_path = path.clone();
-                    new_path.push((edge_val.clone(), node.acc.clone()));
+                    new_path.push((edge_val.clone(), node.acc.acc.clone()));
                     queue.push_back((pred_arc.as_ref(), new_path));
                 }
             }
@@ -347,7 +352,7 @@ impl GSSNode {
 impl Hash for GSSNode {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.hash_key_cache.hash(state);
-        self.acc.hash(state); // Accumulator should be part of the hash for equality
+        self.acc.acc.hash(state); // Accumulator should be part of the hash for equality
     }
 }
 
@@ -355,7 +360,7 @@ impl PartialEq for GSSNode {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self, other) || (
             self.hash_key_cache == other.hash_key_cache && // Structural hash
-            self.acc == other.acc && // Accumulator equality
+            self.acc.acc == other.acc.acc && // Accumulator equality
             self.predecessors == other.predecessors // Deep predecessor equality
         )
     }
@@ -368,7 +373,7 @@ impl PartialOrd for GSSNode {
         if std::ptr::eq(self, other) { return Some(Ordering::Equal); }
         // Order by hash_key_cache, then acc, then predecessors
         self.hash_key_cache.partial_cmp(&other.hash_key_cache)
-            .and_then(|ord| if ord == Ordering::Equal { self.acc.partial_cmp(&other.acc) } else { Some(ord) })
+            .and_then(|ord| if ord == Ordering::Equal { self.acc.acc.partial_cmp(&other.acc.acc) } else { Some(ord) })
             .and_then(|ord| if ord == Ordering::Equal { self.predecessors.partial_cmp(&other.predecessors) } else { Some(ord) })
     }
 }
@@ -377,7 +382,7 @@ impl Ord for GSSNode {
     fn cmp(&self, other: &Self) -> Ordering {
         if std::ptr::eq(self, other) { return Ordering::Equal; }
         self.hash_key_cache.cmp(&other.hash_key_cache)
-            .then_with(|| self.acc.cmp(&other.acc))
+            .then_with(|| self.acc.acc.cmp(&other.acc.acc))
             .then_with(|| self.predecessors.cmp(&other.predecessors))
     }
 }
@@ -444,7 +449,7 @@ fn prune_and_transform_recursive(
         return cached_result.clone();
     }
 
-    match closure(&node_arc.acc) {
+    match closure(&node_arc.acc.acc) {
         None => { // Prune this node
             memo.insert(node_ptr, None);
             None
@@ -611,7 +616,7 @@ impl GSSNode {
         if let Some(new_node_arc) = prune_and_transform_recursive(&node_arc, closure, memo) {
             *self = new_node_arc.as_ref().clone();
         } else {
-            *self = GSSNode::new(self.acc.clone());
+            *self = GSSNode::new(self.acc.acc.clone());
         }
     }
 
@@ -757,7 +762,7 @@ pub fn print_gss_forest(
         visited.insert(node_ptr);
         *node_count += 1;
 
-        writeln!(output, "{}- Node {:p}: (Acc: {:?})", prefix, node_ptr, node_arc.acc)?;
+        writeln!(output, "{}- Node {:p}: (Acc: {:?})", prefix, node_ptr, node_arc.acc.acc)?;
 
         if !node_arc.predecessors.is_empty() {
             writeln!(output, "{}  Predecessors:", prefix)?;
@@ -828,9 +833,9 @@ fn simplify_node_recursive(
                 Some(LLMTokenBV::new())
             } else {
                 let mut iter = simplified_predecessors_map.values();
-                let mut acc = iter.next().unwrap().acc.clone();
+                let mut acc = iter.next().unwrap().acc.acc.clone();
                 for p_arc in iter { // Renamed p
-                    acc.union_assign(p_arc.acc.clone());
+                    acc.union_assign(p_arc.acc.acc.clone());
                 }
                 acc
             };
@@ -840,7 +845,7 @@ fn simplify_node_recursive(
     // The final simplified node has the structure of cached_structural_node,
     // but its accumulator is the one from the original node_arc.
     let mut final_node_data = (**cached_structural_node).clone(); // Clone GSSNode data
-    final_node_data.acc = node_arc.acc.clone(); // Set the specific acc from original node
+    final_node_data.acc.acc = node_arc.acc.acc.clone(); // Set the specific acc from original node
     // Recompute hash key for final_node_data as its acc might differ from cached_structural_node's acc
     final_node_data.hash_key_cache = compute_hash_key(&final_node_data.predecessors);
 
