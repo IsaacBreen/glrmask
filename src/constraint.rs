@@ -1213,6 +1213,10 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn commit_bytes(&mut self, llm_token_bytes: &[u8]) { // llm_token_id is original
+        if llm_token_bytes.is_empty() {
+            return;
+        }
+
         crate::debug!(2, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
 
         for state in self.state.values_mut() {
@@ -1221,7 +1225,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         // Handle allowed terminals
         let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
-        
+
         for tokenizer_state_id in self.state.keys() {
             let exec_result = self.parent.tokenizer.execute_from_state(
                 &llm_token_bytes,
@@ -1244,7 +1248,7 @@ impl<'a> GrammarConstraintState<'a> {
         while let Some((offset, states_to_process)) = processing_queue.pop_first() {
             crate::debug!(3, "Processing offset {} with states {:?}.", offset, states_to_process.keys().map(|k| k.0).collect::<Vec<_>>());
             for (tokenizer_s_id_at_offset, glr_s_at_offset) in states_to_process {
-                assert!(offset <= llm_token_bytes.len());
+                assert!(offset < llm_token_bytes.len());
                 if offset == llm_token_bytes.len() {
                     // This path fully consumed the llm_token_bytes.
                     if let Some(existing_glr_s) = new_overall_state.get_mut(&tokenizer_s_id_at_offset) {
@@ -1260,16 +1264,8 @@ impl<'a> GrammarConstraintState<'a> {
                     tokenizer_s_id_at_offset,
                 );
 
-                let mut possible_matches = BTreeMap::new();
-                if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
-                    possible_matches = self.parent.possible_matches[&TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment)].clone();
-                }
-
                 for match_info in &exec_result.matches {
                     let mut cloned_glr_s = glr_s_at_offset.clone();
-                    if let Some(bv) = possible_matches.get(&TerminalID(match_info.id)) {
-                        Arc::make_mut(&mut cloned_glr_s.active_state.stack).subtract_llm_tokens_and_prune_arc(&bv);
-                    }
 
                     cloned_glr_s.step(TerminalID(match_info.id));
 
