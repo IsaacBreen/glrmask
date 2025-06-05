@@ -16,7 +16,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, print_precompute_stats, PrecomputeStats};
 use crate::datastructures::charmap::TrieMap;
-use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, intersect_allowed_terminals_and_prune_arc, TerminalInfo};
+use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, intersect_allowed_terminals_and_prune_arc, TerminalInfo, reset_allowed_terminals};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -1265,6 +1265,7 @@ impl<'a> GrammarConstraintState<'a> {
                         // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
                         let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
                         if new_offset == llm_token_bytes.len() {
+                            reset_allowed_terminals(&mut cloned_glr_s.active_state.stack);
                             let mut allowed_terminals: TerminalInfo = BTreeMap::new();
                             if let Some(end_state_id) = exec_result.end_state {
                                 let mut allowed_terminals_for_end_state = TerminalBV::max_ones();
