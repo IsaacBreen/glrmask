@@ -670,57 +670,13 @@ pub fn intersect_allowed_terminals_and_prune_arc(
 
 pub fn subtract_allowed_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
-    terminals_to_subtract: &TerminalInfo // Renamed for clarity within the function
+    terminals_to_subtract: &TerminalInfo,
 ) {
-    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-        let mut new_acc = current_acc.clone();
-
-        for (terminal_id, bv_to_subtract) in terminals_to_subtract {
-            // Get the current TerminalBV for this terminal_id.
-            // If it doesn't exist, it's implicitly TerminalBV::max_ones().
-            // Then subtract bv_to_subtract from it.
-            let entry = new_acc.allowed_terminals_mut().entry(*terminal_id).or_insert_with(TerminalBV::max_ones);
-            *entry -= bv_to_subtract;
-        }
-
-        if new_acc.is_alive() {
-            // Consistent with other intersect/subtract functions in the file, using 'false' for continue_recursion.
-            // This means the transformed node will point to original (untransformed by this specific call path) children.
-            // It relies on memoization and the overall recursive traversal to eventually transform children if necessary.
-            Some((new_acc, false))
-        } else {
-            None // Prune this node
-        }
-    };
-
-    let mut memo = HashMap::new();
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
-        *root_arc = new_root;
-    } else {
-        // The entire GSS was pruned. Set root_arc to a new, empty GSSNode
-        // with the original root's accumulator (which is now considered dead by the closure).
-        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
-    }
+    todo!()
 }
 
 pub fn reset_allowed_terminals(root_arc: &mut Arc<GSSNode>) {
-    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-        let needs_reset = !current_acc.allowed_terminals().is_empty();
-
-        let mut new_acc = Acc::new(current_acc.acc().clone(), BTreeMap::new()); // New acc with cleared allowed_terminals
-
-        if new_acc.is_alive() {
-            Some((new_acc, needs_reset)) // Continue recursion only if a reset actually occurred
-        } else {
-            None // Prune this node (e.g., if LLMTokenBV was already empty)
-        }
-    };
-    let mut memo = HashMap::new();
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
-        *root_arc = new_root;
-    } else {
-        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
-    }
+    todo!()
 }
 
 pub fn map_allowed_terminals_tokenizer_states(
