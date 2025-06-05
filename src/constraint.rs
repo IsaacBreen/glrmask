@@ -1221,6 +1221,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         // Handle allowed terminals
         let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+        
         for tokenizer_state_id in self.state.keys() {
             let exec_result = self.parent.tokenizer.execute_from_state(
                 &llm_token_bytes,
@@ -1231,7 +1232,9 @@ impl<'a> GrammarConstraintState<'a> {
             }
         }
 
-
+        for state in self.state.values_mut() {
+            Arc::make_mut(&mut state.active_state.stack).map_allowed_terminals_tokenizer_states(&state_map);
+        }
 
         let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
 

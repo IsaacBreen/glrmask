@@ -124,6 +124,13 @@ pub mod acc_mod {
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Acc {
         acc: LLMTokenInfo,
+        // A map from tokenizer state ID to a set of terminals.
+        // This LLM token info is valid for a given tokenizer state in the map if any terminals it *does* match against the **next** input string
+        // are in the set of terminals under that tokenizer state in the map.
+        // If this LLM token info is not valid for any tokenizer state, it is not valid at all (dead).
+        // TODO: What about when a tokenizer state *can't* match the disallowed terminal? Shouldn't be necessary to have an entry for it right?
+        //  But then we need an all-ones entry here, otherwise there's no tokenizer states in the map and it's considered 'not valid'.
+        //  Perhaps we should...
         allowed_terminals: TerminalInfo,
     }
 
@@ -162,10 +169,13 @@ pub mod acc_mod {
                     return true;
                 }
             }
-            for allowed_terminals in self.allowed_terminals.values() {
-                if allowed_terminals.is_empty() {
-                    return true;
+            if !self.allowed_terminals.is_empty() {
+                for allowed_terminals in self.allowed_terminals.values() {
+                    if !allowed_terminals.is_empty() {
+                        return false;
+                    }
                 }
+                return true;
             }
             false
         }
@@ -683,6 +693,7 @@ pub fn map_allowed_terminals_tokenizer_states(
     root_arc: &mut Arc<GSSNode>,
     map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
 ) {
+    // If there isn't an entry in the map for a given tokenizer state, remove that state from the existing allowed terminals map.
     todo!()
 }
 
