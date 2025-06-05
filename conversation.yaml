@@ -17,6 +17,7 @@ local_system:
       use crate::glr::parser::ParseStateEdgeContent;
       use crate::constraint::{LLMTokenBV, TerminalBV};
       use crate::datastructures::gss::acc_mod::Acc;
+      use crate::glr::grammar::Terminal;
       use crate::tokenizer::TokenizerStateID;
       use crate::types::TerminalID;
 
@@ -26,7 +27,7 @@ local_system:
       type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 
       pub type LLMTokenInfo = Option<LLMTokenBV>;
-      pub type TerminalInfo = BTreeMap<TerminalID, TerminalBV>;
+      pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalBV>;
 
       pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
           fn union_assign(&mut self, other: Self);
@@ -109,14 +110,26 @@ local_system:
       }
 
       pub fn allowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-          for (terminal_id, allowed_terminals) in right {
-              *left.entry(terminal_id).or_insert_with(TerminalBV::max_ones) |= allowed_terminals;
+          let mut common_keys = BTreeSet::new();
+          common_keys.extend(left.keys());
+          common_keys.extend(right.keys());
+          for terminal_id in common_keys {
+              let left_value = left.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
+              let right_value = right.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
+              let union = &left_value | &right_value;
+              left.insert(terminal_id, union);
           }
       }
 
       pub fn allowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-          for (terminal_id, allowed_terminals) in right {
-              *left.entry(terminal_id).or_insert_with(TerminalBV::max_ones) &= allowed_terminals;
+          let mut common_keys = BTreeSet::new();
+          common_keys.extend(left.keys());
+          common_keys.extend(right.keys());
+          for terminal_id in common_keys {
+              let left_value = left.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
+              let right_value = right.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
+              let intersection = &left_value & &right_value;
+              left.insert(terminal_id, intersection);
           }
       }
 
@@ -131,6 +144,13 @@ local_system:
           #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
           pub struct Acc {
               acc: LLMTokenInfo,
+              // A map from tokenizer state ID to a set of terminals.
+              // This LLM token info is valid for a given tokenizer state in the map if any terminals it *does* match against the **next** input string
+              // are in the set of terminals under that tokenizer state in the map.
+              // If this LLM token info is not valid for any tokenizer state, it is not valid at all (dead).
+              // TODO: What about when a tokenizer state *can't* match the disallowed terminal? Shouldn't be necessary to have an entry for it right?
+              //  But then we need an all-ones entry here, otherwise there's no tokenizer states in the map and it's considered 'not valid'.
+              //  Perhaps we should...
               allowed_terminals: TerminalInfo,
           }
 
@@ -169,12 +189,15 @@ local_system:
                           return true;
                       }
                   }
+                  if self.allowed_terminals.is_empty() {
+                      return false;
+                  }
                   for allowed_terminals in self.allowed_terminals.values() {
-                      if allowed_terminals.is_empty() {
-                          return true;
+                      if !allowed_terminals.is_empty() {
+                          return false;
                       }
                   }
-                  false
+                  true
               }
 
               pub fn is_alive(&self) -> bool {
@@ -677,13 +700,25 @@ local_system:
 
       pub fn subtract_allowed_terminals_and_prune_arc(
           root_arc: &mut Arc<GSSNode>,
-          allowed_terminals: &TerminalInfo
+          terminals_to_subtract: &TerminalInfo,
       ) {
-          todo!()
+          // todo!()
       }
 
       pub fn reset_allowed_terminals(root_arc: &mut Arc<GSSNode>) {
-          todo!()
+          // todo!()
+      }
+
+      pub fn prune_disallowed_terminals(root_arc: &mut Arc<GSSNode>, terminals_map: &TerminalInfo) {
+          // todo!()
+      }
+
+      pub fn map_allowed_terminals_tokenizer_states(
+          root_arc: &mut Arc<GSSNode>,
+          map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
+      ) {
+          // If there isn't an entry in the map for a given tokenizer state, remove that state from the existing allowed terminals map.
+          // todo!()
       }
 
       pub fn find_longest_path(
@@ -785,7 +820,7 @@ local_system:
 
           pub fn intersect_allowed_terminals_and_prune_arc(
               &mut self,
-              allowed_terminals: &TerminalBV,
+              allowed_terminals: &TerminalInfo,
           ) {
               let mut node_arc = Arc::new(self.clone());
               intersect_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals);
@@ -794,7 +829,7 @@ local_system:
 
           pub fn subtract_allowed_terminals_and_prune_arc(
               &mut self,
-              allowed_terminals: &TerminalBV,
+              allowed_terminals: &TerminalInfo,
           ) {
               let mut node_arc = Arc::new(self.clone());
               subtract_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals);
@@ -804,6 +839,12 @@ local_system:
           pub fn reset_allowed_terminals(&mut self) {
               let mut node_arc = Arc::new(self.clone());
               reset_allowed_terminals(&mut node_arc);
+              *self = node_arc.as_ref().clone();
+          }
+
+          pub fn map_allowed_terminals_tokenizer_states(&mut self, map: &BTreeMap<TokenizerStateID, TokenizerStateID>) {
+              let mut node_arc = Arc::new(self.clone());
+              map_allowed_terminals_tokenizer_states(&mut node_arc, map);
               *self = node_arc.as_ref().clone();
           }
 
@@ -1079,7 +1120,7 @@ local_system:
           fn mock_llm_token_info(active_val: usize, intersection_val: usize) -> Acc {
               let mut active = LLMTokenBV::zeros();
               active.insert(active_val);
-              Acc::new(Some(active), None)
+              Acc::new(Some(active), Default::default())
           }
           
           fn mock_edge(id: usize) -> ParseStateEdgeContent {
@@ -1231,6 +1272,7 @@ local_system:
       use crate::glr::parser::ParseStateEdgeContent;
       use crate::constraint::{LLMTokenBV, TerminalBV};
       use crate::datastructures::gss::acc_mod::Acc;
+      use crate::glr::grammar::Terminal;
       use crate::tokenizer::TokenizerStateID;
       use crate::types::TerminalID;
 
@@ -1240,7 +1282,7 @@ local_system:
       type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 
       pub type LLMTokenInfo = Option<LLMTokenBV>;
-      pub type TerminalInfo = BTreeMap<TerminalID, TerminalBV>;
+      pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalBV>;
 
       pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
           fn union_assign(&mut self, other: Self);
@@ -1323,14 +1365,26 @@ local_system:
       }
 
       pub fn allowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-          for (terminal_id, allowed_terminals) in right {
-              *left.entry(terminal_id).or_insert_with(TerminalBV::max_ones) |= allowed_terminals;
+          let mut common_keys = BTreeSet::new();
+          common_keys.extend(left.keys());
+          common_keys.extend(right.keys());
+          for terminal_id in common_keys {
+              let left_value = left.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
+              let right_value = right.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
+              let union = &left_value | &right_value;
+              left.insert(terminal_id, union);
           }
       }
 
       pub fn allowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-          for (terminal_id, allowed_terminals) in right {
-              *left.entry(terminal_id).or_insert_with(TerminalBV::max_ones) &= allowed_terminals;
+          let mut common_keys = BTreeSet::new();
+          common_keys.extend(left.keys());
+          common_keys.extend(right.keys());
+          for terminal_id in common_keys {
+              let left_value = left.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
+              let right_value = right.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
+              let intersection = &left_value & &right_value;
+              left.insert(terminal_id, intersection);
           }
       }
 
@@ -1345,6 +1399,13 @@ local_system:
           #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
           pub struct Acc {
               acc: LLMTokenInfo,
+              // A map from tokenizer state ID to a set of terminals.
+              // This LLM token info is valid for a given tokenizer state in the map if any terminals it *does* match against the **next** input string
+              // are in the set of terminals under that tokenizer state in the map.
+              // If this LLM token info is not valid for any tokenizer state, it is not valid at all (dead).
+              // TODO: What about when a tokenizer state *can't* match the disallowed terminal? Shouldn't be necessary to have an entry for it right?
+              //  But then we need an all-ones entry here, otherwise there's no tokenizer states in the map and it's considered 'not valid'.
+              //  Perhaps we should...
               allowed_terminals: TerminalInfo,
           }
 
@@ -1383,12 +1444,15 @@ local_system:
                           return true;
                       }
                   }
+                  if self.allowed_terminals.is_empty() {
+                      return false;
+                  }
                   for allowed_terminals in self.allowed_terminals.values() {
-                      if allowed_terminals.is_empty() {
-                          return true;
+                      if !allowed_terminals.is_empty() {
+                          return false;
                       }
                   }
-                  false
+                  true
               }
 
               pub fn is_alive(&self) -> bool {
@@ -1891,13 +1955,25 @@ local_system:
 
       pub fn subtract_allowed_terminals_and_prune_arc(
           root_arc: &mut Arc<GSSNode>,
-          allowed_terminals: &TerminalInfo
+          terminals_to_subtract: &TerminalInfo,
       ) {
-          todo!()
+          // todo!()
       }
 
       pub fn reset_allowed_terminals(root_arc: &mut Arc<GSSNode>) {
-          todo!()
+          // todo!()
+      }
+
+      pub fn prune_disallowed_terminals(root_arc: &mut Arc<GSSNode>, terminals_map: &TerminalInfo) {
+          // todo!()
+      }
+
+      pub fn map_allowed_terminals_tokenizer_states(
+          root_arc: &mut Arc<GSSNode>,
+          map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
+      ) {
+          // If there isn't an entry in the map for a given tokenizer state, remove that state from the existing allowed terminals map.
+          // todo!()
       }
 
       pub fn find_longest_path(
@@ -1999,7 +2075,7 @@ local_system:
 
           pub fn intersect_allowed_terminals_and_prune_arc(
               &mut self,
-              allowed_terminals: &TerminalBV,
+              allowed_terminals: &TerminalInfo,
           ) {
               let mut node_arc = Arc::new(self.clone());
               intersect_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals);
@@ -2008,7 +2084,7 @@ local_system:
 
           pub fn subtract_allowed_terminals_and_prune_arc(
               &mut self,
-              allowed_terminals: &TerminalBV,
+              allowed_terminals: &TerminalInfo,
           ) {
               let mut node_arc = Arc::new(self.clone());
               subtract_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals);
@@ -2018,6 +2094,12 @@ local_system:
           pub fn reset_allowed_terminals(&mut self) {
               let mut node_arc = Arc::new(self.clone());
               reset_allowed_terminals(&mut node_arc);
+              *self = node_arc.as_ref().clone();
+          }
+
+          pub fn map_allowed_terminals_tokenizer_states(&mut self, map: &BTreeMap<TokenizerStateID, TokenizerStateID>) {
+              let mut node_arc = Arc::new(self.clone());
+              map_allowed_terminals_tokenizer_states(&mut node_arc, map);
               *self = node_arc.as_ref().clone();
           }
 
@@ -2293,7 +2375,7 @@ local_system:
           fn mock_llm_token_info(active_val: usize, intersection_val: usize) -> Acc {
               let mut active = LLMTokenBV::zeros();
               active.insert(active_val);
-              Acc::new(Some(active), None)
+              Acc::new(Some(active), Default::default())
           }
           
           fn mock_edge(id: usize) -> ParseStateEdgeContent {
@@ -2468,6 +2550,7 @@ messages:
       use crate::glr::parser::ParseStateEdgeContent;
       use crate::constraint::{LLMTokenBV, TerminalBV};
       use crate::datastructures::gss::acc_mod::Acc;
+      use crate::glr::grammar::Terminal;
       use crate::tokenizer::TokenizerStateID;
       use crate::types::TerminalID;
 
@@ -2477,7 +2560,7 @@ messages:
       type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 
       pub type LLMTokenInfo = Option<LLMTokenBV>;
-      pub type TerminalInfo = BTreeMap<TerminalID, TerminalBV>;
+      pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalBV>;
 
       pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
           fn union_assign(&mut self, other: Self);
@@ -2560,14 +2643,26 @@ messages:
       }
 
       pub fn allowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-          for (terminal_id, allowed_terminals) in right {
-              *left.entry(terminal_id).or_insert_with(TerminalBV::max_ones) |= allowed_terminals;
+          let mut common_keys = BTreeSet::new();
+          common_keys.extend(left.keys());
+          common_keys.extend(right.keys());
+          for terminal_id in common_keys {
+              let left_value = left.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
+              let right_value = right.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
+              let union = &left_value | &right_value;
+              left.insert(terminal_id, union);
           }
       }
 
       pub fn allowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-          for (terminal_id, allowed_terminals) in right {
-              *left.entry(terminal_id).or_insert_with(TerminalBV::max_ones) &= allowed_terminals;
+          let mut common_keys = BTreeSet::new();
+          common_keys.extend(left.keys());
+          common_keys.extend(right.keys());
+          for terminal_id in common_keys {
+              let left_value = left.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
+              let right_value = right.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
+              let intersection = &left_value & &right_value;
+              left.insert(terminal_id, intersection);
           }
       }
 
@@ -2582,6 +2677,13 @@ messages:
           #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
           pub struct Acc {
               acc: LLMTokenInfo,
+              // A map from tokenizer state ID to a set of terminals.
+              // This LLM token info is valid for a given tokenizer state in the map if any terminals it *does* match against the **next** input string
+              // are in the set of terminals under that tokenizer state in the map.
+              // If this LLM token info is not valid for any tokenizer state, it is not valid at all (dead).
+              // TODO: What about when a tokenizer state *can't* match the disallowed terminal? Shouldn't be necessary to have an entry for it right?
+              //  But then we need an all-ones entry here, otherwise there's no tokenizer states in the map and it's considered 'not valid'.
+              //  Perhaps we should...
               allowed_terminals: TerminalInfo,
           }
 
@@ -2620,12 +2722,15 @@ messages:
                           return true;
                       }
                   }
+                  if self.allowed_terminals.is_empty() {
+                      return false;
+                  }
                   for allowed_terminals in self.allowed_terminals.values() {
-                      if allowed_terminals.is_empty() {
-                          return true;
+                      if !allowed_terminals.is_empty() {
+                          return false;
                       }
                   }
-                  false
+                  true
               }
 
               pub fn is_alive(&self) -> bool {
@@ -3128,13 +3233,25 @@ messages:
 
       pub fn subtract_allowed_terminals_and_prune_arc(
           root_arc: &mut Arc<GSSNode>,
-          allowed_terminals: &TerminalInfo
+          terminals_to_subtract: &TerminalInfo,
       ) {
-          todo!()
+          // todo!()
       }
 
       pub fn reset_allowed_terminals(root_arc: &mut Arc<GSSNode>) {
-          todo!()
+          // todo!()
+      }
+
+      pub fn prune_disallowed_terminals(root_arc: &mut Arc<GSSNode>, terminals_map: &TerminalInfo) {
+          // todo!()
+      }
+
+      pub fn map_allowed_terminals_tokenizer_states(
+          root_arc: &mut Arc<GSSNode>,
+          map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
+      ) {
+          // If there isn't an entry in the map for a given tokenizer state, remove that state from the existing allowed terminals map.
+          // todo!()
       }
 
       pub fn find_longest_path(
@@ -3236,7 +3353,7 @@ messages:
 
           pub fn intersect_allowed_terminals_and_prune_arc(
               &mut self,
-              allowed_terminals: &TerminalBV,
+              allowed_terminals: &TerminalInfo,
           ) {
               let mut node_arc = Arc::new(self.clone());
               intersect_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals);
@@ -3245,7 +3362,7 @@ messages:
 
           pub fn subtract_allowed_terminals_and_prune_arc(
               &mut self,
-              allowed_terminals: &TerminalBV,
+              allowed_terminals: &TerminalInfo,
           ) {
               let mut node_arc = Arc::new(self.clone());
               subtract_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals);
@@ -3255,6 +3372,12 @@ messages:
           pub fn reset_allowed_terminals(&mut self) {
               let mut node_arc = Arc::new(self.clone());
               reset_allowed_terminals(&mut node_arc);
+              *self = node_arc.as_ref().clone();
+          }
+
+          pub fn map_allowed_terminals_tokenizer_states(&mut self, map: &BTreeMap<TokenizerStateID, TokenizerStateID>) {
+              let mut node_arc = Arc::new(self.clone());
+              map_allowed_terminals_tokenizer_states(&mut node_arc, map);
               *self = node_arc.as_ref().clone();
           }
 
@@ -3530,7 +3653,7 @@ messages:
           fn mock_llm_token_info(active_val: usize, intersection_val: usize) -> Acc {
               let mut active = LLMTokenBV::zeros();
               active.insert(active_val);
-              Acc::new(Some(active), None)
+              Acc::new(Some(active), Default::default())
           }
           
           fn mock_edge(id: usize) -> ParseStateEdgeContent {
@@ -3672,46 +3795,124 @@ messages:
       ```
     metadata:
       filename: src/datastructures/gss.rs
-  - user: Complete `subtract_allowed_terminals_and_prune_arc` and `reset_allowed_terminals`.
+  - user: |-
+      Complete `subtract_allowed_terminals_and_prune_arc` and `reset_allowed_terminals`.
+      Keep it clean and simple, mostly transferring the logic from the equivalent LLM token functions like `intersect_allowed_terminals_and_prune_arc` does.
+
+      Implement `prune_disallowed_terminals`. Loop through (tokenizer state, allowed terminals bitvec) pairs in the allowed tokens field. Invert the allowed terminals bitvec to get the disallowed tokens bitvec. Get the corresponding terminal bitvec from the passed `terminals_map` (it must be there - can panic if not). Take the intersection of the two bitvecs (but don't mutate - we're just checking the prune condition). If the intersection is nonempty, then we've encountered one of the disallowed tokens. Prune this node. Do this the first time a nonempty intersection is encountered.
+      Otherwise, do nothing. Keep the node as-is. Continue recursion if the map in the allowed tokens field is empty.
+
+      Implement `map_allowed_terminals_tokenizer_states`.
     metadata:
   - assistant: |-
-      Okay, I'll provide the implementations for `subtract_allowed_terminals_and_prune_arc` and `reset_allowed_terminals`.
+      Okay, I'll implement the four functions: `subtract_allowed_terminals_and_prune_arc`, `reset_allowed_terminals`, `prune_disallowed_terminals`, and `map_allowed_terminals_tokenizer_states`, along with their corresponding `GSSNode` methods.
 
-      I'll adhere to the existing function signatures and the established patterns within the `prune_and_transform_recursive` framework, particularly regarding the `continue_recursion` boolean flag and how the root node is handled if the entire GSS is pruned.
+      I'll ensure the logic for `subtract_allowed_terminals_and_prune_arc` and `reset_allowed_terminals` mirrors their `LLMTokenBV` counterparts, including the behavior of the `continue_recursion` flag in `prune_and_transform_recursive`.
 
-      For `subtract_allowed_terminals_and_prune_arc`, the `allowed_terminals: &TerminalInfo` parameter will be interpreted as a map where each `TerminalBV` indicates the set of tokens to remove from the corresponding `TerminalID` in the node's accumulator.
+      For `prune_disallowed_terminals`, I'll interpret `terminals_map` as specifying, for each tokenizer state, a `TerminalBV` of terminals that are considered "disallowed" or "problematic". If the GSS node's `allowed_terminals` (or its default of allowing all if empty) has a non-empty intersection with these problematic terminals for any relevant state, the node will be pruned. If not pruned, recursion will continue (`true`).
 
-      For `reset_allowed_terminals`, the node's `allowed_terminals` map will be cleared. Recursion to transform children will only proceed if the node's `allowed_terminals` map was not already empty.
+      For `map_allowed_terminals_tokenizer_states`, the keys of the `allowed_terminals` map in `Acc` will be transformed. If a key is not in the provided mapping, it will be removed. If multiple old keys map to the same new key, their `TerminalBV`s will be unioned. `continue_recursion` will be true if the `allowed_terminals` map was not empty before the transformation.
+
+      I'll also add the helper function `allowed_terminals_subtract_assign`. I'm assuming `TerminalBV` supports `SubAssign` (the `-=` operator) and `Sub` (the `-` operator), similar to how `LLMTokenBV` is used in the existing code (e.g., `*bv -= llm_tokens` and `LLMTokenBV::max_ones() - llm_tokens.clone()`).
 
       ```diff
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -500,11 +500,53 @@
+      @@ -92,6 +92,19 @@
+           }
+       }
        
+      +pub fn allowed_terminals_subtract_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
+      +    for (terminal_id, right_bv) in right {
+      +        // If a tokenizer state is not in 'left', it implies all terminals are allowed for that state.
+      +        // So, we start with max_ones() and then subtract.
+      +        let left_value = left.entry(*terminal_id).or_insert_with(TerminalBV::max_ones);
+      +        // Assuming TerminalBV implements SubAssign<&TerminalBV>
+      +        // e.g., for FixedBitSet, this would be left_value.difference_with(right_bv);
+      +        *left_value -= right_bv;
+      +    }
+      +    // Keys in 'left' but not in 'right' are unaffected.
+      +    // Optionally, remove entries from 'left' if their TerminalBV becomes empty after subtraction.
+      +}
+      +
+       pub mod acc_mod {
+           use std::collections::{BTreeMap, BTreeSet};
+           use crate::constraint::{LLMTokenBV, TerminalBV};
+      @@ -478,14 +491,68 @@
        pub fn subtract_allowed_terminals_and_prune_arc(
            root_arc: &mut Arc<GSSNode>,
-      -    allowed_terminals: &TerminalInfo
-      +    terminals_to_subtract: &TerminalInfo // Renamed for clarity within the function
-       ) {
-      -    todo!()
+           terminals_to_subtract: &TerminalInfo,
+      -) {
+      -    // todo!()
+      +) {
       +    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
       +        let mut new_acc = current_acc.clone();
-      +
-      +        for (terminal_id, bv_to_subtract) in terminals_to_subtract {
-      +            // Get the current TerminalBV for this terminal_id.
-      +            // If it doesn't exist, it's implicitly TerminalBV::max_ones().
-      +            // Then subtract bv_to_subtract from it.
-      +            let entry = new_acc.allowed_terminals_mut().entry(*terminal_id).or_insert_with(TerminalBV::max_ones);
-      +            *entry -= bv_to_subtract;
-      +        }
+      +        allowed_terminals_subtract_assign(new_acc.allowed_terminals_mut(), terminals_to_subtract);
       +
       +        if new_acc.is_alive() {
-      +            // Consistent with other intersect/subtract functions in the file, using 'false' for continue_recursion.
-      +            // This means the transformed node will point to original (untransformed by this specific call path) children.
-      +            // It relies on memoization and the overall recursive traversal to eventually transform children if necessary.
-      +            Some((new_acc, false))
+      +            Some((new_acc, false)) // Transformation is local, don't force recursion with this rule
       +        } else {
       +            None // Prune this node
+      +        }
+      +    };
+      +    let mut memo = HashMap::new();
+      +    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+      +        *root_arc = new_root;
+      +    } else {
+      +        // The entire GSS was pruned, set root_arc to an empty GSSNode with original acc (or a default one)
+      +        // For consistency with other prune functions, use original acc.
+      +        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
+      +    }
+       }
+       
+       pub fn reset_allowed_terminals(root_arc: &mut Arc<GSSNode>) {
+      -    // todo!()
+      +    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
+      +        // Continue recursion if the allowed_terminals map was not already empty.
+      +        let continue_recursion = !current_acc.allowed_terminals().is_empty();
+      +        let new_acc = Acc::new(current_acc.acc().clone(), BTreeMap::new());
+      +        Some((new_acc, continue_recursion))
+      +    };
+      +    let mut memo = HashMap::new();
+      +    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+      +        *root_arc = new_root;
+      +    } else {
+      +        // This case should ideally not be reached if the closure always returns Some.
+      +        // If it were, it implies the root itself was an issue, which reset shouldn't cause.
+      +        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
+      +    }
+       }
+       
+       pub fn prune_disallowed_terminals(root_arc: &mut Arc<GSSNode>, terminals_map: &TerminalInfo) {
+      -    // todo!()
+      +    // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
+      +    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
+      +        let mut should_prune = false;
+      +        if current_acc.allowed_terminals().is_empty() {
+      +            // GSS node allows ALL terminals for ALL tokenizer states by default.
+      +            // Prune if any state in terminals_map has a non-empty set of disallowed terminals.
+      +            for disallowed_bv_for_state in terminals_map.values() {
+      +                if !disallowed_bv_for_state.is_empty() {
+      +                    should_prune = true;
+      +                    break;
+      +                }
+      +            }
+      +        } else {
+      +            // GSS node has specific allowances.
+      +            for (gss_state_id, gss_allowed_bv) in current_acc.allowed_terminals() {
+      +                if let Some(disallowed_bv_for_state) = terminals_map.get(gss_state_id) {
+      +                    if !(gss_allowed_bv & disallowed_bv_for_state).is_empty() {
+      +                        should_prune = true; // GSS allows a terminal that is disallowed for this state.
+      +                        break;
+      +                    }
+      +                }
+      +            }
+      +        }
+      +
+      +        if should_prune {
+      +            None // Prune this node
+      +        } else {
+      +            Some((current_acc.clone(), true)) // Keep node, continue recursion to check children
       +        }
       +    };
       +
@@ -3719,24 +3920,42 @@ messages:
       +    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
       +        *root_arc = new_root;
       +    } else {
-      +        // The entire GSS was pruned. Set root_arc to a new, empty GSSNode
-      +        // with the original root's accumulator (which is now considered dead by the closure).
       +        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
       +    }
        }
        
-       pub fn reset_allowed_terminals(root_arc: &mut Arc<GSSNode>) {
-      -    todo!()
+       pub fn map_allowed_terminals_tokenizer_states(
+      @@ -493,8 +560,31 @@
+           root_arc: &mut Arc<GSSNode>,
+           map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
+       ) {
+      -    // If there isn't an entry in the map for a given tokenizer state, remove that state from the existing allowed terminals map.
+      -    // todo!()
       +    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-      +        let needs_reset = !current_acc.allowed_terminals().is_empty();
+      +        let mut new_allowed_terminals = BTreeMap::new();
+      +        let mut changed = false;
       +
-      +        let mut new_acc = Acc::new(current_acc.acc().clone(), BTreeMap::new()); // New acc with cleared allowed_terminals
-      +
-      +        if new_acc.is_alive() {
-      +            Some((new_acc, needs_reset)) // Continue recursion only if a reset actually occurred
-      +        } else {
-      +            None // Prune this node (e.g., if LLMTokenBV was already empty)
+      +        for (old_id, bv) in current_acc.allowed_terminals() {
+      +            if let Some(new_id) = map.get(old_id) {
+      +                new_allowed_terminals.entry(*new_id)
+      +                    .or_insert_with(TerminalBV::zeros)
+      +                    .union_assign(bv.clone()); // Union if multiple old_ids map to the same new_id
+      +                if new_allowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
+      +                    changed = true;
+      +                }
+      +            } else {
+      +                changed = true; // A state was removed
+      +            }
       +        }
+      +        if !changed && current_acc.allowed_terminals().len() == new_allowed_terminals.len() { // No structural change
+      +             // No change in content or structure of allowed_terminals
+      +        } else {
+      +            changed = true;
+      +        }
+      +
+      +        let new_acc = Acc::new(current_acc.acc().clone(), new_allowed_terminals);
+      +        let continue_recursion = changed || !current_acc.allowed_terminals().is_empty(); // Recurse if there was something to map or a change occurred.
+      +        Some((new_acc, continue_recursion))
       +    };
       +    let mut memo = HashMap::new();
       +    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
@@ -3747,6 +3966,21 @@ messages:
        }
        
        pub fn find_longest_path(
+      @@ -578,6 +668,14 @@
+               *self = node_arc.as_ref().clone();
+           }
+       
+      +    pub fn prune_disallowed_terminals(&mut self, terminals_map: &TerminalInfo) {
+      +        let mut node_arc = Arc::new(self.clone());
+      +        prune_disallowed_terminals(&mut node_arc, terminals_map);
+      +        *self = node_arc.as_ref().clone();
+      +    }
+      +
+      +
+      +
+           pub fn map_allowed_terminals_tokenizer_states(&mut self, map: &BTreeMap<TokenizerStateID, TokenizerStateID>) {
+               let mut node_arc = Arc::new(self.clone());
+               map_allowed_terminals_tokenizer_states(&mut node_arc, map);
 
       ```
     metadata:

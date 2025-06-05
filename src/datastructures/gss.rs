@@ -126,6 +126,19 @@ pub fn allowed_terminals_intersect_assign(left: &mut TerminalInfo, right: Termin
     }
 }
 
+pub fn allowed_terminals_subtract_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
+    for (terminal_id, right_bv) in right {
+        // If a tokenizer state is not in 'left', it implies all terminals are allowed for that state.
+        // So, we start with max_ones() and then subtract.
+        let left_value = left.entry(*terminal_id).or_insert_with(TerminalBV::max_ones);
+        // Assuming TerminalBV implements SubAssign<&TerminalBV>
+        // e.g., for FixedBitSet, this would be left_value.difference_with(right_bv);
+        *left_value -= right_bv;
+    }
+    // Keys in 'left' but not in 'right' are unaffected.
+    // Optionally, remove entries from 'left' if their TerminalBV becomes empty after subtraction.
+}
+
 pub mod acc_mod {
     use std::collections::{BTreeMap, BTreeSet};
     use crate::constraint::{LLMTokenBV, TerminalBV};
@@ -695,23 +708,119 @@ pub fn subtract_allowed_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     terminals_to_subtract: &TerminalInfo,
 ) {
-    // todo!()
+    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
+        let mut new_acc = current_acc.clone();
+        allowed_terminals_subtract_assign(new_acc.allowed_terminals_mut(), terminals_to_subtract);
+
+        if new_acc.is_alive() {
+            Some((new_acc, false)) // Transformation is local, don't force recursion with this rule
+        } else {
+            None // Prune this node
+        }
+    };
+    let mut memo = HashMap::new();
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+        *root_arc = new_root;
+    } else {
+        // The entire GSS was pruned, set root_arc to an empty GSSNode with original acc (or a default one)
+        // For consistency with other prune functions, use original acc.
+        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
+    }
 }
 
 pub fn reset_allowed_terminals(root_arc: &mut Arc<GSSNode>) {
-    // todo!()
+    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
+        // Continue recursion if the allowed_terminals map was not already empty.
+        let continue_recursion = !current_acc.allowed_terminals().is_empty();
+        let new_acc = Acc::new(current_acc.acc().clone(), BTreeMap::new());
+        Some((new_acc, continue_recursion))
+    };
+    let mut memo = HashMap::new();
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+        *root_arc = new_root;
+    } else {
+        // This case should ideally not be reached if the closure always returns Some.
+        // If it were, it implies the root itself was an issue, which reset shouldn't cause.
+        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
+    }
 }
 
-pub fn prune_disjoint_allowed_terminals(root_arc: &mut Arc<GSSNode>, comparison: &TerminalInfo) {
-    // todo!()
+pub fn prune_disallowed_terminals(root_arc: &mut Arc<GSSNode>, terminals_map: &TerminalInfo) {
+    // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
+    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
+        let mut should_prune = false;
+        if current_acc.allowed_terminals().is_empty() {
+            // GSS node allows ALL terminals for ALL tokenizer states by default.
+            // Prune if any state in terminals_map has a non-empty set of disallowed terminals.
+            for disallowed_bv_for_state in terminals_map.values() {
+                if !disallowed_bv_for_state.is_empty() {
+                    should_prune = true;
+                    break;
+                }
+            }
+        } else {
+            // GSS node has specific allowances.
+            for (gss_state_id, gss_allowed_bv) in current_acc.allowed_terminals() {
+                if let Some(disallowed_bv_for_state) = terminals_map.get(gss_state_id) {
+                    if !(gss_allowed_bv & disallowed_bv_for_state).is_empty() {
+                        should_prune = true; // GSS allows a terminal that is disallowed for this state.
+                        break;
+                    }
+                }
+            }
+        }
+
+        if should_prune {
+            None // Prune this node
+        } else {
+            Some((current_acc.clone(), true)) // Keep node, continue recursion to check children
+        }
+    };
+
+    let mut memo = HashMap::new();
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+        *root_arc = new_root;
+    } else {
+        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
+    }
 }
 
 pub fn map_allowed_terminals_tokenizer_states(
     root_arc: &mut Arc<GSSNode>,
     map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
 ) {
-    // If there isn't an entry in the map for a given tokenizer state, remove that state from the existing allowed terminals map.
-    // todo!()
+    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
+        let mut new_allowed_terminals = BTreeMap::new();
+        let mut changed = false;
+
+        for (old_id, bv) in current_acc.allowed_terminals() {
+            if let Some(new_id) = map.get(old_id) {
+                new_allowed_terminals.entry(*new_id)
+                    .or_insert_with(TerminalBV::zeros)
+                    .union_assign(bv.clone()); // Union if multiple old_ids map to the same new_id
+                if new_allowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
+                    changed = true;
+                }
+            } else {
+                changed = true; // A state was removed
+            }
+        }
+        if !changed && current_acc.allowed_terminals().len() == new_allowed_terminals.len() { // No structural change
+             // No change in content or structure of allowed_terminals
+        } else {
+            changed = true;
+        }
+
+        let new_acc = Acc::new(current_acc.acc().clone(), new_allowed_terminals);
+        let continue_recursion = changed || !current_acc.allowed_terminals().is_empty(); // Recurse if there was something to map or a change occurred.
+        Some((new_acc, continue_recursion))
+    };
+    let mut memo = HashMap::new();
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+        *root_arc = new_root;
+    } else {
+        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
+    }
 }
 
 pub fn find_longest_path(
@@ -834,6 +943,14 @@ impl GSSNode {
         reset_allowed_terminals(&mut node_arc);
         *self = node_arc.as_ref().clone();
     }
+
+    pub fn prune_disallowed_terminals(&mut self, terminals_map: &TerminalInfo) {
+        let mut node_arc = Arc::new(self.clone());
+        prune_disallowed_terminals(&mut node_arc, terminals_map);
+        *self = node_arc.as_ref().clone();
+    }
+
+
 
     pub fn map_allowed_terminals_tokenizer_states(&mut self, map: &BTreeMap<TokenizerStateID, TokenizerStateID>) {
         let mut node_arc = Arc::new(self.clone());
