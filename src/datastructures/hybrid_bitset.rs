@@ -185,6 +185,10 @@ impl HybridBitset {
         self.inner.clear();
     }
 
+    pub fn inverted(&self) -> Self {
+        &Self::max_ones() - self
+    }
+
     /// Returns an iterator over the indices of the set bits.
     pub fn iter(&self) -> Iter<'_> {
         Iter {

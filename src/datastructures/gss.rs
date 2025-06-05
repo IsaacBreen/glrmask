@@ -749,32 +749,16 @@ pub fn prune_disallowed_terminals(root_arc: &mut Arc<GSSNode>, terminals_map: &T
     // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut should_prune = false;
-        if current_acc.allowed_terminals().is_empty() {
-            // GSS node allows ALL terminals for ALL tokenizer states by default.
-            // Prune if any state in terminals_map has a non-empty set of disallowed terminals.
-            for disallowed_bv_for_state in terminals_map.values() {
-                if !disallowed_bv_for_state.is_empty() {
-                    should_prune = true;
-                    break;
-                }
-            }
-        } else {
-            // GSS node has specific allowances.
-            for (gss_state_id, gss_allowed_bv) in current_acc.allowed_terminals() {
-                if let Some(disallowed_bv_for_state) = terminals_map.get(gss_state_id) {
-                    if !(gss_allowed_bv & disallowed_bv_for_state).is_empty() {
-                        should_prune = true; // GSS allows a terminal that is disallowed for this state.
-                        break;
-                    }
+        for (gss_state_id, gss_allowed_bv) in current_acc.allowed_terminals() {
+            if let Some(allowed_bv_for_state) = terminals_map.get(gss_state_id) {
+                let disallowed_bv_for_state = allowed_bv_for_state.inverted();
+                if !(gss_allowed_bv & &disallowed_bv_for_state).is_empty() {
+                    return None;
                 }
             }
         }
-
-        if should_prune {
-            None // Prune this node
-        } else {
-            Some((current_acc.clone(), true)) // Keep node, continue recursion to check children
-        }
+        let continue_recursion = !current_acc.allowed_terminals().is_empty();
+        Some((current_acc.clone(), continue_recursion))
     };
 
     let mut memo = HashMap::new();
