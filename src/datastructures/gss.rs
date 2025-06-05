@@ -670,43 +670,13 @@ pub fn intersect_allowed_terminals_and_prune_arc(
 
 pub fn subtract_allowed_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
-    allowed_terminals: &TerminalBV
+    allowed_terminals: &TerminalInfo
 ) {
-    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-        let mut new_acc = current_acc.clone();
-        if let Some(bv) = new_acc.acc_mut() {
-            *bv -= allowed_terminals;
-        } else {
-            // new_acc = Acc::new(Some(LLMTokenBV::max_ones() - llm_tokens.clone()), current_acc.allowed_terminals().clone());
-            new_acc = Acc::new(current_acc.acc().clone(), Some(TerminalBV::max_ones() - allowed_terminals.clone()));
-        }
-        if new_acc.is_alive() {
-            Some((new_acc, false))
-        } else {
-            None // Prune this node
-        }
-    };
-    let mut memo = HashMap::new();
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
-        *root_arc = new_root;
-    } else {
-        // The entire GSS was pruned, set root_arc to an empty GSSNode
-        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
-    }
+    todo!()
 }
 
 pub fn reset_allowed_terminals(root_arc: &mut Arc<GSSNode>) {
-    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-        let continue_recursion = !current_acc.is_default();
-        Some((Acc::new(current_acc.acc().clone(), None), continue_recursion)) // Keep node, continue recursion
-    };
-    let mut memo = HashMap::new();
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
-        *root_arc = new_root;
-    } else {
-        // The entire GSS was pruned, set root_arc to an empty GSSNode
-        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
-    }
+    todo!()
 }
 
 pub fn find_longest_path(
@@ -808,7 +778,7 @@ impl GSSNode {
 
     pub fn intersect_allowed_terminals_and_prune_arc(
         &mut self,
-        allowed_terminals: &TerminalBV,
+        allowed_terminals: &TerminalInfo,
     ) {
         let mut node_arc = Arc::new(self.clone());
         intersect_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals);
@@ -817,7 +787,7 @@ impl GSSNode {
 
     pub fn subtract_allowed_terminals_and_prune_arc(
         &mut self,
-        allowed_terminals: &TerminalBV,
+        allowed_terminals: &TerminalInfo,
     ) {
         let mut node_arc = Arc::new(self.clone());
         subtract_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals);
@@ -1102,7 +1072,7 @@ mod tests {
     fn mock_llm_token_info(active_val: usize, intersection_val: usize) -> Acc {
         let mut active = LLMTokenBV::zeros();
         active.insert(active_val);
-        Acc::new(Some(active), None)
+        Acc::new(Some(active), Default::default())
     }
     
     fn mock_edge(id: usize) -> ParseStateEdgeContent {
