@@ -1024,13 +1024,13 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let vocab_file_name = "gpt2_vocab.json";
     let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
     // let gpt2_raw_vocab = BTreeMap::from([("________________________________________________________________", 0)]);
-    // let mut gpt2_raw_vocab = BTreeMap::new();
-    // // Just fill with all bytes
-    // for i in 0u8..=255u8 {
-    //     let c = i as char;
-    //     let s = c.to_string();
-    //     gpt2_raw_vocab.insert(s, i as usize);
-    // }
+    let mut gpt2_raw_vocab = BTreeMap::new();
+    // Just fill with all bytes
+    for i in 0u8..=255u8 {
+        let c = i as char;
+        let s = c.to_string();
+        gpt2_raw_vocab.insert(s, i as usize);
+    }
     let N = 2000;
     // Add "#" and "*" * N
     // gpt2_raw_vocab.insert("#".to_string(), 0);
