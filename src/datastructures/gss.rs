@@ -795,9 +795,8 @@ pub fn map_allowed_terminals_tokenizer_states(
 
         for (old_id, bv) in current_acc.allowed_terminals() {
             if let Some(new_id) = map.get(old_id) {
-                new_allowed_terminals.entry(*new_id)
-                    .or_insert_with(TerminalBV::zeros)
-                    .union_assign(bv.clone()); // Union if multiple old_ids map to the same new_id
+                *new_allowed_terminals.entry(*new_id)
+                    .or_insert_with(TerminalBV::zeros) |= bv;
                 if new_allowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
                     changed = true;
                 }
