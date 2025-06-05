@@ -34,7 +34,6 @@ use crate::glr::analyze::{compute_nullable_nonterminals, compute_terminal_follow
 
 pub type LLMTokenBV = HybridBitset;
 pub type GrammarTokenBV = BitVec;
-pub type LLMTokenInfo = Option<LLMTokenBV>;
 
 const MERGE_THRESHOLD: usize = 10;
 

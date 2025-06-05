@@ -16,6 +16,8 @@ type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 type NodeMap = BTreeMap<ParseStateEdgeContent, Arc<GSSNode>>;
 type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 
+pub type LLMTokenInfo = Option<LLMTokenBV>;
+
 pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
     fn union_assign(&mut self, other: Self);
     fn intersect_assign(&mut self, right: Self); // Renamed from pop_assign
