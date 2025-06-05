@@ -16,7 +16,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, print_precompute_stats, PrecomputeStats};
 use crate::datastructures::charmap::TrieMap;
-use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, intersect_allowed_terminals_and_prune_arc, TerminalInfo, reset_allowed_terminals};
+use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, intersect_allowed_terminals_and_prune_arc, TerminalInfo, reset_allowed_terminals, prune_disjoint_allowed_terminals};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -1225,8 +1225,8 @@ impl<'a> GrammarConstraintState<'a> {
 
         // Handle allowed terminals
         let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
-
-        for tokenizer_state_id in self.state.keys() {
+        let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
+        for (tokenizer_state_id, state) in self.state.iter_mut() {
             let exec_result = self.parent.tokenizer.execute_from_state(
                 &llm_token_bytes,
                 *tokenizer_state_id,
@@ -1234,9 +1234,15 @@ impl<'a> GrammarConstraintState<'a> {
             if let Some(new_state) = exec_result.end_state {
                 state_map.insert(*tokenizer_state_id, TokenizerStateID(new_state));
             }
+            let mut terminals = TerminalBV::zeros();
+            for token in exec_result.matches {
+                terminals.insert(token.id);
+            }
+            terminals_map.insert(*tokenizer_state_id, terminals);
         }
 
         for state in self.state.values_mut() {
+            prune_disjoint_allowed_terminals(&mut state.active_state.stack, &terminals_map);
             Arc::make_mut(&mut state.active_state.stack).map_allowed_terminals_tokenizer_states(&state_map);
         }
 
@@ -1264,16 +1270,18 @@ impl<'a> GrammarConstraintState<'a> {
                         let new_offset = offset + match_info.width;
                         // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
                         let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
+
+                        let mut allowed_terminals: TerminalInfo = BTreeMap::new();
+                        if let Some(end_state_id) = exec_result.end_state {
+                            let mut allowed_terminals_for_end_state = TerminalBV::max_ones();
+                            // Prevent this token from being matched again.
+                            allowed_terminals_for_end_state.remove(match_info.id);
+                            allowed_terminals.insert(TokenizerStateID(end_state_id), allowed_terminals_for_end_state);
+                        }
+                        intersect_allowed_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &allowed_terminals);
+
                         if new_offset == llm_token_bytes.len() {
-                            reset_allowed_terminals(&mut cloned_glr_s.active_state.stack);
-                            let mut allowed_terminals: TerminalInfo = BTreeMap::new();
-                            if let Some(end_state_id) = exec_result.end_state {
-                                let mut allowed_terminals_for_end_state = TerminalBV::max_ones();
-                                // Prevent this token from being matched again.
-                                allowed_terminals_for_end_state.remove(match_info.id);
-                                allowed_terminals.insert(TokenizerStateID(end_state_id), allowed_terminals_for_end_state);
-                            }
-                            intersect_allowed_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &allowed_terminals);
+                            // reset_allowed_terminals(&mut cloned_glr_s.active_state.stack);
                             new_overall_state.entry(next_tokenizer_id_for_segment).and_modify(|existing| existing.merge_with(cloned_glr_s.clone())).or_insert(cloned_glr_s);
                         } else {
                             processing_queue.entry(new_offset).or_default().entry(next_tokenizer_id_for_segment).and_modify(|existing| existing.merge_with(cloned_glr_s.clone())).or_insert(cloned_glr_s);

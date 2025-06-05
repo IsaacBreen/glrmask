@@ -10,6 +10,7 @@ use std::any::{Any, TypeId};
 use crate::glr::parser::ParseStateEdgeContent;
 use crate::constraint::{LLMTokenBV, TerminalBV};
 use crate::datastructures::gss::acc_mod::Acc;
+use crate::glr::grammar::Terminal;
 use crate::tokenizer::TokenizerStateID;
 use crate::types::TerminalID;
 
@@ -698,6 +699,10 @@ pub fn subtract_allowed_terminals_and_prune_arc(
 }
 
 pub fn reset_allowed_terminals(root_arc: &mut Arc<GSSNode>) {
+    // todo!()
+}
+
+pub fn prune_disjoint_allowed_terminals(root_arc: &mut Arc<GSSNode>, comparison: &TerminalInfo) {
     // todo!()
 }
 
