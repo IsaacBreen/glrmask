@@ -1218,8 +1218,20 @@ impl<'a> GrammarConstraintState<'a> {
         for state in self.state.values_mut() {
             Arc::make_mut(&mut state.active_state.stack).reset_llm_tokens();
         }
-        
-        // 
+
+        // Handle allowed terminals
+        let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+        for tokenizer_state_id in self.state.keys() {
+            let exec_result = self.parent.tokenizer.execute_from_state(
+                &llm_token_bytes,
+                *tokenizer_state_id,
+            );
+            if let Some(new_state) = exec_result.end_state {
+                state_map.insert(*tokenizer_state_id, TokenizerStateID(new_state));
+            }
+        }
+
+
 
         let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
 
