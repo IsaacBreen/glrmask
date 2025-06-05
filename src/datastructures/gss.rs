@@ -131,6 +131,10 @@ pub mod acc_mod {
         pub fn forbidden_terminals(&self) -> &BTreeMap<TokenizerStateID, BTreeSet<TerminalID>> {
             &self.forbidden_terminals
         }
+
+        pub fn is_default(&self) -> bool {
+            self.acc.is_none() && self.forbidden_terminals.is_empty()
+        }
     }
 
     impl PathAccumulator for Acc {
@@ -272,8 +276,8 @@ impl GSSNode {
     }
 
     // Helper to clone the node and set a new accumulator. Used internally.
-    fn with_acc(mut self, acc: LLMTokenInfo) -> Self {
-        *self.acc.acc_mut() = acc;
+    fn with_acc(mut self, acc: Acc) -> Self {
+        self.acc = acc;
         self.hash_key_cache = compute_hash_key(&self.predecessors); // Recalculate hash if acc changes meaning
         self
     }
@@ -333,8 +337,8 @@ impl GSSNode {
             let mut pred_arc = pred_arc.clone();
             // The acc for the path ending at pred_arc (after popping self)
             // is self.acc intersected with pred_arc's original acc.
-            if self.acc.acc().intersect_has_effect(&pred_arc.acc.acc()) {
-                let path_acc = self.acc.acc().clone().intersect(pred_arc.acc.acc().clone());
+            if self.acc.intersect_has_effect(&pred_arc.acc) {
+                let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
                 pred_arc = Arc::new(pred_arc.as_ref().clone().with_acc(path_acc));
             }
             (pred_arc, edge_val.clone())
@@ -345,7 +349,7 @@ impl GSSNode {
     fn push_down_acc(&mut self) {
         for pred_arc_val in self.predecessors.values_mut() { // Renamed pred_arc
             let mut_pred_node = Arc::make_mut(pred_arc_val);
-            mut_pred_node.acc.acc_mut().intersect_assign(self.acc.acc().clone());
+            mut_pred_node.acc.intersect_assign(self.acc.clone());
             // After modifying acc, hash_key_cache might need update if acc is part of it.
             // Current compute_hash_key does not include self.acc, only predecessors.
             // However, if the acc of a predecessor changes, its own hash_key_cache changes.
@@ -357,7 +361,7 @@ impl GSSNode {
     pub fn merge(&mut self, other: &Self) {
         if self == other { return; }
 
-        self.acc.acc_mut().union_assign(other.acc.acc().clone());
+        self.acc.union_assign(other.acc.clone());
 
         for (edge_val, other_pred_arc) in &other.predecessors {
             match self.predecessors.entry(edge_val.clone()) {
@@ -415,7 +419,7 @@ impl GSSNode {
 impl Hash for GSSNode {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.hash_key_cache.hash(state);
-        self.acc.acc().hash(state); // Accumulator should be part of the hash for equality
+        self.acc.hash(state); // Accumulator should be part of the hash for equality
     }
 }
 
@@ -423,7 +427,7 @@ impl PartialEq for GSSNode {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self, other) || (
             self.hash_key_cache == other.hash_key_cache && // Structural hash
-            self.acc.acc() == other.acc.acc() && // Accumulator equality
+            self.acc == other.acc && // Accumulator equality
             self.predecessors == other.predecessors // Deep predecessor equality
         )
     }
@@ -436,7 +440,7 @@ impl PartialOrd for GSSNode {
         if std::ptr::eq(self, other) { return Some(Ordering::Equal); }
         // Order by hash_key_cache, then acc, then predecessors
         self.hash_key_cache.partial_cmp(&other.hash_key_cache)
-            .and_then(|ord| if ord == Ordering::Equal { self.acc.acc().partial_cmp(&other.acc.acc()) } else { Some(ord) })
+            .and_then(|ord| if ord == Ordering::Equal { self.acc.partial_cmp(&other.acc) } else { Some(ord) })
             .and_then(|ord| if ord == Ordering::Equal { self.predecessors.partial_cmp(&other.predecessors) } else { Some(ord) })
     }
 }
@@ -445,7 +449,7 @@ impl Ord for GSSNode {
     fn cmp(&self, other: &Self) -> Ordering {
         if std::ptr::eq(self, other) { return Ordering::Equal; }
         self.hash_key_cache.cmp(&other.hash_key_cache)
-            .then_with(|| self.acc.acc().cmp(&other.acc.acc()))
+            .then_with(|| self.acc.cmp(&other.acc))
             .then_with(|| self.predecessors.cmp(&other.predecessors))
     }
 }
