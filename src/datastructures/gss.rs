@@ -99,16 +99,20 @@ fn compute_hash_key(predecessors: &NodeMap) -> u64 {
 }
 
 pub mod acc_mod {
+    use std::collections::{BTreeMap, BTreeSet};
     use crate::datastructures::gss::{LLMTokenInfo, PathAccumulator};
+    use crate::tokenizer::TokenizerStateID;
+    use crate::types::TerminalID;
 
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Acc {
-        acc: LLMTokenInfo
+        acc: LLMTokenInfo,
+        forbidden_terminals: BTreeMap<TokenizerStateID, BTreeSet<TerminalID>>,
     }
 
     impl Acc {
         pub fn new(acc: LLMTokenInfo) -> Self {
-            Self { acc }
+            Self { acc, forbidden_terminals: BTreeMap::new() }
         }
 
         pub fn acc(&self) -> &LLMTokenInfo {
