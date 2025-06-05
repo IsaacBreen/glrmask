@@ -8,9 +8,8 @@ use deterministic_hash::DeterministicHasher;
 use std::any::{Any, TypeId};
 
 use crate::glr::parser::ParseStateEdgeContent;
-use crate::constraint::{LLMTokenBV};
+use crate::constraint::{LLMTokenBV, TerminalBV};
 use crate::datastructures::gss::acc_mod::Acc;
-use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::tokenizer::TokenizerStateID;
 
 // Type aliases for cleaner signatures, now concrete
@@ -19,7 +18,7 @@ type NodeMap = BTreeMap<ParseStateEdgeContent, Arc<GSSNode>>;
 type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 
 pub type LLMTokenInfo = Option<LLMTokenBV>;
-pub type TerminalBV = Option<HybridBitset>;
+pub type TerminalInfo = Option<TerminalBV>;
 
 pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
     fn union_assign(&mut self, other: Self);
@@ -103,9 +102,8 @@ fn compute_hash_key(predecessors: &NodeMap) -> u64 {
 
 pub mod acc_mod {
     use std::collections::{BTreeMap, BTreeSet};
-    use crate::constraint::LLMTokenBV;
-    use crate::datastructures::gss::{LLMTokenInfo, PathAccumulator, TerminalBV};
-    use crate::datastructures::hybrid_bitset::HybridBitset;
+    use crate::constraint::{LLMTokenBV, TerminalBV};
+    use crate::datastructures::gss::{LLMTokenInfo, PathAccumulator, TerminalInfo};
     use crate::glr::grammar::Symbol::Terminal;
     use crate::tokenizer::TokenizerStateID;
     use crate::types::TerminalID;
@@ -113,16 +111,16 @@ pub mod acc_mod {
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Acc {
         acc: LLMTokenInfo,
-        allowed_terminals: TerminalBV,
+        allowed_terminals: TerminalInfo,
     }
 
     impl Acc {
-        pub fn new(acc: LLMTokenInfo, allowed_terminals: TerminalBV) -> Self {
+        pub fn new(acc: LLMTokenInfo, allowed_terminals: TerminalInfo) -> Self {
             Self { acc, allowed_terminals }
         }
 
         pub fn new_for_merging() -> Self {
-            Self { acc: Some(LLMTokenBV::zeros()), allowed_terminals: Some(HybridBitset::zeros()) }
+            Self { acc: Some(LLMTokenBV::zeros()), allowed_terminals: Some(TerminalBV::zeros()) }
         }
 
         pub fn acc(&self) -> &LLMTokenInfo {
@@ -133,7 +131,7 @@ pub mod acc_mod {
             &mut self.acc
         }
 
-        pub fn allowed_terminals(&self) -> &TerminalBV {
+        pub fn allowed_terminals(&self) -> &TerminalInfo {
             &self.allowed_terminals
         }
 
@@ -627,7 +625,7 @@ pub fn reset_llm_tokens(root_arc: &mut Arc<GSSNode>) {
 
 pub fn intersect_allowed_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
-    allowed_terminals: &HybridBitset
+    allowed_terminals: &TerminalBV
 ) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
@@ -653,7 +651,7 @@ pub fn intersect_allowed_terminals_and_prune_arc(
 
 pub fn subtract_allowed_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
-    allowed_terminals: &HybridBitset
+    allowed_terminals: &TerminalBV
 ) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
@@ -661,7 +659,7 @@ pub fn subtract_allowed_terminals_and_prune_arc(
             *bv -= allowed_terminals;
         } else {
             // new_acc = Acc::new(Some(LLMTokenBV::max_ones() - llm_tokens.clone()), current_acc.allowed_terminals().clone());
-            new_acc = Acc::new(current_acc.acc().clone(), Some(HybridBitset::max_ones() - allowed_terminals.clone()));
+            new_acc = Acc::new(current_acc.acc().clone(), Some(TerminalBV::max_ones() - allowed_terminals.clone()));
         }
         if new_acc.is_alive() {
             Some((new_acc, false))
@@ -791,7 +789,7 @@ impl GSSNode {
 
     pub fn intersect_allowed_terminals_and_prune_arc(
         &mut self,
-        allowed_terminals: &HybridBitset,
+        allowed_terminals: &TerminalBV,
     ) {
         let mut node_arc = Arc::new(self.clone());
         intersect_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals);
@@ -800,7 +798,7 @@ impl GSSNode {
 
     pub fn subtract_allowed_terminals_and_prune_arc(
         &mut self,
-        allowed_terminals: &HybridBitset,
+        allowed_terminals: &TerminalBV,
     ) {
         let mut node_arc = Arc::new(self.clone());
         subtract_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals);

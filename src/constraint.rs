@@ -33,7 +33,8 @@ use crate::datastructures::gss::acc_mod::Acc;
 use crate::glr::analyze::{compute_nullable_nonterminals, compute_terminal_follow_sets};
 
 pub type LLMTokenBV = HybridBitset;
-pub type GrammarTokenBV = BitVec;
+pub type TerminalBV = HybridBitset;
+
 
 const MERGE_THRESHOLD: usize = 10;
 
