@@ -169,15 +169,12 @@ pub mod acc_mod {
                     return true;
                 }
             }
-            if !self.allowed_terminals.is_empty() {
-                for allowed_terminals in self.allowed_terminals.values() {
-                    if !allowed_terminals.is_empty() {
-                        return false;
-                    }
+            for allowed_terminals in self.allowed_terminals.values() {
+                if !allowed_terminals.is_empty() {
+                    return false;
                 }
-                return true;
             }
-            false
+            true
         }
 
         pub fn is_alive(&self) -> bool {
