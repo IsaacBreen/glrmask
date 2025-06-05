@@ -105,6 +105,10 @@ pub mod acc_mod {
     }
 
     impl Acc {
+        pub fn new(acc: LLMTokenInfo) -> Self {
+            Self { acc }
+        }
+
         pub fn acc(&self) -> &LLMTokenInfo {
             &self.acc
         }
@@ -180,13 +184,13 @@ impl GSSNode {
     pub fn new(acc: LLMTokenInfo) -> Self {
         let predecessors = NodeMap::new();
         let hash_key_cache = compute_hash_key(&predecessors);
-        Self { acc: acc_mod::Acc { acc }, predecessors, hash_key_cache }
+        Self { acc: acc_mod::Acc::new(acc), predecessors, hash_key_cache }
     }
     
     // Private constructor used by simplification and other internal methods
     fn new_with_map(acc: LLMTokenInfo, predecessors: NodeMap) -> Self {
         let hash_key_cache = compute_hash_key(&predecessors);
-        Self { acc: acc_mod::Acc { acc }, predecessors, hash_key_cache }
+        Self { acc: acc_mod::Acc::new(acc), predecessors, hash_key_cache }
     }
 
     // Helper to create a GSSNode with a single predecessor, used by push.
