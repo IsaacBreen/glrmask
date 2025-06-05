@@ -1178,7 +1178,7 @@ impl<'a> GrammarConstraintState<'a> {
 
 
                 if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
-                    let glr_active_tokens = final_glr_s.active_state.stack.acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                    let glr_active_tokens = final_glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
                     let mask_contribution = &glr_active_tokens & clean_end_bv;
                     final_mask_internal |= mask_contribution;
                 }
@@ -1188,7 +1188,7 @@ impl<'a> GrammarConstraintState<'a> {
                     temp_glr_s_for_finalizer_step.step(*grammar_token);
 
                     if temp_glr_s_for_finalizer_step.is_ok() {
-                        let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                        let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
                         let mask_contribution = &glr_active_after_step & &finalizer.content;
                         final_mask_internal |= &mask_contribution;
                     }

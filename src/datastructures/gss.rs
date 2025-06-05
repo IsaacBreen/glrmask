@@ -9,7 +9,7 @@ use std::any::{Any, TypeId};
 
 use crate::glr::parser::ParseStateEdgeContent;
 use crate::constraint::{LLMTokenBV};
-
+use crate::datastructures::gss::acc_mod::Acc;
 
 // Type aliases for cleaner signatures, now concrete
 type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
@@ -131,6 +131,12 @@ pub mod acc_mod {
             self.acc.intersect_has_effect(&right.acc)
         }
     }
+
+    impl Default for Acc {
+        fn default() -> Self {
+            Self::new(LLMTokenInfo::default())
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -195,25 +201,24 @@ fn process_predecessors(
 
 // Basic node creation and manipulation
 impl GSSNode {
-    pub fn new(acc: LLMTokenInfo) -> Self {
+    pub fn new(acc: Acc) -> Self {
         let predecessors = NodeMap::new();
         let hash_key_cache = compute_hash_key(&predecessors);
-        Self { acc: acc_mod::Acc::new(acc), predecessors, hash_key_cache }
+        Self { acc, predecessors, hash_key_cache }
     }
     
     // Private constructor used by simplification and other internal methods
-    fn new_with_map(acc: LLMTokenInfo, predecessors: NodeMap) -> Self {
+    fn new_with_map(acc: Acc, predecessors: NodeMap) -> Self {
         let hash_key_cache = compute_hash_key(&predecessors);
-        Self { acc: acc_mod::Acc::new(acc), predecessors, hash_key_cache }
+        Self { acc, predecessors, hash_key_cache }
     }
 
     // Helper to create a GSSNode with a single predecessor, used by push.
-    fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, acc: LLMTokenInfo) -> Self {
+    fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, acc: Acc) -> Self {
         let mut predecessors_map = NodeMap::new();
         predecessors_map.insert(edge_value, predecessor_arc);
         Self::new_with_map(acc, predecessors_map)
     }
-
 
     fn predecessors_with_values(&self) -> impl IntoIterator<Item = (&Arc<Self>, &ParseStateEdgeContent)> {
         self.predecessors.iter().map(|(edge_val, pred_arc)| (pred_arc, edge_val))
@@ -231,8 +236,20 @@ impl GSSNode {
         self.predecessors.is_empty()
     }
 
-    pub fn acc(&self) -> &LLMTokenInfo {
+    pub fn acc_acc(&self) -> &LLMTokenInfo {
         &self.acc.acc()
+    }
+
+    pub fn acc_acc_mut(&mut self) -> &mut LLMTokenInfo {
+        self.acc.acc_mut()
+    }
+
+    pub fn acc(&self) -> &Acc {
+        &self.acc
+    }
+
+    pub fn acc_mut(&mut self) -> &mut Acc {
+        &mut self.acc
     }
 
     // Helper to clone the node and set a new accumulator. Used internally.
@@ -256,19 +273,19 @@ impl GSSNode {
     // If pop_into is essential, it would need to return a new Self or take &mut Self and manage acc carefully.
 
     pub fn pop(&self) -> Self {
-        let mut result_acc = Some(LLMTokenBV::new());
+        let mut result_acc = Acc::new(Some(LLMTokenBV::new()));
         let mut result_predecessors = NodeMap::new();
 
         for (pred_arc, _edge_val) in self.predecessors_with_values() {
             // The acc of the path *through* self to pred_arc is self.acc intersected with pred_arc.acc
-            let path_acc = self.acc.acc().clone().intersect(pred_arc.acc.acc().clone());
+            let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
             result_acc.union_assign(path_acc.clone()); // Union accs of all popped paths
 
             // Merge predecessors of pred_arc into result_predecessors
             // Each merged predecessor needs its acc updated based on path_acc
             for (inner_edge, inner_pred_arc) in &pred_arc.predecessors {
                 let mut new_inner_pred_node_data = (**inner_pred_arc).clone();
-                *new_inner_pred_node_data.acc.acc_mut() = path_acc.clone().intersect(inner_pred_arc.acc.acc().clone());
+                new_inner_pred_node_data.acc = path_acc.clone().intersect(inner_pred_arc.acc.clone());
 
                 match result_predecessors.entry(inner_edge.clone()) {
                     std::collections::btree_map::Entry::Vacant(entry) => {
@@ -428,14 +445,14 @@ impl Drop for GSSNode {
 
 // Simplified trait for GSS operations
 pub trait GSSTrait { // No longer generic
-    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: LLMTokenInfo) -> GSSNode;
+    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: Acc) -> GSSNode;
     // push_to is removed as it's complex with private acc_mut and less idiomatic with Arc.
     fn pop(&self) -> GSSNode;
     fn popn(&self, n: usize) -> GSSNode;
 }
 
 impl GSSTrait for GSSNode {
-    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: LLMTokenInfo) -> GSSNode {
+    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: Acc) -> GSSNode {
         self.clone().push(edge_value, acc_for_new_node)
     }
 
@@ -449,7 +466,7 @@ impl GSSTrait for GSSNode {
 }
 
 impl GSSTrait for Arc<GSSNode> {
-    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: LLMTokenInfo) -> GSSNode {
+    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: Acc) -> GSSNode {
         GSSNode::new_with_single_predecessor(self.clone(), edge_value, acc_for_new_node)
     }
 
@@ -1023,13 +1040,13 @@ mod tests {
         assert_eq!(edge10.state_id.0, 10, "Edge from A1 should be 10");
 
         // Accumulator of A1 should remain as it was.
-        assert_eq!(s_a1.acc(), &acc_a1, "A1 accumulator mismatch");
+        assert_eq!(s_a1.acc_acc(), &acc_a1, "A1 accumulator mismatch");
 
         // The merged_b1_d2_node is the result of B1 and D2 paths.
         // Its acc should be the union of B1's original acc and D2's original acc.
         // B1's original acc was acc_base. D2's original acc was acc_other.
         let expected_merged_acc = acc_base.clone().union(acc_other.clone());
-        assert_eq!(merged_b1_d2_node.acc(), &expected_merged_acc, "Merged B1/D2 node accumulator mismatch");
+        assert_eq!(merged_b1_d2_node.acc_acc(), &expected_merged_acc, "Merged B1/D2 node accumulator mismatch");
 
         // Structure of merged_b1_d2_node:
         // It should have two distinct predecessor edges:
@@ -1042,21 +1059,21 @@ mod tests {
 
         // Check acc of s_c1_via_b1 (this is the simplified C1)
         // Original C1's acc was acc_base.
-        assert_eq!(s_c1_via_b1.acc(), &acc_base, "Simplified C1 accumulator mismatch");
+        assert_eq!(s_c1_via_b1.acc_acc(), &acc_base, "Simplified C1 accumulator mismatch");
         // Structure of s_c1_via_b1: edge 30 to simplified D1
         assert_eq!(s_c1_via_b1.predecessors.len(), 1);
         let (_edge30, s_d1_via_c1) = s_c1_via_b1.predecessors.iter().next().unwrap();
-        assert_eq!(s_d1_via_c1.acc(), &acc_base, "Simplified D1 accumulator mismatch");
+        assert_eq!(s_d1_via_c1.acc_acc(), &acc_base, "Simplified D1 accumulator mismatch");
         // Structure of s_d1_via_c1: edge 40 to simplified N4 (v1)
         assert_eq!(s_d1_via_c1.predecessors.len(), 1);
         let (_edge40_d1, s_n4_v1_via_d1) = s_d1_via_c1.predecessors.iter().next().unwrap();
-        assert_eq!(s_n4_v1_via_d1.acc(), &acc_base, "Simplified N4_v1 accumulator mismatch");
+        assert_eq!(s_n4_v1_via_d1.acc_acc(), &acc_base, "Simplified N4_v1 accumulator mismatch");
         assert!(s_n4_v1_via_d1.predecessors.is_empty(), "Simplified N4_v1 should be a leaf");
 
 
         // Check acc of s_n4_via_d2 (this is the simplified N4 from D2's path)
         // Original N4 from D2's path (n4_v2) had acc_other.
-        assert_eq!(s_n4_via_d2.acc(), &acc_other, "Simplified N4_v2 accumulator mismatch");
+        assert_eq!(s_n4_via_d2.acc_acc(), &acc_other, "Simplified N4_v2 accumulator mismatch");
         assert!(s_n4_via_d2.predecessors.is_empty(), "Simplified N4_v2 should be a leaf");
         
         // Crucially, s_n4_v1_via_d1 and s_n4_via_d2 should point to different Arc<GSSNode> instances

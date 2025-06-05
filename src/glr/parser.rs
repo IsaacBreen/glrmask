@@ -15,6 +15,7 @@ use std::sync::Arc;
 use crate::debug;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
+use crate::datastructures::gss::acc_mod::Acc;
 
 pub trait DynEq {
     fn dyn_eq(&self, other: &dyn Any) -> bool;
@@ -112,7 +113,7 @@ pub struct ParseState { // No longer generic
 
 impl ParseState {
     pub fn new() -> Self {
-        ParseState { stack: Arc::new(GSSNode::new(LLMTokenInfo::default())) }
+        ParseState { stack: Arc::new(GSSNode::new(Acc::default())) }
     }
 }
 
@@ -270,7 +271,7 @@ impl GLRParser {
     }
 
     pub fn init_glr_parser(&self) -> GLRParserState { // No longer generic
-        self.init_glr_parser_with_acc(LLMTokenInfo::default())
+        self.init_glr_parser_with_acc(Acc::default())
     }
 
     pub fn init_glr_parser_null(&self) -> GLRParserState { // No longer generic
@@ -282,7 +283,7 @@ impl GLRParser {
         }
     }
 
-    pub fn init_glr_parser_with_acc(&self, initial_acc: LLMTokenInfo) -> GLRParserState { // No longer generic
+    pub fn init_glr_parser_with_acc(&self, initial_acc: Acc) -> GLRParserState { // No longer generic
         let initial_parse_state = self.init_parse_state_with_acc(initial_acc);
         GLRParserState {
             parser: self,
@@ -301,10 +302,10 @@ impl GLRParser {
     }
 
     pub fn init_parse_state(&self) -> ParseState { // No longer generic
-        self.init_parse_state_with_acc(LLMTokenInfo::default())
+        self.init_parse_state_with_acc(Acc::default())
     }
 
-    pub fn init_parse_state_with_acc(&self, initial_acc: LLMTokenInfo) -> ParseState { // No longer generic
+    pub fn init_parse_state_with_acc(&self, initial_acc: Acc) -> ParseState { // No longer generic
         let initial_user_data: Arc<dyn UserDataTrait> = Arc::new(());
         let initial_content = ParseStateEdgeContent {
             state_id: self.start_state_id,
@@ -449,7 +450,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         &self,
         stack: &Arc<GSSNode>, 
         new_content: ParseStateEdgeContent,
-        acc_for_new_node: LLMTokenInfo,
+        acc_for_new_node: Acc,
     ) -> ParseState {
         let new_gss_node_instance = stack.push(new_content, acc_for_new_node);
         ParseState { stack: Arc::new(new_gss_node_instance) }
@@ -468,7 +469,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         } else {
             Arc::new(edge_src.popn(len - 1))
         };
-        let mut out = GSSNode::new(Some(LLMTokenBV::new())); // Start with a default acc
+        let mut out = GSSNode::new(Acc::new(Some(LLMTokenBV::new()))); // Start with a default acc
         crate::debug!(4, "Popped with {} predecessors...", parent_gss_node.num_predecessors());
 
         for (predecessor_arc, edge_value) in parent_gss_node.pop_iter() { // Renamed predecessor to predecessor_arc
