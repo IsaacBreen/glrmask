@@ -11,3 +11,4 @@ mod tests_apr25;
 mod multi_dfa;
 mod test_constraint;
 pub mod json_serialization;
+mod test_constraint_python;
