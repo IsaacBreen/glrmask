@@ -725,11 +725,9 @@ pub fn prune_disallowed_terminals(root_arc: &mut Arc<GSSNode>, terminals_map: &T
             assert_eq!(gss_allowed_bv, &TerminalBV::max_ones());
         }
         for (gss_state_id, gss_allowed_bv) in current_acc.allowed_terminals() {
-            if let Some(allowed_bv_for_state) = terminals_map.get(gss_state_id) {
-                let disallowed_bv_for_state = allowed_bv_for_state.inverted();
-                if !(gss_allowed_bv & &disallowed_bv_for_state).is_empty() {
-                    dbg!(allowed_bv_for_state);
-                    dbg!(&gss_allowed_bv, &disallowed_bv_for_state, &(gss_allowed_bv & &disallowed_bv_for_state));
+            let gss_disallowed_bv = gss_allowed_bv.inverted();
+            if let Some(actual_bv_for_state) = terminals_map.get(gss_state_id) {
+                if !(&gss_disallowed_bv & actual_bv_for_state).is_empty() {
                     return None;
                 }
             }
