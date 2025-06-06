@@ -115,7 +115,6 @@ pub fn allowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalIn
 }
 
 pub fn allowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-    return;
     let mut common_keys = BTreeSet::new();
     common_keys.extend(left.keys());
     common_keys.extend(right.keys());
