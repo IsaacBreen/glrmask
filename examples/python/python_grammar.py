@@ -159,10 +159,14 @@ def define_tokens() -> list[tuple[str, Any]]:
         seq([eat_u8(ord("'")), rep(choice([eat_u8_negation(ord("'")), eat('\'')])), eat_u8(ord("'"))]),
     ])
     tokens["FSTRING_START"] = choice([
+        eat('"'),
+        eat("'"),
         eat('"""'),
         eat("'''"),
     ])
     tokens["FSTRING_END"] = choice([
+        eat('"'),
+        eat("'"),
         eat('"""'),
         eat("'''"),
     ])
