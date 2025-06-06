@@ -657,7 +657,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // let full_text_to_tokenize = "import os";
     // f-strings
     // let full_text_to_tokenize = "x = f'hi!'\n";
-    let full_text_to_tokenize = "x = f'hi{x}'\n";
+    // let full_text_to_tokenize = "x = f'hi{x}'\n";
 
     // Tokenize the full_text_to_tokenize using the VocabPrefixTree
     let mut test_token_sequence_ids = Vec::new();
