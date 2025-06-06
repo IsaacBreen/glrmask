@@ -11883,7 +11883,7 @@
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "FSTRING_START[0]",
+                    "value": "FSTRING_END[0]",
                     "variant": "Terminal"
                 }
             ]
@@ -12930,6 +12930,72 @@
                 "q_type": "OneOrMore",
                 "variant": "Quantifier"
             },
+            96
+        ],
+        [
+            {
+                "exprs": [
+                    {
+                        "bytes": [
+                            34
+                        ],
+                        "variant": "U8Seq"
+                    },
+                    {
+                        "bytes": [
+                            39
+                        ],
+                        "variant": "U8Seq"
+                    },
+                    {
+                        "exprs": [
+                            {
+                                "bytes": [
+                                    34
+                                ],
+                                "variant": "U8Seq"
+                            },
+                            {
+                                "bytes": [
+                                    34
+                                ],
+                                "variant": "U8Seq"
+                            },
+                            {
+                                "bytes": [
+                                    34
+                                ],
+                                "variant": "U8Seq"
+                            }
+                        ],
+                        "variant": "Seq"
+                    },
+                    {
+                        "exprs": [
+                            {
+                                "bytes": [
+                                    39
+                                ],
+                                "variant": "U8Seq"
+                            },
+                            {
+                                "bytes": [
+                                    39
+                                ],
+                                "variant": "U8Seq"
+                            },
+                            {
+                                "bytes": [
+                                    39
+                                ],
+                                "variant": "U8Seq"
+                            }
+                        ],
+                        "variant": "Seq"
+                    }
+                ],
+                "variant": "Choice"
+            },
             95
         ],
         [
@@ -13326,7 +13392,7 @@
                 ],
                 "variant": "Seq"
             },
-            96
+            97
         ],
         [
             {
@@ -14625,8 +14691,12 @@
             92
         ],
         [
-            "FSTRING_MIDDLE[0]",
+            "FSTRING_END[0]",
             95
+        ],
+        [
+            "FSTRING_MIDDLE[0]",
+            96
         ],
         [
             "FSTRING_START[0]",
@@ -14658,7 +14728,7 @@
         ],
         [
             "TYPE_COMMENT[0]",
-            96
+            97
         ]
     ]
 }
