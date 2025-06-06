@@ -519,6 +519,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     //     full_text_to_tokenize.push_str("*"); // Causes stack overflow
     //     // full_text_to_tokenize.push_str("+"); // Causes major slowdown
     // }
+    let full_text_to_tokenize = "import os\nimport sys";
+    //     let full_text_to_tokenize = "# Top-level comment, challenging parser start\nimport os";
 
     // Tokenize the full_text_to_tokenize using the VocabPrefixTree
     let mut test_token_sequence_ids = Vec::new();
