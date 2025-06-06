@@ -527,6 +527,7 @@ if __name__ == "__main__":
     print(f"After '{input_text}': valid={parser_state.is_valid()}")
     assert parser_state.is_valid()
     print("--- End Incremental Parser Demo ---")
+    exit()
 
 
     print("Initializing grammar constraint...")
