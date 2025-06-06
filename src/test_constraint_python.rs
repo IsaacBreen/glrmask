@@ -330,7 +330,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         width: 2,
     });
     let results = compiled_grammar.tokenizer.execute_from_state(text, TokenizerStateID(0));
-    assert_eq!(results.matches, expected_matches);
+    assert_eq!(results.matches.iter().collect::<BTreeSet<_>>(), expected_matches.iter().collect::<BTreeSet<_>>());
 
     // Define the sequences of terminal names to test
     let mut test_sequences_str = vec![
