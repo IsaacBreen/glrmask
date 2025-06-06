@@ -2659,24 +2659,22 @@ system:
 
     You are a helpful assistant.
     Respond in markdown format.
-    If asked for full code, provide it.
-    Otherwise, don't write the full code (it's too long); instead, give detailed, step-by-step instructions for modifying the code. Be very specific.
-    Do NOT write diffs (git-style or otherwise) or patches unless explicitly asked to do so.
-    A git diff uses "+" or "-" at the start lines. Do NOT use "+" or "-" at the start of any line (unless incidental and not part of a git diff).
-    Explain exactly what changes to make, line by line if needed, so the instructions are clear even without conversation context.
+    Respond with a git diff patch for each modified or added files. Use the ```diff markdown code block.
+    One diff code block per file. Do not attempt to combine multiple all changes into one diff with multiple files.
+    Include filenames in the diff code block, e.g. "diff --git a/file.py b/file.py".
     Avoid asking the user to clear their caches or do local configuration related stuff. That's rarely the cause of errors.
     If you ask them, and they reply with a compilation error, assume they've already done everything you suggested and move on.
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - o3
+    - copy-one/paste
   code_completion_model:
     - gemini/gemini-2.5-flash-preview-05-20
   commit_message_model:
     - gemini/gemini-2.5-flash-preview-05-20
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: llm
+  apply_mode: git
 messages:
   - user: |-
       ```rust 'src/test_constraint_python.rs'
@@ -4012,155 +4010,180 @@ messages:
       Each iteration, I want to print some context (maybe a few lines before and after), and something that clearly shows somehow the current position in the text.
     metadata:
   - assistant: |-
-      Below is a “surgical” recipe for augmenting the existing logging so that, on every iteration of the  
-      for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() loop, you will also print a
-      nicely-formatted excerpt of the original input that shows
+      Okay, I can help you add a context display to your test loop. This will involve:
 
-      • a few whole lines of source text before the current token,  
-      • the current token itself (highlighted),  
-      • a few lines after it,  
-      • and an underline caret bar pointing at the exact byte span of the token.
+      1.  Defining a helper function `print_token_context` that takes the full text, the list of lines, the start and end byte offsets of the current token, and the number of context lines to show.
+      2.  Calculating the line and column information for the token's start and end.
+      3.  Printing the relevant lines of text, and for lines spanned by the token, printing an indicator (`^`) underneath the token's portion on that line.
 
-      Nothing else in the file needs to change.
+      Here's the diff:
 
-      --------------------------------------------------------------------
-      1.  Add a helper that prints context
-      --------------------------------------------------------------------
-      Put this somewhere near the top-level of the test module (anywhere
-      outside other fn bodies is fine).
+      ```diff
+      --- a/src/test_constraint_python.rs
+      +++ b/src/test_constraint_python.rs
+      @@ -174,6 +174,91 @@
+           Ok(())
+       }
+       
+      +/// Helper function to print context around a token in a larger text.
+      +fn print_token_context(
+      +    full_text: &str, // Used for end-of-text checks
+      +    all_lines: &[&str], // Pre-split lines of the full_text
+      +    token_start_global_byte: usize,
+      +    token_end_global_byte: usize, // Exclusive end
+      +    context_lines_count: usize,   // Number of lines before and after
+      +) {
+      +    if all_lines.is_empty() {
+      +        // Should ideally not happen if full_text led to tokenization,
+      +        // but handles empty full_text case.
+      +        // Note: `"".lines().collect::<Vec<_>>()` is `[""]`.
+      +        println!("    Context: (empty or malformed input lines)");
+      +        println!("    ----");
+      +        return;
+      +    }
+      +
+      +    let mut current_scan_byte_offset = 0;
+      +    let mut token_start_line_idx = 0;
+      +    let mut token_start_col_byte_in_line = 0;
+      +    let mut token_end_line_idx = 0;
+      +    let mut token_end_col_byte_in_line = 0;
+      +
+      +    // Determine start line and column
+      +    let mut found_start_line = false;
+      +    for (idx, line_content) in all_lines.iter().enumerate() {
+      +        let line_start_byte_offset = current_scan_byte_offset;
+      +        let line_content_end_byte_offset = line_start_byte_offset + line_content.len();
+      +
+      +        if !found_start_line && token_start_global_byte >= line_start_byte_offset && token_start_global_byte <= line_content_end_byte_offset {
+      +            token_start_line_idx = idx;
+      +            token_start_col_byte_in_line = token_start_global_byte - line_start_byte_offset;
+      +            found_start_line = true;
+      +            // Do not break, continue to find end line in the same pass if possible, or for next pass's cbo
+      +        }
+      +
+      +        current_scan_byte_offset += line_content.len();
+      +        if idx < all_lines.len() - 1 {
+      +            current_scan_byte_offset += 1; // Account for '\n'
+      +        }
+      +    }
+      +
+      +    // Determine end line and column
+      +    current_scan_byte_offset = 0;
+      +    for (idx, line_content) in all_lines.iter().enumerate() {
+      +        let line_start_byte_offset = current_scan_byte_offset;
+      +        let line_content_end_byte_offset = line_start_byte_offset + line_content.len();
+      +
+      +        // Token ends on this line if its end byte falls within this line's content
+      +        if token_end_global_byte > line_start_byte_offset && token_end_global_byte <= line_content_end_byte_offset {
+      +            token_end_line_idx = idx;
+      +            token_end_col_byte_in_line = token_end_global_byte - line_start_byte_offset;
+      +            break;
+      +        }
+      +        // Token ends exactly at the newline character after this line's content
+      +        if idx < all_lines.len() - 1 && token_end_global_byte == line_content_end_byte_offset + 1 {
+      +            token_end_line_idx = idx;
+      +            token_end_col_byte_in_line = line_content.len(); // Covers the entire content part of the line
+      +            break;
+      +        }
+      +
+      +        current_scan_byte_offset += line_content.len();
+      +        if idx < all_lines.len() - 1 {
+      +            current_scan_byte_offset += 1; // Account for '\n'
+      +        }
+      +    }
+      +     // If token goes to the very end of the file and file doesn't end with newline
+      +    if token_end_global_byte == full_text.len() && !full_text.ends_with('\n') && !full_text.is_empty() {
+      +        token_end_line_idx = all_lines.len() - 1;
+      +        token_end_col_byte_in_line = all_lines.last().map_or(0, |s| s.len());
+      +    }
+      +
+      +
+      +    let display_start_line = token_start_line_idx.saturating_sub(context_lines_count);
+      +    let display_end_line = (token_end_line_idx + context_lines_count).min(all_lines.len().saturating_sub(1));
+      +
+      +    println!("    Context Highlight (Token bytes [{}, {})):", token_start_global_byte, token_end_global_byte);
+      +    for i in display_start_line..=display_end_line {
+      +        let line_content = all_lines[i];
+      +        println!("{:5} | {}", i + 1, line_content); // 1-indexed line numbers
+      +
+      +        if i >= token_start_line_idx && i <= token_end_line_idx {
+      +            let start_col = if i == token_start_line_idx { token_start_col_byte_in_line } else { 0 };
+      +            let end_col = if i == token_end_line_idx { token_end_col_byte_in_line } else { line_content.len() };
+      +            
+      +            let effective_start_col = start_col.min(line_content.len());
+      +            let effective_end_col = end_col.min(line_content.len()).max(effective_start_col);
+      +
+      +            if effective_end_col > effective_start_col {
+      +                let prefix = " ".repeat(effective_start_col);
+      +                let carets = "^".repeat(effective_end_col - effective_start_col);
+      +                println!("      | {}{}", prefix, carets);
+      +            } else if token_start_global_byte == token_end_global_byte && i == token_start_line_idx && effective_start_col <= line_content.len() { // Empty token
+      +                let prefix = " ".repeat(effective_start_col);
+      +                println!("      | {}{}", prefix, "^");
+      +            }
+      +        }
+      +    }
+      +    println!("    ------------------------------------------");
+      +}
+      +
+       #[test]
+       fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
+           // 1. Define file path for the serialized CompiledGrammar
+      @@ -430,6 +515,8 @@
+           // Initial step to populate possibilities
+           let initial_mask = constraint_state.get_mask();
+           println!("\nInitial mask obtained ({} allowed LLM tokens).", initial_mask.iter_bits().count());
+      +    let all_code_lines: Vec<&str> = full_text_to_tokenize.lines().collect();
+      +    let mut current_text_byte_offset = 0;
+       
+           println!("\nStepping through the token sequence with GrammarConstraint:");
+           for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
+      @@ -437,12 +524,24 @@
+               let current_token_str = &tokenized_strs_for_logging[i];
+               println!(
+                   "Processing token {}/{}: {:?} (LLMTokenID({}))",
+      -            i + 1,
+      +            i + 1, // 1-indexed for display
+                   test_token_sequence_ids.len(),
+                   current_token_str,
+                   llm_token_id.0
+               );
+       
+      +        // Display context
+      +        let token_start_byte_in_full_text = current_text_byte_offset;
+      +        let token_end_byte_in_full_text = current_text_byte_offset + current_token_str.as_bytes().len();
+      +        print_token_context(
+      +            &full_text_to_tokenize,
+      +            &all_code_lines,
+      +            token_start_byte_in_full_text,
+      +            token_end_byte_in_full_text,
+      +            2, // Show 2 lines before and 2 lines after
+      +        );
+      +
+      +
+               assert!(
+                   constraint_state.is_active(),
+                   "Constraint state should be active before processing token {} ('{}')",
+      @@ -476,6 +575,9 @@
+                   i + 1, current_token_str
+               );
+               println!("  Constraint state is active after commit.");
+      +
+      +        // Update current_text_byte_offset for the next iteration
+      +        current_text_byte_offset = token_end_byte_in_full_text;
+           }
+       
+           println!("\nFinished processing token sequence with GrammarConstraint.");
 
-      ```rust
-      /// Pretty-print a few lines of context around the byte range
-      /// [token_start, token_end) inside `source`.
-      fn print_source_context(source: &str, token_start: usize, token_end: usize, context_lines: usize) {
-          // 1. Work out (line_no, column_no) of token_start.
-          //    line_no is 0-based here, will add 1 when printing.
-          let mut line_no = 0usize;
-          let mut line_start_byte = 0usize;
-          for (idx, ch) in source.char_indices() {
-              if idx >= token_start {
-                  break;
-              }
-              if ch == '\n' {
-                  line_no += 1;
-                  line_start_byte = idx + 1;        // first byte after '\n'
-              }
-          }
-          let column_no = token_start - line_start_byte;
-
-          // 2. Collect the lines we want to display.
-          //    Split once to avoid allocation in every loop.
-          let all_lines: Vec<&str> = source.lines().collect();
-          let first_line_to_show =
-              line_no.saturating_sub(context_lines);
-          let last_line_to_show =
-              (line_no + context_lines).min(all_lines.len() - 1);
-
-          // 3. Print each chosen line with a gutter.
-          for ln in first_line_to_show..=last_line_to_show {
-              eprintln!("{:>4} | {}", ln + 1, all_lines[ln]);
-              if ln == line_no {
-                  // underline the token on the next line
-                  let mut underline = String::new();
-                  // indent: 6 (gutter) + column_no spaces
-                  underline.extend(std::iter::repeat(' ').take(6 + column_no));
-                  underline.extend(std::iter::repeat('^').take(token_end - token_start));
-                  eprintln!("{}", underline);
-              }
-          }
-          eprintln!();       // blank line after the block
-      }
       ```
-
-      Notes  
-      • Using eprintln! keeps the pretty output separate from existing println! lines.  
-      • Byte indices work because the GPT-2 vocab is entirely ASCII-compatible; if you later need
-        true UTF-8 char counts, call .chars() instead of byte slicing when computing `column_no`
-        and token length.
-
-      --------------------------------------------------------------------
-      2.  Start tracking where each token lives in the original string
-      --------------------------------------------------------------------
-      Find the block that prepares the three parallel vectors
-
-      ```
-      let mut test_token_sequence_ids = Vec::new();
-      let mut tokenized_strs_for_logging = Vec::new();
-      ```
-
-      Insert two new variables immediately after that block:
-
-      ```rust
-      let mut token_byte_ranges: Vec<(usize, usize)> = Vec::new(); // (start, end)
-      let mut running_input_offset: usize = 0;
-      ```
-
-      --------------------------------------------------------------------
-      3.  Record the byte ranges while tokenising
-      --------------------------------------------------------------------
-      Inside the while-loop that calls
-      `tokenizer_vocab_tree.find_longest_prefix_token`, just after
-      you push `matched_str` into the two existing vectors, also push the byte
-      range and update the running offset:
-
-      ```rust
-      token_byte_ranges.push((running_input_offset,
-                              running_input_offset + matched_bytes.len()));
-      running_input_offset += matched_bytes.len();
-      ```
-
-      (The rest of the loop is unchanged.)
-
-      --------------------------------------------------------------------
-      4.  Print the context each time a token is processed
-      --------------------------------------------------------------------
-      Inside the main stepping loop (the one that starts with
-      `for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate()`),
-      right after you obtain `current_token_str` (and immediately before or
-      after the println! that says “Processing token …”), fetch the recorded
-      byte range and call the helper:
-
-      ```rust
-      let (tok_start, tok_end) = token_byte_ranges[i];
-      print_source_context(&full_text_to_tokenize, tok_start, tok_end, 2);   // 2 lines of context
-      ```
-
-      Feel free to experiment with the last argument (how many lines of
-      look-ahead/behind you want).  The helper guarantees the numbers are
-      clamped within bounds.
-
-      --------------------------------------------------------------------
-      That’s it
-      --------------------------------------------------------------------
-      Compile and run the test again. You will now see output blocks that look
-      roughly like
-
-      ```
-      Processing token 7/123: "import" (LLMTokenID(521))
-         24 | from typing import List
-         25 | import os
-              ^^^^^^
-         26 | def foo():
-      ```
-
-      which should make it crystal-clear where you are in the input on each
-      iteration.
     metadata:
   - user: |
-      Using model 'gemini/gemini-2.5-flash-preview-05-20' for code completion.
+      Git apply result:
+      Found 1 diff block(s) to process using custom patcher.
 
-      --- LLM Code Generation Attempt 1/5 ---
-      Parsed actions JSON: [
-        {
-          "action": "replace",
-          "filepath": "src/test_constraint_python.rs"
-        }
-      ]
-      Found 1 code blocks with filepaths in attempt 1.
-      Received code for required file: src/test_constraint_python.rs
-      All required file contents received or no content needed.
-
-      --- Applying Changes ---
-      Successfully replaced file: src/test_constraint_python.rs
+      --- Processing Diff Block 1 ---
+      Identified target file: src/test_constraint_python.rs
+      Applying patch to 'src/test_constraint_python.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_python.rs.
     metadata:
 ...

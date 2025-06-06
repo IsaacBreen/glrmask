@@ -82,47 +82,6 @@ fn load_or_download_gpt2_vocab(
     }
 }
 
-/// Pretty-print a few lines of context around the byte range
-/// [token_start, token_end) inside `source`.
-fn print_source_context(source: &str, token_start: usize, token_end: usize, context_lines: usize) {
-    // 1. Work out (line_no, column_no) of token_start.
-    //    line_no is 0-based here, will add 1 when printing.
-    let mut line_no = 0usize;
-    let mut line_start_byte = 0usize;
-    for (idx, ch) in source.char_indices() {
-        if idx >= token_start {
-            break;
-        }
-        if ch == '\n' {
-            line_no += 1;
-            line_start_byte = idx + 1;        // first byte after '\n'
-        }
-    }
-    let column_no = token_start - line_start_byte;
-
-    // 2. Collect the lines we want to display.
-    //    Split once to avoid allocation in every loop.
-    let all_lines: Vec<&str> = source.lines().collect();
-    let first_line_to_show =
-        line_no.saturating_sub(context_lines);
-    let last_line_to_show =
-        (line_no + context_lines).min(all_lines.len() - 1);
-
-    // 3. Print each chosen line with a gutter.
-    for ln in first_line_to_show..=last_line_to_show {
-        eprintln!("{:>4} | {}", ln + 1, all_lines[ln]);
-        if ln == line_no {
-            // underline the token on the next line
-            let mut underline = String::new();
-            // indent: 6 (gutter) + column_no spaces
-            underline.extend(std::iter::repeat(' ').take(6 + column_no));
-            underline.extend(std::iter::repeat('^').take(token_end - token_start));
-            eprintln!("{}", underline);
-        }
-    }
-    eprintln!();       // blank line after the block
-}
-
 #[ignore]
 #[test]
 fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
@@ -217,6 +176,107 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Helper function to print context around a token in a larger text.
+fn print_token_context(
+    full_text: &str, // Used for end-of-text checks
+    all_lines: &[&str], // Pre-split lines of the full_text
+    token_start_global_byte: usize,
+    token_end_global_byte: usize, // Exclusive end
+    context_lines_count: usize,   // Number of lines before and after
+) {
+    if all_lines.is_empty() {
+        // Should ideally not happen if full_text led to tokenization,
+        // but handles empty full_text case.
+        // Note: `"".lines().collect::<Vec<_>>()` is `[""]`.
+        println!("    Context: (empty or malformed input lines)");
+        println!("    ----");
+        return;
+    }
+
+    let mut current_scan_byte_offset = 0;
+    let mut token_start_line_idx = 0;
+    let mut token_start_col_byte_in_line = 0;
+    let mut token_end_line_idx = 0;
+    let mut token_end_col_byte_in_line = 0;
+
+    // Determine start line and column
+    let mut found_start_line = false;
+    for (idx, line_content) in all_lines.iter().enumerate() {
+        let line_start_byte_offset = current_scan_byte_offset;
+        let line_content_end_byte_offset = line_start_byte_offset + line_content.len();
+
+        if !found_start_line && token_start_global_byte >= line_start_byte_offset && token_start_global_byte <= line_content_end_byte_offset {
+            token_start_line_idx = idx;
+            token_start_col_byte_in_line = token_start_global_byte - line_start_byte_offset;
+            found_start_line = true;
+            // Do not break, continue to find end line in the same pass if possible, or for next pass's cbo
+        }
+
+        current_scan_byte_offset += line_content.len();
+        if idx < all_lines.len() - 1 {
+            current_scan_byte_offset += 1; // Account for '\n'
+        }
+    }
+
+    // Determine end line and column
+    current_scan_byte_offset = 0;
+    for (idx, line_content) in all_lines.iter().enumerate() {
+        let line_start_byte_offset = current_scan_byte_offset;
+        let line_content_end_byte_offset = line_start_byte_offset + line_content.len();
+
+        // Token ends on this line if its end byte falls within this line's content
+        if token_end_global_byte > line_start_byte_offset && token_end_global_byte <= line_content_end_byte_offset {
+            token_end_line_idx = idx;
+            token_end_col_byte_in_line = token_end_global_byte - line_start_byte_offset;
+            break;
+        }
+        // Token ends exactly at the newline character after this line's content
+        if idx < all_lines.len() - 1 && token_end_global_byte == line_content_end_byte_offset + 1 {
+            token_end_line_idx = idx;
+            token_end_col_byte_in_line = line_content.len(); // Covers the entire content part of the line
+            break;
+        }
+
+        current_scan_byte_offset += line_content.len();
+        if idx < all_lines.len() - 1 {
+            current_scan_byte_offset += 1; // Account for '\n'
+        }
+    }
+     // If token goes to the very end of the file and file doesn't end with newline
+    if token_end_global_byte == full_text.len() && !full_text.ends_with('\n') && !full_text.is_empty() {
+        token_end_line_idx = all_lines.len() - 1;
+        token_end_col_byte_in_line = all_lines.last().map_or(0, |s| s.len());
+    }
+
+
+    let display_start_line = token_start_line_idx.saturating_sub(context_lines_count);
+    let display_end_line = (token_end_line_idx + context_lines_count).min(all_lines.len().saturating_sub(1));
+
+    println!("    Context Highlight (Token bytes [{}, {})):", token_start_global_byte, token_end_global_byte);
+    for i in display_start_line..=display_end_line {
+        let line_content = all_lines[i];
+        println!("{:5} | {}", i + 1, line_content); // 1-indexed line numbers
+
+        if i >= token_start_line_idx && i <= token_end_line_idx {
+            let start_col = if i == token_start_line_idx { token_start_col_byte_in_line } else { 0 };
+            let end_col = if i == token_end_line_idx { token_end_col_byte_in_line } else { line_content.len() };
+            
+            let effective_start_col = start_col.min(line_content.len());
+            let effective_end_col = end_col.min(line_content.len()).max(effective_start_col);
+
+            if effective_end_col > effective_start_col {
+                let prefix = " ".repeat(effective_start_col);
+                let carets = "^".repeat(effective_end_col - effective_start_col);
+                println!("      | {}{}", prefix, carets);
+            } else if token_start_global_byte == token_end_global_byte && i == token_start_line_idx && effective_start_col <= line_content.len() { // Empty token
+                let prefix = " ".repeat(effective_start_col);
+                println!("      | {}{}", prefix, "^");
+            }
+        }
+    }
+    println!("    ------------------------------------------");
 }
 
 #[test]
@@ -576,8 +636,6 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let mut test_token_sequence_ids = Vec::new();
     // This list will store the actual string content of tokens as produced by the vocab tree, primarily for logging.
     let mut tokenized_strs_for_logging = Vec::new();
-    let mut token_byte_ranges: Vec<(usize, usize)> = Vec::new(); // (start, end)
-    let mut running_input_offset: usize = 0;
     let mut text_to_process = full_text_to_tokenize.as_bytes();
 
     println!("\nTokenizing '{}' using VocabPrefixTree:", full_text_to_tokenize);
@@ -589,9 +647,6 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
                 test_token_sequence_ids.push(LLMTokenID(token_id));
                 tokenized_strs_for_logging.push(matched_str); // Store for logging
-                token_byte_ranges.push((running_input_offset,
-                                        running_input_offset + matched_bytes.len()));
-                running_input_offset += matched_bytes.len();
 
                 text_to_process = &text_to_process[matched_bytes.len()..];
             }
@@ -627,6 +682,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // Initial step to populate possibilities
     let initial_mask = constraint_state.get_mask();
     println!("\nInitial mask obtained ({} allowed LLM tokens).", initial_mask.iter_bits().count());
+    let all_code_lines: Vec<&str> = full_text_to_tokenize.lines().collect();
+    let mut current_text_byte_offset = 0;
 
     println!("\nStepping through the token sequence with GrammarConstraint:");
     for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
@@ -634,14 +691,23 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         let current_token_str = &tokenized_strs_for_logging[i];
         println!(
             "Processing token {}/{}: {:?} (LLMTokenID({}))",
-            i + 1,
+            i + 1, // 1-indexed for display
             test_token_sequence_ids.len(),
             current_token_str,
             llm_token_id.0
         );
 
-        let (tok_start, tok_end) = token_byte_ranges[i];
-        print_source_context(&full_text_to_tokenize, tok_start, tok_end, 2);   // 2 lines of context
+        // Display context
+        let token_start_byte_in_full_text = current_text_byte_offset;
+        let token_end_byte_in_full_text = current_text_byte_offset + current_token_str.as_bytes().len();
+        print_token_context(
+            &full_text_to_tokenize,
+            &all_code_lines,
+            token_start_byte_in_full_text,
+            token_end_byte_in_full_text,
+            2, // Show 2 lines before and 2 lines after
+        );
+
 
         assert!(
             constraint_state.is_active(),
@@ -679,6 +745,9 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             i + 1, current_token_str
         );
         println!("  Constraint state is active after commit.");
+
+        // Update current_text_byte_offset for the next iteration
+        current_text_byte_offset = token_end_byte_in_full_text;
     }
 
     println!("\nFinished processing token sequence with GrammarConstraint.");
@@ -726,13 +795,13 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // let mut actual_constraint_parser_state_comp = constraint_state_for_comp.state()[&initial_tokenizer_state_id].clone();
     //
     // let mut comparable_parser_gss_comp = (*parser_state_for_comp.active_state.stack).clone();
-    // let mut comparable_parser_active_state = ParseState { stack: Arc::new(comparable_parser_gss_comp) };
+    // let mut comparable_parser_active_state_comp = ParseState { stack: Arc::new(comparable_parser_gss_comp) };
     //
     //
-    // Arc::make_mut(&mut comparable_parser_active_state.stack).reset_tokens();
+    // Arc::make_mut(&mut comparable_parser_active_state_comp.stack).reset_tokens();
     // Arc::make_mut(&mut actual_constraint_parser_state_comp.active_state.stack).reset_tokens();
     //
-    // assert_eq!(actual_constraint_parser_state_comp.active_state, comparable_parser_active_state, "GSS structures for comparison should match");
+    // assert_eq!(actual_constraint_parser_state_comp.active_state, comparable_parser_active_state_comp, "GSS structures for comparison should match");
     // println!("Number of states: {}", constraint_state_for_comp.state().len());
     // let roots = constraint_state_for_comp.state().values().map(|state| state.active_state.stack.as_ref().clone()).collect::<Vec<_>>();
     // println!("State statistics: {:?}", gather_gss_stats(&roots.iter().collect::<Vec<_>>()));
