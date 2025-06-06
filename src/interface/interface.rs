@@ -139,27 +139,74 @@ impl JSONConvertible for GrammarDefinition {
         let mut obj = StdMap::new();
         obj.insert("productions".to_string(), self.productions.to_json());
         obj.insert("start_production_id".to_string(), self.start_production_id.to_json());
-        obj.insert("terminal_name_to_group_id".to_string(), self.terminal_name_to_group_id.to_json());
-        obj.insert("terminal_expr_to_group_id".to_string(), self.terminal_expr_to_group_id.to_json());
+
+        let mut terminals_json_list = Vec::new();
+        let mut sorted_terminals_info: Vec<(usize, String, Expr)> = Vec::new();
+
+        for (name, group_id) in &self.terminal_name_to_group_id {
+            // Assuming consistency: if a name/group_id exists here, the group_id must exist in terminal_expr_to_group_id
+            let expr = self.terminal_expr_to_group_id.get_by_right(group_id)
+                .unwrap_or_else(|| panic!("Internal consistency error: group_id {} for name '{}' not found in terminal_expr_to_group_id.", group_id, name))
+                .clone();
+            sorted_terminals_info.push((*group_id, name.clone(), expr));
+        }
+
+        // Sort by group_id for deterministic output
+        sorted_terminals_info.sort_by_key(|(group_id, _, _)| *group_id);
+
+        for (group_id, name, expr) in sorted_terminals_info {
+            let mut terminal_obj = StdMap::new();
+            terminal_obj.insert("name".to_string(), name.to_json());
+            terminal_obj.insert("group_id".to_string(), group_id.to_json());
+            terminal_obj.insert("expr".to_string(), expr.to_json());
+            terminals_json_list.push(JSONNode::Object(terminal_obj));
+        }
+
+        obj.insert("terminals".to_string(), JSONNode::Array(terminals_json_list));
+
         JSONNode::Object(obj)
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Object(mut obj) => Ok(GrammarDefinition {
-                productions: obj.remove("productions")
+            JSONNode::Object(mut obj) => {
+                let productions = obj.remove("productions")
                     .ok_or_else(|| "Missing field productions for GrammarDefinition".to_string())
-                    .and_then(Vec::<Production>::from_json)?,
-                start_production_id: obj.remove("start_production_id")
+                    .and_then(Vec::<Production>::from_json)?;
+                let start_production_id = obj.remove("start_production_id")
                     .ok_or_else(|| "Missing field start_production_id for GrammarDefinition".to_string())
-                    .and_then(usize::from_json)?,
-                terminal_name_to_group_id: obj.remove("terminal_name_to_group_id")
-                    .ok_or_else(|| "Missing field terminal_name_to_group_id for GrammarDefinition".to_string())
-                    .and_then(|n| BiBTreeMap::<String, usize>::from_json(n))?,
-                terminal_expr_to_group_id: obj.remove("terminal_expr_to_group_id")
-                    .ok_or_else(|| "Missing field terminal_expr_to_group_id for GrammarDefinition".to_string())
-                    .and_then(|n| BiBTreeMap::<Expr, usize>::from_json(n))?,
-            }),
+                    .and_then(usize::from_json)?;
+
+                let terminals_node = obj.remove("terminals")
+                    .ok_or_else(|| "Missing field terminals for GrammarDefinition".to_string())?;
+
+                let mut new_terminal_name_to_group_id = BiBTreeMap::new();
+                let mut new_terminal_expr_to_group_id = BiBTreeMap::new();
+
+                if let JSONNode::Array(terminals_array) = terminals_node {
+                    for terminal_item_node in terminals_array {
+                        if let JSONNode::Object(mut terminal_obj) = terminal_item_node {
+                            let name = terminal_obj.remove("name").ok_or_else(|| "Missing field name in terminal object".to_string()).and_then(String::from_json)?;
+                            let group_id = terminal_obj.remove("group_id").ok_or_else(|| "Missing field group_id in terminal object".to_string()).and_then(usize::from_json)?;
+                            let expr = terminal_obj.remove("expr").ok_or_else(|| "Missing field expr in terminal object".to_string()).and_then(Expr::from_json)?;
+
+                            new_terminal_name_to_group_id.insert_no_overwrite(name, group_id).map_err(|e| format!("Error inserting (name, group_id) into BiBTreeMap for names: {:?}", e))?;
+                            new_terminal_expr_to_group_id.insert_no_overwrite(expr, group_id).map_err(|e| format!("Error inserting (expr, group_id) into BiBTreeMap for exprs: {:?}", e))?;
+                        } else {
+                            return Err("Expected JSONNode::Object for terminal item".to_string());
+                        }
+                    }
+                } else {
+                    return Err("Expected JSONNode::Array for terminals field".to_string());
+                }
+
+                Ok(GrammarDefinition {
+                    productions,
+                    start_production_id,
+                    terminal_name_to_group_id: new_terminal_name_to_group_id,
+                    terminal_expr_to_group_id: new_terminal_expr_to_group_id,
+                })
+            }
             _ => Err("Expected JSONNode::Object for GrammarDefinition".to_string()),
         }
     }
