@@ -25,11 +25,11 @@ def regex(expr, name=None):
         print(f"Ignoring ignore for IGNORE rule: {expr}")
         return name, expr
     if name is None:
-        return ge.sequence([ge.ref("IGNORE"), expr])
-#         return expr
+#         return ge.sequence([ge.ref("IGNORE"), expr])
+        return expr
 #     return name, ge.regex(seq([ignore, expr]))
-    return name, ge.sequence([ge.ref("IGNORE"), expr])
-#     return name, expr
+#     return name, ge.sequence([ge.ref("IGNORE"), expr])
+    return name, expr
 
 def eat(s: bytes) -> Regex:
     if len(s) == 1:
@@ -181,8 +181,8 @@ def define_tokens() -> list[tuple[str, Any]]:
         eat('"""'),
         eat("'''"),
     ])
-    tokens["FSTRING_START"] = eat('f"')
-    tokens["FSTRING_END"] = eat('"')
+    tokens["FSTRING_START"] = eat("f'")
+    tokens["FSTRING_END"] = eat("'")
     tokens["FSTRING_MIDDLE"] = rep1(choice([
         eat_u8_negation(ord("{")),
         eat("{{"),
@@ -257,8 +257,10 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
 
 #     exprs = [("start", ge.sequence([ge.regex(Regex.rep(Regex.eat_u8(ord(" ")))), ge.literal(b"f")]))]
 
-#     exprs = [("start", ge.sequence([ge.ref("FSTRING_START"), ge.ref("FSTRING_END")]))]
-    exprs = [("start", ge.sequence([ge.literal(b"f\""), ge.literal(b"\"")]))]
+    exprs = [("start", ge.sequence([ge.ref("FSTRING_START"), ge.ref("FSTRING_END")]))]
+#     exprs = [("start'''", ge.sequence([regex(eat('f"')), ge.ref("\"")]))]
+#     print(exprs)
+#     exprs = [("start", ge.sequence([ge.literal(b"f\""), ge.literal(b"\"")]))]
 
     for rule in grammar.rules.values():
         memo[rule.name] = ge.ref(rule.name)
