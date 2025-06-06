@@ -172,6 +172,7 @@ def define_tokens() -> list[tuple[str, Any]]:
     ])
     tokens["FSTRING_MIDDLE"] = rep1(choice([
         eat_u8_negation(ord("{")),
+        eat("{{"),
     ]))
 #     # TODO: delete this
 #     tokens["STRING"] = eps()
