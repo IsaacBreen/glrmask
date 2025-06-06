@@ -168,21 +168,21 @@ def define_tokens() -> list[tuple[str, Any]]:
         seq([f, r]),
         seq([r, f]),
     ])
-    tokens["FSTRING_START"] = seq([
-        fstring_prefix,
-        choice([
-            eat('"'),
-            eat("'"),
-            eat('"""'),
-            eat("'''"),
-        ])
-    ])
-    tokens["FSTRING_END"] = choice([
-        eat('"'),
-        eat("'"),
-        eat('"""'),
-        eat("'''"),
-    ])
+#     tokens["FSTRING_START"] = seq([
+#         fstring_prefix,
+#         choice([
+#             eat('"'),
+#             eat("'"),
+#             eat('"""'),
+#             eat("'''"),
+#         ])
+#     ])
+#     tokens["FSTRING_END"] = choice([
+#         eat('"'),
+#         eat("'"),
+#         eat('"""'),
+#         eat("'''"),
+#     ])
     tokens["FSTRING_MIDDLE"] = rep1(choice([
         eat_u8_negation(ord("{")),
         eat("{{"),
@@ -193,8 +193,8 @@ def define_tokens() -> list[tuple[str, Any]]:
 #     tokens["FSTRING_END"] = eps()
 #     tokens["FSTRING_MIDDLE"] = rep(Regex.eat_any())
 #     tokens["FSTRING_MIDDLE"] = eps()
-#     tokens["FSTRING_START"] = eat('f"')
-#     tokens["FSTRING_END"] = eat('"')
+    tokens["FSTRING_START"] = eat('f"')
+    tokens["FSTRING_END"] = eat('"')
 
     tokens["TYPE_COMMENT"] = seq([
         eat("#"),
