@@ -439,7 +439,9 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // }
     // gpt2_raw_vocab.insert("import os".to_string(), 0);
     gpt2_raw_vocab.insert("import".to_string(), 1);
-    gpt2_raw_vocab.insert(" os".to_string(), 2);
+    // gpt2_raw_vocab.insert(" os".to_string(), 2);
+    gpt2_raw_vocab.insert(" ".to_string(), 3);
+    gpt2_raw_vocab.insert("os".to_string(), 4);
     let N = 2000;
     // Add "#" and "*" * N
     // gpt2_raw_vocab.insert("#".to_string(), 0);
