@@ -436,8 +436,9 @@ impl GrammarDefinition {
                     current_level_productions.push(Production {
                         lhs: nt.clone(),
                         rhs: {
-                            let mut r = expr_symbols; // These are symbols from expr_box
+                            let mut r = Vec::new(); // These are symbols from expr_box
                             r.push(Symbol::NonTerminal(nt.clone()));
+                            r.extend(expr_symbols);
                             r
                         },
                     });
