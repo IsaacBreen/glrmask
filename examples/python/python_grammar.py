@@ -158,17 +158,31 @@ def define_tokens() -> list[tuple[str, Any]]:
         seq([eat_u8(ord('"')), rep(choice([eat_u8_negation(ord('"')), eat('\"')])), eat_u8(ord('"'))]),
         seq([eat_u8(ord("'")), rep(choice([eat_u8_negation(ord("'")), eat('\'')])), eat_u8(ord("'"))]),
     ])
-    tokens["FSTRING_START"] = choice([
-        eat('"'),
-        eat("'"),
-        eat('"""'),
-        eat("'''"),
+    f = choice([eat('f'), eat('F')])
+    r = choice([eat('r'), eat('R')])
+    fstring_prefix = choice([
+        f,
+        r,
+        seq([f, r]),
+        seq([r, f]),
     ])
-    tokens["FSTRING_END"] = choice([
-        eat('"'),
-        eat("'"),
-        eat('"""'),
-        eat("'''"),
+    tokens["FSTRING_START"] = seq([
+        fstring_prefix,
+        choice([
+            eat('"'),
+            eat("'"),
+            eat('"""'),
+            eat("'''"),
+        ])
+    ])
+    tokens["FSTRING_END"] =  seq([
+        fstring_prefix,
+        choice([
+            eat('"'),
+            eat("'"),
+            eat('"""'),
+            eat("'''"),
+        ])
     ])
     tokens["FSTRING_MIDDLE"] = rep1(choice([
         eat_u8_negation(ord("{")),
@@ -513,7 +527,10 @@ if __name__ == "__main__":
 #     input_text = 'from typing import Any, List, Tuple, Union'
 #     input_text = 'def'
 #     input_text = 'NAME'
-    input_text = 'f"{x}"'
+#     input_text = '""'
+    input_text = 'f"x"'
+#     input_text = 'f"{}"'
+#     input_text = 'f"{x}"'
     expected_next_token = ""
 
     if expected_next_token:
