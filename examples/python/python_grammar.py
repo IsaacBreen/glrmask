@@ -281,6 +281,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
 
 
     tokens = define_tokens()
+    tokens.reverse()
     # TODO: uncomment this
     exprs.extend(tokens)
 #     tokens = {}
