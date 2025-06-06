@@ -511,8 +511,9 @@ if __name__ == "__main__":
 
     pre_input_text = ""
 #     input_text = 'from typing import Any, List, Tuple, Union'
-    input_text = 'def'
+#     input_text = 'def'
 #     input_text = 'NAME'
+    input_text = 'f"{x}"'
     expected_next_token = ""
 
     if expected_next_token:
