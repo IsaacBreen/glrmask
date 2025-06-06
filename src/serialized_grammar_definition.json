@@ -74,11 +74,11 @@
             "lhs": "eval[0]",
             "rhs": [
                 {
-                    "value": "NEWLINE",
+                    "value": "eval[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "eval[0]",
+                    "value": "NEWLINE",
                     "variant": "NonTerminal"
                 }
             ]
@@ -149,11 +149,11 @@
             "lhs": "func_type[1]",
             "rhs": [
                 {
-                    "value": "NEWLINE",
+                    "value": "func_type[1]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "func_type[1]",
+                    "value": "NEWLINE",
                     "variant": "NonTerminal"
                 }
             ]
@@ -179,11 +179,11 @@
             "lhs": "statements[0]",
             "rhs": [
                 {
-                    "value": "statement",
+                    "value": "statements[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "statements[0]",
+                    "value": "statement",
                     "variant": "NonTerminal"
                 }
             ]
@@ -288,6 +288,10 @@
             "lhs": "simple_stmts[0]",
             "rhs": [
                 {
+                    "value": "simple_stmts[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -297,10 +301,6 @@
                 },
                 {
                     "value": "simple_stmt",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "simple_stmts[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -695,6 +695,10 @@
             "lhs": "assignment[3]",
             "rhs": [
                 {
+                    "value": "assignment[3]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "star_targets",
                     "variant": "NonTerminal"
                 },
@@ -705,10 +709,6 @@
                 {
                     "value": "\"=\"",
                     "variant": "Terminal"
-                },
-                {
-                    "value": "assignment[3]",
-                    "variant": "NonTerminal"
                 }
             ]
         },
@@ -1088,6 +1088,10 @@
             "lhs": "global_stmt[0]",
             "rhs": [
                 {
+                    "value": "global_stmt[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -1097,10 +1101,6 @@
                 },
                 {
                     "value": "NAME",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "global_stmt[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -1134,6 +1134,10 @@
             "lhs": "nonlocal_stmt[0]",
             "rhs": [
                 {
+                    "value": "nonlocal_stmt[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -1143,10 +1147,6 @@
                 },
                 {
                     "value": "NAME",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "nonlocal_stmt[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -1313,11 +1313,11 @@
             "lhs": "import_from[0]",
             "rhs": [
                 {
-                    "value": "import_from[0][0]",
+                    "value": "import_from[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "import_from[0]",
+                    "value": "import_from[0][0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -1415,11 +1415,11 @@
             "lhs": "import_from[2]",
             "rhs": [
                 {
-                    "value": "import_from[2][0]",
+                    "value": "import_from[2]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "import_from[2]",
+                    "value": "import_from[2][0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -1548,6 +1548,10 @@
             "lhs": "import_from_as_names[0]",
             "rhs": [
                 {
+                    "value": "import_from_as_names[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -1557,10 +1561,6 @@
                 },
                 {
                     "value": "import_from_as_name",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "import_from_as_names[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -1620,6 +1620,10 @@
             "lhs": "dotted_as_names[0]",
             "rhs": [
                 {
+                    "value": "dotted_as_names[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -1629,10 +1633,6 @@
                 },
                 {
                     "value": "dotted_as_name",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "dotted_as_names[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -1773,6 +1773,10 @@
             "lhs": "decorators[0]",
             "rhs": [
                 {
+                    "value": "decorators[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -1786,10 +1790,6 @@
                 },
                 {
                     "value": "NEWLINE",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "decorators[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -2245,11 +2245,11 @@
             "lhs": "parameters[0]",
             "rhs": [
                 {
-                    "value": "param_no_default",
+                    "value": "parameters[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "parameters[0]",
+                    "value": "param_no_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -2262,11 +2262,11 @@
             "lhs": "parameters[1]",
             "rhs": [
                 {
-                    "value": "param_with_default",
+                    "value": "parameters[1]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "parameters[1]",
+                    "value": "param_with_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -2309,11 +2309,11 @@
             "lhs": "parameters[3]",
             "rhs": [
                 {
-                    "value": "param_with_default",
+                    "value": "parameters[3]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "parameters[3]",
+                    "value": "param_with_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -2360,11 +2360,11 @@
             "lhs": "parameters[5]",
             "rhs": [
                 {
-                    "value": "param_no_default",
+                    "value": "parameters[5]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "parameters[5]",
+                    "value": "param_no_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -2377,11 +2377,11 @@
             "lhs": "parameters[6]",
             "rhs": [
                 {
-                    "value": "param_with_default",
+                    "value": "parameters[6]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "parameters[6]",
+                    "value": "param_with_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -2424,11 +2424,11 @@
             "lhs": "parameters[8]",
             "rhs": [
                 {
-                    "value": "param_with_default",
+                    "value": "parameters[8]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "parameters[8]",
+                    "value": "param_with_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -2492,11 +2492,11 @@
             "lhs": "slash_no_default[0]",
             "rhs": [
                 {
-                    "value": "param_no_default",
+                    "value": "slash_no_default[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "slash_no_default[0]",
+                    "value": "param_no_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -2530,11 +2530,11 @@
             "lhs": "slash_no_default[1]",
             "rhs": [
                 {
-                    "value": "param_no_default",
+                    "value": "slash_no_default[1]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "slash_no_default[1]",
+                    "value": "param_no_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -2580,11 +2580,11 @@
             "lhs": "slash_with_default[0]",
             "rhs": [
                 {
-                    "value": "param_no_default",
+                    "value": "slash_with_default[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "slash_with_default[0]",
+                    "value": "param_no_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -2597,11 +2597,11 @@
             "lhs": "slash_with_default[1]",
             "rhs": [
                 {
-                    "value": "param_with_default",
+                    "value": "slash_with_default[1]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "slash_with_default[1]",
+                    "value": "param_with_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -2639,11 +2639,11 @@
             "lhs": "slash_with_default[2]",
             "rhs": [
                 {
-                    "value": "param_no_default",
+                    "value": "slash_with_default[2]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "slash_with_default[2]",
+                    "value": "param_no_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -2656,11 +2656,11 @@
             "lhs": "slash_with_default[3]",
             "rhs": [
                 {
-                    "value": "param_with_default",
+                    "value": "slash_with_default[3]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "slash_with_default[3]",
+                    "value": "param_with_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -2707,11 +2707,11 @@
             "lhs": "star_etc[0]",
             "rhs": [
                 {
-                    "value": "param_maybe_default",
+                    "value": "star_etc[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "star_etc[0]",
+                    "value": "param_maybe_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -2762,11 +2762,11 @@
             "lhs": "star_etc[2]",
             "rhs": [
                 {
-                    "value": "param_maybe_default",
+                    "value": "star_etc[2]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "star_etc[2]",
+                    "value": "param_maybe_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -2825,11 +2825,11 @@
             "lhs": "star_etc[4]",
             "rhs": [
                 {
-                    "value": "param_maybe_default",
+                    "value": "star_etc[4]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "star_etc[4]",
+                    "value": "param_maybe_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -3778,6 +3778,10 @@
             "lhs": "with_stmt[0]",
             "rhs": [
                 {
+                    "value": "with_stmt[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -3787,10 +3791,6 @@
                 },
                 {
                     "value": "with_item",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "with_stmt[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -3870,6 +3870,10 @@
             "lhs": "with_stmt[3]",
             "rhs": [
                 {
+                    "value": "with_stmt[3]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -3879,10 +3883,6 @@
                 },
                 {
                     "value": "with_item",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "with_stmt[3]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -3969,6 +3969,10 @@
             "lhs": "with_stmt[5]",
             "rhs": [
                 {
+                    "value": "with_stmt[5]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -3978,10 +3982,6 @@
                 },
                 {
                     "value": "with_item",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "with_stmt[5]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -4056,6 +4056,10 @@
             "lhs": "with_stmt[7]",
             "rhs": [
                 {
+                    "value": "with_stmt[7]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -4065,10 +4069,6 @@
                 },
                 {
                     "value": "with_item",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "with_stmt[7]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -4221,11 +4221,11 @@
             "lhs": "try_stmt[0]",
             "rhs": [
                 {
-                    "value": "except_block",
+                    "value": "try_stmt[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "try_stmt[0]",
+                    "value": "except_block",
                     "variant": "NonTerminal"
                 }
             ]
@@ -4305,11 +4305,11 @@
             "lhs": "try_stmt[3]",
             "rhs": [
                 {
-                    "value": "except_star_block",
+                    "value": "try_stmt[3]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "try_stmt[3]",
+                    "value": "except_star_block",
                     "variant": "NonTerminal"
                 }
             ]
@@ -4604,11 +4604,11 @@
             "lhs": "match_stmt[0]",
             "rhs": [
                 {
-                    "value": "case_block",
+                    "value": "match_stmt[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "match_stmt[0]",
+                    "value": "case_block",
                     "variant": "NonTerminal"
                 }
             ]
@@ -4824,6 +4824,10 @@
             "lhs": "or_pattern[0]",
             "rhs": [
                 {
+                    "value": "or_pattern[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -4833,10 +4837,6 @@
                 },
                 {
                     "value": "closed_pattern",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "or_pattern[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -5396,6 +5396,10 @@
             "lhs": "maybe_sequence_pattern[0]",
             "rhs": [
                 {
+                    "value": "maybe_sequence_pattern[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -5405,10 +5409,6 @@
                 },
                 {
                     "value": "maybe_star_pattern",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "maybe_sequence_pattern[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -5674,6 +5674,10 @@
             "lhs": "items_pattern[0]",
             "rhs": [
                 {
+                    "value": "items_pattern[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -5683,10 +5687,6 @@
                 },
                 {
                     "value": "key_value_pattern",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "items_pattern[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -5964,6 +5964,10 @@
             "lhs": "positional_patterns[0]",
             "rhs": [
                 {
+                    "value": "positional_patterns[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -5973,10 +5977,6 @@
                 },
                 {
                     "value": "pattern",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "positional_patterns[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -6002,6 +6002,10 @@
             "lhs": "keyword_patterns[0]",
             "rhs": [
                 {
+                    "value": "keyword_patterns[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -6011,10 +6015,6 @@
                 },
                 {
                     "value": "keyword_pattern",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "keyword_patterns[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -6145,6 +6145,10 @@
             "lhs": "type_param_seq[0]",
             "rhs": [
                 {
+                    "value": "type_param_seq[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -6154,10 +6158,6 @@
                 },
                 {
                     "value": "type_param",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "type_param_seq[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -6387,6 +6387,10 @@
             "lhs": "expressions[0]",
             "rhs": [
                 {
+                    "value": "expressions[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -6396,10 +6400,6 @@
                 },
                 {
                     "value": "expression",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "expressions[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -6608,6 +6608,10 @@
             "lhs": "star_expressions[0]",
             "rhs": [
                 {
+                    "value": "star_expressions[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -6617,10 +6621,6 @@
                 },
                 {
                     "value": "star_expression",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "star_expressions[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -6719,6 +6719,10 @@
             "lhs": "star_named_expressions[0]",
             "rhs": [
                 {
+                    "value": "star_named_expressions[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -6728,10 +6732,6 @@
                 },
                 {
                     "value": "star_named_expression",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "star_named_expressions[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -6860,6 +6860,10 @@
             "lhs": "disjunction[0]",
             "rhs": [
                 {
+                    "value": "disjunction[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -6869,10 +6873,6 @@
                 },
                 {
                     "value": "conjunction",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "disjunction[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -6919,6 +6919,10 @@
             "lhs": "conjunction[0]",
             "rhs": [
                 {
+                    "value": "conjunction[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -6928,10 +6932,6 @@
                 },
                 {
                     "value": "inversion",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "conjunction[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -6996,11 +6996,11 @@
             "lhs": "comparison[0]",
             "rhs": [
                 {
-                    "value": "compare_op_bitwise_or_pair",
+                    "value": "comparison[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "comparison[0]",
+                    "value": "compare_op_bitwise_or_pair",
                     "variant": "NonTerminal"
                 }
             ]
@@ -7896,6 +7896,10 @@
             "lhs": "slices[1]",
             "rhs": [
                 {
+                    "value": "slices[1]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -7905,10 +7909,6 @@
                 },
                 {
                     "value": "slices[1][0]",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "slices[1]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -8370,11 +8370,11 @@
             "lhs": "lambda_parameters[0]",
             "rhs": [
                 {
-                    "value": "lambda_param_no_default",
+                    "value": "lambda_parameters[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "lambda_parameters[0]",
+                    "value": "lambda_param_no_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -8387,11 +8387,11 @@
             "lhs": "lambda_parameters[1]",
             "rhs": [
                 {
-                    "value": "lambda_param_with_default",
+                    "value": "lambda_parameters[1]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "lambda_parameters[1]",
+                    "value": "lambda_param_with_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -8434,11 +8434,11 @@
             "lhs": "lambda_parameters[3]",
             "rhs": [
                 {
-                    "value": "lambda_param_with_default",
+                    "value": "lambda_parameters[3]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "lambda_parameters[3]",
+                    "value": "lambda_param_with_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -8485,11 +8485,11 @@
             "lhs": "lambda_parameters[5]",
             "rhs": [
                 {
-                    "value": "lambda_param_no_default",
+                    "value": "lambda_parameters[5]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "lambda_parameters[5]",
+                    "value": "lambda_param_no_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -8502,11 +8502,11 @@
             "lhs": "lambda_parameters[6]",
             "rhs": [
                 {
-                    "value": "lambda_param_with_default",
+                    "value": "lambda_parameters[6]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "lambda_parameters[6]",
+                    "value": "lambda_param_with_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -8549,11 +8549,11 @@
             "lhs": "lambda_parameters[8]",
             "rhs": [
                 {
-                    "value": "lambda_param_with_default",
+                    "value": "lambda_parameters[8]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "lambda_parameters[8]",
+                    "value": "lambda_param_with_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -8617,11 +8617,11 @@
             "lhs": "lambda_slash_no_default[0]",
             "rhs": [
                 {
-                    "value": "lambda_param_no_default",
+                    "value": "lambda_slash_no_default[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "lambda_slash_no_default[0]",
+                    "value": "lambda_param_no_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -8655,11 +8655,11 @@
             "lhs": "lambda_slash_no_default[1]",
             "rhs": [
                 {
-                    "value": "lambda_param_no_default",
+                    "value": "lambda_slash_no_default[1]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "lambda_slash_no_default[1]",
+                    "value": "lambda_param_no_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -8705,11 +8705,11 @@
             "lhs": "lambda_slash_with_default[0]",
             "rhs": [
                 {
-                    "value": "lambda_param_no_default",
+                    "value": "lambda_slash_with_default[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "lambda_slash_with_default[0]",
+                    "value": "lambda_param_no_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -8722,11 +8722,11 @@
             "lhs": "lambda_slash_with_default[1]",
             "rhs": [
                 {
-                    "value": "lambda_param_with_default",
+                    "value": "lambda_slash_with_default[1]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "lambda_slash_with_default[1]",
+                    "value": "lambda_param_with_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -8764,11 +8764,11 @@
             "lhs": "lambda_slash_with_default[2]",
             "rhs": [
                 {
-                    "value": "lambda_param_no_default",
+                    "value": "lambda_slash_with_default[2]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "lambda_slash_with_default[2]",
+                    "value": "lambda_param_no_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -8781,11 +8781,11 @@
             "lhs": "lambda_slash_with_default[3]",
             "rhs": [
                 {
-                    "value": "lambda_param_with_default",
+                    "value": "lambda_slash_with_default[3]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "lambda_slash_with_default[3]",
+                    "value": "lambda_param_with_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -8832,11 +8832,11 @@
             "lhs": "lambda_star_etc[0]",
             "rhs": [
                 {
-                    "value": "lambda_param_maybe_default",
+                    "value": "lambda_star_etc[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "lambda_star_etc[0]",
+                    "value": "lambda_param_maybe_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -8895,11 +8895,11 @@
             "lhs": "lambda_star_etc[2]",
             "rhs": [
                 {
-                    "value": "lambda_param_maybe_default",
+                    "value": "lambda_star_etc[2]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "lambda_star_etc[2]",
+                    "value": "lambda_param_maybe_default",
                     "variant": "NonTerminal"
                 }
             ]
@@ -9230,11 +9230,11 @@
             "lhs": "fstring_full_format_spec[0]",
             "rhs": [
                 {
-                    "value": "fstring_format_spec",
+                    "value": "fstring_full_format_spec[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "fstring_full_format_spec[0]",
+                    "value": "fstring_format_spec",
                     "variant": "NonTerminal"
                 }
             ]
@@ -9282,11 +9282,11 @@
             "lhs": "fstring[0]",
             "rhs": [
                 {
-                    "value": "fstring_middle",
+                    "value": "fstring[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "fstring[0]",
+                    "value": "fstring_middle",
                     "variant": "NonTerminal"
                 }
             ]
@@ -9339,11 +9339,11 @@
             "lhs": "strings[1]",
             "rhs": [
                 {
-                    "value": "strings[1][0]",
+                    "value": "strings[1]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "strings[1]",
+                    "value": "strings[1][0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -9580,6 +9580,10 @@
             "lhs": "double_starred_kvpairs[0]",
             "rhs": [
                 {
+                    "value": "double_starred_kvpairs[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -9589,10 +9593,6 @@
                 },
                 {
                     "value": "double_starred_kvpair",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "double_starred_kvpairs[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -9682,11 +9682,11 @@
             "lhs": "for_if_clauses[0]",
             "rhs": [
                 {
-                    "value": "for_if_clause",
+                    "value": "for_if_clauses[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "for_if_clauses[0]",
+                    "value": "for_if_clause",
                     "variant": "NonTerminal"
                 }
             ]
@@ -9740,6 +9740,10 @@
             "lhs": "for_if_clause[0]",
             "rhs": [
                 {
+                    "value": "for_if_clause[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -9749,10 +9753,6 @@
                 },
                 {
                     "value": "disjunction",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "for_if_clause[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -9798,6 +9798,10 @@
             "lhs": "for_if_clause[1]",
             "rhs": [
                 {
+                    "value": "for_if_clause[1]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -9807,10 +9811,6 @@
                 },
                 {
                     "value": "disjunction",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "for_if_clause[1]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -10103,6 +10103,10 @@
             "lhs": "args[1]",
             "rhs": [
                 {
+                    "value": "args[1]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -10112,10 +10116,6 @@
                 },
                 {
                     "value": "args[1][0]",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "args[1]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -10223,6 +10223,10 @@
             "lhs": "kwargs[0]",
             "rhs": [
                 {
+                    "value": "kwargs[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -10232,10 +10236,6 @@
                 },
                 {
                     "value": "kwarg_or_starred",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "kwargs[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -10248,6 +10248,10 @@
             "lhs": "kwargs[1]",
             "rhs": [
                 {
+                    "value": "kwargs[1]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -10257,10 +10261,6 @@
                 },
                 {
                     "value": "kwarg_or_double_starred",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "kwargs[1]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -10286,6 +10286,10 @@
             "lhs": "kwargs[2]",
             "rhs": [
                 {
+                    "value": "kwargs[2]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -10295,10 +10299,6 @@
                 },
                 {
                     "value": "kwarg_or_starred",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "kwargs[2]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -10324,6 +10324,10 @@
             "lhs": "kwargs[3]",
             "rhs": [
                 {
+                    "value": "kwargs[3]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -10333,10 +10337,6 @@
                 },
                 {
                     "value": "kwarg_or_double_starred",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "kwargs[3]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -10496,6 +10496,10 @@
             "lhs": "star_targets[0]",
             "rhs": [
                 {
+                    "value": "star_targets[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -10505,10 +10509,6 @@
                 },
                 {
                     "value": "star_target",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "star_targets[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -10555,6 +10555,10 @@
             "lhs": "star_targets_list_seq[0]",
             "rhs": [
                 {
+                    "value": "star_targets_list_seq[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -10564,10 +10568,6 @@
                 },
                 {
                     "value": "star_target",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "star_targets_list_seq[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -10626,6 +10626,10 @@
             "lhs": "star_targets_tuple_seq[0]",
             "rhs": [
                 {
+                    "value": "star_targets_tuple_seq[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -10635,10 +10639,6 @@
                 },
                 {
                     "value": "star_target",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "star_targets_tuple_seq[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -11143,6 +11143,10 @@
             "lhs": "del_targets[0]",
             "rhs": [
                 {
+                    "value": "del_targets[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -11152,10 +11156,6 @@
                 },
                 {
                     "value": "del_target",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "del_targets[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -11407,6 +11407,10 @@
             "lhs": "type_expressions[0]",
             "rhs": [
                 {
+                    "value": "type_expressions[0]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -11416,10 +11420,6 @@
                 },
                 {
                     "value": "expression",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "type_expressions[0]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -11465,6 +11465,10 @@
             "lhs": "type_expressions[1]",
             "rhs": [
                 {
+                    "value": "type_expressions[1]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -11474,10 +11478,6 @@
                 },
                 {
                     "value": "expression",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "type_expressions[1]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -11523,6 +11523,10 @@
             "lhs": "type_expressions[2]",
             "rhs": [
                 {
+                    "value": "type_expressions[2]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -11532,10 +11536,6 @@
                 },
                 {
                     "value": "expression",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "type_expressions[2]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -11632,6 +11632,10 @@
             "lhs": "type_expressions[3]",
             "rhs": [
                 {
+                    "value": "type_expressions[3]",
+                    "variant": "NonTerminal"
+                },
+                {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
@@ -11641,10 +11645,6 @@
                 },
                 {
                     "value": "expression",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "type_expressions[3]",
                     "variant": "NonTerminal"
                 }
             ]
@@ -11748,11 +11748,11 @@
             "lhs": "IGNORE[0]",
             "rhs": [
                 {
-                    "value": "IGNORE[0][0]",
+                    "value": "IGNORE[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "IGNORE[0]",
+                    "value": "IGNORE[0][0]",
                     "variant": "NonTerminal"
                 }
             ]
