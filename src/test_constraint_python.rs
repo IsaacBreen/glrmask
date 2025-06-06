@@ -310,7 +310,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     // Ensure the test string tokenizes as expected.
     let text = b"f\"";
-    let expected_terminal_name = "FSTRING_START";
+    let expected_terminal_name = "FSTRING_START[0]";
     let results = compiled_grammar.tokenizer.execute_from_state(text, TokenizerStateID(0));
     let fstring_start_group_id = *grammar_definition.terminal_name_to_group_id.get_by_left(expected_terminal_name).unwrap();
     assert_eq!(results.matches, vec![Token {
