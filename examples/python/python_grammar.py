@@ -110,16 +110,21 @@ def define_tokens() -> list[tuple[str, Any]]:
         return choice([Regex.eat_u8(c) for c in range(ord(start), ord(end) + 1)])
 
     # TODO: Use eg eat("a") instead of eat_u8(ord("a")). It's a bit more readable.
-#     tokens["FSTRING_END"] = choice([
-#         eat('"'),
-#         eat("'"),
-#         eat('"""'),
-#         eat("'''"),
-#     ])
-#     tokens["FSTRING_MIDDLE"] = rep1(choice([
-#         eat_u8_negation(ord("{")),
-#         eat("{{"),
-#     ]))
+    tokens["FSTRING_START"] = seq([
+        fstring_prefix,
+        choice([
+            eat('"'),
+            eat("'"),
+            eat('"""'),
+            eat("'''"),
+        ])
+    ])
+    tokens["FSTRING_END"] = choice([
+        eat('"'),
+        eat("'"),
+        eat('"""'),
+        eat("'''"),
+    ])
 
     ignore = ge.repeat(ge.choice([
         ge.regex(rep1(eat_u8(ord(" ")))),
@@ -211,8 +216,8 @@ def define_tokens() -> list[tuple[str, Any]]:
     ])
     tokens["ENDMARKER"] = eps()
     # TODO: delete this
-    tokens.pop("FSTRING_START")
-    tokens.pop("FSTRING_END")
+#     tokens.pop("FSTRING_START")
+#     tokens.pop("FSTRING_END")
     return [regex(expr, name) for name, expr in tokens.items()]
 #     # TODO: delete this
 #     return []
@@ -292,11 +297,11 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
        # TODO: uncomment this
 #         exprs.append((rule.name, rhs))
 
-    tokens = {}
-    tokens["FSTRING_START"] = eat('f"')
-    tokens["FSTRING_END"] = eat('"')
-    tokens = [regex(expr, name) for name, expr in tokens.items()]
-    exprs.extend(tokens)
+#     tokens = {}
+#     tokens["FSTRING_START"] = eat('f"')
+#     tokens["FSTRING_END"] = eat('"')
+#     tokens = [regex(expr, name) for name, expr in tokens.items()]
+#     exprs.extend(tokens)
 
     tokens = define_tokens()
 #     tokens.reverse()
