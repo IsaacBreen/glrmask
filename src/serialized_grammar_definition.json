@@ -12906,23 +12906,6 @@
                                 ]
                             ],
                             "variant": "U8Class"
-                        },
-                        {
-                            "exprs": [
-                                {
-                                    "bytes": [
-                                        123
-                                    ],
-                                    "variant": "U8Seq"
-                                },
-                                {
-                                    "bytes": [
-                                        123
-                                    ],
-                                    "variant": "U8Seq"
-                                }
-                            ],
-                            "variant": "Seq"
                         }
                     ],
                     "variant": "Choice"
@@ -12931,6 +12914,72 @@
                 "variant": "Quantifier"
             },
             95
+        ],
+        [
+            {
+                "exprs": [
+                    {
+                        "bytes": [
+                            34
+                        ],
+                        "variant": "U8Seq"
+                    },
+                    {
+                        "bytes": [
+                            39
+                        ],
+                        "variant": "U8Seq"
+                    },
+                    {
+                        "exprs": [
+                            {
+                                "bytes": [
+                                    34
+                                ],
+                                "variant": "U8Seq"
+                            },
+                            {
+                                "bytes": [
+                                    34
+                                ],
+                                "variant": "U8Seq"
+                            },
+                            {
+                                "bytes": [
+                                    34
+                                ],
+                                "variant": "U8Seq"
+                            }
+                        ],
+                        "variant": "Seq"
+                    },
+                    {
+                        "exprs": [
+                            {
+                                "bytes": [
+                                    39
+                                ],
+                                "variant": "U8Seq"
+                            },
+                            {
+                                "bytes": [
+                                    39
+                                ],
+                                "variant": "U8Seq"
+                            },
+                            {
+                                "bytes": [
+                                    39
+                                ],
+                                "variant": "U8Seq"
+                            }
+                        ],
+                        "variant": "Seq"
+                    }
+                ],
+                "variant": "Choice"
+            },
+            94
         ],
         [
             {
@@ -13157,60 +13206,6 @@
                 "variant": "Choice"
             },
             91
-        ],
-        [
-            {
-                "exprs": [
-                    {
-                        "exprs": [
-                            {
-                                "bytes": [
-                                    34
-                                ],
-                                "variant": "U8Seq"
-                            },
-                            {
-                                "bytes": [
-                                    34
-                                ],
-                                "variant": "U8Seq"
-                            },
-                            {
-                                "bytes": [
-                                    34
-                                ],
-                                "variant": "U8Seq"
-                            }
-                        ],
-                        "variant": "Seq"
-                    },
-                    {
-                        "exprs": [
-                            {
-                                "bytes": [
-                                    39
-                                ],
-                                "variant": "U8Seq"
-                            },
-                            {
-                                "bytes": [
-                                    39
-                                ],
-                                "variant": "U8Seq"
-                            },
-                            {
-                                "bytes": [
-                                    39
-                                ],
-                                "variant": "U8Seq"
-                            }
-                        ],
-                        "variant": "Seq"
-                    }
-                ],
-                "variant": "Choice"
-            },
-            94
         ],
         [
             {

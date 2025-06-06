@@ -632,7 +632,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     //     let full_text_to_tokenize = "# Top-level comment, challenging parser start\nimport os";
     // let full_text_to_tokenize = "import os";
     // f-strings
-    let full_text_to_tokenize = "x = f'hi!'\n"; 
+    // let full_text_to_tokenize = "x = f'hi!'\n";
     let full_text_to_tokenize = "x = f'hi{x}'\n";
 
     // Tokenize the full_text_to_tokenize using the VocabPrefixTree
