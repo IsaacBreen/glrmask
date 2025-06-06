@@ -1,7 +1,7 @@
 use crate::glr::parser::ParseState;
 use rand::rngs::StdRng;
 use std::collections::{BTreeMap, BTreeSet};
-use crate::finite_automata::eat_u8;
+use crate::finite_automata::{eat_u8, Match};
 use crate::{choice, choice_fast, groups, seq, seq_fast};
 use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
@@ -22,7 +22,7 @@ use crate::datastructures::trie::Trie;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 // Already a main dependency, but good to be explicit if used directly
 // reqwest will be used if the file isn't cached, ensure it's in dev-dependencies
-use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+use crate::tokenizer::{LLMTokenID, LLMTokenMap, Token, TokenizerStateID};
 use crate::types::TerminalID;
 use crate::datastructures::vocab_prefix_tree::VocabPrefixTree; // Added for tokenization
 use std::time::Instant;
@@ -307,6 +307,16 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     println!("{}", compiled_grammar);
     // --- New test section for grammar terminal sequences ---
     println!("\nTesting GLR parser with specific grammar terminal sequences...");
+
+    // Ensure the test string tokenizes as expected.
+    let text = b"f\"";
+    let expected_terminal_name = "FSTRING_START";
+    let results = compiled_grammar.tokenizer.execute_from_state(text, TokenizerStateID(0));
+    let fstring_start_group_id = *grammar_definition.terminal_name_to_group_id.get_by_left(expected_terminal_name).unwrap();
+    assert_eq!(results.matches, vec![Token {
+        id: fstring_start_group_id,
+        width: 2,
+    }]);
 
     // Define the sequences of terminal names to test
     let mut test_sequences_str = vec![
