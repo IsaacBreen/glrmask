@@ -720,6 +720,10 @@ pub fn intersect_allowed_terminals_and_prune_arc(
 pub fn prune_disallowed_terminals(root_arc: &mut Arc<GSSNode>, terminals_map: &TerminalInfo) {
     // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
+        // TODO: delete this
+        for gss_allowed_bv in current_acc.allowed_terminals().values() {
+            assert_eq!(gss_allowed_bv, &TerminalBV::max_ones());
+        }
         for (gss_state_id, gss_allowed_bv) in current_acc.allowed_terminals() {
             if let Some(allowed_bv_for_state) = terminals_map.get(gss_state_id) {
                 let disallowed_bv_for_state = allowed_bv_for_state.inverted();
@@ -768,6 +772,10 @@ pub fn map_allowed_terminals_tokenizer_states(
         }
 
         let new_acc = Acc::new(current_acc.acc().clone(), new_allowed_terminals);
+        // TODO: delete this
+        for gss_allowed_bv in new_acc.allowed_terminals().values() {
+            assert_eq!(gss_allowed_bv, &TerminalBV::max_ones());
+        }
         let continue_recursion = changed || !current_acc.allowed_terminals().is_empty(); // Recurse if there was something to map or a change occurred.
         Some((new_acc, continue_recursion))
     };
