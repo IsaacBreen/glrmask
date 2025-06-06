@@ -432,12 +432,14 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // let gpt2_raw_vocab = BTreeMap::from([("________________________________________________________________", 0)]);
     let mut gpt2_raw_vocab = BTreeMap::new();
     // Just fill with all bytes
-    for i in 0u8..=255u8 {
-        let c = i as char;
-        let s = c.to_string();
-        gpt2_raw_vocab.insert(s, i as usize);
-    }
-    gpt2_raw_vocab.insert("import os".to_string(), 0);
+    // for i in 0u8..=255u8 {
+    //     let c = i as char;
+    //     let s = c.to_string();
+    //     gpt2_raw_vocab.insert(s, i as usize);
+    // }
+    // gpt2_raw_vocab.insert("import os".to_string(), 0);
+    gpt2_raw_vocab.insert("import".to_string(), 1);
+    gpt2_raw_vocab.insert(" os".to_string(), 2);
     let N = 2000;
     // Add "#" and "*" * N
     // gpt2_raw_vocab.insert("#".to_string(), 0);
