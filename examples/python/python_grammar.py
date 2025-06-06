@@ -292,16 +292,22 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
        # TODO: uncomment this
 #         exprs.append((rule.name, rhs))
 
-
-    tokens = define_tokens()
-#     tokens.reverse()
-    # TODO: uncomment this
-    exprs.extend(tokens)
     tokens = {}
     tokens["FSTRING_START"] = eat('f"')
     tokens["FSTRING_END"] = eat('"')
     tokens = [regex(expr, name) for name, expr in tokens.items()]
     exprs.extend(tokens)
+
+    tokens = define_tokens()
+#     tokens.reverse()
+    # TODO: uncomment this
+    exprs.extend(tokens)
+
+#     tokens = {}
+#     tokens["FSTRING_START"] = eat('f"')
+#     tokens["FSTRING_END"] = eat('"')
+#     tokens = [regex(expr, name) for name, expr in tokens.items()]
+#     exprs.extend(tokens)
 
     return GrammarDefinition(exprs) # Changed Grammar to CompiledGrammar
 
