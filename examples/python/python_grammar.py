@@ -110,8 +110,8 @@ def define_tokens() -> list[tuple[str, Any]]:
         return choice([Regex.eat_u8(c) for c in range(ord(start), ord(end) + 1)])
 
     # TODO: Use eg eat("a") instead of eat_u8(ord("a")). It's a bit more readable.
-    tokens["FSTRING_START"] = eat('f"')
-    tokens["FSTRING_END"] = eat('"')
+#     tokens["FSTRING_START"] = eat('f"')
+#     tokens["FSTRING_END"] = eat('"')
 
     ignore = ge.repeat(ge.choice([
         ge.regex(rep1(eat_u8(ord(" ")))),
@@ -193,8 +193,8 @@ def define_tokens() -> list[tuple[str, Any]]:
 #     tokens["FSTRING_END"] = eps()
 #     tokens["FSTRING_MIDDLE"] = rep(Regex.eat_any())
 #     tokens["FSTRING_MIDDLE"] = eps()
-    tokens["FSTRING_START"] = eat('f"')
-    tokens["FSTRING_END"] = eat('"')
+#     tokens["FSTRING_START"] = eat('f"')
+#     tokens["FSTRING_END"] = eat('"')
 
     tokens["TYPE_COMMENT"] = seq([
         eat("#"),
