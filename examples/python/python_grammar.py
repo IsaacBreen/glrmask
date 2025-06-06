@@ -257,6 +257,8 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
 
 #     exprs = [("start", ge.sequence([ge.regex(Regex.rep(Regex.eat_u8(ord(" ")))), ge.literal(b"f")]))]
 
+    exprs = [("start", ge.sequence([ge.ref("FSTRING_START"), ge.ref("FSTRING_END")]))]
+
     for rule in grammar.rules.values():
         memo[rule.name] = ge.ref(rule.name)
         if not rule_name_is_valid(rule.name):
@@ -265,7 +267,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
         else:
             rhs = pegen_to_sep1_regex(rule.rhs, memo)
        # TODO: uncomment this
-        exprs.append((rule.name, rhs))
+#         exprs.append((rule.name, rhs))
 
 
     tokens = define_tokens()
