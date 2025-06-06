@@ -407,10 +407,8 @@ impl GSSNode {
             let mut pred_arc = pred_arc.clone();
             // The acc for the path ending at pred_arc (after popping self)
             // is self.acc intersected with pred_arc's original acc.
-            if self.acc.intersect_has_effect(&pred_arc.acc) {
-                let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
-                pred_arc = Arc::new(pred_arc.as_ref().clone().with_acc(path_acc));
-            }
+            let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
+            pred_arc = Arc::new(pred_arc.as_ref().clone().with_acc(path_acc));
             (pred_arc, edge_val.clone())
         }).collect()
     }

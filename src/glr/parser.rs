@@ -494,7 +494,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
         // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
-        // return;
+        return;
         const MAX: usize = 30;
         const PANIC_THRESHOLD: usize = 10000;
 
@@ -642,7 +642,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         
         // Simplify the active GSS forest at the end of the step
         if !self.active_state.stack.is_empty() {
-            Arc::make_mut(&mut self.active_state.stack).simplify();
+            // Arc::make_mut(&mut self.active_state.stack).simplify();
         }
 
         self.log_gss("Step-end", token_id);
