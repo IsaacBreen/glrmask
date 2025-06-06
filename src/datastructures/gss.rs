@@ -704,47 +704,6 @@ pub fn intersect_allowed_terminals_and_prune_arc(
     }
 }
 
-pub fn subtract_allowed_terminals_and_prune_arc(
-    root_arc: &mut Arc<GSSNode>,
-    terminals_to_subtract: &TerminalInfo,
-) {
-    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-        let mut new_acc = current_acc.clone();
-        allowed_terminals_subtract_assign(new_acc.allowed_terminals_mut(), terminals_to_subtract);
-
-        if new_acc.is_alive() {
-            Some((new_acc, false)) // Transformation is local, don't force recursion with this rule
-        } else {
-            None // Prune this node
-        }
-    };
-    let mut memo = HashMap::new();
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
-        *root_arc = new_root;
-    } else {
-        // The entire GSS was pruned, set root_arc to an empty GSSNode with original acc (or a default one)
-        // For consistency with other prune functions, use original acc.
-        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
-    }
-}
-
-pub fn reset_allowed_terminals(root_arc: &mut Arc<GSSNode>) {
-    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-        // Continue recursion if the allowed_terminals map was not already empty.
-        let continue_recursion = !current_acc.allowed_terminals().is_empty();
-        let new_acc = Acc::new(current_acc.acc().clone(), BTreeMap::new());
-        Some((new_acc, continue_recursion))
-    };
-    let mut memo = HashMap::new();
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
-        *root_arc = new_root;
-    } else {
-        // This case should ideally not be reached if the closure always returns Some.
-        // If it were, it implies the root itself was an issue, which reset shouldn't cause.
-        *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
-    }
-}
-
 pub fn prune_disallowed_terminals(root_arc: &mut Arc<GSSNode>, terminals_map: &TerminalInfo) {
     // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
@@ -909,21 +868,6 @@ impl GSSNode {
     ) {
         let mut node_arc = Arc::new(self.clone());
         intersect_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals);
-        *self = node_arc.as_ref().clone();
-    }
-
-    pub fn subtract_allowed_terminals_and_prune_arc(
-        &mut self,
-        allowed_terminals: &TerminalInfo,
-    ) {
-        let mut node_arc = Arc::new(self.clone());
-        subtract_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals);
-        *self = node_arc.as_ref().clone();
-    }
-
-    pub fn reset_allowed_terminals(&mut self) {
-        let mut node_arc = Arc::new(self.clone());
-        reset_allowed_terminals(&mut node_arc);
         *self = node_arc.as_ref().clone();
     }
 
