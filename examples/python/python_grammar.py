@@ -181,8 +181,8 @@ def define_tokens() -> list[tuple[str, Any]]:
 #         eat('"""'),
 #         eat("'''"),
 #     ])
-    tokens["FSTRING_START"] = eat('f"')
-    tokens["FSTRING_END"] = eat('"')
+#     tokens["FSTRING_START"] = eat('f"')
+#     tokens["FSTRING_END"] = eat('"')
     tokens["FSTRING_MIDDLE"] = rep1(choice([
         eat_u8_negation(ord("{")),
         eat("{{"),
@@ -260,6 +260,11 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
     exprs = [("start", ge.sequence([ge.ref("FSTRING_START"), ge.ref("FSTRING_END")]))]
 #     exprs.append(regex(eat('f"'), "FSTRING_START"))
 #     exprs.append(regex(eat('"'), "FSTRING_END"))
+    tokens = {}
+    tokens["FSTRING_START"] = eat('f"')
+    tokens["FSTRING_END"] = eat('"')
+    tokens = [regex(expr, name) for name, expr in tokens.items()]
+    exprs.extend(tokens)
 #     exprs = [("start'''", ge.sequence([regex(eat('f"')), ge.ref("\"")]))]
 #     print(exprs)
 #     exprs = [("start", ge.sequence([ge.literal(b"f\""), ge.literal(b"\"")]))]
