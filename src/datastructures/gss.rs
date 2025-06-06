@@ -581,6 +581,10 @@ fn prune_and_transform_recursive(
     closure: &impl Fn(&Acc) -> Option<(Acc, bool)>,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) -> Option<Arc<GSSNode>> {
+    // TODO: delete this
+    for gss_allowed_bv in node_arc.acc.allowed_terminals().values() {
+        assert_eq!(gss_allowed_bv, &TerminalBV::max_ones());
+    }
     let node_ptr = Arc::as_ptr(node_arc);
     if let Some(cached_result) = memo.get(&node_ptr) {
         return cached_result.clone();
