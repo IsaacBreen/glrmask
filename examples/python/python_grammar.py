@@ -258,6 +258,8 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
 #     exprs = [("start", ge.sequence([ge.regex(Regex.rep(Regex.eat_u8(ord(" ")))), ge.literal(b"f")]))]
 
     exprs = [("start", ge.sequence([ge.ref("FSTRING_START"), ge.ref("FSTRING_END")]))]
+    exprs.append(regex(eat('f"'), "FSTRING_START"))
+    exprs.append(regex(eat('"'), "FSTRING_END"))
 #     exprs = [("start'''", ge.sequence([regex(eat('f"')), ge.ref("\"")]))]
 #     print(exprs)
 #     exprs = [("start", ge.sequence([ge.literal(b"f\""), ge.literal(b"\"")]))]
@@ -274,7 +276,8 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
 
 
     tokens = define_tokens()
-    exprs.extend(tokens)
+    # TODO: uncomment this
+#     exprs.extend(tokens)
 
     return GrammarDefinition(exprs) # Changed Grammar to CompiledGrammar
 
