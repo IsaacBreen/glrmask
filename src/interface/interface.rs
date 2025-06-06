@@ -569,8 +569,6 @@ impl GrammarDefinition {
         // ------------------------------------------------------------------
         let mut always_null_terminals: HashSet<String>   = HashSet::new();
         let mut may_be_null_terminals:    HashSet<String> = HashSet::new();
-        dbg!(&terminal_name_to_group_id);
-        dbg!(&terminal_expr_to_group_id);
 
         for (terminal_name, group_id) in terminal_name_to_group_id.iter() {
             let expr = terminal_expr_to_group_id
@@ -650,8 +648,6 @@ impl GrammarDefinition {
         // ------------------------------------------------------------------
         //  End of nullability processing
         // ------------------------------------------------------------------
-        dbg!(&terminal_name_to_group_id);
-        dbg!(&terminal_expr_to_group_id);
 
         Ok(GrammarDefinition {
             productions,
