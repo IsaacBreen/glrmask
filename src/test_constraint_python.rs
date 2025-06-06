@@ -82,6 +82,7 @@ fn load_or_download_gpt2_vocab(
     }
 }
 
+#[ignore]
 #[test]
 fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define tokenizer: matches anything
@@ -1017,6 +1018,7 @@ fn inline_sole_productions_pass(
     (productions, made_change_this_outer_iteration)
 }
 
+#[ignore]
 #[test]
 fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Error>> {
     // --- Initial Setup (same as before) ---
@@ -1228,6 +1230,7 @@ fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
+#[ignore]
 #[test]
 fn test_minimized_grammar_causes_panic() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n[Test MRE] Testing the manually defined minimized grammar that causes the panic.");

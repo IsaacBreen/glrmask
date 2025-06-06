@@ -36,7 +36,6 @@ use crate::datastructures::gss::{gather_gss_stats, reset_llm_tokens};
 use crate::datastructures::gss::acc_mod::Acc;
 // For the symbol removal helper
 
-
 #[test]
 fn test_constraint_simple() {
     // LLM tokens: "ab", "ac", "$"
