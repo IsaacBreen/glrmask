@@ -715,6 +715,7 @@ pub fn prune_disallowed_terminals(root_arc: &mut Arc<GSSNode>, terminals_map: &T
             if let Some(allowed_bv_for_state) = terminals_map.get(gss_state_id) {
                 let disallowed_bv_for_state = allowed_bv_for_state.inverted();
                 if !(gss_allowed_bv & &disallowed_bv_for_state).is_empty() {
+                    dbg!(allowed_bv_for_state);
                     dbg!(&gss_allowed_bv, &disallowed_bv_for_state, &(gss_allowed_bv & &disallowed_bv_for_state));
                     return None;
                 }
