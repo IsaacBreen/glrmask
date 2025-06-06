@@ -430,7 +430,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let vocab_file_name = "gpt2_vocab.json";
     let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
     // let gpt2_raw_vocab = BTreeMap::from([("________________________________________________________________", 0)]);
-    let mut gpt2_raw_vocab = BTreeMap::new();
+    // let mut gpt2_raw_vocab = BTreeMap::new();
     // Just fill with all bytes
     // for i in 0u8..=255u8 {
     //     let c = i as char;
@@ -438,13 +438,13 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     //     gpt2_raw_vocab.insert(s, i as usize);
     // }
     // gpt2_raw_vocab.insert("import os".to_string(), 0);
-    gpt2_raw_vocab.insert("import".to_string(), 1);
     // gpt2_raw_vocab.insert("import ".to_string(), 1);
     // gpt2_raw_vocab.insert(" os".to_string(), 2);
-    gpt2_raw_vocab.insert(" ".to_string(), 3);
-    gpt2_raw_vocab.insert("os".to_string(), 4);
-    gpt2_raw_vocab.insert("from".to_string(), 100);
-    gpt2_raw_vocab.insert(" typing".to_string(), 101);
+    // gpt2_raw_vocab.insert("import".to_string(), 1);
+    // gpt2_raw_vocab.insert(" ".to_string(), 3);
+    // gpt2_raw_vocab.insert("os".to_string(), 4);
+    // gpt2_raw_vocab.insert("from".to_string(), 100);
+    // gpt2_raw_vocab.insert(" typing".to_string(), 101);
     let N = 2000;
     // Add "#" and "*" * N
     // gpt2_raw_vocab.insert("#".to_string(), 0);
