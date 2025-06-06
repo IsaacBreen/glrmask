@@ -616,6 +616,11 @@ fn prune_and_transform_recursive(
             
             let result_arc = Arc::new(transformed_node);
             memo.insert(node_ptr, Some(result_arc.clone()));
+
+            // TODO: delete this
+            for gss_allowed_bv in result_arc.acc.allowed_terminals().values() {
+                assert_eq!(gss_allowed_bv, &TerminalBV::max_ones());
+            }
             Some(result_arc)
         }
     }
