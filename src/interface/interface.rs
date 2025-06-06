@@ -3,10 +3,7 @@ use crate::debug;
 use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParser;
-use crate::glr::table::{
-    assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, NonTerminalID,
-    TerminalID,
-};
+use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::tokenizer::LLMTokenID;
 use crate::types::TerminalID as GrammarTokenID; // May not be used directly here anymore
@@ -739,7 +736,8 @@ impl CompiledGrammar {
         let tokenizer = tokenizer_expr_groups_obj.build();
 
         debug!(2, "Building GLR parser from definition");
-        let glr_parser = generate_glr_parser(&definition.productions, definition.start_production_id);
+        let terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.terminal_name_to_group_id.iter().map(|(name, group_id)| (Terminal(name.clone()), TerminalID(*group_id))).collect();
+        let glr_parser = generate_glr_parser_with_terminal_map(&definition.productions, definition.start_production_id, terminal_map);
 
         Self {
             definition,
