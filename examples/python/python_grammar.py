@@ -175,14 +175,11 @@ def define_tokens() -> list[tuple[str, Any]]:
             eat("'''"),
         ])
     ])
-    tokens["FSTRING_END"] =  seq([
-        fstring_prefix,
-        choice([
-            eat('"'),
-            eat("'"),
-            eat('"""'),
-            eat("'''"),
-        ])
+    tokens["FSTRING_END"] = choice([
+        eat('"'),
+        eat("'"),
+        eat('"""'),
+        eat("'''"),
     ])
     tokens["FSTRING_MIDDLE"] = rep1(choice([
         eat_u8_negation(ord("{")),
