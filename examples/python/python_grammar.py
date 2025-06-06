@@ -528,7 +528,8 @@ if __name__ == "__main__":
 #     input_text = 'def'
 #     input_text = 'NAME'
 #     input_text = '""'
-    input_text = 'f"x"'
+    input_text = 'f""'
+#     input_text = 'f"x"'
 #     input_text = 'f"{}"'
 #     input_text = 'f"{x}"'
     expected_next_token = ""
