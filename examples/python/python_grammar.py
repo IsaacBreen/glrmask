@@ -25,11 +25,11 @@ def regex(expr, name=None):
         print(f"Ignoring ignore for IGNORE rule: {expr}")
         return name, expr
     if name is None:
-#         return ge.sequence([ge.ref("IGNORE"), expr])
-        return expr
+        return ge.sequence([ge.ref("IGNORE"), expr])
+#         return expr
 #     return name, ge.regex(seq([ignore, expr]))
-#     return name, ge.sequence([ge.ref("IGNORE"), expr])
-    return name, expr
+    return name, ge.sequence([ge.ref("IGNORE"), expr])
+#     return name, expr
 
 def eat(s: bytes) -> Regex:
     if len(s) == 1:
@@ -168,21 +168,21 @@ def define_tokens() -> list[tuple[str, Any]]:
         seq([f, r]),
         seq([r, f]),
     ])
-#     tokens["FSTRING_START"] = seq([
-#         fstring_prefix,
-#         choice([
-#             eat('"'),
-#             eat("'"),
-#             eat('"""'),
-#             eat("'''"),
-#         ])
-#     ])
-#     tokens["FSTRING_END"] = choice([
-#         eat('"'),
-#         eat("'"),
-#         eat('"""'),
-#         eat("'''"),
-#     ])
+    tokens["FSTRING_START"] = seq([
+        fstring_prefix,
+        choice([
+            eat('"'),
+            eat("'"),
+            eat('"""'),
+            eat("'''"),
+        ])
+    ])
+    tokens["FSTRING_END"] = choice([
+        eat('"'),
+        eat("'"),
+        eat('"""'),
+        eat("'''"),
+    ])
     tokens["FSTRING_MIDDLE"] = rep1(choice([
         eat_u8_negation(ord("{")),
         eat("{{"),
@@ -193,8 +193,8 @@ def define_tokens() -> list[tuple[str, Any]]:
 #     tokens["FSTRING_END"] = eps()
 #     tokens["FSTRING_MIDDLE"] = rep(Regex.eat_any())
 #     tokens["FSTRING_MIDDLE"] = eps()
-    tokens["FSTRING_START"] = eat('f"')
-    tokens["FSTRING_END"] = eat('"')
+#     tokens["FSTRING_START"] = eat('f"')
+#     tokens["FSTRING_END"] = eat('"')
 
     tokens["TYPE_COMMENT"] = seq([
         eat("#"),
@@ -262,7 +262,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
 
 #     exprs = [("start", ge.sequence([ge.regex(Regex.rep(Regex.eat_u8(ord(" ")))), ge.literal(b"f")]))]
 
-    exprs = [("start", ge.sequence([ge.ref("FSTRING_START"), ge.ref("FSTRING_END")]))]
+#     exprs = [("start", ge.sequence([ge.ref("FSTRING_START"), ge.ref("FSTRING_END")]))]
 #     exprs.append(regex(eat('f"'), "FSTRING_START"))
 #     exprs.append(regex(eat('"'), "FSTRING_END"))
 #     tokens = {}
@@ -282,7 +282,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
         else:
             rhs = pegen_to_sep1_regex(rule.rhs, memo)
        # TODO: uncomment this
-#         exprs.append((rule.name, rhs))
+        exprs.append((rule.name, rhs))
 
 #     tokens = {}
 #     tokens["FSTRING_START"] = eat('f"')
@@ -574,7 +574,6 @@ if __name__ == "__main__":
     print(f"After '{input_text}': valid={parser_state.is_valid()}")
     assert parser_state.is_valid()
     print("--- End Incremental Parser Demo ---")
-    exit()
 
 
     print("Initializing grammar constraint...")
