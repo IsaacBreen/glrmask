@@ -698,6 +698,10 @@ pub fn intersect_allowed_terminals_and_prune_arc(
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
         allowed_terminals_intersect_assign(new_acc.allowed_terminals_mut(), allowed_terminals.clone());
+        // TODO: delete this
+        for gss_allowed_bv in new_acc.allowed_terminals().values() {
+            assert_eq!(gss_allowed_bv, &TerminalBV::max_ones());
+        }
         if new_acc.is_alive() {
             Some((new_acc, false))
         } else {
