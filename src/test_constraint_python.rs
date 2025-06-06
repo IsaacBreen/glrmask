@@ -82,6 +82,47 @@ fn load_or_download_gpt2_vocab(
     }
 }
 
+/// Pretty-print a few lines of context around the byte range
+/// [token_start, token_end) inside `source`.
+fn print_source_context(source: &str, token_start: usize, token_end: usize, context_lines: usize) {
+    // 1. Work out (line_no, column_no) of token_start.
+    //    line_no is 0-based here, will add 1 when printing.
+    let mut line_no = 0usize;
+    let mut line_start_byte = 0usize;
+    for (idx, ch) in source.char_indices() {
+        if idx >= token_start {
+            break;
+        }
+        if ch == '\n' {
+            line_no += 1;
+            line_start_byte = idx + 1;        // first byte after '\n'
+        }
+    }
+    let column_no = token_start - line_start_byte;
+
+    // 2. Collect the lines we want to display.
+    //    Split once to avoid allocation in every loop.
+    let all_lines: Vec<&str> = source.lines().collect();
+    let first_line_to_show =
+        line_no.saturating_sub(context_lines);
+    let last_line_to_show =
+        (line_no + context_lines).min(all_lines.len() - 1);
+
+    // 3. Print each chosen line with a gutter.
+    for ln in first_line_to_show..=last_line_to_show {
+        eprintln!("{:>4} | {}", ln + 1, all_lines[ln]);
+        if ln == line_no {
+            // underline the token on the next line
+            let mut underline = String::new();
+            // indent: 6 (gutter) + column_no spaces
+            underline.extend(std::iter::repeat(' ').take(6 + column_no));
+            underline.extend(std::iter::repeat('^').take(token_end - token_start));
+            eprintln!("{}", underline);
+        }
+    }
+    eprintln!();       // blank line after the block
+}
+
 #[ignore]
 #[test]
 fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
@@ -535,6 +576,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let mut test_token_sequence_ids = Vec::new();
     // This list will store the actual string content of tokens as produced by the vocab tree, primarily for logging.
     let mut tokenized_strs_for_logging = Vec::new();
+    let mut token_byte_ranges: Vec<(usize, usize)> = Vec::new(); // (start, end)
+    let mut running_input_offset: usize = 0;
     let mut text_to_process = full_text_to_tokenize.as_bytes();
 
     println!("\nTokenizing '{}' using VocabPrefixTree:", full_text_to_tokenize);
@@ -546,6 +589,9 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
                 test_token_sequence_ids.push(LLMTokenID(token_id));
                 tokenized_strs_for_logging.push(matched_str); // Store for logging
+                token_byte_ranges.push((running_input_offset,
+                                        running_input_offset + matched_bytes.len()));
+                running_input_offset += matched_bytes.len();
 
                 text_to_process = &text_to_process[matched_bytes.len()..];
             }
@@ -593,6 +639,9 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             current_token_str,
             llm_token_id.0
         );
+
+        let (tok_start, tok_end) = token_byte_ranges[i];
+        print_source_context(&full_text_to_tokenize, tok_start, tok_end, 2);   // 2 lines of context
 
         assert!(
             constraint_state.is_active(),
@@ -677,13 +726,13 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // let mut actual_constraint_parser_state_comp = constraint_state_for_comp.state()[&initial_tokenizer_state_id].clone();
     //
     // let mut comparable_parser_gss_comp = (*parser_state_for_comp.active_state.stack).clone();
-    // let mut comparable_parser_active_state_comp = ParseState { stack: Arc::new(comparable_parser_gss_comp) };
+    // let mut comparable_parser_active_state = ParseState { stack: Arc::new(comparable_parser_gss_comp) };
     //
     //
-    // Arc::make_mut(&mut comparable_parser_active_state_comp.stack).reset_tokens();
+    // Arc::make_mut(&mut comparable_parser_active_state.stack).reset_tokens();
     // Arc::make_mut(&mut actual_constraint_parser_state_comp.active_state.stack).reset_tokens();
     //
-    // assert_eq!(actual_constraint_parser_state_comp.active_state, comparable_parser_active_state_comp, "GSS structures for comparison should match");
+    // assert_eq!(actual_constraint_parser_state_comp.active_state, comparable_parser_active_state, "GSS structures for comparison should match");
     // println!("Number of states: {}", constraint_state_for_comp.state().len());
     // let roots = constraint_state_for_comp.state().values().map(|state| state.active_state.stack.as_ref().clone()).collect::<Vec<_>>();
     // println!("State statistics: {:?}", gather_gss_stats(&roots.iter().collect::<Vec<_>>()));
