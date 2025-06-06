@@ -294,14 +294,14 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
 
 
     tokens = define_tokens()
-    tokens.reverse()
+#     tokens.reverse()
     # TODO: uncomment this
     exprs.extend(tokens)
     tokens = {}
     tokens["FSTRING_START"] = eat('f"')
     tokens["FSTRING_END"] = eat('"')
-#     tokens = [regex(expr, name) for name, expr in tokens.items()]
-#     exprs.extend(tokens)
+    tokens = [regex(expr, name) for name, expr in tokens.items()]
+    exprs.extend(tokens)
 
     return GrammarDefinition(exprs) # Changed Grammar to CompiledGrammar
 
