@@ -311,21 +311,17 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // Ensure the test string tokenizes as expected.
     let text = b"f\"";
     let mut expected_matches = Vec::new();
-    let expected_terminal_name = "FSTRING_START[0]";
-    let fstring_start_group_id = *grammar_definition.terminal_name_to_group_id.get_by_left(expected_terminal_name).unwrap();
-    expected_matches.push(Token {
-        id: fstring_start_group_id,
-        width: 2,
-    });
     let expected_terminal_name = "NAME[0]";
     let name_group_id = *grammar_definition.terminal_name_to_group_id.get_by_left(expected_terminal_name).unwrap();
     expected_matches.push(Token {
         id: name_group_id,
         width: 1,
     });
+    let expected_terminal_name = "FSTRING_START[0]";
+    let fstring_start_group_id = *grammar_definition.terminal_name_to_group_id.get_by_left(expected_terminal_name).unwrap();
     expected_matches.push(Token {
-        id: name_group_id,
-        width: 1,
+        id: fstring_start_group_id,
+        width: 2,
     });
     let results = compiled_grammar.tokenizer.execute_from_state(text, TokenizerStateID(0));
     assert_eq!(results.matches, expected_matches);
