@@ -686,12 +686,11 @@ pub fn intersect_allowed_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     allowed_terminals: &TerminalInfo
 ) {
-    return;
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
         allowed_terminals_intersect_assign(new_acc.allowed_terminals_mut(), allowed_terminals.clone());
         if new_acc.is_alive() {
-            Some((new_acc, false))
+            Some((new_acc, true))
         } else {
             None // Prune this node
         }
@@ -707,9 +706,7 @@ pub fn intersect_allowed_terminals_and_prune_arc(
 
 pub fn prune_disallowed_terminals(root_arc: &mut Arc<GSSNode>, terminals_map: &TerminalInfo) {
     // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
-    return;
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-        let mut should_prune = false;
         for (gss_state_id, gss_allowed_bv) in current_acc.allowed_terminals() {
             if let Some(allowed_bv_for_state) = terminals_map.get(gss_state_id) {
                 let disallowed_bv_for_state = allowed_bv_for_state.inverted();
