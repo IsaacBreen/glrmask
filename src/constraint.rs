@@ -1157,13 +1157,13 @@ impl<'a> GrammarConstraintState<'a> {
         let step_counts_clone1 = Arc::clone(&step_counts);
         let step_counts_clone2 = Arc::clone(&step_counts);
 
+        let mut gss_pruning_memo = HashMap::new();
+
         Trie::special_map(
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
-            |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
-                let mut glr_s = glr_s.clone();
-
-                intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv);
+            |mut glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
+                intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut gss_pruning_memo);
 
                 if let Some(gtid) = grammar_token_opt {
                     *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
@@ -1239,14 +1239,17 @@ impl<'a> GrammarConstraintState<'a> {
 
         crate::debug!(2, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
 
+        let mut gss_transformation_memo = HashMap::new();
+
         for state in self.state.values_mut() {
-            Arc::make_mut(&mut state.active_state.stack).reset_llm_tokens();
+            reset_llm_tokens(&mut state.active_state.stack, &mut gss_transformation_memo);
         }
+        gss_transformation_memo.clear();
 
         // Handle allowed terminals
         let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
         let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
-        for (tokenizer_state_id, state) in self.state.iter_mut() {
+        for (tokenizer_state_id, _state) in self.state.iter() {
             let exec_result = self.parent.tokenizer.execute_from_state(
                 &llm_token_bytes,
                 *tokenizer_state_id,
@@ -1262,9 +1265,14 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         for state in self.state.values_mut() {
-            prune_disallowed_terminals(&mut state.active_state.stack, &terminals_map);
-            Arc::make_mut(&mut state.active_state.stack).map_allowed_terminals_tokenizer_states(&state_map);
+            prune_disallowed_terminals(&mut state.active_state.stack, &terminals_map, &mut gss_transformation_memo);
         }
+        gss_transformation_memo.clear();
+
+        for state in self.state.values_mut() {
+            map_allowed_terminals_tokenizer_states(&mut state.active_state.stack, &state_map, &mut gss_transformation_memo);
+        }
+        gss_transformation_memo.clear();
 
         let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
 
@@ -1298,7 +1306,7 @@ impl<'a> GrammarConstraintState<'a> {
                             allowed_terminals_for_end_state.remove(match_info.id);
                             allowed_terminals.insert(TokenizerStateID(end_state_id), allowed_terminals_for_end_state);
                         }
-                        intersect_allowed_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &allowed_terminals);
+                        intersect_allowed_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &allowed_terminals, &mut gss_transformation_memo);
 
                         if new_offset == llm_token_bytes.len() {
                             // reset_allowed_terminals(&mut cloned_glr_s.active_state.stack);
@@ -1316,7 +1324,7 @@ impl<'a> GrammarConstraintState<'a> {
                     new_overall_state.entry(final_tokenizer_state).and_modify(|existing| existing.merge_with(glr_s_at_offset.clone())).or_insert(glr_s_at_offset.clone());
                 }
             }
-
+            gss_transformation_memo.clear();
         }
 
         self.state = new_overall_state.clone();

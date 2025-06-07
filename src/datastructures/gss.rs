@@ -617,7 +617,11 @@ fn prune_and_transform_recursive(
 }
 
 
-pub fn intersect_llm_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to_intersect: &LLMTokenBV) {
+pub fn intersect_llm_tokens_and_prune_arc(
+    root_arc: &mut Arc<GSSNode>, 
+    tokens_to_intersect: &LLMTokenBV,
+    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
+) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
         if let Some(bv) = new_acc.acc_mut() {
@@ -632,8 +636,7 @@ pub fn intersect_llm_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to
         }
     };
 
-    let mut memo = HashMap::new();
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
         // The entire GSS was pruned, set root_arc to an empty GSSNode
@@ -644,6 +647,7 @@ pub fn intersect_llm_tokens_and_prune_arc(root_arc: &mut Arc<GSSNode>, tokens_to
 pub fn subtract_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     llm_tokens: &LLMTokenBV,
+    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
@@ -658,8 +662,7 @@ pub fn subtract_llm_tokens_and_prune_arc(
             None // Prune this node
         }
     };
-    let mut memo = HashMap::new();
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
         // The entire GSS was pruned, set root_arc to an empty GSSNode
@@ -667,13 +670,15 @@ pub fn subtract_llm_tokens_and_prune_arc(
     }
 }
 
-pub fn reset_llm_tokens(root_arc: &mut Arc<GSSNode>) {
+pub fn reset_llm_tokens(
+    root_arc: &mut Arc<GSSNode>,
+    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
+) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let continue_recursion = !current_acc.is_default();
         Some((Acc::new(None, current_acc.allowed_terminals().clone()), continue_recursion)) // Keep node, continue recursion
     };
-    let mut memo = HashMap::new();
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
         // The entire GSS was pruned, set root_arc to an empty GSSNode
@@ -683,7 +688,8 @@ pub fn reset_llm_tokens(root_arc: &mut Arc<GSSNode>) {
 
 pub fn intersect_allowed_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
-    allowed_terminals: &TerminalInfo
+    allowed_terminals: &TerminalInfo,
+    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
@@ -694,8 +700,7 @@ pub fn intersect_allowed_terminals_and_prune_arc(
             None // Prune this node
         }
     };
-    let mut memo = HashMap::new();
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
         // The entire GSS was pruned, set root_arc to an empty GSSNode
@@ -703,7 +708,11 @@ pub fn intersect_allowed_terminals_and_prune_arc(
     }
 }
 
-pub fn prune_disallowed_terminals(root_arc: &mut Arc<GSSNode>, terminals_map: &TerminalInfo) {
+pub fn prune_disallowed_terminals(
+    root_arc: &mut Arc<GSSNode>, 
+    terminals_map: &TerminalInfo,
+    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
+) {
     // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         for (gss_state_id, gss_allowed_bv) in current_acc.allowed_terminals() {
@@ -718,8 +727,7 @@ pub fn prune_disallowed_terminals(root_arc: &mut Arc<GSSNode>, terminals_map: &T
         Some((current_acc.clone(), continue_recursion))
     };
 
-    let mut memo = HashMap::new();
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
         *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
@@ -729,6 +737,7 @@ pub fn prune_disallowed_terminals(root_arc: &mut Arc<GSSNode>, terminals_map: &T
 pub fn map_allowed_terminals_tokenizer_states(
     root_arc: &mut Arc<GSSNode>,
     map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
+    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_allowed_terminals = BTreeMap::new();
@@ -755,8 +764,7 @@ pub fn map_allowed_terminals_tokenizer_states(
         let continue_recursion = changed || !current_acc.allowed_terminals().is_empty(); // Recurse if there was something to map or a change occurred.
         Some((new_acc, continue_recursion))
     };
-    let mut memo = HashMap::new();
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, &mut memo) {
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
         *root_arc = Arc::new(GSSNode::new(root_arc.acc2().clone()));
@@ -841,7 +849,8 @@ impl GSSNode {
         llm_tokens: &LLMTokenBV,
     ) {
         let mut node_arc = Arc::new(self.clone());
-        intersect_llm_tokens_and_prune_arc(&mut node_arc, &llm_tokens);
+        let mut memo = HashMap::new();
+        intersect_llm_tokens_and_prune_arc(&mut node_arc, &llm_tokens, &mut memo);
         *self = node_arc.as_ref().clone();
     }
 
@@ -850,13 +859,15 @@ impl GSSNode {
         llm_tokens: &LLMTokenBV,
     ) {
         let mut node_arc = Arc::new(self.clone());
-        subtract_llm_tokens_and_prune_arc(&mut node_arc, &llm_tokens);
+        let mut memo = HashMap::new();
+        subtract_llm_tokens_and_prune_arc(&mut node_arc, &llm_tokens, &mut memo);
         *self = node_arc.as_ref().clone();
     }
 
     pub fn reset_llm_tokens(&mut self) {
         let mut node_arc = Arc::new(self.clone());
-        reset_llm_tokens(&mut node_arc);
+        let mut memo = HashMap::new();
+        reset_llm_tokens(&mut node_arc, &mut memo);
         *self = node_arc.as_ref().clone();
     }
 
@@ -865,21 +876,28 @@ impl GSSNode {
         allowed_terminals: &TerminalInfo,
     ) {
         let mut node_arc = Arc::new(self.clone());
-        intersect_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals);
+        let mut memo = HashMap::new();
+        intersect_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals, &mut memo);
         *self = node_arc.as_ref().clone();
     }
 
-    pub fn prune_disallowed_terminals(&mut self, terminals_map: &TerminalInfo) {
+    pub fn prune_disallowed_terminals(
+        &mut self, 
+        terminals_map: &TerminalInfo,
+    ) {
         let mut node_arc = Arc::new(self.clone());
-        prune_disallowed_terminals(&mut node_arc, terminals_map);
+        let mut memo = HashMap::new();
+        prune_disallowed_terminals(&mut node_arc, terminals_map, &mut memo);
         *self = node_arc.as_ref().clone();
     }
 
-
-
-    pub fn map_allowed_terminals_tokenizer_states(&mut self, map: &BTreeMap<TokenizerStateID, TokenizerStateID>) {
+    pub fn map_allowed_terminals_tokenizer_states(
+        &mut self, 
+        map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
+    ) {
         let mut node_arc = Arc::new(self.clone());
-        map_allowed_terminals_tokenizer_states(&mut node_arc, map);
+        let mut memo = HashMap::new();
+        map_allowed_terminals_tokenizer_states(&mut node_arc, map, &mut memo);
         *self = node_arc.as_ref().clone();
     }
 
