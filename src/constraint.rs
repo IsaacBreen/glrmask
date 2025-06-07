@@ -1137,7 +1137,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
         for (tokenizer_state_id, glr_state) in &self.state {
-            crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
+            // crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
             // Ensure the GLR state's GSS stack is not empty before proceeding
             if glr_state.active_state.stack.is_empty() {
                 continue;
@@ -1151,18 +1151,18 @@ impl<'a> GrammarConstraintState<'a> {
                     for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
                         if !allowed_terminals_for_state.contains(terminal_id.0) {
                             // This terminal is not allowed
-                            crate::debug!(4, "Allowed terminals for GSS: {:?}", allowed_terminals_for_gss);
-                            crate::debug!(4, "Possible matches for state {}: {:?}", tokenizer_state_id.0, possible_matches_for_state);
-                            crate::debug!(4, "Subtracting forbidden LLM tokens for terminal {:?} (ID {}) for state {}: {:?}", self.parent.parser.terminal_map.get_by_right(terminal_id).map(|t| t.0.clone()).unwrap_or("UNKNOWN_TERMINAL".to_string()), terminal_id.0, tokenizer_state_id.0, llm_tokens_that_match_this_terminal);
+                            // crate::debug!(4, "Allowed terminals for GSS: {:?}", allowed_terminals_for_gss);
+                            // crate::debug!(4, "Possible matches for state {}: {:?}", tokenizer_state_id.0, possible_matches_for_state);
+                            // crate::debug!(4, "Subtracting forbidden LLM tokens for terminal {:?} (ID {}) for state {}: {:?}", self.parent.parser.terminal_map.get_by_right(terminal_id).map(|t| t.0.clone()).unwrap_or("UNKNOWN_TERMINAL".to_string()), terminal_id.0, tokenizer_state_id.0, llm_tokens_that_match_this_terminal);
                             forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
                         }
                     }
                 }
                 let mut glr_state = glr_state.clone();
                 if forbidden_llm_tokens != (LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.internal_max_llm_token + 1)) {
-                    glr_state.log_gss(format!("Subtracting forbidden LLM tokens: {:?}", forbidden_llm_tokens).as_str(), TerminalID(0));
+                    // glr_state.log_gss(format!("Subtracting forbidden LLM tokens: {:?}", forbidden_llm_tokens).as_str(), TerminalID(0));
                     subtract_llm_tokens_and_prune_arc(&mut glr_state.active_state.stack, &forbidden_llm_tokens, &mut HashMap::new());
-                    glr_state.log_gss("Done subtracting forbidden LLM tokens.", TerminalID(0));
+                    // glr_state.log_gss("Done subtracting forbidden LLM tokens.", TerminalID(0));
                 }
                 let precomputed_trie_arc = Arc::new(Mutex::new(precomputed_trie_root_data.clone()));
                 initial_values_for_map.push((precomputed_trie_arc, glr_state));
@@ -1185,10 +1185,10 @@ impl<'a> GrammarConstraintState<'a> {
             // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
             |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
                 let mut glr_s = glr_s.clone();
-                crate::debug!(4, "Stepping with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
-                glr_s.log_gss("Stepping with edge_llm_tokens_bv", grammar_token_opt.unwrap_or(TerminalID(0)));
+                // crate::debug!(4, "Stepping with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
+                // glr_s.log_gss("Stepping with edge_llm_tokens_bv", grammar_token_opt.unwrap_or(TerminalID(0)));
                 intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
-                glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
+                // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
 
                 if let Some(gtid) = grammar_token_opt {
                     *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
@@ -1219,7 +1219,7 @@ impl<'a> GrammarConstraintState<'a> {
                 }
 
                 for (grammar_token, finalizer) in precomputed_node_data.value.finalizers() {
-                    crate::debug!(4, "Finalizing token {}", grammar_token.0);
+                    // crate::debug!(4, "Finalizing token {}", grammar_token.0);
                     let mut temp_glr_s_for_finalizer_step = final_glr_s.clone();
                     *step_counts_clone2.lock().unwrap().entry(*grammar_token).or_insert(0) += 1;
                     temp_glr_s_for_finalizer_step.step(*grammar_token);
