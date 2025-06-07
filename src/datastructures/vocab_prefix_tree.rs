@@ -1000,5 +1000,29 @@ mod tests {
         assert!(!tree_empty.has_empty_string_token());
         assert_eq!(tree_empty.find_longest_prefix_token(b"abc"), None);
         assert_eq!(tree_empty.find_longest_prefix_token(b""), None);
+
+        // Test case 15: Tokens with spaces
+        let space_tokens = vec![
+            (31, b(" ")),
+            (32, b("  ")),
+            (34, b("    ")),
+        ];
+        let tree_spaces = VocabPrefixTree::build(&space_tokens);
+        assert!(!tree_spaces.has_empty_string_token());
+
+        // Exact match for one space
+        assert_eq!(tree_spaces.find_longest_prefix_token(b" "), Some((31, &b(" ")[..])));
+        // Exact match for two spaces
+        assert_eq!(tree_spaces.find_longest_prefix_token(b"  "), Some((32, &b("  ")[..])));
+        // Input is three spaces, longest prefix is two spaces
+        assert_eq!(tree_spaces.find_longest_prefix_token(b"   "), Some((32, &b("  ")[..])));
+        // Exact match for four spaces
+        assert_eq!(tree_spaces.find_longest_prefix_token(b"    "), Some((34, &b("    ")[..])));
+        // Input is five spaces, longest prefix is four spaces
+        assert_eq!(tree_spaces.find_longest_prefix_token(b"     "), Some((34, &b("    ")[..])));
+        // No match
+        assert_eq!(tree_spaces.find_longest_prefix_token(b"a"), None);
+        // Empty input, no empty token
+        assert_eq!(tree_spaces.find_longest_prefix_token(b""), None);
     }
 }
