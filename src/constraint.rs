@@ -1132,6 +1132,8 @@ impl<'a> GrammarConstraintState<'a> {
             return self.parent.internal_bv_to_original(&final_mask_internal);
         }
 
+        let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, usize>::new()));
+
         let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
         for (tokenizer_state_id, glr_state) in &self.state {
             // Ensure the GLR state's GSS stack is not empty before proceeding
@@ -1152,15 +1154,19 @@ impl<'a> GrammarConstraintState<'a> {
              return self.parent.internal_bv_to_original(&final_mask_internal);
         }
 
+        let step_counts_clone1 = Arc::clone(&step_counts);
+        let step_counts_clone2 = Arc::clone(&step_counts);
+
         Trie::special_map(
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
             |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
                 let mut glr_s = glr_s.clone();
-                
+
                 intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv);
 
                 if let Some(gtid) = grammar_token_opt {
+                    *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
                     glr_s.step(*gtid);
                 }
 
@@ -1189,6 +1195,7 @@ impl<'a> GrammarConstraintState<'a> {
 
                 for (grammar_token, finalizer) in precomputed_node_data.value.finalizers() {
                     let mut temp_glr_s_for_finalizer_step = final_glr_s.clone();
+                    *step_counts_clone2.lock().unwrap().entry(*grammar_token).or_insert(0) += 1;
                     temp_glr_s_for_finalizer_step.step(*grammar_token);
 
                     if temp_glr_s_for_finalizer_step.is_ok() {
@@ -1200,6 +1207,22 @@ impl<'a> GrammarConstraintState<'a> {
                 true 
             },
         );
+
+        let counts = step_counts.lock().unwrap();
+        if !counts.is_empty() {
+            let mut sorted_counts: Vec<_> = counts.iter().collect();
+            sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(*count));
+
+            let mut log_msg = String::from("get_mask step() counts:");
+            for (terminal_id, count) in sorted_counts {
+                let terminal_name = self.parent.parser.terminal_map.get_by_right(terminal_id)
+                    .map(|s| s.0.as_str())
+                    .unwrap_or("UNKNOWN_TERMINAL");
+                log_msg.push_str(&format!("\n  - '{}': {}", terminal_name, count));
+            }
+            crate::debug!(2, "{}", log_msg);
+        }
+
         crate::debug!(2, "Done computing mask");
         self.parent.internal_bv_to_original(&final_mask_internal)
     }
