@@ -1218,6 +1218,7 @@ impl<'a> GrammarConstraintState<'a> {
                 }
 
                 for (grammar_token, finalizer) in precomputed_node_data.value.finalizers() {
+                    crate::debug!(4, "Finalizing token {}", grammar_token.0);
                     let mut temp_glr_s_for_finalizer_step = final_glr_s.clone();
                     *step_counts_clone2.lock().unwrap().entry(*grammar_token).or_insert(0) += 1;
                     temp_glr_s_for_finalizer_step.step(*grammar_token);
