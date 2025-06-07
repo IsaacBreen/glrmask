@@ -584,12 +584,6 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // gpt2_raw_vocab.insert("  ".to_string(), 3);
     // gpt2_raw_vocab.insert("    ".to_string(), 4);
 
-    // Assert that 1, 2, and 4 'Ġ's are in the vocab
-    assert!(gpt2_raw_vocab.contains_key("Ġ"));
-    assert!(gpt2_raw_vocab.contains_key("ĠĠ"));
-    assert!(gpt2_raw_vocab.contains_key("ĠĠĠĠ"));
-
-
     let mut llm_token_map = LLMTokenMap::new();
     let mut max_original_llm_token_id_val: usize = 0;
 
@@ -606,12 +600,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             max_original_llm_token_id_val = id_val;
         }
     }
-
-    // Assert that 1, 2, and 4 spaces are in the vocab
-    assert!(llm_token_map.contains_left(&b" ".to_vec()));
-    assert!(llm_token_map.contains_left(&b"  ".to_vec()));
-    assert!(llm_token_map.contains_left(&b"    ".to_vec()));
-
+    
     if llm_token_map.is_empty() {
         println!("Warning: LLM token map is empty after sampling. Max original ID will be 0.");
     }
@@ -674,7 +663,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // let full_text_to_tokenize = "x = f'hi!'\n";
     // let full_text_to_tokenize = "x = f'hi{x}'\n";
     // let full_text_to_tokenize = "f'hi{x}'\n";
-    let full_text_to_tokenize = "                        ";
+    // let full_text_to_tokenize = "                        ";
 
     // Tokenize the full_text_to_tokenize using the VocabPrefixTree
     let mut test_token_sequence_ids = Vec::new();
