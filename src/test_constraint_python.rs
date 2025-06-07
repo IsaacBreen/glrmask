@@ -602,6 +602,12 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         }
     }
 
+    // Print the vocab
+    println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
+    for (token, id) in llm_token_map.iter() {
+        println!("  {}: {} (ID {})", String::from_utf8_lossy(token), id.0, id.0);
+    }
+
     if llm_token_map.is_empty() {
         println!("Warning: LLM token map is empty after sampling. Max original ID will be 0.");
     }
