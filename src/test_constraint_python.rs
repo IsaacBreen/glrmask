@@ -583,6 +583,12 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // gpt2_raw_vocab.insert("  ".to_string(), 3);
     // gpt2_raw_vocab.insert("    ".to_string(), 4);
 
+    // Assert that 1, 2, and 4 'Ġ's are in the vocab
+    assert!(gpt2_raw_vocab.contains_key("Ġ"));
+    assert!(gpt2_raw_vocab.contains_key("ĠĠ"));
+    assert!(gpt2_raw_vocab.contains_key("ĠĠĠĠ"));
+
+
     let mut llm_token_map = LLMTokenMap::new();
     let mut max_original_llm_token_id_val: usize = 0;
 
