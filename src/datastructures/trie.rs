@@ -1112,26 +1112,6 @@ where
     result: Option<Arc<Mutex<Trie<EK, EV, T>>>>, // Stores the successful destination node
 }
 
-impl<EK, EV, T, FMergeEV> Drop for EdgeInserter<EK, EV, T, FMergeEV>
-where
-    EK: Ord + Clone,
-    EV: Clone,
-    T: Clone,
-    FMergeEV: FnMut(&mut EV, EV),
-{
-    fn drop(&mut self) {
-        // If edge_value is still Some, it means it was never consumed by a successful
-        // insertion or merge. This indicates the EdgeInserter was dropped without being
-        // finalized. We panic to alert the developer.
-        if self.edge_value.is_some() && !std::thread::panicking() {
-            panic!(
-                "EdgeInserter dropped without a destination being found or created. \
-                 Use .into_option() to handle potential failure explicitly, or an .else_create...() method to provide a fallback."
-            );
-        }
-    }
-}
-
 impl<EK, EV, T, FMergeEV> EdgeInserter<EK, EV, T, FMergeEV>
 where
     EK: Ord + Clone + Debug,
@@ -1340,7 +1320,7 @@ where
 
     /// Returns the resulting destination node, if one was found or created.
     pub fn into_option(self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
-        self.result.clone()
+        self.result
     }
 
     pub fn clone_into_option(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
@@ -1349,12 +1329,12 @@ where
 
     /// Returns the resulting destination node, panicking if none was found or created.
     pub fn unwrap(self) -> Arc<Mutex<Trie<EK, EV, T>>> {
-        self.result.clone().expect("EdgeInserter::unwrap() called but no destination was found or created")
+        self.result.expect("EdgeInserter::unwrap() called but no destination was found or created")
     }
 
     /// Returns the resulting destination node, panicking with the given message if none was found or created.
     pub fn expect(self, msg: &str) -> Arc<Mutex<Trie<EK, EV, T>>> {
-        self.result.clone().expect(msg)
+        self.result.expect(msg)
     }
 }
 
