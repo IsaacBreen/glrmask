@@ -624,16 +624,14 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     );
     println!("GrammarConstraint constructed successfully.");
 
-    // Ensure there's an edge in the root precompute node for state 0 that has the terminal for `NEWLINE[0]` on the edge key and which the LLM token for "\n" on the edge value.
-    // The original comment mentioned IGNORE[0][0][1], which seems to be a typo based on the grammar structure.
-    // We check for NEWLINE[0] as it's a more direct and stable terminal for the newline character.
+    // Ensure there's an edge in the root precompute node for state 0 that has the terminal for `IGNORE[0][0][1]` on the edge key and which the LLM token for "\n" on the edge value.
     {
         // 1. Get the root precompute node for tokenizer state 0.
         let precompute_root_node = grammar_constraint.precomputed.get(&TokenizerStateID(0))
             .expect("Precomputed data for tokenizer state 0 should exist.");
 
         // 2. Get the TerminalID for the terminal we are interested in.
-        let newline_terminal_name = "NEWLINE[0]".to_string();
+        let newline_terminal_name = "IGNORE[0][0][1]".to_string();
         let newline_terminal_id = grammar_constraint.parser.terminal_map
             .get_by_left(&Terminal(newline_terminal_name.clone()))
             .unwrap_or_else(|| panic!("Terminal '{}' not found in parser's terminal map.", newline_terminal_name));
@@ -654,7 +652,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         // 5. Check if any edge for this key contains the newline LLM token.
         let found_edge_with_newline_token = destinations_map.values().any(|edge_value_bv| edge_value_bv.contains(newline_llm_token_id.0));
 
-        assert!(found_edge_with_newline_token, "Expected to find an edge for terminal '{}' containing the LLM token for newline (ID {}), but none was found.", newline_terminal_name, newline_llm_token_id.0);
+        assert!(found_edge_with_newline_token, "Expected to find an edge for terminal '{}' containing the LLM token for newline (ID {}), but none was found. Got: {:?}", newline_terminal_name, newline_llm_token_id.0, destinations_map);
 
         println!("Successfully verified edge for '{}' with LLM token for '\\n'.", newline_terminal_name);
     }
