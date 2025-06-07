@@ -1,7 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use crate::datastructures::gss::map_allowed_terminals_tokenizer_states;
+use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, subtract_llm_tokens_and_prune_arc};
 use ordered_hash_map::OrderedHashMap;
 use ordered_hash_map::OrderedHashSet;
 use std::cmp::Ordering;
@@ -1142,8 +1142,21 @@ impl<'a> GrammarConstraintState<'a> {
                 continue;
             }
             if let Some(precomputed_trie_root_data) = self.parent.precomputed.get(tokenizer_state_id) {
+                let allowed_terminals_for_gss = glr_state.active_state.stack.acc2().allowed_terminals();
+                let mut forbidden_llm_tokens = LLMTokenBV::zeros();
+                for (tokenizer_state_id, allowed_terminals_for_state) in allowed_terminals_for_gss {
+                    let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
+                    for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
+                        if !allowed_terminals_for_state.contains(terminal_id.0) {
+                            // This terminal is not allowed
+                            forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
+                        }
+                    }
+                }
+                let mut glr_state = glr_state.clone();
+                subtract_llm_tokens_and_prune_arc(&mut glr_state.active_state.stack, &forbidden_llm_tokens, &mut HashMap::new());
                 let precomputed_trie_arc = Arc::new(Mutex::new(precomputed_trie_root_data.clone()));
-                initial_values_for_map.push((precomputed_trie_arc, glr_state.clone()));
+                initial_values_for_map.push((precomputed_trie_arc, glr_state));
             } else {
                 panic!("No precomputed trie found for tokenizer state {:?}.", tokenizer_state_id);
             }
