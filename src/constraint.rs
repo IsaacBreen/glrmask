@@ -1143,7 +1143,7 @@ impl<'a> GrammarConstraintState<'a> {
             }
             if let Some(precomputed_trie_root_data) = self.parent.precomputed.get(tokenizer_state_id) {
                 let mut forbidden_llm_tokens = LLMTokenBV::zeros();
-                forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.max_original_llm_token_id);
+                forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.internal_max_llm_token);
                 let allowed_terminals_for_gss = glr_state.active_state.stack.acc2().allowed_terminals();
                 for (tokenizer_state_id, allowed_terminals_for_state) in allowed_terminals_for_gss {
                     let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
