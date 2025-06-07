@@ -1180,8 +1180,6 @@ impl<'a> GrammarConstraintState<'a> {
         let step_counts_clone1 = Arc::clone(&step_counts);
         let step_counts_clone2 = Arc::clone(&step_counts);
 
-        let mut gss_pruning_memo = HashMap::new();
-
         Trie::special_map(
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
@@ -1189,7 +1187,8 @@ impl<'a> GrammarConstraintState<'a> {
                 let mut glr_s = glr_s.clone();
                 crate::debug!(4, "Stepping with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
                 glr_s.log_gss("Stepping with edge_llm_tokens_bv", grammar_token_opt.unwrap_or(TerminalID(0)));
-                intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut gss_pruning_memo);
+                intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
+                glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
 
                 if let Some(gtid) = grammar_token_opt {
                     *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
@@ -1333,7 +1332,7 @@ impl<'a> GrammarConstraintState<'a> {
                             allowed_terminals_for_end_state.remove(match_info.id);
                             allowed_terminals.insert(TokenizerStateID(end_state_id), allowed_terminals_for_end_state);
                         }
-                        intersect_allowed_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &allowed_terminals, &mut gss_transformation_memo);
+                        intersect_allowed_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &allowed_terminals, &mut HashMap::new());
 
                         if new_offset == llm_token_bytes.len() {
                             // reset_allowed_terminals(&mut cloned_glr_s.active_state.stack);
@@ -1351,7 +1350,6 @@ impl<'a> GrammarConstraintState<'a> {
                     new_overall_state.entry(final_tokenizer_state).and_modify(|existing| existing.merge_with(glr_s_at_offset.clone())).or_insert(glr_s_at_offset.clone());
                 }
             }
-            gss_transformation_memo.clear();
         }
 
         self.state = new_overall_state.clone();
