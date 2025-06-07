@@ -1137,6 +1137,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
         for (tokenizer_state_id, glr_state) in &self.state {
+            crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
             // Ensure the GLR state's GSS stack is not empty before proceeding
             if glr_state.active_state.stack.is_empty() {
                 continue;
