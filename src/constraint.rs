@@ -36,7 +36,7 @@ pub type LLMTokenBV = HybridBitset;
 pub type TerminalBV = HybridBitset;
 
 
-const MERGE_THRESHOLD: usize = 100;
+const MERGE_THRESHOLD: usize = 10;
 
 // -----------------------------------------------------------------------------
 // Pre-computation node values
