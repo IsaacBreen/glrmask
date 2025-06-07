@@ -14351,43 +14351,10 @@
         },
         {
             "expr": {
-                "expr": {
-                    "exprs": [
-                        {
-                            "u8set": [
-                                [
-                                    0,
-                                    122
-                                ],
-                                [
-                                    124,
-                                    255
-                                ]
-                            ],
-                            "variant": "U8Class"
-                        },
-                        {
-                            "exprs": [
-                                {
-                                    "bytes": [
-                                        123
-                                    ],
-                                    "variant": "U8Seq"
-                                },
-                                {
-                                    "bytes": [
-                                        123
-                                    ],
-                                    "variant": "U8Seq"
-                                }
-                            ],
-                            "variant": "Seq"
-                        }
-                    ],
-                    "variant": "Choice"
-                },
-                "q_type": "OneOrMore",
-                "variant": "Quantifier"
+                "bytes": [
+                    39
+                ],
+                "variant": "U8Seq"
             },
             "group_id": 96,
             "name": "FSTRING_MIDDLE[0]"
