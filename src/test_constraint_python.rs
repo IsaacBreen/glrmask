@@ -641,7 +641,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         // 3. Get the LLMTokenID for the newline character.
         let newline_bytes = b"\n";
         let newline_llm_token_id = grammar_constraint.llm_token_map
-            .get_by_left(newline_bytes)
+            .get_by_left(&newline_bytes.to_vec())
             .unwrap_or_else(|| panic!("LLM token for newline '{:?}' not found in token map.", String::from_utf8_lossy(newline_bytes)));
 
         // 4. Check for the edge in the precompute root node.
