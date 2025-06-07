@@ -37,7 +37,7 @@ pub type LLMTokenBV = HybridBitset;
 pub type TerminalBV = HybridBitset;
 
 
-const MERGE_THRESHOLD: usize = 10;
+const MERGE_THRESHOLD: usize = 100;
 
 // -----------------------------------------------------------------------------
 // Pre-computation node values
@@ -1100,8 +1100,8 @@ impl<'r> Precomputer<'r> {
                 |existing_edge_data: &mut HybridBitset, new_edge_data: HybridBitset| *existing_edge_data |= new_edge_data,
             );
 
-            inserter = inserter.try_destination(merged_node_arc.clone());
             inserter = inserter.try_children();
+            inserter = inserter.try_destination(merged_node_arc.clone());
         }
 
         let mut out = OrderedHashSet::new();
