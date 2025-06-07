@@ -1156,7 +1156,7 @@ impl<'a> GrammarConstraintState<'a> {
                 }
                 let mut glr_state = glr_state.clone();
                 if forbidden_llm_tokens != (LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.internal_max_llm_token)) {
-                    glr_state.log_gss("Precomputed trie found for tokenizer state {:?}. Subtracting forbidden LLM tokens.", TerminalID(0));
+                    glr_state.log_gss("Precomputed trie found for tokenizer state {:?}. Subtracting forbidden LLM tokens {:?}.", TerminalID(0), forbidden_llm_tokens);
                     subtract_llm_tokens_and_prune_arc(&mut glr_state.active_state.stack, &forbidden_llm_tokens, &mut HashMap::new());
                     glr_state.log_gss("Done subtracting forbidden LLM tokens.", TerminalID(0));
                 }
