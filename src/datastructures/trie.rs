@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicUsize, Ordering}; // Added for tests
 use std::cmp::Reverse;          // min-heap helper
 use std::collections::BinaryHeap;
 use std::hash::{DefaultHasher, Hash, Hasher}; // Added for Hash implementation
-use std::cell::RefCell; // Not strictly needed with the chosen direct BFS approach in to_json, but good to keep in mind for context-passing alternatives.
+use std::cell::RefCell;
+use std::mem::ManuallyDrop;
+// Not strictly needed with the chosen direct BFS approach in to_json, but good to keep in mind for context-passing alternatives.
 use ordered_hash_map::OrderedHashMap;
 
 
@@ -1134,14 +1136,14 @@ where
         edge_key: EK,
         edge_value: EV,
         merge_edge_value: FMergeEV,
-    ) -> Self {
-        EdgeInserter {
+    ) -> ManuallyDrop<Self> {
+        ManuallyDrop::new(EdgeInserter {
             source_arc,
             edge_key,
             edge_value: Some(edge_value),
             merge_edge_value,
             result: None,
-        }
+        })
     }
 
     /// Tries to establish an edge to the given `destination`.
@@ -1393,11 +1395,11 @@ impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
         edge_key: EK,
         edge_value: EV,
         merge_edge_value: FMergeEV,
-    ) -> EdgeInserter<EK, EV, T, FMergeEV>
+    ) -> ManuallyDrop<EdgeInserter<EK, EV, T, FMergeEV>>
     where
          FMergeEV: FnMut(&mut EV, EV), // Changed signature
     {
-            EdgeInserter::new(Arc::new(Mutex::new(self.clone())), edge_key, edge_value, merge_edge_value)
+            ManuallyDrop::new(EdgeInserter::new(Arc::new(Mutex::new(self.clone())), edge_key, edge_value, merge_edge_value))
         }
     }
 
