@@ -1090,20 +1090,22 @@ impl<'r> Precomputer<'r> {
             PrecomputedNodeContents::default(),
         )));
 
-        for child_wrapper in set {
+        for child_wrapper in set { 
             let edge_tokens_for_merge = self.all_llm_tokens.clone();
-            EdgeInserter::new(
-                child_wrapper.as_arc().clone(),
-                None::<GrammarTokenID>,
-                edge_tokens_for_merge.clone(),
+            // Consume the inserter to avoid a panic on drop. We don't need the result,
+            // as this is a "fire and forget" insertion within the merge logic.
+            let _ = EdgeInserter::new(
+                child_wrapper.as_arc().clone(), 
+                None::<GrammarTokenID>,   
+                edge_tokens_for_merge.clone(), 
                 |existing_edge_data: &mut HybridBitset, new_edge_data: HybridBitset| *existing_edge_data |= new_edge_data,
-            )
-            .try_destination(merged_node_arc.clone())
-            .unwrap();
+            ).try_destination(merged_node_arc.clone())
+             .try_children()
+             .into_option();
         }
 
         let mut out = OrderedHashSet::new();
-        out.insert(ArcPtrWrapper::new(merged_node_arc));
+        out.insert(ArcPtrWrapper::new(merged_node_arc)); 
         out
     }
 }

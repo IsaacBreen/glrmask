@@ -1098,7 +1098,6 @@ where
 /// A helper struct to facilitate inserting an edge into a Trie,
 /// trying multiple potential destinations and optionally creating a new node.
 /// Provides a chainable interface.
-#[must_use = "EdgeInserter does nothing unless consumed. Call a final method like .unwrap() or .into_option()"]
 pub struct EdgeInserter<EK, EV, T, FMergeEV>
 where
     EK: Ord + Clone,
@@ -1111,6 +1110,26 @@ where
     edge_value: Option<EV>,                          // The value for the edge to be inserted
     merge_edge_value: FMergeEV,              // The function to merge edge values
     result: Option<Arc<Mutex<Trie<EK, EV, T>>>>, // Stores the successful destination node
+}
+
+impl<EK, EV, T, FMergeEV> Drop for EdgeInserter<EK, EV, T, FMergeEV>
+where
+    EK: Ord + Clone,
+    EV: Clone,
+    T: Clone,
+    FMergeEV: FnMut(&mut EV, EV),
+{
+    fn drop(&mut self) {
+        // If edge_value is still Some, it means it was never consumed by a successful
+        // insertion or merge. This indicates the EdgeInserter was dropped without being
+        // finalized. We panic to alert the developer.
+        if self.edge_value.is_some() && !std::thread::panicking() {
+            panic!(
+                "EdgeInserter dropped without a destination being found or created. \
+                 Use .into_option() to handle potential failure explicitly, or an .else_create...() method to provide a fallback."
+            );
+        }
+    }
 }
 
 impl<EK, EV, T, FMergeEV> EdgeInserter<EK, EV, T, FMergeEV>

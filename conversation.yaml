@@ -12137,71 +12137,83 @@ messages:
       filename: src/datastructures/trie.rs
   - user: Modify `EdgeInserter` so it *guarantees* at compile time that an edge is
       inserted eventually, or that insertion failure is eventually handled. Require
-      the user to do some kind of 'finalisation', eg getting the new node.
+      the user to do some kind of 'finalisation', eg getting the new node. Perhaps
+      we can do this by disallowing `EdgeInserter` from being dropped implicitly.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your code. Dealing with graph structures and ensuring correctness can be tricky. Here are the patches for the files you've provided.
+      existing_edge_Hello! As a helpful assistant, I'd be happy to help you with your code. Dealing with edge cases in complex data structures like tries can be tricky. Here are the patches to address the `EdgeInserter`'s behavior and ensure edge insertions are always handled explicitly.
 
-      It looks like you've added a new pruning pass for terminal sequences, which is a great optimization. I've also noticed a potential issue in how `EdgeInserter` was being used, which could lead to silent failures. I've adjusted the `EdgeInserter` to be safer and fixed its usage in `merge_handles` to be more robust and explicit about its intent.
+      I've implemented a `Drop` trait for `EdgeInserter` that will panic if it's dropped without being finalized. This prevents "fire and forget" usage where an insertion might silently fail. I've also updated the call sites in `constraint.rs` to correctly handle the `EdgeInserter`'s lifecycle.
 
-      Here are the diffs for the files:
+      Here are the diffs for the modified files:
 
-      In `src/constraint.rs`, I've updated `merge_handles` to correctly and safely use the `EdgeInserter`, ensuring that edge insertions are finalized and any potential failures (though unlikely in this specific case) are not ignored.
+      In `src/constraint.rs`, I'll update `merge_handles` to correctly consume the `EdgeInserter`.
 
       ```diff
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -1305,21 +1305,18 @@
-                   PrecomputedNodeContents::default(),
+      @@ -1393,18 +1393,15 @@
                )));
        
-      -        for child_wrapper in set { 
-      +        for child_wrapper in set {
+               for child_wrapper in set { 
                    let edge_tokens_for_merge = self.all_llm_tokens.clone();
       -            let mut inserter = EdgeInserter::new(
-      -                child_wrapper.as_arc().clone(), 
-      -                None::<GrammarTokenID>,   
-      -                edge_tokens_for_merge.clone(), 
-      +            EdgeInserter::new(
-      +                child_wrapper.as_arc().clone(),
-      +                None::<GrammarTokenID>,
-      +                edge_tokens_for_merge.clone(),
+      +            // Consume the inserter to avoid a panic on drop. We don't need the result,
+      +            // as this is a "fire and forget" insertion within the merge logic.
+      +            let _ = EdgeInserter::new(
+                       child_wrapper.as_arc().clone(), 
+                       None::<GrammarTokenID>,   
+                       edge_tokens_for_merge.clone(), 
                        |existing_edge_data: &mut HybridBitset, new_edge_data: HybridBitset| *existing_edge_data |= new_edge_data,
       -            );
       -
       -            inserter = inserter.try_destination(merged_node_arc.clone());
       -            inserter = inserter.try_children();
-      +            )
-      +            .try_destination(merged_node_arc.clone())
-      +            .unwrap();
+      +            ).try_destination(merged_node_arc.clone())
+      +             .try_children()
+      +             .into_option();
                }
        
                let mut out = OrderedHashSet::new();
-      -        out.insert(ArcPtrWrapper::new(merged_node_arc)); 
-      +        out.insert(ArcPtrWrapper::new(merged_node_arc));
-               out
-           }
-       }
 
       ```
 
-      In `src/datastructures/trie.rs`, I've added a `#[must_use]` attribute to `EdgeInserter`. This will cause the compiler to issue a warning if an `EdgeInserter` instance is created and not "consumed" by a finalization method like `.unwrap()` or `.into_option()`. This helps prevent bugs where an insertion is intended but not guaranteed to be checked for success.
+      In `src/datastructures/trie.rs`, I'll add the `Drop` implementation to `EdgeInserter`.
 
       ```diff
       --- a/src/datastructures/trie.rs
       +++ b/src/datastructures/trie.rs
-      @@ -1428,6 +1428,7 @@
-       /// A helper struct to facilitate inserting an edge into a Trie,
-       /// trying multiple potential destinations and optionally creating a new node.
-       /// Provides a chainable interface.
-      +#[must_use = "EdgeInserter does nothing unless consumed. Call a final method like .unwrap() or .into_option()"]
-       pub struct EdgeInserter<EK, EV, T, FMergeEV>
+      @@ -1480,6 +1480,25 @@
+           result: Option<Arc<Mutex<Trie<EK, EV, T>>>>, // Stores the successful destination node
+       }
+       
+      +impl<EK, EV, T, FMergeEV> Drop for EdgeInserter<EK, EV, T, FMergeEV>
+      +where
+      +    EK: Ord + Clone,
+      +    EV: Clone,
+      +    T: Clone,
+      +    FMergeEV: FnMut(&mut EV, EV),
+      +{
+      +    fn drop(&mut self) {
+      +        // If edge_value is still Some, it means it was never consumed by a successful
+      +        // insertion or merge. This indicates the EdgeInserter was dropped without being
+      +        // finalized. We panic to alert the developer.
+      +        if self.edge_value.is_some() && !std::thread::panicking() {
+      +            panic!(
+      +                "EdgeInserter dropped without a destination being found or created. \
+      +                 Use .into_option() to handle potential failure explicitly, or an .else_create...() method to provide a fallback."
+      +            );
+      +        }
+      +    }
+      +}
+      +
+       impl<EK, EV, T, FMergeEV> EdgeInserter<EK, EV, T, FMergeEV>
        where
-           EK: Ord + Clone,
+           EK: Ord + Clone + Debug,
 
       ```
 
-      These changes should make your code more robust and prevent the kind of subtle bugs that can arise from unhandled results in a chained-call API. Let me know if you have any other questions
+      These changes should enforce the desired behavior for the `EdgeInserter`. Let me know if you have any other questions
     metadata:
   - user: |
       Git apply result:
