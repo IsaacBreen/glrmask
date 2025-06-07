@@ -1090,21 +1090,20 @@ impl<'r> Precomputer<'r> {
             PrecomputedNodeContents::default(),
         )));
 
-        for child_wrapper in set { 
+        for child_wrapper in set {
             let edge_tokens_for_merge = self.all_llm_tokens.clone();
-            let mut inserter = EdgeInserter::new(
-                child_wrapper.as_arc().clone(), 
-                None::<GrammarTokenID>,   
-                edge_tokens_for_merge.clone(), 
+            EdgeInserter::new(
+                child_wrapper.as_arc().clone(),
+                None::<GrammarTokenID>,
+                edge_tokens_for_merge.clone(),
                 |existing_edge_data: &mut HybridBitset, new_edge_data: HybridBitset| *existing_edge_data |= new_edge_data,
-            );
-
-            inserter = inserter.try_destination(merged_node_arc.clone());
-            inserter = inserter.try_children();
+            )
+            .try_destination(merged_node_arc.clone())
+            .unwrap();
         }
 
         let mut out = OrderedHashSet::new();
-        out.insert(ArcPtrWrapper::new(merged_node_arc)); 
+        out.insert(ArcPtrWrapper::new(merged_node_arc));
         out
     }
 }

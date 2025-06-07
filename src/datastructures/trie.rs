@@ -1098,6 +1098,7 @@ where
 /// A helper struct to facilitate inserting an edge into a Trie,
 /// trying multiple potential destinations and optionally creating a new node.
 /// Provides a chainable interface.
+#[must_use = "EdgeInserter does nothing unless consumed. Call a final method like .unwrap() or .into_option()"]
 pub struct EdgeInserter<EK, EV, T, FMergeEV>
 where
     EK: Ord + Clone,
