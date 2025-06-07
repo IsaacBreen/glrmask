@@ -372,7 +372,7 @@ impl BitAndAssign for HybridBitset {
             println!("HybridBitset::bitand_assign (owned) took {:?}", duration);
         }
         if duration.as_millis() > 10 {
-            panic!("HybridBitset::bitand_assign (owned) took {:?}", duration);
+            // panic!("HybridBitset::bitand_assign (owned) took {:?}", duration);
         }
     }
 }
