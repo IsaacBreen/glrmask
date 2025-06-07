@@ -1163,7 +1163,7 @@ impl<'a> GrammarConstraintState<'a> {
         Trie::special_map(
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
-            |mut glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
+            |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
                 let mut glr_s = glr_s.clone();
                 intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut gss_pruning_memo);
 
