@@ -1092,16 +1092,15 @@ impl<'r> Precomputer<'r> {
 
         for child_wrapper in set { 
             let edge_tokens_for_merge = self.all_llm_tokens.clone();
-            // Consume the inserter to avoid a panic on drop. We don't need the result,
-            // as this is a "fire and forget" insertion within the merge logic.
-            let _ = EdgeInserter::new(
+            let mut inserter = EdgeInserter::new(
                 child_wrapper.as_arc().clone(), 
                 None::<GrammarTokenID>,   
                 edge_tokens_for_merge.clone(), 
                 |existing_edge_data: &mut HybridBitset, new_edge_data: HybridBitset| *existing_edge_data |= new_edge_data,
-            ).try_destination(merged_node_arc.clone())
-             .try_children()
-             .into_option();
+            );
+
+            inserter = inserter.try_destination(merged_node_arc.clone());
+            inserter = inserter.try_children();
         }
 
         let mut out = OrderedHashSet::new();
