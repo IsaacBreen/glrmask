@@ -1126,7 +1126,7 @@ pub struct GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
-        crate::debug!(2, "Computing mask");
+        crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
         let mut final_mask_internal = HybridBitset::zeros();
 
         if self.state.is_empty() {
@@ -1145,7 +1145,7 @@ impl<'a> GrammarConstraintState<'a> {
                 let precomputed_trie_arc = Arc::new(Mutex::new(precomputed_trie_root_data.clone()));
                 initial_values_for_map.push((precomputed_trie_arc, glr_state.clone()));
             } else {
-                crate::debug!(1, "Warning: No precomputed trie found for tokenizer state {:?}. This state will not contribute to the mask.", tokenizer_state_id);
+                panic!("No precomputed trie found for tokenizer state {:?}.", tokenizer_state_id);
             }
         }
 
