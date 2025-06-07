@@ -1340,7 +1340,7 @@ where
 
     /// Returns the resulting destination node, if one was found or created.
     pub fn into_option(self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
-        self.result
+        self.result.clone()
     }
 
     pub fn clone_into_option(&self) -> Option<Arc<Mutex<Trie<EK, EV, T>>>> {
@@ -1349,12 +1349,12 @@ where
 
     /// Returns the resulting destination node, panicking if none was found or created.
     pub fn unwrap(self) -> Arc<Mutex<Trie<EK, EV, T>>> {
-        self.result.expect("EdgeInserter::unwrap() called but no destination was found or created")
+        self.result.clone().expect("EdgeInserter::unwrap() called but no destination was found or created")
     }
 
     /// Returns the resulting destination node, panicking with the given message if none was found or created.
     pub fn expect(self, msg: &str) -> Arc<Mutex<Trie<EK, EV, T>>> {
-        self.result.expect(msg)
+        self.result.clone().expect(msg)
     }
 }
 
