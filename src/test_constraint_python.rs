@@ -551,10 +551,10 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     println!("\nLoading GPT-2 vocabulary...");
     let cache_dir = Path::new(".cache/test_vocabs");
-    // let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
-    // let vocab_file_name = "gpt2_vocab.json";
-    let vocab_url = "https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B/raw/main/vocab.json";
-    let vocab_file_name = "qwen_vocab.json";
+    let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
+    let vocab_file_name = "gpt2_vocab.json";
+    // let vocab_url = "https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B/raw/main/vocab.json";
+    // let vocab_file_name = "qwen_vocab.json";
     let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
     // let gpt2_raw_vocab = BTreeMap::from([("________________________________________________________________", 0)]);
     // let mut gpt2_raw_vocab = BTreeMap::new();
@@ -600,7 +600,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             max_original_llm_token_id_val = id_val;
         }
     }
-    
+
     if llm_token_map.is_empty() {
         println!("Warning: LLM token map is empty after sampling. Max original ID will be 0.");
     }
