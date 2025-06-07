@@ -624,6 +624,9 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     );
     println!("GrammarConstraint constructed successfully.");
 
+    // Ensure there's an edge in the root precompute node for state 0 that has the terminal for `IGNORE[0][0][1]` on the edge key and which the LLM token for "\n" on the edge value.
+    todo!();
+
     // Ensure grammar constraint creation is deterministic
     // assert_eq!(grammar_constraint, GrammarConstraint::from_compiled_grammar(
     //     compiled_grammar,
