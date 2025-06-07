@@ -689,7 +689,7 @@ pub fn intersect_allowed_terminals_and_prune_arc(
         let mut new_acc = current_acc.clone();
         allowed_terminals_intersect_assign(new_acc.allowed_terminals_mut(), allowed_terminals.clone());
         if new_acc.is_alive() {
-            Some((new_acc, true))
+            Some((new_acc, false))
         } else {
             None // Prune this node
         }
