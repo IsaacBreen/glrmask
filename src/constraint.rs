@@ -1150,6 +1150,8 @@ impl<'a> GrammarConstraintState<'a> {
                     for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
                         if !allowed_terminals_for_state.contains(terminal_id.0) {
                             // This terminal is not allowed
+                            crate::debug!(4, "Allowed terminals for GSS: {:?}", allowed_terminals_for_gss);
+                            crate::debug!(4, "Possible matches for state {}: {:?}", tokenizer_state_id.0, possible_matches_for_state);
                             crate::debug!(4, "Subtracting forbidden LLM tokens for terminal {:?} (ID {}) for state {}: {:?}", self.parent.parser.terminal_map.get_by_right(terminal_id).map(|t| t.0.clone()).unwrap_or("UNKNOWN_TERMINAL".to_string()), terminal_id.0, tokenizer_state_id.0, llm_tokens_that_match_this_terminal);
                             forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
                         }
