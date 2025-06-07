@@ -579,6 +579,14 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     //     asterisks.push('*');
     // }
     // gpt2_raw_vocab.insert(asterisks, 1);
+    // gpt2_raw_vocab.insert(" ".to_string(), 2);
+    // gpt2_raw_vocab.insert("  ".to_string(), 3);
+    // gpt2_raw_vocab.insert("    ".to_string(), 4);
+
+    // Assert that 1, 2, and 4 spaces are in the vocab
+    assert!(gpt2_raw_vocab.contains_key(&" ".to_string()));
+    assert!(gpt2_raw_vocab.contains_key(&"  ".to_string()));
+    assert!(gpt2_raw_vocab.contains_key(&"    ".to_string()));
 
 
     let mut llm_token_map = LLMTokenMap::new();
@@ -660,6 +668,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // let full_text_to_tokenize = "x = f'hi!'\n";
     // let full_text_to_tokenize = "x = f'hi{x}'\n";
     // let full_text_to_tokenize = "f'hi{x}'\n";
+    let full_text_to_tokenize = "                        ";
 
     // Tokenize the full_text_to_tokenize using the VocabPrefixTree
     let mut test_token_sequence_ids = Vec::new();
