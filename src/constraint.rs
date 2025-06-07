@@ -1142,8 +1142,8 @@ impl<'a> GrammarConstraintState<'a> {
                 continue;
             }
             if let Some(precomputed_trie_root_data) = self.parent.precomputed.get(tokenizer_state_id) {
-                let allowed_terminals_for_gss = glr_state.active_state.stack.acc2().allowed_terminals();
                 let mut forbidden_llm_tokens = LLMTokenBV::zeros();
+                let allowed_terminals_for_gss = glr_state.active_state.stack.acc2().allowed_terminals();
                 for (tokenizer_state_id, allowed_terminals_for_state) in allowed_terminals_for_gss {
                     let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
                     for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
@@ -1154,7 +1154,9 @@ impl<'a> GrammarConstraintState<'a> {
                     }
                 }
                 let mut glr_state = glr_state.clone();
+                glr_state.log_gss("Precomputed trie found for tokenizer state {:?}. Subtracting forbidden LLM tokens.", TerminalID(0));
                 subtract_llm_tokens_and_prune_arc(&mut glr_state.active_state.stack, &forbidden_llm_tokens, &mut HashMap::new());
+                glr_state.log_gss("Done subtracting forbidden LLM tokens.", TerminalID(0));
                 let precomputed_trie_arc = Arc::new(Mutex::new(precomputed_trie_root_data.clone()));
                 initial_values_for_map.push((precomputed_trie_arc, glr_state));
             } else {
