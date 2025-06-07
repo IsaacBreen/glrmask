@@ -602,9 +602,11 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         }
     }
 
-    // Print the vocab
+    // Print the vocab in-order
     println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
-    for (token, id) in llm_token_map.iter() {
+    let mut sorted_tokens: Vec<_> = llm_token_map.iter().collect();
+    sorted_tokens.sort_by_key(|(_, id)| id.0);
+    for (token, id) in sorted_tokens {
         println!("  {:?}: {} (ID {})", String::from_utf8_lossy(token), id.0, id.0);
     }
 
