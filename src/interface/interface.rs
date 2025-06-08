@@ -14,7 +14,6 @@ use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 use std::collections::BTreeMap as StdMap;
 use crate::glr::analyze::simplify_grammar;
-use crate::glr::analyze::eliminate_direct_left_recursion; // NEW
 
 type LLMToken<'a> = &'a [u8];
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
@@ -650,12 +649,6 @@ impl GrammarDefinition {
         // ------------------------------------------------------------------
         //  End of nullability processing
         // ------------------------------------------------------------------
-        // ---------------------------------------------------------------
-        //  Finally, eliminate any remaining *direct* left-recursion so
-        //  downstream validation / parser generation does not have to
-        //  cope with it (the GLR core can handle indirect recursion).
-        // ---------------------------------------------------------------
-        let productions = eliminate_direct_left_recursion(&productions);
 
         Ok(GrammarDefinition {
             productions,
