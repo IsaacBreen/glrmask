@@ -641,96 +641,126 @@ pub fn resolve_right_recursion(
             }
         }
     }
+    // The order of non-terminals is crucial for the algorithm.
     let non_terminals: Vec<NonTerminal> = all_nonterminals_set.into_iter().collect();
 
-    let mut current_productions = productions.clone();
+    // Use a map for efficient access and modification of productions.
+    let mut prods_map: BTreeMap<NonTerminal, Vec<Vec<Symbol>>> = BTreeMap::new();
+    for p in productions.iter() {
+        prods_map.entry(p.lhs.clone()).or_default().push(p.rhs.clone());
+    }
 
     // 2. Main loop to eliminate indirect and direct recursion
     for i in 0..non_terminals.len() {
-        let ai = &non_terminals[i];
+        let ai = non_terminals[i].clone();
 
         // a. Substitute Aj (j < i) to make indirect recursion direct
         for j in 0..i {
             let aj = &non_terminals[j];
 
-            let aj_productions: Vec<_> = current_productions.iter()
-                .filter(|p| p.lhs == *aj)
-                .map(|p| p.rhs.clone())
-                .collect();
+            let aj_rhss = match prods_map.get(aj) {
+                Some(rhss) => rhss.clone(), // Clone to avoid borrow issues
+                None => continue,
+            };
 
-            if aj_productions.is_empty() { continue; }
+            if aj_rhss.is_empty() { continue; }
 
-            let mut productions_after_subst = Vec::new();
-            for prod in &current_productions {
-                if prod.lhs != *ai {
-                    productions_after_subst.push(prod.clone());
-                    continue;
-                }
+            let mut new_ai_rhss = Vec::new();
+            let mut needs_substitution = false;
 
-                if let Some((k, Symbol::NonTerminal(last_nt))) = find_last_non_nullable_symbol(&prod.rhs, &nullable_set) {
-                    if last_nt == aj {
-                        // This rule is Ai -> γ Aj (+ nullables), substitute Aj
-                        let prefix = &prod.rhs[..k];
-                        let suffix_nullables = &prod.rhs[k+1..];
-
-                        for aj_rhs in &aj_productions {
-                            let mut new_rhs = prefix.to_vec();
-                            new_rhs.extend_from_slice(aj_rhs);
-                            new_rhs.extend_from_slice(suffix_nullables);
-                            productions_after_subst.push(Production { lhs: ai.clone(), rhs: new_rhs });
+            // Only proceed if Ai has productions
+            if let Some(ai_rhss) = prods_map.get(&ai) {
+                for rhs in ai_rhss {
+                    if let Some((k, Symbol::NonTerminal(last_nt))) = find_last_non_nullable_symbol(rhs, &nullable_set) {
+                        if last_nt == aj {
+                            needs_substitution = true;
+                            // Substitute: Ai -> γ Aj becomes Ai -> γ (body of Aj)
+                            let prefix = &rhs[..k];
+                            let suffix_nullables = &rhs[k+1..];
+                            for aj_rhs in &aj_rhss {
+                                let mut new_rhs = prefix.to_vec();
+                                new_rhs.extend_from_slice(aj_rhs);
+                                new_rhs.extend_from_slice(suffix_nullables);
+                                new_ai_rhss.push(new_rhs);
+                            }
+                        } else {
+                            new_ai_rhss.push(rhs.clone());
                         }
                     } else {
-                        productions_after_subst.push(prod.clone());
+                        new_ai_rhss.push(rhs.clone());
                     }
-                } else {
-                    productions_after_subst.push(prod.clone());
                 }
+            } else {
+                // Ai has no productions, nothing to do.
+                continue;
             }
-            current_productions = productions_after_subst;
+
+            if needs_substitution {
+                prods_map.insert(ai.clone(), new_ai_rhss);
+            }
         }
 
         // b. Eliminate direct right recursion for Ai
-        let mut recursive_rules = Vec::new();
-        let mut non_recursive_rules = Vec::new();
-        let mut other_prods = Vec::new();
+        let ai_rhss = match prods_map.get(&ai) {
+            Some(rhss) => rhss.clone(),
+            None => continue,
+        };
 
-        for prod in &current_productions {
-            if prod.lhs != *ai { other_prods.push(prod.clone()); continue; }
-            if let Some((k, Symbol::NonTerminal(last_nt))) = find_last_non_nullable_symbol(&prod.rhs, &nullable_set) {
-                if last_nt == ai { recursive_rules.push(prod.clone()); } else { non_recursive_rules.push(prod.clone()); }
-            } else { non_recursive_rules.push(prod.clone()); }
+        let mut recursive_rhss = Vec::new();
+        let mut non_recursive_rhss = Vec::new();
+
+        for rhs in &ai_rhss {
+            if let Some((_, Symbol::NonTerminal(last_nt))) = find_last_non_nullable_symbol(rhs, &nullable_set) {
+                if last_nt == &ai {
+                    recursive_rhss.push(rhs.clone());
+                } else {
+                    non_recursive_rhss.push(rhs.clone());
+                }
+            } else {
+                non_recursive_rhss.push(rhs.clone());
+            }
         }
 
-        if recursive_rules.is_empty() { continue; }
+        if recursive_rhss.is_empty() { continue; }
 
         let new_nt_name = new_name_generator(&ai.0);
         let new_nt = NonTerminal(new_nt_name);
         let new_nt_symbol = Symbol::NonTerminal(new_nt.clone());
 
-        let mut final_productions = other_prods;
-
-        // A -> β becomes A -> A' β
-        for beta_prod in &non_recursive_rules {
+        // Rewrite Ai's productions: A -> β becomes A -> A' β
+        let mut new_ai_rhss = Vec::new();
+        for beta_rhs in &non_recursive_rhss {
             let mut new_rhs = vec![new_nt_symbol.clone()];
-            new_rhs.extend_from_slice(&beta_prod.rhs);
-            final_productions.push(Production { lhs: ai.clone(), rhs: new_rhs });
+            new_rhs.extend_from_slice(beta_rhs);
+            new_ai_rhss.push(new_rhs);
+        }
+        if new_ai_rhss.is_empty() {
+            prods_map.remove(&ai);
+        } else {
+            prods_map.insert(ai.clone(), new_ai_rhss);
         }
 
         // A -> α A (+ nullables) becomes A' -> A' α (+ nullables)
-        for alpha_prod in &recursive_rules {
-            let (k, _) = find_last_non_nullable_symbol(&alpha_prod.rhs, &nullable_set).unwrap();
-            let alpha = &alpha_prod.rhs[..k];
-            let null_suffix = &alpha_prod.rhs[k+1..];
+        let mut new_nt_rhss = Vec::new();
+        for alpha_rhs in &recursive_rhss {
+            let (k, _) = find_last_non_nullable_symbol(alpha_rhs, &nullable_set).unwrap();
+            let alpha = &alpha_rhs[..k];
+            let null_suffix = &alpha_rhs[k+1..];
             let mut new_rhs_for_new_nt = vec![new_nt_symbol.clone()];
             new_rhs_for_new_nt.extend_from_slice(alpha);
             new_rhs_for_new_nt.extend_from_slice(null_suffix);
-            final_productions.push(Production { lhs: new_nt.clone(), rhs: new_rhs_for_new_nt });
+            new_nt_rhss.push(new_rhs_for_new_nt);
         }
 
         // A' -> ε
-        final_productions.push(Production { lhs: new_nt.clone(), rhs: vec![] });
-        current_productions = final_productions;
+        new_nt_rhss.push(vec![]);
+        prods_map.insert(new_nt, new_nt_rhss);
     }
 
-    *productions = current_productions;
+    // 3. Convert map back to Vec<Production>
+    let final_productions = prods_map.into_iter().flat_map(|(lhs, rhss)| {
+        rhss.into_iter().map(move |rhs| Production { lhs: lhs.clone(), rhs })
+    }).collect();
+
+    *productions = final_productions;
 }
