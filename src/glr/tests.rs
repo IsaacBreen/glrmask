@@ -1,7 +1,7 @@
 use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, GLRParserState};
 use crate::glr::table::{generate_glr_parser, TerminalID};
-use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar}; // Import the analyze module
+use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
 use bimap::BiBTreeMap;
 use std::collections::BTreeSet;
 use crate::interface::display_productions;
@@ -780,6 +780,123 @@ fn test_standard_expression_grammar_parse() {
             input_str
         );
     }
+}
+
+#[test]
+fn test_resolve_right_recursion() {
+    // Helper to compare production sets regardless of order
+    let compare_prods = |p1: &[Production], p2: &[Production]| -> bool {
+        let set1: BTreeSet<_> = p1.iter().cloned().collect();
+        let set2: BTreeSet<_> = p2.iter().cloned().collect();
+        set1 == set2
+    };
+
+    // --- Test Case 1: Simple Direct Right-Recursion ---
+    let mut prods1 = vec![
+        prod("S", vec![t("a"), nt("S")]),
+        prod("S", vec![t("b")]),
+    ];
+    let expected1 = vec![
+        prod("S", vec![nt("S_prime"), t("b")]),
+        prod("S_prime", vec![nt("S_prime"), t("a")]),
+        prod("S_prime", vec![]),
+    ];
+    resolve_right_recursion(&mut prods1, &|name| format!("{}_prime", name));
+    assert!(compare_prods(&prods1, &expected1), "Test 1 failed. Got: {:?}", prods1);
+
+    // --- Test Case 2: No Right-Recursion (should not change) ---
+    let mut prods2 = vec![
+        prod("S", vec![nt("S"), t("a")]),
+        prod("S", vec![t("b")]),
+    ];
+    let expected2 = prods2.clone();
+    resolve_right_recursion(&mut prods2, &|name| format!("{}_prime", name));
+    assert!(compare_prods(&prods2, &expected2), "Test 2 failed. Got: {:?}", prods2);
+
+    // --- Test Case 3: Indirect Right-Recursion ---
+    let mut prods3 = vec![
+        prod("A", vec![t("a"), nt("B")]),
+        prod("A", vec![t("c")]),
+        prod("B", vec![t("b"), nt("A")]),
+        prod("B", vec![t("d")]),
+    ];
+    // Expected transformation:
+    // A is fine.
+    // B -> b A | d  (A is substituted)
+    // B -> b (a B) | b c | d
+    // B -> b a B | b c | d (Now B has direct right-recursion)
+    // B -> B' (b c) | B' d
+    // B' -> B' (b a) | ε
+    let expected3 = vec![
+        prod("A", vec![t("a"), nt("B")]),
+        prod("A", vec![t("c")]),
+        prod("B", vec![nt("B_prime"), t("b"), t("c")]),
+        prod("B", vec![nt("B_prime"), t("d")]),
+        prod("B_prime", vec![nt("B_prime"), t("b"), t("a")]),
+        prod("B_prime", vec![]),
+    ];
+    resolve_right_recursion(&mut prods3, &|name| format!("{}_prime", name));
+    assert!(compare_prods(&prods3, &expected3), "Test 3 failed. Got: {:?}", prods3);
+
+    // --- Test Case 4: Hidden Direct Right-Recursion ---
+    let mut prods4 = vec![
+        prod("S", vec![t("a"), nt("S"), nt("N")]),
+        prod("S", vec![t("b")]),
+        prod("N", vec![]),
+    ];
+    let expected4 = vec![
+        prod("S", vec![nt("S_prime"), t("b")]),
+        prod("S_prime", vec![nt("S_prime"), t("a"), nt("N")]),
+        prod("S_prime", vec![]),
+        prod("N", vec![]),
+    ];
+    resolve_right_recursion(&mut prods4, &|name| format!("{}_prime", name));
+    assert!(compare_prods(&prods4, &expected4), "Test 4 failed. Got: {:?}", prods4);
+
+    // --- Test Case 5: Multiple Non-Recursive Choices ---
+    let mut prods5 = vec![
+        prod("S", vec![t("a"), nt("S")]),
+        prod("S", vec![t("b")]),
+        prod("S", vec![t("c")]),
+    ];
+    let expected5 = vec![
+        prod("S", vec![nt("S_prime"), t("b")]),
+        prod("S", vec![nt("S_prime"), t("c")]),
+        prod("S_prime", vec![nt("S_prime"), t("a")]),
+        prod("S_prime", vec![]),
+    ];
+    resolve_right_recursion(&mut prods5, &|name| format!("{}_prime", name));
+    assert!(compare_prods(&prods5, &expected5), "Test 5 failed. Got: {:?}", prods5);
+
+    // --- Test Case 6: Multiple Recursive Choices ---
+    let mut prods6 = vec![
+        prod("S", vec![t("a"), nt("S")]),
+        prod("S", vec![t("b"), nt("S")]),
+        prod("S", vec![t("c")]),
+    ];
+    let expected6 = vec![
+        prod("S", vec![nt("S_prime"), t("c")]),
+        prod("S_prime", vec![nt("S_prime"), t("a")]),
+        prod("S_prime", vec![nt("S_prime"), t("b")]),
+        prod("S_prime", vec![]),
+    ];
+    resolve_right_recursion(&mut prods6, &|name| format!("{}_prime", name));
+    assert!(compare_prods(&prods6, &expected6), "Test 6 failed. Got: {:?}", prods6);
+
+    // --- Test Case 7: Both Left and Right Recursive ---
+    // S -> S S | a
+    // Should eliminate the right-recursion part.
+    let mut prods7 = vec![
+        prod("S", vec![nt("S"), nt("S")]),
+        prod("S", vec![t("a")]),
+    ];
+    let expected7 = vec![
+        prod("S", vec![nt("S_prime"), t("a")]),
+        prod("S_prime", vec![nt("S_prime"), nt("S")]),
+        prod("S_prime", vec![]),
+    ];
+    resolve_right_recursion(&mut prods7, &|name| format!("{}_prime", name));
+    assert!(compare_prods(&prods7, &expected7), "Test 7 failed. Got: {:?}", prods7);
 }
 // --- Notes on Limitations Not Easily Tested Here ---
 // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
