@@ -5,7 +5,7 @@ use bimap::BiBTreeMap;
 use std::collections::{HashMap, VecDeque};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
-use crate::glr::analyze::{drop_dead, remove_productions_with_undefined_nonterminals, resolve_left_recursion, simplify_grammar, validate};
+use crate::glr::analyze::{drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate};
 pub use crate::types::{TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
@@ -517,12 +517,9 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>) -> GLRParser {
     let original_productions = productions.to_vec();
 
-    crate::debug!(2, "Resolving left recursion");
-    let productions = resolve_left_recursion(productions);
-
 
     crate::debug!(2, "Removing productions with undefined non-terminals");
-    let productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
+    let productions = remove_productions_with_undefined_nonterminals(productions, &[start_production_id]);
     // (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id);
 
     crate::debug!(2, "Validating");
