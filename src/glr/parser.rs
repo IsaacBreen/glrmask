@@ -458,9 +458,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     fn pop_and_goto(
         &self,
-        stack: &Arc<GSSNode>, 
         edge_content: &ParseStateEdgeContent,
-        edge_src: &Arc<GSSNode>, 
+        edge_src: &Arc<GSSNode>,
         len: usize,
         nt: NonTerminalID,
     ) -> Arc<GSSNode> { 
@@ -587,7 +586,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 continue;
                             }
                         }
-                        let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt);
+                        let s_new_arc = self.pop_and_goto(&top_edge_content, &parent_arc, *len, *nt);
                         if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
                            todo.push(ParseState { stack: s_new_arc });
                         }
@@ -612,7 +611,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         continue;
                                     }
                                 }
-                                let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt);
+                                let s_new_arc = self.pop_and_goto(&top_edge_content, &parent_arc, *len, *nt);
                                 if !s_new_arc.is_empty() {
                                     todo.push(ParseState { stack: s_new_arc });
                                 }
