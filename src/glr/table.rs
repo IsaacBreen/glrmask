@@ -521,7 +521,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
     let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
     let mut productions = productions.to_vec();
-    crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
+    crate::glr::analyze::remove_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
 
     crate::debug!(2, "Removing productions with undefined non-terminals");
     let productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
