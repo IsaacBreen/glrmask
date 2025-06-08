@@ -313,7 +313,7 @@ impl GLRParser {
         };
         let root = Arc::new(GSSNode::new(initial_acc.clone())); // initial_acc for the root
         // Push creates a new node. Its acc should be derived from the parent (root in this case).
-        let stack = Arc::new(root.push(initial_content, initial_acc)); 
+        let stack = Arc::new(root.push_with_acc(initial_content, initial_acc)); 
         ParseState { stack }
     }
 
@@ -452,7 +452,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         new_content: ParseStateEdgeContent,
         acc_for_new_node: Acc,
     ) -> ParseState {
-        let new_gss_node_instance = stack.push(new_content, acc_for_new_node);
+        let new_gss_node_instance = stack.push_with_acc(new_content, acc_for_new_node);
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 

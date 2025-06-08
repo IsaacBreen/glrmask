@@ -410,7 +410,7 @@ impl GSSNode {
 // Core manipulation methods
 impl GSSNode {
     // Push now takes the acc for the new node
-    pub fn push(self, edge_value: ParseStateEdgeContent, acc_for_new_node: Acc) -> Self {
+    pub fn push_with_acc(self, edge_value: ParseStateEdgeContent, acc_for_new_node: Acc) -> Self {
         Self::new_with_single_predecessor(Arc::new(self), edge_value, acc_for_new_node)
     }
 
@@ -604,15 +604,20 @@ impl Drop for GSSNode {
 
 // Simplified trait for GSS operations
 pub trait GSSTrait { // No longer generic
-    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: Acc) -> GSSNode;
+    fn push_with_acc(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: Acc) -> GSSNode;
+    fn push_with_existing_acc(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+        let acc_for_new_node = self.acc2().clone();
+        self.push_with_acc(edge_value, acc_for_new_node)
+    }
     // push_to is removed as it's complex with private acc_mut and less idiomatic with Arc.
     fn pop(&self) -> GSSNode;
     fn popn(&self, n: usize) -> GSSNode;
+    fn acc2(&self) -> &Acc;
 }
 
 impl GSSTrait for GSSNode {
-    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: Acc) -> GSSNode {
-        self.clone().push(edge_value, acc_for_new_node)
+    fn push_with_acc(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: Acc) -> GSSNode {
+        self.clone().push_with_acc(edge_value, acc_for_new_node)
     }
 
     fn pop(&self) -> GSSNode {
@@ -622,10 +627,14 @@ impl GSSTrait for GSSNode {
     fn popn(&self, n: usize) -> GSSNode {
         GSSNode::popn(self, n)
     }
+
+    fn acc2(&self) -> &Acc {
+        self.acc2()
+    }
 }
 
 impl GSSTrait for Arc<GSSNode> {
-    fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: Acc) -> GSSNode {
+    fn push_with_acc(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: Acc) -> GSSNode {
         GSSNode::new_with_single_predecessor(self.clone(), edge_value, acc_for_new_node)
     }
 
@@ -635,6 +644,10 @@ impl GSSTrait for Arc<GSSNode> {
 
     fn popn(&self, n: usize) -> GSSNode {
         self.as_ref().popn(n)
+    }
+
+    fn acc2(&self) -> &Acc {
+        self.acc2()
     }
 }
 
