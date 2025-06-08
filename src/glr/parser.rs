@@ -554,22 +554,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.log_gss("Step-start", token_id);
         self.cycled_states = ParseState::new();
 
-        let mut todo: Vec<(ParseState, BTreeSet<Arc<GSSNode>>)> = Vec::new();
-        todo.push((ParseState { stack: self.active_state.stack.clone() }, BTreeSet::new()));
+        let mut todo: Vec<ParseState> = Vec::new();
+        todo.push(ParseState { stack: self.active_state.stack.clone() });
 
         let mut next = ParseState::new();
         let mut not_found = ParseState::new();
 
-        while let Some((state, visited_on_this_path)) = todo.pop() { 
-            if visited_on_this_path.contains(&state.stack) {
-                crate::debug!(2, "Cycle detected: GSSNode at {:p} encountered again in reduction path while processing token {:?}.", Arc::as_ptr(&state.stack), token_id);
-                print_gss_forest(&[state.stack.clone()], usize::MAX);
-                panic!("Cycle detected: GSSNode at {:p} encountered again in reduction path.", Arc::as_ptr(&state.stack));
-            }
-
-            let mut next_visited_on_this_path = visited_on_this_path; 
-            // next_visited_on_this_path.insert(state.stack.clone());
-
+        while let Some(state) = todo.pop() {
             let stack_arc_for_operations = &state.stack; 
             for (mut top_edge_content, parent_arc) in state.stack.pop_iter() { // Renamed top to top_edge_content
                 let temp_idk = Arc::new(parent_arc.push(top_edge_content.clone(), parent_arc.acc2().clone())); // Acc for push
@@ -598,7 +589,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         }
                         let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt);
                         if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
-                           todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
+                           todo.push(ParseState { stack: s_new_arc });
                         }
                     }
 
@@ -623,7 +614,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
                                 let s_new_arc = self.pop_and_goto(&temp_idk, &top_edge_content, &parent_arc, *len, *nt);
                                 if !s_new_arc.is_empty() {
-                                    todo.push((ParseState { stack: s_new_arc }, next_visited_on_this_path.clone()));
+                                    todo.push(ParseState { stack: s_new_arc });
                                 }
                             }
                         }
