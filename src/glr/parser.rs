@@ -415,9 +415,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         &self,
         stack: &Arc<GSSNode>, 
         new_content: ParseStateEdgeContent,
-        acc_for_new_node: Acc,
     ) -> ParseState {
-        let new_gss_node_instance = stack.push_with_acc(new_content, acc_for_new_node);
+        let new_gss_node_instance = stack.push_with_acc(new_content, stack.acc2().clone());
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
@@ -522,7 +521,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         crate::debug!(4, "Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
                         let stack_for_push = peek.to_arc_node();
                         let new_content = ParseStateEdgeContent { state_id: *to };
-                        let new_parse_state = self.push_state(&stack_for_push, new_content, stack_for_push.acc2().clone());
+                        let new_parse_state = self.push_state(&stack_for_push, new_content);
                         next.merge(new_parse_state);
                     }
 
@@ -543,7 +542,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             crate::debug!(4, " Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
                             let stack_for_push = peek.to_arc_node();
                             let new_content = ParseStateEdgeContent { state_id: *to };
-                            let new_parse_state = self.push_state(&stack_for_push, new_content, stack_for_push.acc2().clone());
+                            let new_parse_state = self.push_state(&stack_for_push, new_content);
                             next.merge(new_parse_state);
                         }
                         for (len, nts) in reduces {
