@@ -1,5 +1,6 @@
 use std::cmp::PartialEq;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use kdam::{tqdm, BarExt};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 
 /// Computes the set of non-terminals that can derive the empty string (epsilon).
@@ -646,8 +647,11 @@ pub fn resolve_right_recursion(
     let mut current_productions = productions.clone();
 
     // 2. Main loop to eliminate indirect and direct recursion
+    let mut pbar = tqdm!(total = non_terminals.len());
+    pbar.set_description("Resolving right-recursion");
     for i in 0..non_terminals.len() {
         let ai = &non_terminals[i];
+        pbar.set_description(format!("Processing non-terminal {}", ai.0));
 
         // a. Substitute Aj (j < i) to make indirect recursion direct
         for j in 0..i {
@@ -701,7 +705,10 @@ pub fn resolve_right_recursion(
             } else { non_recursive_rules.push(prod.clone()); }
         }
 
-        if recursive_rules.is_empty() { continue; }
+        if recursive_rules.is_empty() {
+            pbar.update(1).unwrap();
+            continue;
+        }
 
         let new_nt_name = new_name_generator(&ai.0);
         let new_nt = NonTerminal(new_nt_name);
@@ -730,6 +737,7 @@ pub fn resolve_right_recursion(
         // A' -> ε
         final_productions.push(Production { lhs: new_nt.clone(), rhs: vec![] });
         current_productions = final_productions;
+        pbar.update(1).unwrap();
     }
 
     *productions = current_productions;
