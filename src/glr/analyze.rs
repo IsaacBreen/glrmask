@@ -147,7 +147,7 @@ pub fn validate(productions: &[Production]) -> Result<(), String> {
         let mut first_non_nullable_idx: Option<usize> = None;
 
         // Find the first non-nullable symbol and its index
-        for (idx, symbol) in rhs.iter().enumerate() {
+        for (idx, symbol) in rhs.iter().enumerate().rev() { // Changed to rev for 'last' non-nullable if we need it here
             match symbol {
                 Symbol::Terminal(_) => {
                     first_non_nullable_symbol = Some(symbol);
@@ -609,6 +609,39 @@ pub fn create_unique_name_generator(all_nonterminals: &BTreeSet<NonTerminal>) ->
     }
 }
 
+/// Helper for topological sort using DFS.
+/// The result is a reverse topological sort.
+fn dfs_topo_sort(
+    nt: &NonTerminal,
+    graph: &BTreeMap<NonTerminal, BTreeSet<NonTerminal>>,
+    visiting: &mut BTreeSet<NonTerminal>,
+    visited: &mut BTreeSet<NonTerminal>,
+    result: &mut Vec<NonTerminal>,
+) {
+    visiting.insert(nt.clone());
+    visited.insert(nt.clone());
+
+    if let Some(neighbors) = graph.get(nt) {
+        // Sort neighbors for deterministic output, which is important for consistent grammar generation.
+        let mut sorted_neighbors: Vec<_> = neighbors.iter().collect();
+        sorted_neighbors.sort(); // NonTerminal implements Ord
+
+        for neighbor in sorted_neighbors {
+            if visiting.contains(neighbor) {
+                // Cycle detected. This is expected in recursive grammars.
+                // We just don't recurse further, breaking the cycle for the sort.
+                continue;
+            }
+            if !visited.contains(neighbor) {
+                dfs_topo_sort(neighbor, graph, visiting, visited, result);
+            }
+        }
+    }
+
+    visiting.remove(nt);
+    result.push(nt.clone());
+}
+
 /// Eliminates right-recursion from a grammar.
 ///
 /// This function transforms productions to remove both direct and indirect right-recursion.
@@ -650,9 +683,42 @@ pub fn resolve_right_recursion(
             }
         }
     }
-    // The order of non-terminals is crucial for the algorithm's correctness.
-    // BTreeSet provides a stable, sorted iteration order.
-    let non_terminals: Vec<NonTerminal> = all_nonterminals_set.into_iter().collect();
+    // --- New logic to determine optimal processing order for non-terminals ---
+    // To minimize expensive rule substitutions, we order non-terminals topologically.
+    // A dependency A -> B exists if a rule A -> ... B exists. We want to process B before A.
+    // A topological sort gives an ordering where dependencies go forward.
+    // The algorithm substitutes A_j into A_i if j < i. By using a topological sort
+    // for the order, if A_i -> A_j, then i < j, so no substitution is needed unless
+    // A_i and A_j are in a cycle.
+
+    // 1. Build dependency graph.
+    let mut dependency_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
+    for nt in &all_nonterminals_set {
+        dependency_graph.entry(nt.clone()).or_default();
+    }
+    for (lhs, rhses) in &prods_by_lhs {
+        for rhs in rhses {
+            if let Some((_, Symbol::NonTerminal(rhs_nt))) = find_last_non_nullable_symbol(rhs, &nullable_set) {
+                dependency_graph.entry(lhs.clone()).or_default().insert(rhs_nt.clone());
+            }
+        }
+    }
+
+    // 2. Topologically sort the non-terminals.
+    let mut reverse_topo_order = Vec::new();
+    let mut visited = BTreeSet::new();
+    // Iterate over a sorted list of non-terminals (from BTreeSet) for deterministic behavior.
+    for nt in &all_nonterminals_set {
+        if !visited.contains(nt) {
+            let mut visiting = BTreeSet::new();
+            dfs_topo_sort(nt, &dependency_graph, &mut visiting, &mut visited, &mut reverse_topo_order);
+        }
+    }
+
+    // dfs_topo_sort produces a reverse topological order. Reverse it to get the correct processing order.
+    let mut non_terminals = reverse_topo_order;
+    non_terminals.reverse();
+    // --- End of new logic ---
 
     // 2. Main loop to eliminate indirect and direct recursion
     let mut pbar = tqdm!(total = non_terminals.len(), desc = "Resolving right-recursion");
