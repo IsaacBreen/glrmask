@@ -472,7 +472,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut out = GSSNode::new(Acc::new_for_merging()); // Start with a default acc
         crate::debug!(4, "Popped with {} predecessors...", parent_gss_node.num_predecessors());
 
-        for (predecessor_arc, edge_value) in parent_gss_node.pop_iter() { // Renamed predecessor to predecessor_arc
+        for (edge_value, predecessor_arc) in parent_gss_node.pop_iter() { // Renamed predecessor to predecessor_arc
             let goto = self.parser.stage_7_table.get(&edge_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", edge_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor {:p})", nt.0, edge_value.state_id, Arc::as_ptr(&predecessor_arc))), |state_id| Ok(*state_id))).unwrap();
             match goto {
                 Goto::State(goto_state_id) => {
@@ -571,7 +571,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             // next_visited_on_this_path.insert(state.stack.clone());
 
             let stack_arc_for_operations = &state.stack; 
-            for (parent_arc, mut top_edge_content) in state.stack.pop_iter() { // Renamed top to top_edge_content
+            for (mut top_edge_content, parent_arc) in state.stack.pop_iter() { // Renamed top to top_edge_content
                 let temp_idk = Arc::new(parent_arc.push(top_edge_content.clone(), parent_arc.acc2().clone())); // Acc for push
 
                 let row = &self.parser.stage_7_table[&top_edge_content.state_id];
