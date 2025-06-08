@@ -458,23 +458,24 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     fn reduce_and_goto(
         &self,
-        popped_node: &Arc<GSSNode>,
+        peek: &GSSPeek,
         nt: NonTerminalID,
+        len: usize,
         user_data_for_goto: Arc<dyn UserDataTrait>,
     ) -> Arc<GSSNode> {
         let mut out = GSSNode::new(Acc::new_for_merging()); // Start with a default acc
-        crate::debug!(4, "Popped with {} predecessors...", popped_node.num_predecessors());
+        // crate::debug!(4, "Popped with {} predecessors...", popped_node.num_predecessors());
 
-        for (edge_value, predecessor_arc) in popped_node.pop_iter() { // Renamed predecessor to predecessor_arc
-            let goto = self.parser.stage_7_table.get(&edge_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", edge_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor {:p})", nt.0, edge_value.state_id, Arc::as_ptr(&predecessor_arc))), |state_id| Ok(*state_id))).unwrap();
+        for popped_peek in peek.popn(len).peek_iter() { // Renamed predecessor to predecessor_arc
+            let edge_value = popped_peek.edge_value();
+            let goto = self.parser.stage_7_table.get(&edge_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", edge_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor ??)", nt.0, edge_value.state_id)), |state_id| Ok(*state_id))).unwrap();
             match goto {
                 Goto::State(goto_state_id) => {
-                    crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
+                    // crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
 
                     let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id, user_data: user_data_for_goto.clone() };
 
-                    let isolated_parent_arc = Arc::new(predecessor_arc.push(edge_value, predecessor_arc.acc2().clone()));
-                    let new_gss_node = isolated_parent_arc.push(goto_node_content, isolated_parent_arc.acc2().clone());
+                    let new_gss_node = popped_peek.to_node().push_with_existing_acc(goto_node_content);
                     out.merge(&Arc::new(new_gss_node));
                 }
                 Goto::Accept => {
@@ -579,8 +580,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 continue;
                             }
                         }
-                        let popped_node = peek.popn(*len);
-                        let s_new_arc = self.reduce_and_goto(&popped_node, *nt, top_edge_content.user_data);
+                        let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, top_edge_content.user_data);
                         if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
                            todo.push(ParseState { stack: s_new_arc });
                         }
@@ -608,8 +608,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         continue;
                                     }
                                 }
-                                let popped_node = peek.popn(*len);
-                                let s_new_arc = self.reduce_and_goto(&popped_node, *nt, reduction_user_data);
+                                let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, reduction_user_data);
                                 if !s_new_arc.is_empty() {
                                     todo.push(ParseState { stack: s_new_arc });
                                 }

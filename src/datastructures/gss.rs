@@ -413,6 +413,11 @@ impl GSSNode {
     pub fn push(self, edge_value: ParseStateEdgeContent, acc_for_new_node: Acc) -> Self {
         Self::new_with_single_predecessor(Arc::new(self), edge_value, acc_for_new_node)
     }
+
+    pub fn push_with_existing_acc(self, edge_value: ParseStateEdgeContent) -> Self {
+        let acc_for_new_node = self.acc2().clone();
+        Self::new_with_single_predecessor(Arc::new(self), edge_value, acc_for_new_node)
+    }
     
     // pop_into is complex with private acc_mut, might need rethink or careful internal use
     // For now, assume pop() and popn() are the main public interfaces for this.
