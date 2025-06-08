@@ -1,10 +1,44 @@
 local_system:
   attached_files:
+    - Cargo.toml
     - src/glr/analyze.rs
   conversation_file:
   compile_command:
   initial_file_contents:
-    src/glr/analyze.rs: |+
+    Cargo.toml: |
+      [package]
+      name = "sep1"
+      version = "0.1.0"
+      edition = "2024"
+
+      [dependencies]
+      bimap = "0.6.3"
+      regex = "1.11.1"
+      fixedbitset = "0.5.7"
+      bitvec = "1.0.1"
+      kdam = "0.6.0"
+      keyed_priority_queue = "0.4.2"
+      serde = { version = "1.0.219", features = ["derive"] }
+      serde_json = "1.0.107"
+      chrono = "0.4.41"
+      indicatif = "0.17.11"
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+      range-set-blaze = { version = "0.1.16", default-features = false, features = ["alloc"] }
+
+      # Add the derive macro crate
+      json_convertible_derive = { path = "json_convertible_derive" }
+      deterministic-hash = "1.0.1"
+      crc = "3.3.0"
+      rand = "0.9.1"
+      ordered_hash_map = "0.4.0"
+
+      [dev-dependencies]
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+
+      [profile.dev]
+      debug = true
+      #opt-level = 1
+    src/glr/analyze.rs: |
       use std::cmp::PartialEq;
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use kdam::{tqdm, BarExt};
@@ -740,7 +774,6 @@ local_system:
 
                   // We need to repeatedly get Ai's rules as they are modified in this j-loop.
                   let ai_rhses = prods_by_lhs.get(ai).cloned().unwrap_or_default();
-                  println!("Processing non-terminal {} with {} rules", aj.0, ai_rhses.len());
 
                   // Only proceed if Aj has productions to substitute.
                   if let Some(aj_rhses) = prods_by_lhs.get(aj) {
@@ -809,14 +842,34 @@ local_system:
               let new_nt = NonTerminal(new_nt_name);
               let new_nt_symbol = Symbol::NonTerminal(new_nt.clone());
 
-              // Rewrite Ai's rules: Ai -> β becomes Ai -> Ai' β
+              // Rewrite Ai's rules: Ai -> β becomes Ai -> Ai' β.
+              // To avoid a combinatorial explosion of rules when this NT is substituted later,
+              // we factor the β productions into a new non-terminal if there are more than one.
               let mut new_ai_rhses = Vec::new();
-              for beta_rhs in &non_recursive_rhses {
+              if non_recursive_rhses.is_empty() {
+                  // This case means Ai is non-productive (e.g., A -> A).
+                  // By leaving new_ai_rhses empty, we effectively remove Ai from the grammar.
+                  prods_by_lhs.remove(ai);
+              } else if non_recursive_rhses.len() > 1 {
+                  // More than one non-recursive rule (β), so we factor them.
+                  let beta_alt_name = new_name_generator(&format!("{}_alts", ai.0));
+                  let beta_alt_nt = NonTerminal(beta_alt_name);
+                  let beta_alt_symbol = Symbol::NonTerminal(beta_alt_nt.clone());
+
+                  // Rule becomes: Ai -> Ai' Ai_alts
+                  new_ai_rhses.push(vec![new_nt_symbol.clone(), beta_alt_symbol]);
+                  prods_by_lhs.insert(ai.clone(), new_ai_rhses);
+
+                  // The new helper non-terminal gets all the alternative productions.
+                  prods_by_lhs.insert(beta_alt_nt, non_recursive_rhses);
+              } else {
+                  // Exactly one non-recursive rule, so no need to factor.
+                  // Rule becomes: Ai -> Ai' β
                   let mut new_rhs = vec![new_nt_symbol.clone()];
-                  new_rhs.extend_from_slice(beta_rhs);
+                  new_rhs.extend_from_slice(&non_recursive_rhses[0]);
                   new_ai_rhses.push(new_rhs);
+                  prods_by_lhs.insert(ai.clone(), new_ai_rhses);
               }
-              prods_by_lhs.insert(ai.clone(), new_ai_rhses);
 
               // Create rules for Ai': Ai -> α Ai becomes Ai' -> Ai' α
               let mut new_nt_rhses = Vec::new();
@@ -846,9 +899,41 @@ local_system:
 
           *productions = final_productions;
       }
-
   prev_file_contents:
-    src/glr/analyze.rs: |+
+    Cargo.toml: |
+      [package]
+      name = "sep1"
+      version = "0.1.0"
+      edition = "2024"
+
+      [dependencies]
+      bimap = "0.6.3"
+      regex = "1.11.1"
+      fixedbitset = "0.5.7"
+      bitvec = "1.0.1"
+      kdam = "0.6.0"
+      keyed_priority_queue = "0.4.2"
+      serde = { version = "1.0.219", features = ["derive"] }
+      serde_json = "1.0.107"
+      chrono = "0.4.41"
+      indicatif = "0.17.11"
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+      range-set-blaze = { version = "0.1.16", default-features = false, features = ["alloc"] }
+
+      # Add the derive macro crate
+      json_convertible_derive = { path = "json_convertible_derive" }
+      deterministic-hash = "1.0.1"
+      crc = "3.3.0"
+      rand = "0.9.1"
+      ordered_hash_map = "0.4.0"
+
+      [dev-dependencies]
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+
+      [profile.dev]
+      debug = true
+      #opt-level = 1
+    src/glr/analyze.rs: |
       use std::cmp::PartialEq;
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
       use kdam::{tqdm, BarExt};
@@ -1584,7 +1669,6 @@ local_system:
 
                   // We need to repeatedly get Ai's rules as they are modified in this j-loop.
                   let ai_rhses = prods_by_lhs.get(ai).cloned().unwrap_or_default();
-                  println!("Processing non-terminal {} with {} rules", aj.0, ai_rhses.len());
 
                   // Only proceed if Aj has productions to substitute.
                   if let Some(aj_rhses) = prods_by_lhs.get(aj) {
@@ -1653,14 +1737,34 @@ local_system:
               let new_nt = NonTerminal(new_nt_name);
               let new_nt_symbol = Symbol::NonTerminal(new_nt.clone());
 
-              // Rewrite Ai's rules: Ai -> β becomes Ai -> Ai' β
+              // Rewrite Ai's rules: Ai -> β becomes Ai -> Ai' β.
+              // To avoid a combinatorial explosion of rules when this NT is substituted later,
+              // we factor the β productions into a new non-terminal if there are more than one.
               let mut new_ai_rhses = Vec::new();
-              for beta_rhs in &non_recursive_rhses {
+              if non_recursive_rhses.is_empty() {
+                  // This case means Ai is non-productive (e.g., A -> A).
+                  // By leaving new_ai_rhses empty, we effectively remove Ai from the grammar.
+                  prods_by_lhs.remove(ai);
+              } else if non_recursive_rhses.len() > 1 {
+                  // More than one non-recursive rule (β), so we factor them.
+                  let beta_alt_name = new_name_generator(&format!("{}_alts", ai.0));
+                  let beta_alt_nt = NonTerminal(beta_alt_name);
+                  let beta_alt_symbol = Symbol::NonTerminal(beta_alt_nt.clone());
+
+                  // Rule becomes: Ai -> Ai' Ai_alts
+                  new_ai_rhses.push(vec![new_nt_symbol.clone(), beta_alt_symbol]);
+                  prods_by_lhs.insert(ai.clone(), new_ai_rhses);
+
+                  // The new helper non-terminal gets all the alternative productions.
+                  prods_by_lhs.insert(beta_alt_nt, non_recursive_rhses);
+              } else {
+                  // Exactly one non-recursive rule, so no need to factor.
+                  // Rule becomes: Ai -> Ai' β
                   let mut new_rhs = vec![new_nt_symbol.clone()];
-                  new_rhs.extend_from_slice(beta_rhs);
+                  new_rhs.extend_from_slice(&non_recursive_rhses[0]);
                   new_ai_rhses.push(new_rhs);
+                  prods_by_lhs.insert(ai.clone(), new_ai_rhses);
               }
-              prods_by_lhs.insert(ai.clone(), new_ai_rhses);
 
               // Create rules for Ai': Ai -> α Ai becomes Ai' -> Ai' α
               let mut new_nt_rhses = Vec::new();
@@ -1690,18 +1794,15 @@ local_system:
 
           *productions = final_productions;
       }
-
   diffs_applied_this_send: true
 system:
   message: |2
 
     You are a helpful assistant.
     Respond in markdown format.
-    If asked for full code, provide it.
-    Otherwise, don't write the full code (it's too long); instead, give detailed, step-by-step instructions for modifying the code. Be very specific.
-    Do NOT write diffs (git-style or otherwise) or patches unless explicitly asked to do so.
-    A git diff uses "+" or "-" at the start lines. Do NOT use "+" or "-" at the start of any line (unless incidental and not part of a git diff).
-    Explain exactly what changes to make, line by line if needed, so the instructions are clear even without conversation context.
+    Respond with a git diff patch for each modified or added files. Use the ```diff markdown code block.
+    One diff code block per file. Do not attempt to combine multiple all changes into one diff with multiple files.
+    Include filenames in the diff code block, e.g. "diff --git a/file.py b/file.py".
     Avoid asking the user to clear their caches or do local configuration related stuff. That's rarely the cause of errors.
     If you ask them, and they reply with a compilation error, assume they've already done everything you suggested and move on.
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
@@ -1714,8 +1815,46 @@ system:
     - gemini/gemini-2.5-flash-preview-05-20
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: llm
+  apply_mode: git
 messages:
+  - user: |-
+      ```text 'Cargo.toml'
+      [package]
+      name = "sep1"
+      version = "0.1.0"
+      edition = "2024"
+
+      [dependencies]
+      bimap = "0.6.3"
+      regex = "1.11.1"
+      fixedbitset = "0.5.7"
+      bitvec = "1.0.1"
+      kdam = "0.6.0"
+      keyed_priority_queue = "0.4.2"
+      serde = { version = "1.0.219", features = ["derive"] }
+      serde_json = "1.0.107"
+      chrono = "0.4.41"
+      indicatif = "0.17.11"
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+      range-set-blaze = { version = "0.1.16", default-features = false, features = ["alloc"] }
+
+      # Add the derive macro crate
+      json_convertible_derive = { path = "json_convertible_derive" }
+      deterministic-hash = "1.0.1"
+      crc = "3.3.0"
+      rand = "0.9.1"
+      ordered_hash_map = "0.4.0"
+
+      [dev-dependencies]
+      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
+
+      [profile.dev]
+      debug = true
+      #opt-level = 1
+
+      ```
+    metadata:
+      filename: Cargo.toml
   - user: |-
       ```rust 'src/glr/analyze.rs'
       use std::cmp::PartialEq;
@@ -2453,7 +2592,6 @@ messages:
 
                   // We need to repeatedly get Ai's rules as they are modified in this j-loop.
                   let ai_rhses = prods_by_lhs.get(ai).cloned().unwrap_or_default();
-                  println!("Processing non-terminal {} with {} rules", aj.0, ai_rhses.len());
 
                   // Only proceed if Aj has productions to substitute.
                   if let Some(aj_rhses) = prods_by_lhs.get(aj) {
@@ -2522,14 +2660,34 @@ messages:
               let new_nt = NonTerminal(new_nt_name);
               let new_nt_symbol = Symbol::NonTerminal(new_nt.clone());
 
-              // Rewrite Ai's rules: Ai -> β becomes Ai -> Ai' β
+              // Rewrite Ai's rules: Ai -> β becomes Ai -> Ai' β.
+              // To avoid a combinatorial explosion of rules when this NT is substituted later,
+              // we factor the β productions into a new non-terminal if there are more than one.
               let mut new_ai_rhses = Vec::new();
-              for beta_rhs in &non_recursive_rhses {
+              if non_recursive_rhses.is_empty() {
+                  // This case means Ai is non-productive (e.g., A -> A).
+                  // By leaving new_ai_rhses empty, we effectively remove Ai from the grammar.
+                  prods_by_lhs.remove(ai);
+              } else if non_recursive_rhses.len() > 1 {
+                  // More than one non-recursive rule (β), so we factor them.
+                  let beta_alt_name = new_name_generator(&format!("{}_alts", ai.0));
+                  let beta_alt_nt = NonTerminal(beta_alt_name);
+                  let beta_alt_symbol = Symbol::NonTerminal(beta_alt_nt.clone());
+
+                  // Rule becomes: Ai -> Ai' Ai_alts
+                  new_ai_rhses.push(vec![new_nt_symbol.clone(), beta_alt_symbol]);
+                  prods_by_lhs.insert(ai.clone(), new_ai_rhses);
+
+                  // The new helper non-terminal gets all the alternative productions.
+                  prods_by_lhs.insert(beta_alt_nt, non_recursive_rhses);
+              } else {
+                  // Exactly one non-recursive rule, so no need to factor.
+                  // Rule becomes: Ai -> Ai' β
                   let mut new_rhs = vec![new_nt_symbol.clone()];
-                  new_rhs.extend_from_slice(beta_rhs);
+                  new_rhs.extend_from_slice(&non_recursive_rhses[0]);
                   new_ai_rhses.push(new_rhs);
+                  prods_by_lhs.insert(ai.clone(), new_ai_rhses);
               }
-              prods_by_lhs.insert(ai.clone(), new_ai_rhses);
 
               // Create rules for Ai': Ai -> α Ai becomes Ai' -> Ai' α
               let mut new_nt_rhses = Vec::new();
@@ -2560,123 +2718,155 @@ messages:
           *productions = final_productions;
       }
 
-
       ```
     metadata:
       filename: src/glr/analyze.rs
-  - user: |-
-      Right recursion resolution takes way too long with a large grammar.
-      The algorithm must scale reasonably.
-      It seems to be creating an absurd number of rules in doing indirect recursion resolution substitutions.
-      Modify it to process rules in a way that reduces or preferably minimises the amount of extra rules created.
+  - user: Add a function here that *just* removes direct right recursion, not indirect
+      right recursion.
     metadata:
   - assistant: |-
-      Of course. Dealing with performance issues in grammar transformations can be tricky, as the number of productions can grow unexpectedly. The substitution method for eliminating indirect recursion is a classic example of where this combinatorial explosion can happen.
+      Of course! Here is a function that removes direct right recursion, along with the necessary changes to add it to your file.
 
-      The key to optimizing this is to avoid materializing the cross-product of rules during substitution. We can achieve this by factoring the alternative non-recursive productions (`β` rules) into a new non-terminal instead of creating a separate rule for each one. This keeps the number of productions for the non-terminal being processed small, which in turn prevents the multiplicative explosion during subsequent substitutions.
+      I've added the `remove_direct_right_recursion` function to `src/glr/analyze.rs`. This function is a simplified version of the existing `resolve_right_recursion`, focusing only on direct recursion for each non-terminal without performing the substitutions needed to handle indirect recursion.
 
-      Here are the detailed instructions to modify `src/glr/analyze.rs`:
+      Here is the git diff for the changes:
 
-      ### Step 1: Remove the Debug `println!`
+      ```diff
+      --- a/src/glr/analyze.rs
+      +++ b/src/glr/analyze.rs
+      @@ -810,3 +810,111 @@
+       
+           *productions = final_productions;
+       }
+      +
+      +/// Eliminates direct right-recursion from a grammar.
+      +///
+      +/// This function transforms productions to remove direct right-recursion for each non-terminal
+      +/// independently. It does not handle indirect right-recursion. The resulting grammar will be
+      +/// equivalent but may contain left-recursion, which is generally suitable for GLR parsers.
+      +///
+      +/// For a non-terminal `A` with rules `A -> α A | β` (where `α` are recursive prefixes and
+      +/// `β` are non-recursive bodies), the transformation is:
+      +/// - `A -> A' β`
+      +/// - `A' -> A' α | ε`
+      +///
+      +/// This effectively converts direct right-recursion into direct left-recursion. If there are
+      +/// multiple `β` rules, they are factored into a new non-terminal to keep the grammar compact.
+      +///
+      +/// # Arguments
+      +/// * `productions` - A mutable vector of the grammar's productions. This will be modified in-place.
+      +/// * `new_name_generator` - A closure that generates unique names for new non-terminals.
+      +pub fn remove_direct_right_recursion(
+      +    productions: &mut Vec<Production>,
+      +    mut new_name_generator: impl FnMut(&str) -> String,
+      +) {
+      +    // 1. Pre-computation & Setup
+      +    let nullable_set = compute_nullable_nonterminals(productions);
+      +
+      +    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Vec<Symbol>>> = BTreeMap::new();
+      +    for p in productions.iter() {
+      +        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p.rhs.clone());
+      +    }
+      +
+      +    // Create a sorted list of non-terminals to process for deterministic output.
+      +    let non_terminals: Vec<_> = prods_by_lhs.keys().cloned().collect();
+      +
+      +    // 2. Main loop to eliminate direct recursion for each non-terminal
+      +    for ai in &non_terminals {
+      +        // Get the rules for the current non-terminal Ai.
+      +        let ai_rhses = prods_by_lhs.get(ai).cloned().unwrap_or_default();
+      +
+      +        let mut recursive_rhses = Vec::new(); // Tuples of (RHS, index_of_Ai)
+      +        let mut non_recursive_rhses = Vec::new();
+      +
+      +        for rhs in &ai_rhses {
+      +            // A rule is directly right-recursive if its last non-nullable symbol is Ai itself.
+      +            if let Some((k, Symbol::NonTerminal(last_nt))) = find_last_non_nullable_symbol(rhs, &nullable_set) {
+      +                if last_nt == ai {
+      +                    recursive_rhses.push((rhs.clone(), k));
+      +                } else {
+      +                    non_recursive_rhses.push(rhs.clone());
+      +                }
+      +            } else {
+      +                // Rule is fully nullable or empty, so it's non-recursive.
+      +                non_recursive_rhses.push(rhs.clone());
+      +            }
+      +        }
+      +
+      +        // If there's no direct recursion for this non-terminal, skip it.
+      +        if recursive_rhses.is_empty() {
+      +            continue;
+      +        }
+      +
+      +        // Create a new non-terminal Ai'
+      +        let new_nt_name = new_name_generator(&ai.0);
+      +        let new_nt = NonTerminal(new_nt_name);
+      +        let new_nt_symbol = Symbol::NonTerminal(new_nt.clone());
+      +
+      +        // Rewrite Ai's rules: Ai -> β becomes Ai -> Ai' β.
+      +        // Factor β productions if there are multiple.
+      +        let mut new_ai_rhses = Vec::new();
+      +        if non_recursive_rhses.is_empty() {
+      +            // Case: A -> α A (no β). This non-terminal is non-productive.
+      +            // We remove its productions. The new Ai' will also be non-productive.
+      +            prods_by_lhs.insert(ai.clone(), vec![]);
+      +        } else if non_recursive_rhses.len() > 1 {
+      +            // More than one non-recursive rule (β), so we factor them.
+      +            let beta_alt_name = new_name_generator(&format!("{}_alts", ai.0));
+      +            let beta_alt_nt = NonTerminal(beta_alt_name);
+      +            let beta_alt_symbol = Symbol::NonTerminal(beta_alt_nt.clone());
+      +
+      +            // Rule becomes: Ai -> Ai' Ai_alts
+      +            new_ai_rhses.push(vec![new_nt_symbol.clone(), beta_alt_symbol]);
+      +            prods_by_lhs.insert(ai.clone(), new_ai_rhses);
+      +
+      +            // The new helper non-terminal gets all the alternative productions.
+      +            prods_by_lhs.insert(beta_alt_nt, non_recursive_rhses);
+      +        } else {
+      +            // Exactly one non-recursive rule, so no need to factor.
+      +            // Rule becomes: Ai -> Ai' β
+      +            let mut new_rhs = vec![new_nt_symbol.clone()];
+      +            new_rhs.extend_from_slice(&non_recursive_rhses[0]);
+      +            new_ai_rhses.push(new_rhs);
+      +            prods_by_lhs.insert(ai.clone(), new_ai_rhses);
+      +        }
+      +
+      +        // Create rules for Ai': Ai -> α Ai becomes Ai' -> Ai' α
+      +        let mut new_nt_rhses = Vec::new();
+      +        for (alpha_prod_rhs, k) in &recursive_rhses {
+      +            let alpha = &alpha_prod_rhs[..*k];
+      +            let null_suffix = &alpha_prod_rhs[*k + 1..];
+      +            let mut new_rhs_for_new_nt = vec![new_nt_symbol.clone()];
+      +            new_rhs_for_new_nt.extend_from_slice(alpha);
+      +            new_rhs_for_new_nt.extend_from_slice(null_suffix);
+      +            new_nt_rhses.push(new_rhs_for_new_nt);
+      +        }
+      +
+      +        // Add the epsilon rule: Ai' -> ε
+      +        new_nt_rhses.push(vec![]);
+      +        prods_by_lhs.insert(new_nt, new_nt_rhses);
+      +    }
+      +
+      +    // 3. Reconstruct the flat Vec<Production> from the map.
+      +    let mut final_productions = Vec::new();
+      +    for (lhs, rhses) in prods_by_lhs {
+      +        for rhs in rhses {
+      +            final_productions.push(Production { lhs: lhs.clone(), rhs });
+      +        }
+      +    }
+      +
+      +    *productions = final_productions;
+      +}
 
-      In `resolve_right_recursion`, there's a `println!` statement that was likely used for debugging. Let's remove it.
-
-      In `src/glr/analyze.rs`, find this block of code inside the `resolve_right_recursion` function:
-
-      ```rust
-                  // We need to repeatedly get Ai's rules as they are modified in this j-loop.
-                  let ai_rhses = prods_by_lhs.get(ai).cloned().unwrap_or_default();
-                  println!("Processing non-terminal {} with {} rules", aj.0, ai_rhses.len());
-
-                  // Only proceed if Aj has productions to substitute.
       ```
-
-      Delete the `println!` line:
-
-      ```rust
-                  // We need to repeatedly get Ai's rules as they are modified in this j-loop.
-                  let ai_rhses = prods_by_lhs.get(ai).cloned().unwrap_or_default();
-
-                  // Only proceed if Aj has productions to substitute.
-      ```
-
-      ### Step 2: Optimize Direct Recursion Elimination to Avoid Rule Explosion
-
-      The main change is in the logic for eliminating direct right-recursion. We will replace the loop that creates new rules for each non-recursive (`β`) production with logic that factors them into a new helper non-terminal if there's more than one.
-
-      In `src/glr/analyze.rs`, inside the `resolve_right_recursion` function, find the section that starts with the comment `// b. Eliminate direct right recursion for Ai`.
-
-      Locate and **replace** the following block of code:
-
-      ```rust
-              // Rewrite Ai's rules: Ai -> β becomes Ai -> Ai' β
-              let mut new_ai_rhses = Vec::new();
-              for beta_rhs in &non_recursive_rhses {
-                  let mut new_rhs = vec![new_nt_symbol.clone()];
-                  new_rhs.extend_from_slice(beta_rhs);
-                  new_ai_rhses.push(new_rhs);
-              }
-              prods_by_lhs.insert(ai.clone(), new_ai_rhses);
-      ```
-
-      **with this new block:**
-
-      ```rust
-              // Rewrite Ai's rules: Ai -> β becomes Ai -> Ai' β.
-              // To avoid a combinatorial explosion of rules when this NT is substituted later,
-              // we factor the β productions into a new non-terminal if there are more than one.
-              let mut new_ai_rhses = Vec::new();
-              if non_recursive_rhses.is_empty() {
-                  // This case means Ai is non-productive (e.g., A -> A).
-                  // By leaving new_ai_rhses empty, we effectively remove Ai from the grammar.
-                  prods_by_lhs.remove(ai);
-              } else if non_recursive_rhses.len() > 1 {
-                  // More than one non-recursive rule (β), so we factor them.
-                  let beta_alt_name = new_name_generator(&format!("{}_alts", ai.0));
-                  let beta_alt_nt = NonTerminal(beta_alt_name);
-                  let beta_alt_symbol = Symbol::NonTerminal(beta_alt_nt.clone());
-
-                  // Rule becomes: Ai -> Ai' Ai_alts
-                  new_ai_rhses.push(vec![new_nt_symbol.clone(), beta_alt_symbol]);
-                  prods_by_lhs.insert(ai.clone(), new_ai_rhses);
-
-                  // The new helper non-terminal gets all the alternative productions.
-                  prods_by_lhs.insert(beta_alt_nt, non_recursive_rhses);
-              } else {
-                  // Exactly one non-recursive rule, so no need to factor.
-                  // Rule becomes: Ai -> Ai' β
-                  let mut new_rhs = vec![new_nt_symbol.clone()];
-                  new_rhs.extend_from_slice(&non_recursive_rhses[0]);
-                  new_ai_rhses.push(new_rhs);
-                  prods_by_lhs.insert(ai.clone(), new_ai_rhses);
-              }
-      ```
-
-      ### Summary of Changes
-
-      1.  You've removed a debug `println!` statement.
-      2.  You've replaced the logic for rewriting non-recursive rules during direct right-recursion elimination. The new logic is smarter:
-          *   If a non-terminal has multiple non-recursive (`β`) rules, it creates a single new rule like `A -> A' A_alts`.
-          *   A new helper non-terminal (`A_alts`) is created to hold all the original alternative productions.
-          *   This prevents the number of rules for `A` from growing large, which in turn prevents the combinatorial explosion during the substitution step for indirect recursion.
-
-      These changes should significantly improve the performance and scalability of the `resolve_right_recursion` function for large grammars.
     metadata:
   - user: |
-      Using model 'gemini/gemini-2.5-flash-preview-05-20' for code completion.
+      Git apply result:
+      Found 1 diff block(s) to process using custom patcher.
 
-      --- LLM Code Generation Attempt 1/5 ---
-      Parsed actions JSON: [
-        {
-          "action": "replace",
-          "filepath": "src/glr/analyze.rs"
-        }
-      ]
-      Found 1 code blocks with filepaths in attempt 1.
-      Received code for required file: src/glr/analyze.rs
-      All required file contents received or no content needed.
-
-      --- Applying Changes ---
-      Successfully replaced file: src/glr/analyze.rs
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/analyze.rs
+      Applying patch to 'src/glr/analyze.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/analyze.rs.
     metadata:
 ...
