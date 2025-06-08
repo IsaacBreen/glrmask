@@ -446,7 +446,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     pub fn step(&mut self, token_id: TerminalID) {
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
-        self.log_gss("Step-start", token_id);
+        // self.log_gss("Step-start", token_id);
         self.cycled_states = ParseState::new();
 
         let mut todo: Vec<ParseState> = Vec::new();
@@ -517,7 +517,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
             // Arc::make_mut(&mut self.active_state.stack).simplify();
         }
 
-        self.log_gss("Step-end", token_id);
+        if !self.active_state.stack.is_empty() {
+            self.log_gss("Step-end", token_id);
+        }
         // self.action_not_found_states = ParseState::new(); // Reset if not needed beyond the step
 
         crate::debug!(4, "----------------------------------------------------------------");
