@@ -515,11 +515,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         while let Some(state) = todo.pop() {
             for peek in state.stack.peek_iter() {
-                let row = &self.parser.stage_7_table[&peek.edge_value().clone().state_id];
+                let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
 
                 match row.shifts_and_reduces.get(&token_id) {
                     Some(Stage7ShiftsAndReduces::Shift(to)) => {
-                        crate::debug!(4, "Shift from state {} via token {} to state {}", peek.edge_value().clone().state_id.0, token_id.0, to.0);
+                        crate::debug!(4, "Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
                         let stack_for_push = peek.to_arc_node();
                         let new_content = ParseStateEdgeContent { state_id: *to };
                         let new_parse_state = self.push_state(&stack_for_push, new_content, stack_for_push.acc2().clone());
@@ -530,7 +530,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                              nonterminal_id: nt,
                              len, ..
                          }) => {
-                        crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", peek.edge_value().clone().state_id.0, token_id.0, nt.0, len);
+                        crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", peek.edge_value().state_id.0, token_id.0, nt.0, len);
                         let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                         if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
                            todo.push(ParseState { stack: s_new_arc });
@@ -538,16 +538,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
 
                     Some(Stage7ShiftsAndReduces::Split { shift, reduces }) => {
-                        crate::debug!(4, "Split from state {} via token {}", peek.edge_value().clone().state_id.0, token_id.0);
+                        crate::debug!(4, "Split from state {} via token {}", peek.edge_value().state_id.0, token_id.0);
                         if let Some(to) = shift {
-                            crate::debug!(4, " Shift from state {} via token {} to state {}", peek.edge_value().clone().state_id.0, token_id.0, to.0);
+                            crate::debug!(4, " Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
                             let stack_for_push = peek.to_arc_node();
                             let new_content = ParseStateEdgeContent { state_id: *to };
                             let new_parse_state = self.push_state(&stack_for_push, new_content, stack_for_push.acc2().clone());
                             next.merge(new_parse_state);
                         }
                         for (len, nts) in reduces {
-                            crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", peek.edge_value().clone().state_id.0, token_id.0, nts);
+                            crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", peek.edge_value().state_id.0, token_id.0, nts);
                             for (nt, _prod_ids) in nts {
                                 crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
                                 let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
@@ -559,7 +559,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
 
                     None => {
-                        crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, peek.edge_value().clone().state_id.0);
+                        crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, peek.edge_value().state_id.0);
                         // Reconstruct the ParseState for this specific path and add to not_found.
                         not_found.merge(ParseState { stack: peek.to_arc_node() });
                     },
