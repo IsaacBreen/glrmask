@@ -565,7 +565,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
         // return;
         const MAX: usize = 30;
-        const PANIC_THRESHOLD: usize = 100;
+        const PANIC_THRESHOLD: usize = 10000;
 
         let roots: Vec<_> = vec![self.active_state.stack.clone()];
         let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
