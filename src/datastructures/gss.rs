@@ -467,7 +467,7 @@ impl GSSNode {
     }
 
     pub fn peek_iter(&self) -> impl Iterator<Item = GSSPeek<'_>> {
-        self.predecessors.iter().map(move |(edge_val, pred_arc)| {
+        self.predecessors.iter().map(|(edge_val, pred_arc)| {
             GSSPeek {
                 parent_node: self,
                 edge_value: edge_val,
