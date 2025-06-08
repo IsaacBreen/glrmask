@@ -1253,7 +1253,7 @@ mod tests {
     }
     
     fn mock_edge(id: usize) -> ParseStateEdgeContent {
-        ParseStateEdgeContent { state_id: StateID(id), user_data: Arc::new(()) }
+        ParseStateEdgeContent { state_id: StateID(id) }
     }
 
 

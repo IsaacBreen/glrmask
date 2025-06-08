@@ -45,21 +45,16 @@ pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Syn
 #[derive(Debug, Clone)]
 pub struct ParseStateEdgeContent { 
     pub state_id: StateID,
-    pub user_data: Arc<dyn UserDataTrait>, // Changed to Arc<dyn UserDataTrait>
 }
 impl PartialEq for ParseStateEdgeContent {
     fn eq(&self, other: &Self) -> bool {
-        self.state_id == other.state_id &&
-        self.user_data.dyn_eq(&other.user_data)
+        self.state_id == other.state_id
     }
 }
 impl Eq for ParseStateEdgeContent {}
 impl PartialOrd for ParseStateEdgeContent {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match self.state_id.partial_cmp(&other.state_id) {
-            Some(Ordering::Equal) => {
-                Some(self.user_data.dyn_cmp(&other.user_data))
-            }
             other_ord => other_ord,
         }
     }
@@ -67,13 +62,11 @@ impl PartialOrd for ParseStateEdgeContent {
 impl Ord for ParseStateEdgeContent {
     fn cmp(&self, other: &Self) -> Ordering {
         self.state_id.cmp(&other.state_id)
-            .then_with(|| self.user_data.dyn_cmp(&other.user_data))
     }
 }
 impl Hash for ParseStateEdgeContent {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.state_id.hash(state);
-        self.user_data.dyn_hash(state);
     }
 }
 
@@ -84,11 +77,6 @@ impl JSONConvertible for ParseStateEdgeContent {
         obj.insert("state_id".to_string(), self.state_id.to_json());
         // Handle user_data serialization:
         // Option 1: Panic if not default.
-        if self.user_data.type_id() == std::any::TypeId::of::<()>() {
-             // Optionally, add a marker: obj.insert("user_data_type".to_string(), JSONNode::String("default_unit".to_string()));
-        } else {
-            panic!("Cannot serialize ParseStateEdgeContent with non-default user_data of type {:?}", self.user_data.type_id());
-        }
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
@@ -96,9 +84,7 @@ impl JSONConvertible for ParseStateEdgeContent {
             JSONNode::Object(mut obj) => {
                 let state_id = obj.remove("state_id").ok_or_else(|| "Missing field state_id for ParseStateEdgeContent".to_string()) // Corrected struct name
                                   .and_then(StateID::from_json)?;
-                // Always deserialize user_data as default Arc::new(())
-                let user_data: Arc<dyn UserDataTrait> = Arc::new(());
-                Ok(ParseStateEdgeContent { state_id, user_data })
+                Ok(ParseStateEdgeContent { state_id })
             }
             _ => Err("Expected JSONNode::Object for ParseStateEdgeContent".to_string()), // Corrected struct name
         }
@@ -289,7 +275,6 @@ impl GLRParser {
         let initial_user_data: Arc<dyn UserDataTrait> = Arc::new(());
         let initial_content = ParseStateEdgeContent {
             state_id: self.start_state_id,
-            user_data: initial_user_data, // Add default user_data
         };
         let root = Arc::new(GSSNode::new(initial_acc.clone())); // initial_acc for the root
         // Push creates a new node. Its acc should be derived from the parent (root in this case).
@@ -452,7 +437,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Goto::State(goto_state_id) => {
                     // crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
 
-                    let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id, user_data: edge_value.user_data.clone() };
+                    let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id };
 
                     let new_gss_node = popped_peek.to_node().push_with_existing_acc(goto_node_content);
                     out.merge(&Arc::new(new_gss_node));
@@ -542,7 +527,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     Some(Stage7ShiftsAndReduces::Shift(to)) => {
                         crate::debug!(4, "Shift from state {} via token {} to state {}", top_edge_content.state_id.0, token_id.0, to.0);
                         let stack_for_push = peek.to_arc_node();
-                        let new_content = ParseStateEdgeContent { state_id: *to, user_data: top_edge_content.user_data.clone() };
+                        let new_content = ParseStateEdgeContent { state_id: *to };
                         let new_parse_state = self.push_state(&stack_for_push, new_content, stack_for_push.acc2().clone());
                         next.merge(new_parse_state);
                     }
@@ -563,7 +548,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         if let Some(to) = shift {
                             crate::debug!(4, " Shift from state {} via token {} to state {}", top_edge_content.state_id.0, token_id.0, to.0);
                             let stack_for_push = peek.to_arc_node();
-                            let new_content = ParseStateEdgeContent { state_id: *to, user_data: top_edge_content.user_data.clone() };
+                            let new_content = ParseStateEdgeContent { state_id: *to };
                             let new_parse_state = self.push_state(&stack_for_push, new_content, stack_for_push.acc2().clone());
                             next.merge(new_parse_state);
                         }
@@ -571,7 +556,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top_edge_content.state_id.0, token_id.0, nts);
                             for (nt, _prod_ids) in nts {
                                 crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
-                                let mut reduction_user_data = top_edge_content.user_data.clone();
                                 let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                                 if !s_new_arc.is_empty() {
                                     todo.push(ParseState { stack: s_new_arc });
