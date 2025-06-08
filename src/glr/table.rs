@@ -517,9 +517,21 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>) -> GLRParser {
     let original_productions = productions.to_vec();
 
+    // Resolve right-recursion
+    let mut name_gen_closure = |base: &str| {
+        let mut counter = 0;
+        let mut name = base.to_string();
+        while productions.iter().any(|p| p.lhs.0 == name) {
+            counter += 1;
+            name = format!("{}_{}", base, counter);
+        }
+        name
+    };
+    let mut productions = productions.to_vec();
+    crate::glr::analyze::resolve_right_recursion(&mut productions, &mut name_gen_closure);
 
     crate::debug!(2, "Removing productions with undefined non-terminals");
-    let productions = remove_productions_with_undefined_nonterminals(productions, &[start_production_id]);
+    let productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
     // (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id);
 
     crate::debug!(2, "Validating");

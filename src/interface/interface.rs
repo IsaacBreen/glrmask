@@ -650,12 +650,6 @@ impl GrammarDefinition {
         //  End of nullability processing
         // ------------------------------------------------------------------
 
-        // Resolve right-recursion before returning
-        let mut name_gen_closure = |base: &str| {
-            Self::generate_unique_indexed_name(base, &mut per_base_counters, &mut all_names)
-        };
-        crate::glr::analyze::resolve_right_recursion(&mut productions, &mut name_gen_closure);
-
         Ok(GrammarDefinition {
             productions,
             start_production_id,
