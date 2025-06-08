@@ -517,15 +517,15 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>) -> GLRParser {
     let original_productions = productions.to_vec();
 
+    crate::debug!(2, "Removing productions with undefined non-terminals");
+    let productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
+    // (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id);
+
     // Resolve right-recursion
     let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
     let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
     let mut productions = productions.to_vec();
     crate::glr::analyze::remove_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
-
-    crate::debug!(2, "Removing productions with undefined non-terminals");
-    let productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
-    // (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id);
 
     crate::debug!(2, "Validating");
     validate(&productions).expect("Validation error");
