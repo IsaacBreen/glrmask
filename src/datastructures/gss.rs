@@ -414,11 +414,6 @@ impl GSSNode {
         Self::new_with_single_predecessor(Arc::new(self), edge_value, acc_for_new_node)
     }
 
-    pub fn push_with_existing_acc(self, edge_value: ParseStateEdgeContent) -> Self {
-        let acc_for_new_node = self.acc2().clone();
-        Self::new_with_single_predecessor(Arc::new(self), edge_value, acc_for_new_node)
-    }
-    
     // pop_into is complex with private acc_mut, might need rethink or careful internal use
     // For now, assume pop() and popn() are the main public interfaces for this.
     // If pop_into is essential, it would need to return a new Self or take &mut Self and manage acc carefully.
@@ -617,7 +612,7 @@ pub trait GSSTrait { // No longer generic
 
 impl GSSTrait for GSSNode {
     fn push_with_acc(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: Acc) -> GSSNode {
-        self.clone().push_with_acc(edge_value, acc_for_new_node)
+        GSSNode::push_with_acc(self.clone(), edge_value, acc_for_new_node)
     }
 
     fn pop(&self) -> GSSNode {
@@ -629,7 +624,7 @@ impl GSSTrait for GSSNode {
     }
 
     fn acc2(&self) -> &Acc {
-        self.acc2()
+        GSSNode::acc2(self)
     }
 }
 
@@ -647,7 +642,7 @@ impl GSSTrait for Arc<GSSNode> {
     }
 
     fn acc2(&self) -> &Acc {
-        self.acc2()
+        self.as_ref().acc2()
     }
 }
 
