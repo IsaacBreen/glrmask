@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use crate::glr::grammar::{compute_first_sets, NonTerminal, Production, Symbol, Terminal}; // Added compute_first_sets
+use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal, compute_first_sets}; // Added compute_first_sets
 
 /// Computes the set of non-terminals that can derive the empty string (epsilon).
 pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
@@ -514,121 +514,6 @@ pub fn filter_productions_by_reachability(
     }
     
     kept_productions
-}
-
-/// Helper for unique name generation.
-/// It finds a name like "NT_prime", "NT_prime2", etc., that is not in `all_known_names`.
-fn generate_unique_prime_name(
-    base_nt: &NonTerminal,
-    all_known_names: &mut BTreeSet<String>,
-) -> NonTerminal {
-    let mut prime_name = format!("{}_prime", base_nt.0);
-    if all_known_names.contains(&prime_name) {
-        let mut i = 2;
-        loop {
-            prime_name = format!("{}_prime{}", base_nt.0, i);
-            if !all_known_names.contains(&prime_name) {
-                break;
-            }
-            i += 1;
-        }
-    }
-    all_known_names.insert(prime_name.clone());
-    NonTerminal(prime_name)
-}
-
-/// Resolves direct and indirect left-recursion from a set of productions.
-///
-/// This function implements the standard algorithm for eliminating left-recursion.
-/// It processes non-terminals in a fixed order. For each non-terminal `A`, it first
-/// substitutes any productions that start with a previously processed non-terminal `B`
-/// to eliminate indirect recursion. Then, it eliminates any direct recursion on `A`
-/// by introducing a new "prime" non-terminal.
-///
-/// For a set of productions for `A`:
-/// `A -> A α1 | A α2 | ... | β1 | β2 | ...`
-///
-/// It transforms them into:
-/// `A -> β1 A' | β2 A' | ...`
-/// `A' -> α1 A' | α2 A' | ... | ε`
-///
-/// Note: This algorithm does not handle "hidden" left-recursion involving nullable
-/// non-terminals (e.g., `A -> B A ...` where `B` can be empty). Such constructs
-/// should be addressed by other validation or transformation steps.
-pub fn resolve_left_recursion(productions: &[Production]) -> Vec<Production> {
-    // 1. Get all non-terminals and establish a deterministic order.
-    let mut all_lhs_nonterminals_set: BTreeSet<NonTerminal> = BTreeSet::new();
-    let mut all_known_names: BTreeSet<String> = BTreeSet::new();
-    for p in productions {
-        all_lhs_nonterminals_set.insert(p.lhs.clone());
-        all_known_names.insert(p.lhs.0.clone());
-        for s in &p.rhs {
-            if let Symbol::NonTerminal(nt) = s {
-                all_known_names.insert(nt.0.clone());
-            }
-        }
-    }
-    let ordered_nonterminals: Vec<NonTerminal> = all_lhs_nonterminals_set.into_iter().collect();
-
-    let mut current_productions = productions.to_vec();
-
-    for i in 0..ordered_nonterminals.len() {
-        let ni = &ordered_nonterminals[i];
-
-        // Substitute using productions for Nj where j < i to remove indirect left recursion
-        for j in 0..i {
-            let nj = &ordered_nonterminals[j];
-
-            let prods_for_nj: Vec<_> = current_productions.iter().filter(|p| p.lhs == *nj).cloned().collect();
-            if prods_for_nj.is_empty() { continue; }
-
-            let mut next_prods = Vec::new();
-            let (prods_to_process, other_prods): (Vec<_>, Vec<_>) = current_productions.into_iter().partition(|p| p.lhs == *ni);
-            next_prods.extend(other_prods);
-
-            for p_ni in prods_to_process {
-                if p_ni.rhs.get(0) == Some(&Symbol::NonTerminal(nj.clone())) {
-                    let gamma = &p_ni.rhs[1..];
-                    for p_nj in &prods_for_nj {
-                        let mut new_rhs = p_nj.rhs.clone();
-                        new_rhs.extend_from_slice(gamma);
-                        next_prods.push(Production { lhs: ni.clone(), rhs: new_rhs });
-                    }
-                } else {
-                    next_prods.push(p_ni);
-                }
-            }
-            current_productions = next_prods;
-        }
-
-        // Eliminate direct left recursion for Ni
-        let (recursive_prods, non_recursive_prods): (Vec<_>, Vec<_>) = current_productions
-            .iter()
-            .filter(|p| p.lhs == *ni)
-            .cloned()
-            .partition(|p| p.rhs.get(0) == Some(&Symbol::NonTerminal(ni.clone())));
-
-        if !recursive_prods.is_empty() {
-            current_productions.retain(|p| p.lhs != *ni);
-            let prime_nt = generate_unique_prime_name(ni, &mut all_known_names);
-
-            for p_beta in &non_recursive_prods {
-                let mut new_rhs = p_beta.rhs.clone();
-                new_rhs.push(Symbol::NonTerminal(prime_nt.clone()));
-                current_productions.push(Production { lhs: ni.clone(), rhs: new_rhs });
-            }
-
-            for p_alpha in recursive_prods {
-                let mut new_rhs = p_alpha.rhs[1..].to_vec();
-                new_rhs.push(Symbol::NonTerminal(prime_nt.clone()));
-                current_productions.push(Production { lhs: prime_nt.clone(), rhs: new_rhs });
-            }
-
-            current_productions.push(Production { lhs: prime_nt.clone(), rhs: vec![] });
-        }
-    }
-
-    current_productions
 }
 
 pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {
