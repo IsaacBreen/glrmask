@@ -733,6 +733,7 @@ pub fn resolve_right_recursion(
 
             // We need to repeatedly get Ai's rules as they are modified in this j-loop.
             let ai_rhses = prods_by_lhs.get(ai).cloned().unwrap_or_default();
+            println!("Processing non-terminal {} with {} rules", aj.0, ai_rhses.len());
 
             // Only proceed if Aj has productions to substitute.
             if let Some(aj_rhses) = prods_by_lhs.get(aj) {
