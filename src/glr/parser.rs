@@ -437,9 +437,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Goto::State(goto_state_id) => {
                     // crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
 
-                    let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id };
-
-                    let new_gss_node = popped_peek.to_node().push_with_existing_acc(goto_node_content);
+                    let new_gss_node = popped_peek.to_node().push_with_existing_acc(ParseStateEdgeContent { state_id: goto_state_id });
                     out.merge(&Arc::new(new_gss_node));
                 }
                 Goto::Accept => {
