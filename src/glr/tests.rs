@@ -531,7 +531,7 @@ fn test_hidden_left_recursion() {
     //          B  -> epsilon
     // This grammar has hidden left recursion because B is nullable.
     // S -> B S a can effectively act like S -> S a.
-    // GLR parsers should handle this correctly.
+    // The left-recursion elimination pass should transform this grammar.
     let productions = vec![
         prod("S'", vec![nt("S"), t("$")]), // Start
         prod("S", vec![nt("B"), nt("S"), t("a")]),
@@ -539,14 +539,9 @@ fn test_hidden_left_recursion() {
         prod("B", vec![]), // Epsilon
     ];
 
-    // Validation should fail due to left-nullable left recursion
-    assert!(analyze::validate(&productions).is_err(), "Validation should fail for left-nullable left recursion");
-    // This test case is currently redundant because validation fails before parser generation.
-    // It is kept here to document the grammar type but will not be run successfully
-    // until the validation logic is adjusted or skipped for testing purposes.
-    // If validation is ever removed or changed to allow this, uncomment the rest:
-    /*
-    let parser = generate_glr_parser(&productions, 0); // This will fail due to left-nullable left recursion
+    // The `generate_glr_parser` function now includes a left-recursion resolution step.
+    // The validation should pass on the transformed grammar, and the parser should be generated.
+    let parser = generate_glr_parser(&productions, 0);
     println!("Parser: {}", parser);
     let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
 
@@ -566,7 +561,6 @@ fn test_hidden_left_recursion() {
         state.step(eof);
         assert_eq!(state.is_ok(), expected_match, "Parse check failed for hidden left recursion input: '{}'", input);
     }
-    */
 }
 
 #[test]
