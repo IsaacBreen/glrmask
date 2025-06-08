@@ -880,7 +880,7 @@ impl<'r> Precomputer<'r> {
         for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
             let child_vocab_ref = &*child_vocab_arc;
             crate::debug!(
-                3,
+                5,
                 "Segment '{}' -> prefix '{}'",
                 String::from_utf8_lossy(segment_bytes),
                 String::from_utf8_lossy(child_vocab_ref.prefix())

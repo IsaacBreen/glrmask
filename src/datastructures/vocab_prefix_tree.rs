@@ -178,7 +178,7 @@ impl VocabPrefixTree {
         //    to a leaf node holding the token's ID.
         crate::debug!(2, "Building vocab prefix tree");
         for (id, bytes) in tokens {
-            crate::debug!(3, "Adding token {} with bytes {:?}", id, bytes);
+            crate::debug!(5, "Adding token {} with bytes {:?}", id, bytes);
             if bytes.is_empty() {
                 // Assign the token ID for the empty string directly to the root,
                 // overwriting the default 0 if necessary.
