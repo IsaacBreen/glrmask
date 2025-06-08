@@ -577,6 +577,37 @@ pub fn compute_terminal_follow_sets(
     terminal_follows
 }
 
+/// Creates a closure that generates unique non-terminal names, suitable for `resolve_right_recursion`.
+///
+/// The generator ensures that new names do not conflict with existing non-terminal names
+/// or with names it has generated previously. A typical generated name for a non-terminal `A`
+/// would be `A_rr`, `A_rr_2`, etc., to avoid collisions.
+///
+/// # Arguments
+/// * `all_nonterminals` - A set of all non-terminal names currently in the grammar.
+///
+/// # Returns
+/// A closure `FnMut(&str) -> String` that can be passed to `resolve_right_recursion`.
+pub fn create_unique_name_generator(all_nonterminals: &BTreeSet<NonTerminal>) -> impl FnMut(&str) -> String {
+    let mut existing_names: BTreeSet<String> = all_nonterminals.iter().map(|nt| nt.0.clone()).collect();
+
+    move |base_name: &str| {
+        // First attempt: base_name + "_rr" (for right-recursion elimination)
+        let mut new_name = format!("{}_rr", base_name);
+        let mut counter = 1;
+
+        // Check for collisions and increment a suffix if needed
+        while existing_names.contains(&new_name) {
+            counter += 1;
+            new_name = format!("{}_rr_{}", base_name, counter);
+        }
+
+        // Reserve the new name to avoid future collisions within the generator.
+        existing_names.insert(new_name.clone());
+        new_name
+    }
+}
+
 /// Eliminates right-recursion from a grammar.
 ///
 /// This function transforms productions to remove both direct and indirect right-recursion.
