@@ -526,9 +526,10 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
     let mut productions = productions.to_vec();
     crate::glr::analyze::remove_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
+    // dbg!(&productions);
 
-    crate::debug!(2, "Validating");
-    validate(&productions).expect("Validation error");
+    // crate::debug!(2, "Validating");
+    // validate(&productions).expect("Validation error");
 
     crate::debug!(2, "Stage 1");
     let stage_1_table = stage_1(&productions, start_production_id);
