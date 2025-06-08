@@ -733,7 +733,6 @@ pub fn resolve_right_recursion(
 
             // We need to repeatedly get Ai's rules as they are modified in this j-loop.
             let ai_rhses = prods_by_lhs.get(ai).cloned().unwrap_or_default();
-            println!("Processing non-terminal {} with {} rules", aj.0, ai_rhses.len());
 
             // Only proceed if Aj has productions to substitute.
             if let Some(aj_rhses) = prods_by_lhs.get(aj) {
@@ -802,14 +801,34 @@ pub fn resolve_right_recursion(
         let new_nt = NonTerminal(new_nt_name);
         let new_nt_symbol = Symbol::NonTerminal(new_nt.clone());
 
-        // Rewrite Ai's rules: Ai -> β becomes Ai -> Ai' β
+        // Rewrite Ai's rules: Ai -> β becomes Ai -> Ai' β.
+        // To avoid a combinatorial explosion of rules when this NT is substituted later,
+        // we factor the β productions into a new non-terminal if there are more than one.
         let mut new_ai_rhses = Vec::new();
-        for beta_rhs in &non_recursive_rhses {
+        if non_recursive_rhses.is_empty() {
+            // This case means Ai is non-productive (e.g., A -> A).
+            // By leaving new_ai_rhses empty, we effectively remove Ai from the grammar.
+            prods_by_lhs.remove(ai);
+        } else if non_recursive_rhses.len() > 1 {
+            // More than one non-recursive rule (β), so we factor them.
+            let beta_alt_name = new_name_generator(&format!("{}_alts", ai.0));
+            let beta_alt_nt = NonTerminal(beta_alt_name);
+            let beta_alt_symbol = Symbol::NonTerminal(beta_alt_nt.clone());
+
+            // Rule becomes: Ai -> Ai' Ai_alts
+            new_ai_rhses.push(vec![new_nt_symbol.clone(), beta_alt_symbol]);
+            prods_by_lhs.insert(ai.clone(), new_ai_rhses);
+
+            // The new helper non-terminal gets all the alternative productions.
+            prods_by_lhs.insert(beta_alt_nt, non_recursive_rhses);
+        } else {
+            // Exactly one non-recursive rule, so no need to factor.
+            // Rule becomes: Ai -> Ai' β
             let mut new_rhs = vec![new_nt_symbol.clone()];
-            new_rhs.extend_from_slice(beta_rhs);
+            new_rhs.extend_from_slice(&non_recursive_rhses[0]);
             new_ai_rhses.push(new_rhs);
+            prods_by_lhs.insert(ai.clone(), new_ai_rhses);
         }
-        prods_by_lhs.insert(ai.clone(), new_ai_rhses);
 
         // Create rules for Ai': Ai -> α Ai becomes Ai' -> Ai' α
         let mut new_nt_rhses = Vec::new();
@@ -839,4 +858,3 @@ pub fn resolve_right_recursion(
 
     *productions = final_productions;
 }
-
