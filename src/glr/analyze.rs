@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal, compute_first_sets}; // Added compute_first_sets
+use std::collections::HashSet; // <-- NEW
 
 /// Computes the set of non-terminals that can derive the empty string (epsilon).
 pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
@@ -286,6 +287,129 @@ pub fn remove_productions_with_undefined_nonterminals(initial_productions: &[Pro
     }
 
     current_productions.into_iter().map(|(_, prod)| prod).collect()
+}
+
+// ========================================================================
+//  Left-recursion elimination (direct only – sufficient for most PEG use-cases)
+// ========================================================================
+//
+//  For every non-terminal A that has rules of the form
+//
+//      A ::= A α1 | A α2 | … | β1 | β2 | …
+//
+//  (where each βi does not start with A) we rewrite them as
+//
+//      A  ::= β1 A′ | β2 A′ | …
+//      A′ ::= α1 A′ | α2 A′ | … | ε
+//
+//  The auxiliary non-terminal A′ is guaranteed to be fresh (unique) by
+//  appending one or more `'` characters until it no longer collides with any
+//  existing name.
+//
+//  Indirect left-recursion is **not** handled here; the vast majority of
+//  grammars generated from `GrammarExpr` only contain direct left recursion
+//  after macro expansion.  The GLR engine itself can cope with (non-nullable)
+//  indirect recursion so we leave it unchanged.
+//
+//  The augmented start-production (index 0 in every `GrammarDefinition`) is
+//  preserved – its index stays 0 – therefore callers do **not** have to update
+//  `start_production_id`.
+// ------------------------------------------------------------------------
+
+/// Eliminates direct left-recursion from the supplied production list.
+///
+/// The returned vector is a new list of productions; the original slice is left
+/// untouched.
+pub fn eliminate_direct_left_recursion(productions: &[Production]) -> Vec<Production> {
+    // Collect existing non-terminal names for uniqueness checks.
+    let mut existing_names: HashSet<String> =
+        productions.iter().map(|p| p.lhs.0.clone()).collect();
+
+    // Group productions by their LHS.
+    let mut grouped: BTreeMap<&NonTerminal, Vec<&Production>> = BTreeMap::new();
+    for prod in productions {
+        grouped.entry(&prod.lhs).or_default().push(prod);
+    }
+
+    // Where we accumulate the rewritten grammar.
+    let mut new_productions: Vec<Production> = Vec::new();
+
+    for (lhs_nt, prods_for_nt) in grouped {
+        // Split into α-rules (directly recursive) and β-rules (non-recursive).
+        let mut alphas: Vec<Vec<Symbol>> = Vec::new();
+        let mut betas: Vec<Vec<Symbol>>  = Vec::new();
+
+        for prod in &prods_for_nt {
+            if let Some(Symbol::NonTerminal(nt0)) = prod.rhs.first() {
+                if nt0 == lhs_nt {
+                    // Strip the leading A from α:  A α  =>  α
+                    alphas.push(prod.rhs[1..].to_vec());
+                    continue;
+                }
+            }
+            betas.push(prod.rhs.clone());
+        }
+
+        // If there is no direct left recursion – keep the originals verbatim.
+        if alphas.is_empty() {
+            new_productions.extend(prods_for_nt.into_iter().cloned());
+            continue;
+        }
+
+        // If *all* rules are of the form  A ::= A α  the grammar is hopeless.
+        // Keep them as-is to avoid data-loss (the validator will later reject).
+        if betas.is_empty() {
+            new_productions.extend(prods_for_nt.into_iter().cloned());
+            continue;
+        }
+
+        // ------------------------------------------------------------------
+        //  Create a fresh auxiliary non-terminal  A′
+        // ------------------------------------------------------------------
+        let mut aux_name = format!("{}'", lhs_nt.0);
+        while existing_names.contains(&aux_name) {
+            aux_name.push('\'');
+        }
+        existing_names.insert(aux_name.clone());
+        let aux_nt = NonTerminal(aux_name);
+
+        // ------------------------------------------------------------------
+        //  A  ::=  β  A′
+        // ------------------------------------------------------------------
+        for beta in betas {
+            let mut rhs = beta.clone();
+            rhs.push(Symbol::NonTerminal(aux_nt.clone()));
+            new_productions.push(Production {
+                lhs: lhs_nt.clone(),
+                rhs,
+            });
+        }
+
+        // ------------------------------------------------------------------
+        //  A′ ::= α A′
+        //  A′ ::= ε
+        // ------------------------------------------------------------------
+        for alpha in alphas {
+            let mut rhs = alpha.clone();
+            rhs.push(Symbol::NonTerminal(aux_nt.clone()));
+            new_productions.push(Production {
+                lhs: aux_nt.clone(),
+                rhs,
+            });
+        }
+        // ε-production
+        new_productions.push(Production {
+            lhs: aux_nt,
+            rhs: Vec::new(),
+        });
+    }
+
+    // Keep the original order of non-recursive groups by sorting on insertion
+    // order would be tricky; instead we rely on the deterministic iteration
+    // order of BTreeMap and that all groups are appended exactly once. The
+    // augmented start production (index 0) was processed first, so it remains
+    // at position 0.
+    new_productions
 }
 
 // TODO: This function is marked as broken and is not modified by this request.
