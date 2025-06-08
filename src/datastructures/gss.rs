@@ -414,10 +414,6 @@ impl GSSNode {
         Self::new_with_single_predecessor(Arc::new(self), edge_value, acc_for_new_node)
     }
 
-    // pop_into is complex with private acc_mut, might need rethink or careful internal use
-    // For now, assume pop() and popn() are the main public interfaces for this.
-    // If pop_into is essential, it would need to return a new Self or take &mut Self and manage acc carefully.
-
     pub fn pop(&self) -> Self {
         let mut result_acc = Acc::new_for_merging();
         let mut result_predecessors = NodeMap::new();
