@@ -11,8 +11,8 @@ use bimap::BiBTreeMap;
 use kdam::tqdm;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
-use std::sync::Arc;
 use std::collections::BTreeMap as StdMap;
+use std::sync::Arc;
 use crate::glr::analyze::simplify_grammar;
 
 type LLMToken<'a> = &'a [u8];
@@ -649,6 +649,8 @@ impl GrammarDefinition {
         // ------------------------------------------------------------------
         //  End of nullability processing
         // ------------------------------------------------------------------
+
+        let productions = crate::glr::analyze::resolve_left_recursion(&productions);
 
         Ok(GrammarDefinition {
             productions,
