@@ -5,7 +5,7 @@ use bimap::BiBTreeMap;
 use std::collections::{HashMap, VecDeque};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
-use crate::glr::analyze::{drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate};
+use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate};
 pub use crate::types::{TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
@@ -518,17 +518,10 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let original_productions = productions.to_vec();
 
     // Resolve right-recursion
-    let mut name_gen_closure = |base: &str| {
-        let mut counter = 0;
-        let mut name = base.to_string();
-        while productions.iter().any(|p| p.lhs.0 == name) {
-            counter += 1;
-            name = format!("{}_{}", base, counter);
-        }
-        name
-    };
+    let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
+    let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
     let mut productions = productions.to_vec();
-    crate::glr::analyze::resolve_right_recursion(&mut productions, &mut name_gen_closure);
+    crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
 
     crate::debug!(2, "Removing productions with undefined non-terminals");
     let productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
