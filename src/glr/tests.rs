@@ -801,7 +801,7 @@ fn test_resolve_right_recursion() {
         prod("S_prime", vec![nt("S_prime"), t("a")]),
         prod("S_prime", vec![]),
     ];
-    resolve_right_recursion(&mut prods1, &|name| format!("{}_prime", name));
+    resolve_right_recursion(&mut prods1, |name| format!("{}_prime", name));
     assert!(compare_prods(&prods1, &expected1), "Test 1 failed. Got: {:?}", prods1);
 
     // --- Test Case 2: No Right-Recursion (should not change) ---
@@ -810,7 +810,7 @@ fn test_resolve_right_recursion() {
         prod("S", vec![t("b")]),
     ];
     let expected2 = prods2.clone();
-    resolve_right_recursion(&mut prods2, &|name| format!("{}_prime", name));
+    resolve_right_recursion(&mut prods2, |name| format!("{}_prime", name));
     assert!(compare_prods(&prods2, &expected2), "Test 2 failed. Got: {:?}", prods2);
 
     // --- Test Case 3: Indirect Right-Recursion ---
@@ -835,7 +835,7 @@ fn test_resolve_right_recursion() {
         prod("B_prime", vec![nt("B_prime"), t("b"), t("a")]),
         prod("B_prime", vec![]),
     ];
-    resolve_right_recursion(&mut prods3, &|name| format!("{}_prime", name));
+    resolve_right_recursion(&mut prods3, |name| format!("{}_prime", name));
     assert!(compare_prods(&prods3, &expected3), "Test 3 failed. Got: {:?}", prods3);
 
     // --- Test Case 4: Hidden Direct Right-Recursion ---
@@ -850,7 +850,7 @@ fn test_resolve_right_recursion() {
         prod("S_prime", vec![]),
         prod("N", vec![]),
     ];
-    resolve_right_recursion(&mut prods4, &|name| format!("{}_prime", name));
+    resolve_right_recursion(&mut prods4, |name| format!("{}_prime", name));
     assert!(compare_prods(&prods4, &expected4), "Test 4 failed. Got: {:?}", prods4);
 
     // --- Test Case 5: Multiple Non-Recursive Choices ---
@@ -865,7 +865,7 @@ fn test_resolve_right_recursion() {
         prod("S_prime", vec![nt("S_prime"), t("a")]),
         prod("S_prime", vec![]),
     ];
-    resolve_right_recursion(&mut prods5, &|name| format!("{}_prime", name));
+    resolve_right_recursion(&mut prods5, |name| format!("{}_prime", name));
     assert!(compare_prods(&prods5, &expected5), "Test 5 failed. Got: {:?}", prods5);
 
     // --- Test Case 6: Multiple Recursive Choices ---
@@ -880,7 +880,7 @@ fn test_resolve_right_recursion() {
         prod("S_prime", vec![nt("S_prime"), t("b")]),
         prod("S_prime", vec![]),
     ];
-    resolve_right_recursion(&mut prods6, &|name| format!("{}_prime", name));
+    resolve_right_recursion(&mut prods6, |name| format!("{}_prime", name));
     assert!(compare_prods(&prods6, &expected6), "Test 6 failed. Got: {:?}", prods6);
 
     // --- Test Case 7: Both Left and Right Recursive ---
@@ -895,7 +895,7 @@ fn test_resolve_right_recursion() {
         prod("S_prime", vec![nt("S_prime"), nt("S")]),
         prod("S_prime", vec![]),
     ];
-    resolve_right_recursion(&mut prods7, &|name| format!("{}_prime", name));
+    resolve_right_recursion(&mut prods7, |name| format!("{}_prime", name));
     assert!(compare_prods(&prods7, &expected7), "Test 7 failed. Got: {:?}", prods7);
 }
 // --- Notes on Limitations Not Easily Tested Here ---
