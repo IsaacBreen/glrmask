@@ -642,16 +642,32 @@ fn dfs_topo_sort(
     result.push(nt.clone());
 }
 
-/// Eliminates indirect right-recursion by substituting rules.
+/// Eliminates right-recursion from a grammar.
 ///
-/// This function processes non-terminals in a topological order. For each non-terminal `A_i`,
-/// it substitutes any rules for preceding non-terminals `A_j` (where `j < i`) that appear
-/// in a right-recursive position in `A_i`'s productions. This transforms indirect
-/// right-recursion into direct right-recursion, which can then be eliminated.
-pub fn resolve_indirect_right_recursion(
+/// This function transforms productions to remove both direct and indirect right-recursion.
+/// The resulting grammar will be equivalent but may contain left-recursion, which is
+/// generally suitable for GLR parsers.
+///
+/// The algorithm works as follows:
+/// 1. The non-terminals are sorted into a fixed order (A_1, A_2, ..., A_n).
+/// 2. For each non-terminal A_i in order:
+///    a. For each preceding non-terminal A_j (j < i), any rule of the form `A_i -> γ A_j`
+///       is replaced by substituting the productions of A_j. This converts indirect
+///       right-recursion into direct right-recursion.
+///    b. Direct right-recursion for A_i (rules like `A_i -> α A_i`) is eliminated by
+///       introducing a new non-terminal `A_i'` and rewriting the rules:
+///       - `A_i -> α A_i | β` becomes `A_i -> A_i' β` and `A_i' -> A_i' α | ε`.
+///
+/// This process also handles "hidden" recursion where nullable non-terminals are involved.
+/// The transformation converts right-recursion into left-recursion, which is suitable for GLR parsers.
+pub fn resolve_right_recursion(
     productions: &mut Vec<Production>,
+    mut new_name_generator: impl FnMut(&str) -> String,
 ) {
     // 1. Pre-computation & Setup
+    // The algorithm's performance is sensitive to repeated full scans of the grammar.
+    // We switch to a map-based representation (LHS -> list of RHSes) to allow for
+    // efficient lookups and modifications of a non-terminal's productions.
     let nullable_set = compute_nullable_nonterminals(productions);
 
     let mut all_nonterminals_set = BTreeSet::new();
@@ -668,6 +684,13 @@ pub fn resolve_indirect_right_recursion(
         }
     }
     // --- New logic to determine optimal processing order for non-terminals ---
+    // To minimize expensive rule substitutions, we order non-terminals topologically.
+    // A dependency A -> B exists if a rule A -> ... B exists. We want to process B before A.
+    // A topological sort gives an ordering where dependencies go forward.
+    // The algorithm substitutes A_j into A_i if j < i. By using a topological sort
+    // for the order, if A_i -> A_j, then i < j, so no substitution is needed unless
+    // A_i and A_j are in a cycle.
+
     // 1. Build dependency graph.
     let mut dependency_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
     for nt in &all_nonterminals_set {
@@ -697,14 +720,14 @@ pub fn resolve_indirect_right_recursion(
     non_terminals.reverse();
     // --- End of new logic ---
 
-    // 2. Main loop to eliminate indirect recursion
-    let mut pbar = tqdm!(total = non_terminals.len(), desc = "Resolving indirect right-recursion");
+    // 2. Main loop to eliminate indirect and direct recursion
+    let mut pbar = tqdm!(total = non_terminals.len(), desc = "Resolving right-recursion");
 
     for i in 0..non_terminals.len() {
         let ai = &non_terminals[i];
         pbar.set_postfix(format!("NT = {}", ai.0));
 
-        // Substitute Aj (j < i) to make indirect recursion direct
+        // a. Substitute Aj (j < i) to make indirect recursion direct
         for j in 0..i {
             let aj = &non_terminals[j];
 
@@ -747,52 +770,9 @@ pub fn resolve_indirect_right_recursion(
                 }
             }
         }
-        pbar.update(1).unwrap();
-    }
 
-    // 3. Reconstruct the flat Vec<Production> from the map.
-    let mut final_productions = Vec::new();
-    for (lhs, rhses) in prods_by_lhs {
-        for rhs in rhses {
-            final_productions.push(Production { lhs: lhs.clone(), rhs });
-        }
-    }
-
-    *productions = final_productions;
-}
-
-/// Eliminates direct right-recursion from a grammar.
-///
-/// This function transforms productions of the form `A -> α A` (and variants with nullable
-/// non-terminals) into left-recursive equivalents. For each non-terminal `A` with direct
-/// right-recursion, it introduces a new non-terminal `A'` and rewrites the rules:
-/// - `A -> α A | β` becomes `A -> A' β` and `A' -> A' α | ε`.
-///
-/// This should be run after `resolve_indirect_right_recursion` to be effective.
-pub fn resolve_direct_right_recursion(
-    productions: &mut Vec<Production>,
-    mut new_name_generator: impl FnMut(&str) -> String,
-) {
-    // 1. Pre-computation & Setup
-    let nullable_set = compute_nullable_nonterminals(productions);
-
-    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Vec<Symbol>>> = BTreeMap::new();
-    for p in productions.iter() {
-        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p.rhs.clone());
-    }
-
-    // Collect all non-terminals to iterate over.
-    // Sorting ensures deterministic behavior.
-    let non_terminals: Vec<NonTerminal> = prods_by_lhs.keys().cloned().collect();
-
-    // 2. Main loop to eliminate direct recursion
-    let mut pbar = tqdm!(total = non_terminals.len(), desc = "Resolving direct right-recursion");
-
-    for ai in &non_terminals {
-        pbar.set_postfix(format!("NT = {}", ai.0));
-
-        // Get the rules for Ai.
-        // The `prods_by_lhs` map is modified, so we must clone the rules for the current NT.
+        // b. Eliminate direct right recursion for Ai
+        // Get the (potentially modified by substitution) rules for Ai.
         let ai_rhses = prods_by_lhs.get(ai).cloned().unwrap_or_default();
 
         let mut recursive_rhses = Vec::new(); // Tuples of (RHS, index_of_Ai)
@@ -822,8 +802,8 @@ pub fn resolve_direct_right_recursion(
         let new_nt_symbol = Symbol::NonTerminal(new_nt.clone());
 
         // Rewrite Ai's rules: Ai -> β becomes Ai -> Ai' β.
-        // To avoid a combinatorial explosion of rules, we factor the β productions
-        // into a new non-terminal if there are more than one.
+        // To avoid a combinatorial explosion of rules when this NT is substituted later,
+        // we factor the β productions into a new non-terminal if there are more than one.
         let mut new_ai_rhses = Vec::new();
         if non_recursive_rhses.is_empty() {
             // This case means Ai is non-productive (e.g., A -> A).
@@ -877,23 +857,4 @@ pub fn resolve_direct_right_recursion(
     }
 
     *productions = final_productions;
-}
-
-/// Eliminates right-recursion from a grammar.
-///
-/// This function transforms productions to remove both direct and indirect right-recursion.
-/// The resulting grammar will be equivalent but may contain left-recursion, which is
-/// generally suitable for GLR parsers.
-///
-/// The algorithm works in two stages:
-/// 1. Indirect right-recursion is converted into direct right-recursion.
-/// 2. Direct right-recursion is eliminated by introducing new non-terminals and rewriting rules.
-///
-/// This transformation converts right-recursion into left-recursion.
-pub fn resolve_right_recursion(
-    productions: &mut Vec<Production>,
-    mut new_name_generator: impl FnMut(&str) -> String,
-) {
-    resolve_indirect_right_recursion(productions);
-    resolve_direct_right_recursion(productions, new_name_generator);
 }
