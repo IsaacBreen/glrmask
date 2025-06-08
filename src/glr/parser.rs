@@ -429,14 +429,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
     ) -> Arc<GSSNode> {
         let mut out = GSSNode::new(Acc::new_for_merging()); // Start with a default acc
         // crate::debug!(4, "Popped with {} predecessors...", popped_node.num_predecessors());
-
         for popped_peek in peek.popn(len).peek_iter() { // Renamed predecessor to predecessor_arc
-            let edge_value = popped_peek.edge_value();
-            let goto = self.parser.stage_7_table.get(&edge_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", edge_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor ??)", nt.0, edge_value.state_id)), |state_id| Ok(*state_id))).unwrap();
+            let goto = self.parser.stage_7_table.get(&popped_peek.edge_value().state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", popped_peek.edge_value().state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor ??)", nt.0, popped_peek.edge_value().state_id)), |state_id| Ok(*state_id))).unwrap();
             match goto {
                 Goto::State(goto_state_id) => {
                     // crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
-
                     let new_gss_node = popped_peek.to_node().push_with_existing_acc(ParseStateEdgeContent { state_id: goto_state_id });
                     out.merge(&Arc::new(new_gss_node));
                 }
