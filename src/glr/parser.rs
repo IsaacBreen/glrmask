@@ -151,14 +151,10 @@ pub struct GLRParser {
     pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
     pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
     pub start_state_id: StateID,
-    pub actions: BTreeMap<NonTerminalID, ActionFn>, // Changed field type
 }
 
 impl JSONConvertible for GLRParser {
     fn to_json(&self) -> JSONNode {
-        if !self.actions.is_empty() {
-            panic!("Cannot serialize GLRParser with actions defined. Actions are not JSON serializable.");
-        }
         let mut obj = StdMap::new();
         obj.insert("stage_7_table".to_string(), self.stage_7_table.to_json());
         obj.insert("productions".to_string(), self.productions.to_json());
@@ -192,7 +188,6 @@ impl JSONConvertible for GLRParser {
                     non_terminal_map,
                     item_set_map,
                     start_state_id,
-                    actions: BTreeMap::new(), // Initialize actions as empty
                 })
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
@@ -202,14 +197,6 @@ impl JSONConvertible for GLRParser {
 
 impl Debug for GLRParser {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let actions_str = if self.actions.is_empty() {
-            "None".to_string()
-        } else {
-            // ActionFn is not Debug, so we can't print it directly.
-            // We can list the NonTerminalIDs that have actions.
-            let nt_ids_with_actions: Vec<usize> = self.actions.keys().map(|id| id.0).collect();
-            format!("[Actions defined for NT IDs: {:?}]", nt_ids_with_actions)
-        };
         f.debug_struct("GLRParser")
             .field("stage_7_table", &self.stage_7_table)
             .field("productions", &self.productions)
@@ -217,24 +204,18 @@ impl Debug for GLRParser {
             .field("non_terminal_map", &self.non_terminal_map)
             .field("item_set_map", &self.item_set_map)
             .field("start_state_id", &self.start_state_id)
-            .field("actions", &actions_str)
             .finish()
     }
 }
 
 impl PartialEq for GLRParser {
     fn eq(&self, other: &Self) -> bool {
-        let actions_are_equal = self.actions.len() == other.actions.len() &&
-                               self.actions.iter().all(|(key, val_self)| {
-                                   other.actions.get(key).map_or(false, |val_other| Arc::ptr_eq(val_self, val_other))
-                               });
         self.stage_7_table == other.stage_7_table &&
         self.productions == other.productions &&
         self.terminal_map == other.terminal_map &&
         self.non_terminal_map == other.non_terminal_map &&
         self.item_set_map == other.item_set_map &&
-        self.start_state_id == other.start_state_id &&
-        actions_are_equal
+        self.start_state_id == other.start_state_id
     }
 }
 
@@ -266,7 +247,6 @@ impl GLRParser {
             non_terminal_map,
             item_set_map,
             start_state_id,
-            actions: converted_actions, // Assign converted actions
         }
     }
 
@@ -313,7 +293,7 @@ impl GLRParser {
         };
         let root = Arc::new(GSSNode::new(initial_acc.clone())); // initial_acc for the root
         // Push creates a new node. Its acc should be derived from the parent (root in this case).
-        let stack = Arc::new(root.push_with_acc(initial_content, initial_acc)); 
+        let stack = Arc::new(root.push_with_acc(initial_content, initial_acc));
         ParseState { stack }
     }
 
@@ -461,7 +441,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         peek: &GSSPeek,
         nt: NonTerminalID,
         len: usize,
-        user_data_for_goto: Arc<dyn UserDataTrait>,
     ) -> Arc<GSSNode> {
         let mut out = GSSNode::new(Acc::new_for_merging()); // Start with a default acc
         // crate::debug!(4, "Popped with {} predecessors...", popped_node.num_predecessors());
@@ -473,7 +452,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Goto::State(goto_state_id) => {
                     // crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
 
-                    let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id, user_data: user_data_for_goto.clone() };
+                    let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id, user_data: edge_value.user_data.clone() };
 
                     let new_gss_node = popped_peek.to_node().push_with_existing_acc(goto_node_content);
                     out.merge(&Arc::new(new_gss_node));
@@ -573,14 +552,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                              len, ..
                          }) => {
                         crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", top_edge_content.state_id.0, token_id.0, nt.0, len);
-                        if let Some(action_fn) = self.parser.actions.get(&nt) {
-                            let is_ok = action_fn(&mut top_edge_content.user_data);
-                            if !is_ok {
-                                crate::debug!(4, "Action for non-terminal {} returned false, pruning this reduction path.", nt.0);
-                                continue;
-                            }
-                        }
-                        let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, top_edge_content.user_data);
+                        let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                         if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
                            todo.push(ParseState { stack: s_new_arc });
                         }
@@ -599,16 +571,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top_edge_content.state_id.0, token_id.0, nts);
                             for (nt, _prod_ids) in nts {
                                 crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
-                                // Clone user_data for each reduction path to ensure actions don't interfere with each other.
                                 let mut reduction_user_data = top_edge_content.user_data.clone();
-                                if let Some(action_fn) = self.parser.actions.get(&nt) {
-                                    let is_ok = action_fn(&mut reduction_user_data);
-                                    if !is_ok {
-                                        crate::debug!(4, "Action for non-terminal {} returned false, pruning this reduction path.", nt.0);
-                                        continue;
-                                    }
-                                }
-                                let s_new_arc = self.reduce_and_goto(&peek, *nt, *len, reduction_user_data);
+                                let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                                 if !s_new_arc.is_empty() {
                                     todo.push(ParseState { stack: s_new_arc });
                                 }
