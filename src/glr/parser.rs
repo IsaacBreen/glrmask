@@ -1,9 +1,8 @@
 use std::any::Any;
 use std::cmp::Ordering;
 use crate::datastructures::gss::{print_gss_forest, LLMTokenInfo};
-use crate::datastructures::gss::{gather_gss_stats, find_longest_path, PathAccumulator, GSSNode, GSSTrait, GSSStats};
+use crate::datastructures::gss::{gather_gss_stats, find_longest_path, PathAccumulator, GSSNode, GSSTrait, GSSStats, GSSPeek};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::items::Item;
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID};
 use crate::constraint::{LLMTokenBV}; // Import LLMTokenInfo
 
@@ -16,6 +15,7 @@ use crate::debug;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use crate::datastructures::gss::acc_mod::Acc;
+use crate::glr::items::Item;
 
 pub trait DynEq {
     fn dyn_eq(&self, other: &dyn Any) -> bool;
@@ -456,28 +456,22 @@ impl<'a> GLRParserState<'a> { // No longer generic
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
-    fn pop_and_goto(
+    fn reduce_and_goto(
         &self,
-        edge_content: &ParseStateEdgeContent,
-        edge_src: &Arc<GSSNode>,
-        len: usize,
+        popped_node: &Arc<GSSNode>,
         nt: NonTerminalID,
-    ) -> Arc<GSSNode> { 
-        let parent_gss_node = if len == 0 { // Renamed parent to parent_gss_node
-            Arc::new(edge_src.push(edge_content.clone(), edge_src.acc2().clone())) // Provide acc for push
-        } else {
-            Arc::new(edge_src.popn(len - 1))
-        };
+        user_data_for_goto: Arc<dyn UserDataTrait>,
+    ) -> Arc<GSSNode> {
         let mut out = GSSNode::new(Acc::new_for_merging()); // Start with a default acc
-        crate::debug!(4, "Popped with {} predecessors...", parent_gss_node.num_predecessors());
+        crate::debug!(4, "Popped with {} predecessors...", popped_node.num_predecessors());
 
-        for (edge_value, predecessor_arc) in parent_gss_node.pop_iter() { // Renamed predecessor to predecessor_arc
+        for (edge_value, predecessor_arc) in popped_node.pop_iter() { // Renamed predecessor to predecessor_arc
             let goto = self.parser.stage_7_table.get(&edge_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", edge_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor {:p})", nt.0, edge_value.state_id, Arc::as_ptr(&predecessor_arc))), |state_id| Ok(*state_id))).unwrap();
             match goto {
                 Goto::State(goto_state_id) => {
                     crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
 
-                    let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id, user_data: edge_content.user_data.clone() };
+                    let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id, user_data: user_data_for_goto.clone() };
 
                     let isolated_parent_arc = Arc::new(predecessor_arc.push(edge_value, predecessor_arc.acc2().clone()));
                     let new_gss_node = isolated_parent_arc.push(goto_node_content, isolated_parent_arc.acc2().clone());
@@ -560,17 +554,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut not_found = ParseState::new();
 
         while let Some(state) = todo.pop() {
-            let stack_arc_for_operations = &state.stack; 
-            for (mut top_edge_content, parent_arc) in state.stack.pop_iter() { // Renamed top to top_edge_content
-                let temp_idk = Arc::new(parent_arc.push(top_edge_content.clone(), parent_arc.acc2().clone())); // Acc for push
-
+            for peek in state.stack.peek_iter() {
+                let mut top_edge_content = peek.edge_value().clone();
                 let row = &self.parser.stage_7_table[&top_edge_content.state_id];
 
                 match row.shifts_and_reduces.get(&token_id) {
                     Some(Stage7ShiftsAndReduces::Shift(to)) => {
                         crate::debug!(4, "Shift from state {} via token {} to state {}", top_edge_content.state_id.0, token_id.0, to.0);
+                        let stack_for_push = peek.to_arc_node();
                         let new_content = ParseStateEdgeContent { state_id: *to, user_data: top_edge_content.user_data.clone() };
-                        let new_parse_state = self.push_state(&temp_idk, new_content, stack_arc_for_operations.acc2().clone());
+                        let new_parse_state = self.push_state(&stack_for_push, new_content, stack_for_push.acc2().clone());
                         next.merge(new_parse_state);
                     }
 
@@ -586,7 +579,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 continue;
                             }
                         }
-                        let s_new_arc = self.pop_and_goto(&top_edge_content, &parent_arc, *len, *nt);
+                        let popped_node = peek.popn(*len);
+                        let s_new_arc = self.reduce_and_goto(&popped_node, *nt, top_edge_content.user_data);
                         if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
                            todo.push(ParseState { stack: s_new_arc });
                         }
@@ -596,22 +590,26 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         crate::debug!(4, "Split from state {} via token {}", top_edge_content.state_id.0, token_id.0);
                         if let Some(to) = shift {
                             crate::debug!(4, " Shift from state {} via token {} to state {}", top_edge_content.state_id.0, token_id.0, to.0);
+                            let stack_for_push = peek.to_arc_node();
                             let new_content = ParseStateEdgeContent { state_id: *to, user_data: top_edge_content.user_data.clone() };
-                            let new_parse_state = self.push_state(&temp_idk, new_content, stack_arc_for_operations.acc2().clone());
+                            let new_parse_state = self.push_state(&stack_for_push, new_content, stack_for_push.acc2().clone());
                             next.merge(new_parse_state);
                         }
                         for (len, nts) in reduces {
                             crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top_edge_content.state_id.0, token_id.0, nts);
                             for (nt, _prod_ids) in nts {
                                 crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
+                                // Clone user_data for each reduction path to ensure actions don't interfere with each other.
+                                let mut reduction_user_data = top_edge_content.user_data.clone();
                                 if let Some(action_fn) = self.parser.actions.get(&nt) {
-                                    let is_ok = action_fn(&mut top_edge_content.user_data);
+                                    let is_ok = action_fn(&mut reduction_user_data);
                                     if !is_ok {
                                         crate::debug!(4, "Action for non-terminal {} returned false, pruning this reduction path.", nt.0);
                                         continue;
                                     }
                                 }
-                                let s_new_arc = self.pop_and_goto(&top_edge_content, &parent_arc, *len, *nt);
+                                let popped_node = peek.popn(*len);
+                                let s_new_arc = self.reduce_and_goto(&popped_node, *nt, reduction_user_data);
                                 if !s_new_arc.is_empty() {
                                     todo.push(ParseState { stack: s_new_arc });
                                 }
@@ -621,7 +619,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     None => {
                         crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, top_edge_content.state_id.0);
-                        not_found.merge(state.clone());
+                        // Reconstruct the ParseState for this specific path and add to not_found.
+                        not_found.merge(ParseState { stack: peek.to_arc_node() });
                     },
                 }
             }

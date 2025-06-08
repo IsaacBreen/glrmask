@@ -139,6 +139,59 @@ pub fn allowed_terminals_subtract_assign(left: &mut TerminalInfo, right: &Termin
     // Optionally, remove entries from 'left' if their TerminalBV becomes empty after subtraction.
 }
 
+#[derive(Clone, Copy)]
+pub struct GSSPeek<'a> {
+    parent_node: &'a GSSNode,
+    edge_value: &'a ParseStateEdgeContent,
+    predecessor_node: &'a Arc<GSSNode>,
+}
+
+impl<'a> GSSPeek<'a> {
+    pub fn edge_value(&self) -> &'a ParseStateEdgeContent {
+        self.edge_value
+    }
+
+    pub fn predecessor(&self) -> &'a Arc<GSSNode> {
+        self.predecessor_node
+    }
+
+    /// Returns a GSS node representing the stack for this specific peeked path.
+    /// This is equivalent to popping 0 elements.
+    pub fn to_node(&self) -> GSSNode {
+        GSSNode::new_with_single_predecessor(
+            self.predecessor_node.clone(),
+            self.edge_value.clone(),
+            self.parent_node.acc.clone(),
+        )
+    }
+
+    pub fn to_arc_node(&self) -> Arc<GSSNode> {
+        Arc::new(self.to_node())
+    }
+
+    /// Pops `n` elements from the stack represented by this peek.
+    /// `n=0` is equivalent to `to_node()`.
+    /// `n=1` returns the predecessor node with an updated accumulator.
+    /// `n>1` pops `n-1` from the predecessor.
+    /// The accumulator of the returned node is correctly adjusted for the path.
+    pub fn popn(&self, n: usize) -> Arc<GSSNode> {
+        if n == 0 {
+            return self.to_arc_node();
+        }
+
+        // For n >= 1, the result is based on the predecessor.
+        // First, calculate the accumulator for the path to the predecessor.
+        let path_acc = self.parent_node.acc.clone().intersect(self.predecessor_node.acc.clone());
+        let pred_with_path_acc = Arc::new(self.predecessor_node.as_ref().clone().with_acc(path_acc));
+
+        if n == 1 {
+            pred_with_path_acc
+        } else { // n > 1
+            Arc::new(pred_with_path_acc.popn(n - 1))
+        }
+    }
+}
+
 pub mod acc_mod {
     use std::collections::{BTreeMap, BTreeSet};
     use crate::constraint::{LLMTokenBV, TerminalBV};
@@ -411,6 +464,16 @@ impl GSSNode {
             pred_arc = Arc::new(pred_arc.as_ref().clone().with_acc(path_acc));
             (edge_val.clone(), pred_arc)
         }).collect()
+    }
+
+    pub fn peek_iter(&self) -> impl Iterator<Item = GSSPeek<'_>> {
+        self.predecessors.iter().map(move |(edge_val, pred_arc)| {
+            GSSPeek {
+                parent_node: self,
+                edge_value: edge_val,
+                predecessor_node: pred_arc,
+            }
+        })
     }
 
     // Internal helper, needs careful handling due to private acc_mut
@@ -1310,4 +1373,3 @@ mod tests {
         assert_eq!(all_nodes.len(), 6, "Incorrect number of unique nodes in simplified graph. Actual: {:?}", all_nodes.len());
     }
 }
-

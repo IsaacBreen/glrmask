@@ -4012,7 +4012,7 @@ local_system:
               }
           }
       }
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
 system:
   message: |2
 
@@ -4028,7 +4028,6 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - copy-all/paste
     - copy-one/paste
   code_completion_model:
     - gemini/gemini-2.5-flash-preview-05-20
@@ -6084,5 +6083,247 @@ messages:
       All this should be done efficiently. A new GSS node doesn't need to actually be created with this object - it can just be created if/when it's needed. e.g. the user might not push to the new object, but instead pop from it to get the GSS nodes.
 
       The method - which returns an iterable of these objects - should be called `peek_iter`.
+    metadata:
+  - assistant: |-
+      Of course, I can help you with that. Dealing with complex data structures like GSS can be tricky, and creating abstractions to simplify interactions is a great idea. Here are the detailed instructions to refactor your code by introducing a `GSSPeek` object.
+
+      ### File: `src/datastructures/gss.rs`
+
+      First, let's add the `GSSPeek` struct and its implementation. This struct will represent a "peek" at a single path in the GSS without modifying it.
+
+      1.  Add the following code for the `GSSPeek` struct after the `use` statements and before the `GSSNode` struct definition.
+
+      ```rust
+      #[derive(Clone, Copy)]
+      pub struct GSSPeek<'a> {
+          parent_node: &'a GSSNode,
+          edge_value: &'a ParseStateEdgeContent,
+          predecessor_node: &'a Arc<GSSNode>,
+      }
+
+      impl<'a> GSSPeek<'a> {
+          pub fn edge_value(&self) -> &'a ParseStateEdgeContent {
+              self.edge_value
+          }
+
+          pub fn predecessor(&self) -> &'a Arc<GSSNode> {
+              self.predecessor_node
+          }
+
+          /// Returns a GSS node representing the stack for this specific peeked path.
+          /// This is equivalent to popping 0 elements.
+          pub fn to_node(&self) -> GSSNode {
+              GSSNode::new_with_single_predecessor(
+                  self.predecessor_node.clone(),
+                  self.edge_value.clone(),
+                  self.parent_node.acc.clone(),
+              )
+          }
+
+          pub fn to_arc_node(&self) -> Arc<GSSNode> {
+              Arc::new(self.to_node())
+          }
+
+          /// Pops `n` elements from the stack represented by this peek.
+          /// `n=0` is equivalent to `to_node()`.
+          /// `n=1` returns the predecessor node with an updated accumulator.
+          /// `n>1` pops `n-1` from the predecessor.
+          /// The accumulator of the returned node is correctly adjusted for the path.
+          pub fn popn(&self, n: usize) -> Arc<GSSNode> {
+              if n == 0 {
+                  return self.to_arc_node();
+              }
+
+              // For n >= 1, the result is based on the predecessor.
+              // First, calculate the accumulator for the path to the predecessor.
+              let path_acc = self.parent_node.acc.clone().intersect(self.predecessor_node.acc.clone());
+              let pred_with_path_acc = Arc::new(self.predecessor_node.as_ref().clone().with_acc(path_acc));
+
+              if n == 1 {
+                  pred_with_path_acc
+              } else { // n > 1
+                  Arc::new(pred_with_path_acc.popn(n - 1))
+              }
+          }
+      }
+      ```
+
+      2.  Next, add the `peek_iter` method to `GSSNode`. This method will return an iterator that yields `GSSPeek` objects. Add it inside the `impl GSSNode` block, within the "Core manipulation methods" section.
+
+      ```rust
+          pub fn peek_iter(&self) -> impl Iterator<Item = GSSPeek<'_>> {
+              self.predecessors.iter().map(move |(edge_val, pred_arc)| {
+                  GSSPeek {
+                      parent_node: self,
+                      edge_value: edge_val,
+                      predecessor_node: pred_arc,
+                  }
+              })
+          }
+      ```
+
+      ### File: `src/glr/parser.rs`
+
+      Now, let's update the parser logic to use the new `GSSPeek` abstraction.
+
+      1.  In `impl<'a> GLRParserState<'a>`, replace the `pop_and_goto` function with the new `reduce_and_goto` function. This new function is cleaner as it doesn't need to handle the `len=0` case specially.
+
+      ```rust
+          fn reduce_and_goto(
+              &self,
+              popped_node: &Arc<GSSNode>,
+              nt: NonTerminalID,
+              user_data_for_goto: Arc<dyn UserDataTrait>,
+          ) -> Arc<GSSNode> {
+              let mut out = GSSNode::new(Acc::new_for_merging()); // Start with a default acc
+              crate::debug!(4, "Popped with {} predecessors...", popped_node.num_predecessors());
+
+              for (edge_value, predecessor_arc) in popped_node.pop_iter() { // Renamed predecessor to predecessor_arc
+                  let goto = self.parser.stage_7_table.get(&edge_value.state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", edge_value.state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor {:p})", nt.0, edge_value.state_id, Arc::as_ptr(&predecessor_arc))), |state_id| Ok(*state_id))).unwrap();
+                  match goto {
+                      Goto::State(goto_state_id) => {
+                          crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
+
+                          let goto_node_content = ParseStateEdgeContent { state_id: goto_state_id, user_data: user_data_for_goto.clone() };
+
+                          let isolated_parent_arc = Arc::new(predecessor_arc.push(edge_value, predecessor_arc.acc2().clone()));
+                          let new_gss_node = isolated_parent_arc.push(goto_node_content, isolated_parent_arc.acc2().clone());
+                          out.merge(&Arc::new(new_gss_node));
+                      }
+                      Goto::Accept => {
+                          // No action needed for Accept
+                      }
+                  }
+              }
+              Arc::new(out)
+          }
+      ```
+
+      2.  Finally, replace the entire body of the `step` method in `impl<'a> GLRParserState<'a>` with the following refactored implementation. This version uses `peek_iter` and `reduce_and_goto`, which makes the logic much cleaner and also fixes a couple of subtle bugs.
+
+      ```rust
+          pub fn step(&mut self, token_id: TerminalID) {
+              crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
+              self.log_gss("Step-start", token_id);
+              self.cycled_states = ParseState::new();
+
+              let mut todo: Vec<ParseState> = Vec::new();
+              todo.push(ParseState { stack: self.active_state.stack.clone() });
+
+              let mut next = ParseState::new();
+              let mut not_found = ParseState::new();
+
+              while let Some(state) = todo.pop() {
+                  for peek in state.stack.peek_iter() {
+                      let mut top_edge_content = peek.edge_value().clone();
+                      let row = &self.parser.stage_7_table[&top_edge_content.state_id];
+
+                      match row.shifts_and_reduces.get(&token_id) {
+                          Some(Stage7ShiftsAndReduces::Shift(to)) => {
+                              crate::debug!(4, "Shift from state {} via token {} to state {}", top_edge_content.state_id.0, token_id.0, to.0);
+                              let stack_for_push = peek.to_arc_node();
+                              let new_content = ParseStateEdgeContent { state_id: *to, user_data: top_edge_content.user_data.clone() };
+                              let new_parse_state = self.push_state(&stack_for_push, new_content, stack_for_push.acc2().clone());
+                              next.merge(new_parse_state);
+                          }
+
+                          Some(Stage7ShiftsAndReduces::Reduce {
+                                   nonterminal_id: nt,
+                                   len, ..
+                               }) => {
+                              crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", top_edge_content.state_id.0, token_id.0, nt.0, len);
+                              if let Some(action_fn) = self.parser.actions.get(&nt) {
+                                  let is_ok = action_fn(&mut top_edge_content.user_data);
+                                  if !is_ok {
+                                      crate::debug!(4, "Action for non-terminal {} returned false, pruning this reduction path.", nt.0);
+                                      continue;
+                                  }
+                              }
+                              let popped_node = peek.popn(*len);
+                              let s_new_arc = self.reduce_and_goto(&popped_node, *nt, top_edge_content.user_data);
+                              if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
+                                 todo.push(ParseState { stack: s_new_arc });
+                              }
+                          }
+
+                          Some(Stage7ShiftsAndReduces::Split { shift, reduces }) => {
+                              crate::debug!(4, "Split from state {} via token {}", top_edge_content.state_id.0, token_id.0);
+                              if let Some(to) = shift {
+                                  crate::debug!(4, " Shift from state {} via token {} to state {}", top_edge_content.state_id.0, token_id.0, to.0);
+                                  let stack_for_push = peek.to_arc_node();
+                                  let new_content = ParseStateEdgeContent { state_id: *to, user_data: top_edge_content.user_data.clone() };
+                                  let new_parse_state = self.push_state(&stack_for_push, new_content, stack_for_push.acc2().clone());
+                                  next.merge(new_parse_state);
+                              }
+                              for (len, nts) in reduces {
+                                  crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", top_edge_content.state_id.0, token_id.0, nts);
+                                  for (nt, _prod_ids) in nts {
+                                      crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
+                                      // Clone user_data for each reduction path to ensure actions don't interfere with each other.
+                                      let mut reduction_user_data = top_edge_content.user_data.clone();
+                                      if let Some(action_fn) = self.parser.actions.get(&nt) {
+                                          let is_ok = action_fn(&mut reduction_user_data);
+                                          if !is_ok {
+                                              crate::debug!(4, "Action for non-terminal {} returned false, pruning this reduction path.", nt.0);
+                                              continue;
+                                          }
+                                      }
+                                      let popped_node = peek.popn(*len);
+                                      let s_new_arc = self.reduce_and_goto(&popped_node, *nt, reduction_user_data);
+                                      if !s_new_arc.is_empty() {
+                                          todo.push(ParseState { stack: s_new_arc });
+                                      }
+                                  }
+                              }
+                          }
+
+                          None => {
+                              crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, top_edge_content.state_id.0);
+                              // Reconstruct the ParseState for this specific path and add to not_found.
+                              not_found.merge(ParseState { stack: peek.to_arc_node() });
+                          },
+                      }
+                  }
+              }
+
+              self.active_state = next;
+              self.action_not_found_states = not_found; // Retain for potential inspection, though current design drops them.
+              
+              // Simplify the active GSS forest at the end of the step
+              if !self.active_state.stack.is_empty() {
+                  // Arc::make_mut(&mut self.active_state.stack).simplify();
+              }
+
+              self.log_gss("Step-end", token_id);
+              // self.action_not_found_states = ParseState::new(); // Reset if not needed beyond the step
+
+              crate::debug!(4, "----------------------------------------------------------------");
+          }
+      ```
+
+      These changes should make your parser logic easier to understand and maintain. The `GSSPeek` abstraction encapsulates the messy details of handling individual paths within the GSS.
+    metadata:
+  - user: |
+      Using model 'gemini/gemini-2.5-flash-preview-05-20' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/datastructures/gss.rs"
+        },
+        {
+          "action": "replace",
+          "filepath": "src/glr/parser.rs"
+        }
+      ]
+      Found 2 code blocks with filepaths in attempt 1.
+      Received code for required file: src/datastructures/gss.rs
+      Received code for required file: src/glr/parser.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/glr/parser.rs
+      Successfully replaced file: src/datastructures/gss.rs
     metadata:
 ...
