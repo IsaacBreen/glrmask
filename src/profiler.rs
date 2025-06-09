@@ -53,7 +53,7 @@ fn print_node_recursive(
     name: &str,
     indent_level: usize,
     root_total_time: Duration,
-    min_percentage_of_root: f64,
+    min_proportion_of_root: f64,
 ) {
     let indent = "  ".repeat(indent_level);
     let name_with_indent = format!("{}{}", indent, name);
@@ -61,11 +61,12 @@ fn print_node_recursive(
     let total_ms = node.total_time.as_secs_f64() * 1000.0;
     let own_ms = node.own_time.as_secs_f64() * 1000.0;
 
-    let percentage_of_root = if !root_total_time.is_zero() {
-        (node.total_time.as_secs_f64() / root_total_time.as_secs_f64()) * 100.0
+    let proportion_of_root = if !root_total_time.is_zero() {
+        node.total_time.as_secs_f64() / root_total_time.as_secs_f64()
     } else {
         0.0
     };
+    let percentage_of_root = proportion_of_root * 100.0;
 
     println!(
         "{:<50} {:>10} {:>12.3}ms {:>12.3}ms {:>7.1}%",
@@ -73,7 +74,7 @@ fn print_node_recursive(
     );
 
     // Collapse children if this node's contribution is too small and it has children
-    if percentage_of_root < min_percentage_of_root && !node.children.is_empty() {
+    if proportion_of_root < min_proportion_of_root && !node.children.is_empty() {
         let collapsed_indent = "  ".repeat(indent_level + 1);
         println!("{}[... children collapsed ...]", collapsed_indent);
         return;
@@ -88,16 +89,16 @@ fn print_node_recursive(
             child_name,
             indent_level + 1,
             root_total_time,
-            min_percentage_of_root,
+            min_proportion_of_root,
         );
     }
 }
 
 /// Prints a summary of the collected profiling data to stdout.
 ///
-/// Nodes whose total time is less than `min_percentage_of_root` of the total
+/// Nodes whose total time is less than `min_proportion_of_root` of the total
 /// profiled time will be collapsed.
-pub fn print_summary(min_percentage_of_root: f64) {
+pub fn print_summary(min_proportion_of_root: f64) {
     let data = profiler().lock().unwrap();
     println!("--- Profiler Summary ---");
 
@@ -133,7 +134,7 @@ pub fn print_summary(min_percentage_of_root: f64) {
                 name,
                 0,
                 root_total_time,
-                min_percentage_of_root,
+                min_proportion_of_root,
             );
         }
     }
@@ -244,11 +245,11 @@ impl Drop for TimedBlockGuard {
 ///     time!("my_function_call", my_function());
 /// });
 ///
-/// // Print full summary
+/// // Print full summary (collapse threshold is 0.0)
 /// print_summary(0.0);
 ///
-/// // Print summary, collapsing nodes that are less than 50% of total time
-/// print_summary(50.0);
+/// // Print summary, collapsing nodes that are less than 1% (0.01) of total time
+/// print_summary(0.01);
 ///
 /// reset();
 /// ```
@@ -288,7 +289,7 @@ macro_rules! time {
 ///     hit!("some_condition was true");
 /// }
 ///
-/// print_summary(0.0);
+/// print_summary(0.0); // Show all nodes
 /// ```
 #[macro_export]
 macro_rules! hit {
