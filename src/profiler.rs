@@ -81,10 +81,11 @@ fn time_block_start(name: String) {
     let mut data = profiler().lock().unwrap();
     let now = Instant::now();
 
-    // Pause the parent timer
-    if let Some((parent_name, parent_start_time)) = data.timing_stack.last() {
-        let duration = now.duration_since(*parent_start_time);
-        *data.timings.entry(parent_name.clone()).or_default() += duration;
+    // Pause the parent timer. We must clone the parent's name to release the immutable
+    // borrow on `data.timing_stack` before we can get a mutable borrow on `data.timings`.
+    if let Some((parent_name, parent_start_time)) = data.timing_stack.last().map(|(s, i)| (s.clone(), *i)) {
+        let duration = now.duration_since(parent_start_time);
+        *data.timings.entry(parent_name).or_default() += duration;
     }
 
     // Push the new timer onto the stack
