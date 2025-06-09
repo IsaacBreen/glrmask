@@ -53,7 +53,21 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 //     println!("self_bv: {:?}", &self_bv);
                 //     println!("other_bv: {:?}", &other_bv);
                 // }
-                let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
+                // let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
+                // Round down to nearest power of 10
+                fn round_down_to_power_of_10(x: usize) -> usize {
+                    let mut x = x;
+                    while x > 0 {
+                        if x % 10 == 0 {
+                            break;
+                        }
+                        x /= 10;
+                    }
+                    x * 10
+                }
+                let self_bv_len = round_down_to_power_of_10(self_bv.inner().ranges_len());
+                let other_bv_len = round_down_to_power_of_10(other_bv.inner().ranges_len());
+                let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv_len, other_bv_len);
                 timeit!(time_str,
                     *self_bv |= &other_bv
                 );
