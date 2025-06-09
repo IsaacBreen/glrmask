@@ -624,7 +624,9 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     );
     println!("GrammarConstraint constructed successfully.");
     println!("GrammarConstraint original to internal ID map:");
-    for (original_id, internal_id) in grammar_constraint.original_to_internal_id_bimap.iter() {
+    let mut temp = grammar_constraint.original_to_internal_id_bimap.iter().collect::<Vec<_>>();
+    temp.sort_by_key(|(original_id, internal_id)| *internal_id);
+    for (original_id, internal_id) in temp {
         let token = llm_token_map.get_by_right(&LLMTokenID(*original_id)).unwrap();
         println!("  original {} -> internal {}, token {:?}", original_id, internal_id, String::from_utf8_lossy(token));
     }
