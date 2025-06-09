@@ -167,7 +167,7 @@ pub fn print_summary_flat() {
 
         println!("\n[Flat Timings]");
         println!(
-            "{:<50} {:>10} {:>15} {:>15}",
+            "{:<100} {:>10} {:>15} {:>15}",
             "Name", "Hits", "Total Time", "Own Time"
         );
 
@@ -181,7 +181,7 @@ pub fn print_summary_flat() {
             let own_str = format!("{:.3}ms", own_ms);
 
             println!(
-                "{:<50} {:>10} {:>15} {:>15}",
+                "{:<100} {:>10} {:>15} {:>15}",
                 name, node.hits, total_str, own_str
             );
         }
