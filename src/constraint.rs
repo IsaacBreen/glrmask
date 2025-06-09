@@ -1249,6 +1249,9 @@ impl<'a> GrammarConstraintState<'a> {
             crate::debug!(2, "{}", log_msg);
         }
 
+        crate::profiler::print_summary();
+        crate::profiler::reset();
+
         crate::debug!(2, "Done computing mask");
         self.parent.internal_bv_to_original(&final_mask_internal)
     }
