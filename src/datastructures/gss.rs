@@ -67,11 +67,9 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 }
                 let self_bv_len = round_down_to_power_of_10(self_bv.inner().ranges_len());
                 let other_bv_len = round_down_to_power_of_10(other_bv.inner().ranges_len());
-                let overlap = (&*self_bv & &other_bv).len() as f64 / (&*self_bv | &other_bv).len() as f64;
-                // Round overlap to 2 dp
-                let overlap = format!("{:.2}", overlap);
-                let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}",
-                    self_bv_len, other_bv_len);
+                let overlap_len = round_down_to_power_of_10((&*self_bv & &other_bv).inner().ranges_len());
+                let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}, overlap_len: {}",
+                    self_bv_len, other_bv_len, overlap_len);
                 timeit!(time_str,
                     *self_bv |= &other_bv
                 );
