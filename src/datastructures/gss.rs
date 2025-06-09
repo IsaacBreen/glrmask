@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use deterministic_hash::DeterministicHasher;
 use std::any::{Any, TypeId};
-use profiler_macro::time_it;
+use profiler_macro::{time_it, timeit};
 
 use crate::glr::parser::ParseStateEdgeContent;
 use crate::constraint::{LLMTokenBV, TerminalBV};
@@ -267,17 +267,17 @@ pub mod acc_mod {
     }
 
     impl PathAccumulator for Acc {
-        #[time_it("Acc::union_assign")]
+        // #[time_it("Acc::union_assign")]
         fn union_assign(&mut self, other: Self) {
             self.acc.union_assign(other.acc);
             allowed_terminals_union_assign(&mut self.allowed_terminals, other.allowed_terminals);
         }
-        #[time_it("Acc::intersect_assign")]
+        // #[time_it("Acc::intersect_assign")]
         fn intersect_assign(&mut self, right: Self) {
             self.acc.intersect_assign(right.acc);
             allowed_terminals_intersect_assign(&mut self.allowed_terminals, right.allowed_terminals);
         }
-        #[time_it("Acc::intersect_has_effect")]
+        // #[time_it("Acc::intersect_has_effect")]
         fn intersect_has_effect(&self, right: &Self) -> bool {
             self.acc.intersect_has_effect(&right.acc)
         }
@@ -484,7 +484,7 @@ impl GSSNode {
     pub fn merge(&mut self, other: &Self) {
         if self == other { return; }
 
-        self.acc.union_assign(other.acc.clone());
+        timeit!("GSSNode::merge::acc.union_assign", self.acc.union_assign(other.acc.clone()));
 
         for (edge_val, other_pred_arc) in &other.predecessors {
             match self.predecessors.entry(edge_val.clone()) {
@@ -547,7 +547,7 @@ impl Hash for GSSNode {
 }
 
 impl PartialEq for GSSNode {
-    #[time_it("GSSNode::eq")]
+    // #[time_it("GSSNode::eq")]
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self, other) || (
             self.hash_key_cache == other.hash_key_cache && // Structural hash
@@ -560,7 +560,7 @@ impl PartialEq for GSSNode {
 impl Eq for GSSNode {}
 
 impl PartialOrd for GSSNode {
-    #[time_it("GSSNode::partial_cmp")]
+    // #[time_it("GSSNode::partial_cmp")]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         if std::ptr::eq(self, other) { return Some(Ordering::Equal); }
         // Order by hash_key_cache, then acc, then predecessors
@@ -571,7 +571,7 @@ impl PartialOrd for GSSNode {
 }
 
 impl Ord for GSSNode {
-    #[time_it("GSSNode::cmp")]
+    // #[time_it("GSSNode::cmp")]
     fn cmp(&self, other: &Self) -> Ordering {
         if std::ptr::eq(self, other) { return Ordering::Equal; }
         self.hash_key_cache.cmp(&other.hash_key_cache)
