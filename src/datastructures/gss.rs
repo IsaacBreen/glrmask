@@ -47,13 +47,16 @@ impl PathAccumulator for Option<LLMTokenBV> {
     fn union_assign(&mut self, other: Self) {
         match (self.as_mut(), other) {
             (Some(self_bv), Some(other_bv)) => {
-                let BIG_RANGE_LEN = 1000;
-                if other_bv.inner().ranges_len() > BIG_RANGE_LEN || self_bv.inner().ranges_len() > BIG_RANGE_LEN {
-                    println!("WARNING: union_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN || other_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
-                    dbg!(&self_bv);
-                    dbg!(&other_bv);
-                }
-                *self_bv |= &other_bv;
+                // let BIG_RANGE_LEN = 1000;
+                // if other_bv.inner().ranges_len() > BIG_RANGE_LEN || self_bv.inner().ranges_len() > BIG_RANGE_LEN {
+                //     println!("WARNING: union_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN || other_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
+                //     println!("self_bv: {:?}", &self_bv);
+                //     println!("other_bv: {:?}", &other_bv);
+                // }
+                let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
+                timeit!(time_str,
+                    *self_bv |= &other_bv
+                );
                 // An empty bitset resulting from a union is still Some(empty_bv), not None.
             }
             (None, Some(other_bv)) => {
