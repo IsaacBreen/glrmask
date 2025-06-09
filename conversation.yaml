@@ -1,9 +1,614 @@
 local_system:
   attached_files:
+    - src/glr/table.rs
     - src/glr/analyze.rs
   conversation_file:
   compile_command:
   initial_file_contents:
+    src/glr/table.rs: |
+      use super::items::{compute_closure, compute_goto, split_on_dot, Item};
+      use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::parser::{GLRParser, ActionFn};
+      use bimap::BiBTreeMap;
+      use std::collections::{HashMap, VecDeque};
+      use std::collections::{BTreeMap, BTreeSet};
+      use std::fmt::Display;
+      use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate};
+      pub use crate::types::{TerminalID};
+      use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+      use std::collections::BTreeMap as StdMap;
+      use crate::interface::display_productions;
+      // Added for derive macro pattern
+
+
+      type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
+      type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
+      type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
+      type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Row>;
+      type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
+      type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
+      pub type Stage7Table = BTreeMap<StateID, Stage7Row>;
+
+
+      type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
+      #[derive(Debug)]
+      struct Stage2Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeSet<Item>,
+      }
+      #[derive(Debug)]
+      struct Stage3Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Terminal, BTreeSet<Item>>,
+      }
+      #[derive(Debug)]
+      struct Stage4Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+      }
+      type Stage5Row = Stage4Row;
+      #[derive(Debug)]
+      struct Stage6Row {
+          shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+      }
+
+      #[derive(Debug)]
+      enum Stage6ShiftsAndReduces {
+          Shift(BTreeSet<Item>),
+          Reduce(ProductionID),
+          Split {
+              shift: Option<BTreeSet<Item>>,
+              reduces: BTreeSet<ProductionID>,
+          },
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub enum Stage7ShiftsAndReduces {
+          Shift(StateID),
+          Reduce { production_id: ProductionID, nonterminal_id: NonTerminalID, len: usize },
+          Split {
+              shift: Option<StateID>,
+              reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>,
+          },
+      }
+
+      impl JSONConvertible for Stage7ShiftsAndReduces {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              match self {
+                  Stage7ShiftsAndReduces::Shift(state_id) => {
+                      obj.insert("variant".to_string(), JSONNode::String("Shift".to_string()));
+                      obj.insert("state_id".to_string(), state_id.to_json());
+                  }
+                  Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len } => {
+                      obj.insert("variant".to_string(), JSONNode::String("Reduce".to_string()));
+                      obj.insert("production_id".to_string(), production_id.to_json());
+                      obj.insert("nonterminal_id".to_string(), nonterminal_id.to_json());
+                      obj.insert("len".to_string(), len.to_json());
+                  }
+                  Stage7ShiftsAndReduces::Split { shift, reduces } => {
+                      obj.insert("variant".to_string(), JSONNode::String("Split".to_string()));
+                      obj.insert("shift".to_string(), shift.to_json());
+                      obj.insert("reduces".to_string(), reduces.to_json());
+                  }
+              }
+              JSONNode::Object(obj)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for Stage7ShiftsAndReduces".to_string())
+                                         .and_then(String::from_json)?;
+                      match variant.as_str() {
+                          "Shift" => {
+                              let state_id = obj.remove("state_id").ok_or_else(|| "Missing field state_id for Shift".to_string())
+                                                .and_then(StateID::from_json)?;
+                              Ok(Stage7ShiftsAndReduces::Shift(state_id))
+                          }
+                          "Reduce" => {
+                              let production_id = obj.remove("production_id").ok_or_else(|| "Missing field production_id for Reduce".to_string())
+                                                     .and_then(ProductionID::from_json)?;
+                              let nonterminal_id = obj.remove("nonterminal_id").ok_or_else(|| "Missing field nonterminal_id for Reduce".to_string())
+                                                      .and_then(NonTerminalID::from_json)?;
+                              let len = obj.remove("len").ok_or_else(|| "Missing field len for Reduce".to_string())
+                                           .and_then(usize::from_json)?;
+                              Ok(Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len })
+                          }
+                          "Split" => {
+                              let shift = obj.remove("shift").ok_or_else(|| "Missing field shift for Split".to_string())
+                                             .and_then(Option::<StateID>::from_json)?;
+                              let reduces = obj.remove("reduces").ok_or_else(|| "Missing field reduces for Split".to_string())
+                                               .and_then(|n| BTreeMap::<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>::from_json(n))?;
+                              Ok(Stage7ShiftsAndReduces::Split { shift, reduces })
+                          }
+                          _ => Err(format!("Unknown variant {} for Stage7ShiftsAndReduces", variant)),
+                      }
+                  }
+                  _ => Err("Expected JSONNode::Object for Stage7ShiftsAndReduces".to_string()),
+              }
+          }
+      }
+
+      #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+      pub enum Goto {
+          State(StateID),
+          Accept,
+      }
+
+      impl JSONConvertible for Goto {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              match self {
+                  Goto::State(state_id) => {
+                      obj.insert("variant".to_string(), JSONNode::String("State".to_string()));
+                      obj.insert("value".to_string(), state_id.to_json());
+                  }
+                  Goto::Accept => {
+                      obj.insert("variant".to_string(), JSONNode::String("Accept".to_string()));
+                      // No value needed for Accept
+                  }
+              }
+              JSONNode::Object(obj)
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let variant = obj.remove("variant")
+                          .ok_or_else(|| "Missing field 'variant' for Goto".to_string())
+                          .and_then(String::from_json)?;
+                      match variant.as_str() {
+                          "State" => {
+                              let value_node = obj.remove("value").ok_or_else(|| "Missing field 'value' for Goto::State".to_string())?;
+                              StateID::from_json(value_node).map(Goto::State)
+                          }
+                          "Accept" => Ok(Goto::Accept),
+                          _ => Err(format!("Unknown variant '{}' for Goto", variant)),
+                      }
+                  }
+                  _ => Err("Expected JSONNode::Object for Goto".to_string()),
+              }
+          }
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub struct Stage7Row {
+          pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
+          pub gotos: BTreeMap<NonTerminalID, Goto>,
+      }
+
+      // Manual impl for Stage7Row (could be derived)
+      impl JSONConvertible for Stage7Row {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("shifts_and_reduces".to_string(), self.shifts_and_reduces.to_json());
+              obj.insert("gotos".to_string(), self.gotos.to_json());
+              JSONNode::Object(obj)
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let shifts_and_reduces = obj.remove("shifts_and_reduces").ok_or_else(|| "Missing field shifts_and_reduces for Stage7Row".to_string())
+                                                  .and_then(|n| BTreeMap::<TerminalID, Stage7ShiftsAndReduces>::from_json(n))?;
+                      let gotos = obj.remove("gotos").ok_or_else(|| "Missing field gotos for Stage7Row".to_string())
+                                     .and_then(|n| BTreeMap::<NonTerminalID, Goto>::from_json(n))?;
+                      Ok(Stage7Row { shifts_and_reduces, gotos })
+                  }
+                  _ => Err("Expected JSONNode::Object for Stage7Row".to_string()),
+              }
+          }
+      }
+
+
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct StateID(pub usize);
+
+      impl JSONConvertible for StateID {
+          fn to_json(&self) -> JSONNode { self.0.to_json() }
+          fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(StateID) }
+      }
+
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct ProductionID(pub usize);
+
+      impl JSONConvertible for ProductionID {
+          fn to_json(&self) -> JSONNode { self.0.to_json() }
+          fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(ProductionID) }
+      }
+
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct NonTerminalID(pub usize);
+
+      impl JSONConvertible for NonTerminalID {
+          fn to_json(&self) -> JSONNode { self.0.to_json() }
+          fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(NonTerminalID) }
+      }
+
+
+      type Stage1Result = Stage1Table;
+      type Stage2Result = Stage2Table;
+      type Stage3Result = Stage3Table;
+      type Stage4Result = Stage4Table;
+      type Stage5Result = Stage5Table;
+      type Stage6Result = Stage6Table;
+      type Stage7Result = (
+          Stage7Table,
+          BiBTreeMap<BTreeSet<Item>, StateID>,
+          StateID,
+      );
+
+      fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+          let initial_item = Item {
+              production: productions[start_production_id].clone(),
+              dot_position: 0,
+          };
+          let initial_closure = BTreeSet::from([initial_item]);
+          let mut worklist = VecDeque::from([initial_closure.clone()]);
+
+          let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
+
+          while let Some(items) = worklist.pop_front() {
+              if transitions.contains_key(&items) {
+                  continue;
+              }
+
+              let closure = compute_closure(&items, productions);
+              let splits = split_on_dot(&closure);
+              let mut row = BTreeMap::new();
+
+              for (symbol, items) in splits {
+                  if symbol.is_none() {
+                      continue;
+                  }
+                  let goto_set = compute_goto(&items);
+                  row.insert(symbol.clone(), goto_set.clone());
+                  worklist.push_back(goto_set);
+              }
+
+              transitions.insert(items.clone(), row);
+          }
+
+          transitions
+      }
+
+      fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
+          let mut stage_2_table = BTreeMap::new();
+          for (item_set, transitions) in stage_1_table {
+              let mut shifts = BTreeMap::new();
+              let mut gotos = BTreeMap::new();
+              let mut reduces = BTreeSet::new();
+
+              let closure = compute_closure(&item_set, productions);
+              for item in &closure { // Check the full closure for reductions
+                  if item.dot_position == item.production.rhs.len() {
+                      reduces.insert(item.clone());
+                  }
+              }
+
+              for (symbol_opt, next_item_set) in &transitions {
+                  if let Some(symbol) = symbol_opt {
+                      match symbol {
+                          Symbol::Terminal(t) => {
+                              shifts.insert(t.clone(), next_item_set.clone());
+                          }
+                          Symbol::NonTerminal(nt) => {
+                              gotos.insert(nt.clone(), next_item_set.clone());
+                          }
+                      }
+                  }
+              }
+
+              for item in &closure {
+                  // e.g. start rules
+                  if item.dot_position == 0 && !gotos.contains_key(&item.production.lhs) {
+                      gotos.insert(item.production.lhs.clone(), BTreeSet::new());
+                  }
+              }
+
+              stage_2_table.insert(
+                  item_set,
+                  Stage2Row {
+                      shifts,
+                      gotos,
+                      reduces,
+                  },
+              );
+          }
+          stage_2_table
+      }
+
+      fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
+          let follow_sets = compute_follow_sets(productions);
+          crate::debug!(3, "Follow sets:");
+          for (nt, follow_set) in &follow_sets {
+              crate::debug!(3, "  {}: {}", nt.0, follow_set.iter().map(|t| t.0.to_string()).collect::<Vec<_>>().join(", "));
+          }
+
+          let mut stage_3_table = BTreeMap::new();
+
+          for (item_set, row) in stage_2_table {
+              let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
+
+              for item in &row.reduces {
+                  let lhs = &item.production.lhs;
+                  let lookaheads = follow_sets.get(lhs).cloned().unwrap_or_default(); // Handle if NT not in follow_sets
+
+                  for terminal in lookaheads {
+                      reduces
+                          .entry(terminal.clone())
+                          .or_default()
+                          .insert(item.clone());
+                  }
+              }
+
+              stage_3_table.insert(
+                  item_set,
+                  Stage3Row {
+                      shifts: row.shifts,
+                      gotos: row.gotos,
+                      reduces,
+                  },
+              );
+          }
+
+          stage_3_table
+      }
+
+      fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
+          let production_ids: BTreeMap<Production, ProductionID> = productions
+              .iter()
+              .enumerate()
+              .map(|(i, p)| (p.clone(), ProductionID(i)))
+              .collect();
+
+          let mut stage_4_table = BTreeMap::new();
+
+          for (item_set, row) in stage_3_table {
+              let mut reduces = BTreeMap::new();
+
+              for (terminal, items) in row.reduces {
+                  let mut prod_ids = BTreeSet::new();
+                  for item in items {
+                      let prod_id = production_ids.get(&item.production).unwrap();
+                      prod_ids.insert(*prod_id);
+                  }
+                  reduces.insert(terminal.clone(), prod_ids);
+              }
+
+              stage_4_table.insert(
+                  item_set,
+                  Stage4Row {
+                      shifts: row.shifts,
+                      gotos: row.gotos,
+                      reduces,
+                  },
+              );
+          }
+
+          stage_4_table
+      }
+
+      fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
+          // todo: remove this
+          stage_4_table
+      }
+
+      fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
+          let mut stage_6_table = BTreeMap::new();
+
+          for (item_set, row) in stage_5_table {
+              let mut shifts_and_reduces = BTreeMap::new();
+
+              for (terminal, next_item_set) in row.shifts {
+                  shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Shift(next_item_set));
+              }
+
+              for (terminal, mut production_ids) in row.reduces {
+                  if let Some(mut existing) = shifts_and_reduces.remove(&terminal) {
+                      match existing {
+                          Stage6ShiftsAndReduces::Shift(shift_set) => {
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
+                                  shift: Some(shift_set.clone()),
+                                  reduces: production_ids.clone(),
+                              });
+                          }
+                          Stage6ShiftsAndReduces::Reduce(existing_production_id) => {
+                              production_ids.insert(existing_production_id);
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
+                                  shift: None,
+                                  reduces: production_ids,
+                              });
+                          }
+                          Stage6ShiftsAndReduces::Split { shift, mut reduces } => {
+                              reduces.extend(production_ids.into_iter());
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift, reduces });
+                          }
+                      }
+                  } else {
+                      // If there's only one production ID, we can optimize by storing it directly
+                      if production_ids.len() == 1 {
+                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Reduce(production_ids.iter().next().unwrap().clone()));
+                      } else {
+                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift: None, reduces: production_ids });
+                      }
+                  }
+              }
+
+              stage_6_table.insert(
+                  item_set,
+                  Stage6Row {
+                      shifts_and_reduces,
+                      gotos: row.gotos,
+                  },
+              );
+          }
+
+          stage_6_table
+      }
+
+      fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
+          let mut item_set_map = BiBTreeMap::new();
+          let mut next_state_id = 0;
+
+          let mut terminals = BTreeSet::new();
+          let mut non_terminals = BTreeSet::new();
+
+          for (item_set, row) in &stage_6_table {
+              item_set_map.insert(item_set.clone(), StateID(next_state_id));
+              next_state_id += 1;
+
+              for t in row.shifts_and_reduces.keys() {
+                  terminals.insert(t.clone());
+              }
+
+              for nt in row.gotos.keys() {
+                  non_terminals.insert(nt.clone());
+              }
+          }
+
+          let mut stage_7_table = BTreeMap::new();
+
+          for (item_set, row) in stage_6_table {
+              let state_id = *item_set_map.get_by_left(&item_set).unwrap();
+              let mut shifts_and_reduces = BTreeMap::new();
+              let mut gotos = BTreeMap::new();
+
+              for (terminal, action) in row.shifts_and_reduces {
+                  let terminal_id = *terminal_map.get_by_left(&terminal).expect(format!("{:?} not found in terminal map {:?}", terminal, terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+                  let converted_action = match action {
+                      Stage6ShiftsAndReduces::Shift(next_item_set) => {
+                          let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
+                          Stage7ShiftsAndReduces::Shift(next_state_id)
+                      }
+                      Stage6ShiftsAndReduces::Reduce(production_id) => {
+                          let production = productions.get(production_id.0).unwrap();
+                          let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).expect(format!("{:?} not found in non_terminal_map {:?}", production.lhs, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+                          let len = production.rhs.len();
+                          Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len }
+                      }
+                      Stage6ShiftsAndReduces::Split { shift, reduces } => {
+                          let shift_state_id = shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
+                          let mut len_to_nt_to_production_id: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
+                          for production_id in reduces {
+                              let production = productions.get(production_id.0).unwrap();
+                              let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).expect(format!("{:?} not found in non_terminal_map {:?}", production.lhs, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+                              let len = production.rhs.len();
+                              len_to_nt_to_production_id.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id);
+                          }
+                          Stage7ShiftsAndReduces::Split { shift: shift_state_id, reduces: len_to_nt_to_production_id }
+                      }
+                  };
+                  shifts_and_reduces.insert(terminal_id, converted_action);
+              }
+
+              for (nonterminal, next_item_set) in row.gotos {
+                  let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(format!("{:?} not found in non_terminal_map {:?}", nonterminal, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+                  let goto = item_set_map.get_by_left(&next_item_set).map_or(Goto::Accept, |&next_state_id| Goto::State(next_state_id));
+                  if goto == Goto::Accept { assert!(next_item_set.is_empty()); }
+                  gotos.insert(non_terminal_id, goto);
+              }
+
+              stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos });
+          }
+
+          let start_item = Item {
+              production: productions[start_production_id].clone(),
+              dot_position: 0,
+          };
+          let start_state_id = *item_set_map.get_by_left(&BTreeSet::from([start_item])).unwrap();
+
+          (stage_7_table, item_set_map, start_state_id)
+      }
+
+      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>) -> GLRParser {
+          let original_productions = productions.to_vec();
+
+          crate::debug!(2, "Removing productions with undefined non-terminals");
+          let productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
+          // (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id);
+
+          // Resolve right-recursion
+          let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
+          let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
+          let mut productions = productions.to_vec();
+          // crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
+          crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
+          // println!("After direct right recursion:\n{}", display_productions(&productions));
+
+          // crate::debug!(2, "Validating");
+          // validate(&productions).expect("Validation error");
+
+          crate::debug!(2, "Stage 1");
+          let stage_1_table = stage_1(&productions, start_production_id);
+          crate::debug!(6, &stage_1_table);
+          crate::debug!(2, "Stage 2");
+          let stage_2_table = stage_2(stage_1_table, &productions);
+          crate::debug!(6, &stage_2_table);
+          crate::debug!(2, "Stage 3");
+          let stage_3_table = stage_3(stage_2_table, &productions);
+          crate::debug!(6, &stage_3_table);
+          crate::debug!(2, "Stage 4");
+          let stage_4_table = stage_4(stage_3_table, &productions);
+          crate::debug!(6, &stage_4_table);
+          crate::debug!(2, "Stage 5");
+          let stage_5_table = stage_5(stage_4_table, &productions);
+          crate::debug!(6, &stage_5_table);
+          crate::debug!(2, "Stage 6");
+          let stage_6_table = stage_6(stage_5_table);
+          crate::debug!(6, &stage_6_table);
+          crate::debug!(2, "Stage 7");
+          let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
+          crate::debug!(6, &stage_7_table);
+          crate::debug!(2, "Done generating GLR parser");
+
+          GLRParser::new(stage_7_table, original_productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions)
+      }
+
+      pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
+          let terminal_map = assign_terminal_ids(productions);
+          let non_terminal_map = assign_non_terminal_ids(productions);
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
+      }
+
+      pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
+          let non_terminal_map = assign_non_terminal_ids(productions);
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
+      }
+
+      pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
+          let mut terminal_map = BiBTreeMap::new();
+          let mut next_terminal_id = 0;
+
+          for p in productions {
+              for symbol in &p.rhs {
+                  if let Symbol::Terminal(t) = symbol {
+                      if !terminal_map.contains_left(t) {
+                          terminal_map.insert(t.clone(), TerminalID(next_terminal_id));
+                          next_terminal_id += 1;
+                      }
+                  }
+              }
+          }
+
+          terminal_map
+      }
+
+      pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerminal, NonTerminalID> {
+          let mut non_terminal_map = BiBTreeMap::new();
+          let mut next_non_terminal_id = 0;
+
+          for p in productions {
+              if !non_terminal_map.contains_left(&p.lhs) {
+                  non_terminal_map.insert(p.lhs.clone(), NonTerminalID(next_non_terminal_id));
+                  next_non_terminal_id += 1;
+              }
+          }
+          non_terminal_map
+      }
     src/glr/analyze.rs: |+
       use std::cmp::PartialEq;
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -627,36 +1232,33 @@ local_system:
           productions: &mut Vec<Production>,
           mut new_name_generator: impl FnMut(&str) -> String,
       ) {
-          // This function transforms direct right-recursion into left-recursion.
-          // A set of rules for a non-terminal `A` of the form:
-          //   A -> α₁ A | α₂ A | ... | αₘ A  (right-recursive rules)
-          //   A -> β₁ | β₂ | ... | βₙ          (non-recursive rules)
-          // generates the language (α₁|...|αₘ)* (β₁|...|βₙ).
+          // This function transforms direct right-recursion into left-recursion while preserving
+          // the original order of productions as much as possible.
           //
-          // This can be rewritten using a new non-terminal `A'` to be left-recursive:
-          //   A  -> A' β₁ | A' β₂ | ... | A' βₙ
-          //   A' -> A' α₁ | A' α₂ | ... | A' αₘ | ε
-          // This new form generates the same language and is left-recursive.
+          // The transformation for a non-terminal `A` with rules:
+          //   A -> α₁ A | ... | αₘ A  (right-recursive rules, where αᵢ is a prefix)
+          //   A -> β₁ | ... | βₙ      (non-recursive rules)
+          // is to replace them with:
+          //   A  -> A' β₁ | ... | A' βₙ
+          //   A' -> A' α₁ | ... | A' αₘ | ε
+          // where `A'` is a new non-terminal. This generates the same language `(α₁|...|αₘ)* (β₁|...|βₙ)`
+          // using left-recursion.
           //
-          // This implementation only considers "simple" direct right-recursion, where a rule
-          // is of the form `A -> α A` and `α` does not contain `A`. More complex recursions
-          // like `A -> α A β A` or `A -> α A A` are not transformed and are treated as
-          // non-recursive "β" terms.
+          // The implementation preserves order by iterating through the original production list.
+          // When it first encounters a rule for a right-recursive non-terminal, it replaces all
+          // rules for that non-terminal with the new, transformed set of rules at that position.
 
-          // 1. Group all productions by their LHS non-terminal.
+          // 1. Group productions by LHS to easily access all rules for a given non-terminal.
+          // The BTreeMap is just for efficient lookup; we don't iterate over its keys for ordering.
           let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
           for prod in productions.iter().cloned() {
               prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod);
           }
 
-          let mut new_productions = Vec::new();
-          let nts_to_process: Vec<NonTerminal> = prods_by_lhs.keys().cloned().collect();
-
-          for nt in nts_to_process {
-              let prods_for_nt = prods_by_lhs.get(&nt).unwrap();
-
-              // 2. Partition rules for `nt` into simple direct right-recursive and others.
-              let (recursive_rules, other_rules): (Vec<_>, Vec<_>) = prods_for_nt.iter().cloned().partition(|p| {
+          // 2. Identify all non-terminals that have simple direct right-recursive rules.
+          let mut recursive_nts = BTreeSet::new();
+          for (nt, prods_for_nt) in &prods_by_lhs {
+              let is_recursive = prods_for_nt.iter().any(|p| {
                   // A rule `A -> α A` is simple direct right-recursive if:
                   // a) `α` is not empty (i.e., rule is not `A -> A`).
                   if p.rhs.len() < 2 { return false; }
@@ -666,47 +1268,680 @@ local_system:
                   let alpha = &p.rhs[..p.rhs.len() - 1];
                   !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
               });
-
-              if recursive_rules.is_empty() {
-                  // No simple direct right-recursion for this NT, so keep its original rules.
-                  new_productions.extend(prods_for_nt.clone());
-              } else {
-                  // 3. Found recursion, perform the transformation.
-                  let new_nt = NonTerminal(new_name_generator(&nt.0));
-                  crate::debug!(2, "Resolving direct right-recursion for '{}', creating new non-terminal '{}'", nt.0, new_nt.0);
-
-                  // 4. Create rules for the new non-terminal `A'`.
-                  // For each recursive rule `A -> αᵢ A`, create `A' -> A' αᵢ`.
-                  for rec_rule in &recursive_rules {
-                      let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
-                      let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
-                      new_rhs.extend_from_slice(alpha);
-                      let new_prod = Production { lhs: new_nt.clone(), rhs: new_rhs };
-                      crate::debug!(2, "  Transforming recursive rule '{}' -> '{}'", rec_rule, new_prod);
-                      new_productions.push(new_prod);
-                  }
-                  let epsilon_prod = Production { lhs: new_nt.clone(), rhs: vec![] }; // A' -> ε
-                  crate::debug!(2, "  Adding new epsilon rule: '{}'", epsilon_prod);
-                  new_productions.push(epsilon_prod);
-
-                  // 5. Create new rules for the original non-terminal `A`.
-                  // For each non-recursive rule `A -> βⱼ`, create `A -> A' βⱼ`.
-                  for non_rec_rule in &other_rules {
-                      let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
-                      new_rhs.extend_from_slice(&non_rec_rule.rhs);
-                      let new_prod = Production { lhs: nt.clone(), rhs: new_rhs };
-                      crate::debug!(2, "  Transforming non-recursive rule '{}' -> '{}'", non_rec_rule, new_prod);
-                      new_productions.push(new_prod);
-                  }
+              if is_recursive {
+                  recursive_nts.insert(nt.clone());
               }
           }
 
-          // 6. Replace the original productions with the new set.
+          // 3. Build the new production list, preserving order.
+          let mut new_productions = Vec::new();
+          let mut processed_recursive_nts = BTreeSet::new();
+
+          for prod in productions.iter().cloned() {
+              let lhs = &prod.lhs;
+
+              if !recursive_nts.contains(lhs) {
+                  // This production's LHS is not right-recursive, so we can keep the production as is.
+                  new_productions.push(prod);
+                  continue;
+              }
+
+              // The LHS is right-recursive. We need to process all of its rules at once.
+              // We do this only the first time we encounter a rule for this LHS.
+              if processed_recursive_nts.contains(lhs) {
+                  // We've already handled this NT and its rules, so we skip this and subsequent productions for it.
+                  continue;
+              }
+              processed_recursive_nts.insert(lhs.clone());
+
+              // --- Perform the transformation for `lhs` ---
+              let prods_for_nt = prods_by_lhs.get(lhs).unwrap();
+
+              let (recursive_rules, other_rules): (Vec<_>, Vec<_>) = prods_for_nt.iter().cloned().partition(|p| {
+                  if p.rhs.len() < 2 { return false; }
+                  if p.rhs.last() != Some(&Symbol::NonTerminal(p.lhs.clone())) { return false; }
+                  let alpha = &p.rhs[..p.rhs.len() - 1];
+                  !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
+              });
+
+              // `recursive_rules` is guaranteed to be non-empty because `lhs` is in `recursive_nts`.
+              let new_nt = NonTerminal(new_name_generator(&lhs.0));
+              crate::debug!(2, "Resolving direct right-recursion for '{}', creating new non-terminal '{}'", lhs.0, new_nt.0);
+
+              // Create new rules for the original non-terminal `A`: `A -> A' βⱼ`.
+              // The order of these new rules is based on the original order of the `β` rules.
+              for non_rec_rule in &other_rules {
+                  let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
+                  new_rhs.extend_from_slice(&non_rec_rule.rhs);
+                  let new_prod = Production { lhs: lhs.clone(), rhs: new_rhs };
+                  crate::debug!(2, "  Transforming non-recursive rule '{}' -> '{}'", non_rec_rule, new_prod);
+                  new_productions.push(new_prod);
+              }
+
+              // Create rules for the new non-terminal `A'`: `A' -> A' αᵢ` and `A' -> ε`.
+              for rec_rule in &recursive_rules {
+                  let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
+                  let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
+                  new_rhs.extend_from_slice(alpha);
+                  let new_prod = Production { lhs: new_nt.clone(), rhs: new_rhs };
+                  crate::debug!(2, "  Transforming recursive rule '{}' -> '{}'", rec_rule, new_prod);
+                  new_productions.push(new_prod);
+              }
+              let epsilon_prod = Production { lhs: new_nt.clone(), rhs: vec![] }; // A' -> ε
+              crate::debug!(2, "  Adding new epsilon rule: '{}'", epsilon_prod);
+              new_productions.push(epsilon_prod);
+          }
+
+          // 4. Replace the original productions with the new set.
           productions.clear();
           productions.extend(new_productions);
       }
 
   prev_file_contents:
+    src/glr/table.rs: |
+      use super::items::{compute_closure, compute_goto, split_on_dot, Item};
+      use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::parser::{GLRParser, ActionFn};
+      use bimap::BiBTreeMap;
+      use std::collections::{HashMap, VecDeque};
+      use std::collections::{BTreeMap, BTreeSet};
+      use std::fmt::Display;
+      use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate};
+      pub use crate::types::{TerminalID};
+      use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+      use std::collections::BTreeMap as StdMap;
+      use crate::interface::display_productions;
+      // Added for derive macro pattern
+
+
+      type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
+      type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
+      type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
+      type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Row>;
+      type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
+      type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
+      pub type Stage7Table = BTreeMap<StateID, Stage7Row>;
+
+
+      type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
+      #[derive(Debug)]
+      struct Stage2Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeSet<Item>,
+      }
+      #[derive(Debug)]
+      struct Stage3Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Terminal, BTreeSet<Item>>,
+      }
+      #[derive(Debug)]
+      struct Stage4Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+      }
+      type Stage5Row = Stage4Row;
+      #[derive(Debug)]
+      struct Stage6Row {
+          shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+      }
+
+      #[derive(Debug)]
+      enum Stage6ShiftsAndReduces {
+          Shift(BTreeSet<Item>),
+          Reduce(ProductionID),
+          Split {
+              shift: Option<BTreeSet<Item>>,
+              reduces: BTreeSet<ProductionID>,
+          },
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub enum Stage7ShiftsAndReduces {
+          Shift(StateID),
+          Reduce { production_id: ProductionID, nonterminal_id: NonTerminalID, len: usize },
+          Split {
+              shift: Option<StateID>,
+              reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>,
+          },
+      }
+
+      impl JSONConvertible for Stage7ShiftsAndReduces {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              match self {
+                  Stage7ShiftsAndReduces::Shift(state_id) => {
+                      obj.insert("variant".to_string(), JSONNode::String("Shift".to_string()));
+                      obj.insert("state_id".to_string(), state_id.to_json());
+                  }
+                  Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len } => {
+                      obj.insert("variant".to_string(), JSONNode::String("Reduce".to_string()));
+                      obj.insert("production_id".to_string(), production_id.to_json());
+                      obj.insert("nonterminal_id".to_string(), nonterminal_id.to_json());
+                      obj.insert("len".to_string(), len.to_json());
+                  }
+                  Stage7ShiftsAndReduces::Split { shift, reduces } => {
+                      obj.insert("variant".to_string(), JSONNode::String("Split".to_string()));
+                      obj.insert("shift".to_string(), shift.to_json());
+                      obj.insert("reduces".to_string(), reduces.to_json());
+                  }
+              }
+              JSONNode::Object(obj)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for Stage7ShiftsAndReduces".to_string())
+                                         .and_then(String::from_json)?;
+                      match variant.as_str() {
+                          "Shift" => {
+                              let state_id = obj.remove("state_id").ok_or_else(|| "Missing field state_id for Shift".to_string())
+                                                .and_then(StateID::from_json)?;
+                              Ok(Stage7ShiftsAndReduces::Shift(state_id))
+                          }
+                          "Reduce" => {
+                              let production_id = obj.remove("production_id").ok_or_else(|| "Missing field production_id for Reduce".to_string())
+                                                     .and_then(ProductionID::from_json)?;
+                              let nonterminal_id = obj.remove("nonterminal_id").ok_or_else(|| "Missing field nonterminal_id for Reduce".to_string())
+                                                      .and_then(NonTerminalID::from_json)?;
+                              let len = obj.remove("len").ok_or_else(|| "Missing field len for Reduce".to_string())
+                                           .and_then(usize::from_json)?;
+                              Ok(Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len })
+                          }
+                          "Split" => {
+                              let shift = obj.remove("shift").ok_or_else(|| "Missing field shift for Split".to_string())
+                                             .and_then(Option::<StateID>::from_json)?;
+                              let reduces = obj.remove("reduces").ok_or_else(|| "Missing field reduces for Split".to_string())
+                                               .and_then(|n| BTreeMap::<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>::from_json(n))?;
+                              Ok(Stage7ShiftsAndReduces::Split { shift, reduces })
+                          }
+                          _ => Err(format!("Unknown variant {} for Stage7ShiftsAndReduces", variant)),
+                      }
+                  }
+                  _ => Err("Expected JSONNode::Object for Stage7ShiftsAndReduces".to_string()),
+              }
+          }
+      }
+
+      #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+      pub enum Goto {
+          State(StateID),
+          Accept,
+      }
+
+      impl JSONConvertible for Goto {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              match self {
+                  Goto::State(state_id) => {
+                      obj.insert("variant".to_string(), JSONNode::String("State".to_string()));
+                      obj.insert("value".to_string(), state_id.to_json());
+                  }
+                  Goto::Accept => {
+                      obj.insert("variant".to_string(), JSONNode::String("Accept".to_string()));
+                      // No value needed for Accept
+                  }
+              }
+              JSONNode::Object(obj)
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let variant = obj.remove("variant")
+                          .ok_or_else(|| "Missing field 'variant' for Goto".to_string())
+                          .and_then(String::from_json)?;
+                      match variant.as_str() {
+                          "State" => {
+                              let value_node = obj.remove("value").ok_or_else(|| "Missing field 'value' for Goto::State".to_string())?;
+                              StateID::from_json(value_node).map(Goto::State)
+                          }
+                          "Accept" => Ok(Goto::Accept),
+                          _ => Err(format!("Unknown variant '{}' for Goto", variant)),
+                      }
+                  }
+                  _ => Err("Expected JSONNode::Object for Goto".to_string()),
+              }
+          }
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub struct Stage7Row {
+          pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
+          pub gotos: BTreeMap<NonTerminalID, Goto>,
+      }
+
+      // Manual impl for Stage7Row (could be derived)
+      impl JSONConvertible for Stage7Row {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("shifts_and_reduces".to_string(), self.shifts_and_reduces.to_json());
+              obj.insert("gotos".to_string(), self.gotos.to_json());
+              JSONNode::Object(obj)
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let shifts_and_reduces = obj.remove("shifts_and_reduces").ok_or_else(|| "Missing field shifts_and_reduces for Stage7Row".to_string())
+                                                  .and_then(|n| BTreeMap::<TerminalID, Stage7ShiftsAndReduces>::from_json(n))?;
+                      let gotos = obj.remove("gotos").ok_or_else(|| "Missing field gotos for Stage7Row".to_string())
+                                     .and_then(|n| BTreeMap::<NonTerminalID, Goto>::from_json(n))?;
+                      Ok(Stage7Row { shifts_and_reduces, gotos })
+                  }
+                  _ => Err("Expected JSONNode::Object for Stage7Row".to_string()),
+              }
+          }
+      }
+
+
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct StateID(pub usize);
+
+      impl JSONConvertible for StateID {
+          fn to_json(&self) -> JSONNode { self.0.to_json() }
+          fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(StateID) }
+      }
+
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct ProductionID(pub usize);
+
+      impl JSONConvertible for ProductionID {
+          fn to_json(&self) -> JSONNode { self.0.to_json() }
+          fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(ProductionID) }
+      }
+
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct NonTerminalID(pub usize);
+
+      impl JSONConvertible for NonTerminalID {
+          fn to_json(&self) -> JSONNode { self.0.to_json() }
+          fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(NonTerminalID) }
+      }
+
+
+      type Stage1Result = Stage1Table;
+      type Stage2Result = Stage2Table;
+      type Stage3Result = Stage3Table;
+      type Stage4Result = Stage4Table;
+      type Stage5Result = Stage5Table;
+      type Stage6Result = Stage6Table;
+      type Stage7Result = (
+          Stage7Table,
+          BiBTreeMap<BTreeSet<Item>, StateID>,
+          StateID,
+      );
+
+      fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+          let initial_item = Item {
+              production: productions[start_production_id].clone(),
+              dot_position: 0,
+          };
+          let initial_closure = BTreeSet::from([initial_item]);
+          let mut worklist = VecDeque::from([initial_closure.clone()]);
+
+          let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
+
+          while let Some(items) = worklist.pop_front() {
+              if transitions.contains_key(&items) {
+                  continue;
+              }
+
+              let closure = compute_closure(&items, productions);
+              let splits = split_on_dot(&closure);
+              let mut row = BTreeMap::new();
+
+              for (symbol, items) in splits {
+                  if symbol.is_none() {
+                      continue;
+                  }
+                  let goto_set = compute_goto(&items);
+                  row.insert(symbol.clone(), goto_set.clone());
+                  worklist.push_back(goto_set);
+              }
+
+              transitions.insert(items.clone(), row);
+          }
+
+          transitions
+      }
+
+      fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
+          let mut stage_2_table = BTreeMap::new();
+          for (item_set, transitions) in stage_1_table {
+              let mut shifts = BTreeMap::new();
+              let mut gotos = BTreeMap::new();
+              let mut reduces = BTreeSet::new();
+
+              let closure = compute_closure(&item_set, productions);
+              for item in &closure { // Check the full closure for reductions
+                  if item.dot_position == item.production.rhs.len() {
+                      reduces.insert(item.clone());
+                  }
+              }
+
+              for (symbol_opt, next_item_set) in &transitions {
+                  if let Some(symbol) = symbol_opt {
+                      match symbol {
+                          Symbol::Terminal(t) => {
+                              shifts.insert(t.clone(), next_item_set.clone());
+                          }
+                          Symbol::NonTerminal(nt) => {
+                              gotos.insert(nt.clone(), next_item_set.clone());
+                          }
+                      }
+                  }
+              }
+
+              for item in &closure {
+                  // e.g. start rules
+                  if item.dot_position == 0 && !gotos.contains_key(&item.production.lhs) {
+                      gotos.insert(item.production.lhs.clone(), BTreeSet::new());
+                  }
+              }
+
+              stage_2_table.insert(
+                  item_set,
+                  Stage2Row {
+                      shifts,
+                      gotos,
+                      reduces,
+                  },
+              );
+          }
+          stage_2_table
+      }
+
+      fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
+          let follow_sets = compute_follow_sets(productions);
+          crate::debug!(3, "Follow sets:");
+          for (nt, follow_set) in &follow_sets {
+              crate::debug!(3, "  {}: {}", nt.0, follow_set.iter().map(|t| t.0.to_string()).collect::<Vec<_>>().join(", "));
+          }
+
+          let mut stage_3_table = BTreeMap::new();
+
+          for (item_set, row) in stage_2_table {
+              let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
+
+              for item in &row.reduces {
+                  let lhs = &item.production.lhs;
+                  let lookaheads = follow_sets.get(lhs).cloned().unwrap_or_default(); // Handle if NT not in follow_sets
+
+                  for terminal in lookaheads {
+                      reduces
+                          .entry(terminal.clone())
+                          .or_default()
+                          .insert(item.clone());
+                  }
+              }
+
+              stage_3_table.insert(
+                  item_set,
+                  Stage3Row {
+                      shifts: row.shifts,
+                      gotos: row.gotos,
+                      reduces,
+                  },
+              );
+          }
+
+          stage_3_table
+      }
+
+      fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
+          let production_ids: BTreeMap<Production, ProductionID> = productions
+              .iter()
+              .enumerate()
+              .map(|(i, p)| (p.clone(), ProductionID(i)))
+              .collect();
+
+          let mut stage_4_table = BTreeMap::new();
+
+          for (item_set, row) in stage_3_table {
+              let mut reduces = BTreeMap::new();
+
+              for (terminal, items) in row.reduces {
+                  let mut prod_ids = BTreeSet::new();
+                  for item in items {
+                      let prod_id = production_ids.get(&item.production).unwrap();
+                      prod_ids.insert(*prod_id);
+                  }
+                  reduces.insert(terminal.clone(), prod_ids);
+              }
+
+              stage_4_table.insert(
+                  item_set,
+                  Stage4Row {
+                      shifts: row.shifts,
+                      gotos: row.gotos,
+                      reduces,
+                  },
+              );
+          }
+
+          stage_4_table
+      }
+
+      fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
+          // todo: remove this
+          stage_4_table
+      }
+
+      fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
+          let mut stage_6_table = BTreeMap::new();
+
+          for (item_set, row) in stage_5_table {
+              let mut shifts_and_reduces = BTreeMap::new();
+
+              for (terminal, next_item_set) in row.shifts {
+                  shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Shift(next_item_set));
+              }
+
+              for (terminal, mut production_ids) in row.reduces {
+                  if let Some(mut existing) = shifts_and_reduces.remove(&terminal) {
+                      match existing {
+                          Stage6ShiftsAndReduces::Shift(shift_set) => {
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
+                                  shift: Some(shift_set.clone()),
+                                  reduces: production_ids.clone(),
+                              });
+                          }
+                          Stage6ShiftsAndReduces::Reduce(existing_production_id) => {
+                              production_ids.insert(existing_production_id);
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
+                                  shift: None,
+                                  reduces: production_ids,
+                              });
+                          }
+                          Stage6ShiftsAndReduces::Split { shift, mut reduces } => {
+                              reduces.extend(production_ids.into_iter());
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift, reduces });
+                          }
+                      }
+                  } else {
+                      // If there's only one production ID, we can optimize by storing it directly
+                      if production_ids.len() == 1 {
+                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Reduce(production_ids.iter().next().unwrap().clone()));
+                      } else {
+                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift: None, reduces: production_ids });
+                      }
+                  }
+              }
+
+              stage_6_table.insert(
+                  item_set,
+                  Stage6Row {
+                      shifts_and_reduces,
+                      gotos: row.gotos,
+                  },
+              );
+          }
+
+          stage_6_table
+      }
+
+      fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
+          let mut item_set_map = BiBTreeMap::new();
+          let mut next_state_id = 0;
+
+          let mut terminals = BTreeSet::new();
+          let mut non_terminals = BTreeSet::new();
+
+          for (item_set, row) in &stage_6_table {
+              item_set_map.insert(item_set.clone(), StateID(next_state_id));
+              next_state_id += 1;
+
+              for t in row.shifts_and_reduces.keys() {
+                  terminals.insert(t.clone());
+              }
+
+              for nt in row.gotos.keys() {
+                  non_terminals.insert(nt.clone());
+              }
+          }
+
+          let mut stage_7_table = BTreeMap::new();
+
+          for (item_set, row) in stage_6_table {
+              let state_id = *item_set_map.get_by_left(&item_set).unwrap();
+              let mut shifts_and_reduces = BTreeMap::new();
+              let mut gotos = BTreeMap::new();
+
+              for (terminal, action) in row.shifts_and_reduces {
+                  let terminal_id = *terminal_map.get_by_left(&terminal).expect(format!("{:?} not found in terminal map {:?}", terminal, terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+                  let converted_action = match action {
+                      Stage6ShiftsAndReduces::Shift(next_item_set) => {
+                          let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
+                          Stage7ShiftsAndReduces::Shift(next_state_id)
+                      }
+                      Stage6ShiftsAndReduces::Reduce(production_id) => {
+                          let production = productions.get(production_id.0).unwrap();
+                          let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).expect(format!("{:?} not found in non_terminal_map {:?}", production.lhs, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+                          let len = production.rhs.len();
+                          Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len }
+                      }
+                      Stage6ShiftsAndReduces::Split { shift, reduces } => {
+                          let shift_state_id = shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
+                          let mut len_to_nt_to_production_id: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
+                          for production_id in reduces {
+                              let production = productions.get(production_id.0).unwrap();
+                              let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).expect(format!("{:?} not found in non_terminal_map {:?}", production.lhs, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+                              let len = production.rhs.len();
+                              len_to_nt_to_production_id.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id);
+                          }
+                          Stage7ShiftsAndReduces::Split { shift: shift_state_id, reduces: len_to_nt_to_production_id }
+                      }
+                  };
+                  shifts_and_reduces.insert(terminal_id, converted_action);
+              }
+
+              for (nonterminal, next_item_set) in row.gotos {
+                  let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(format!("{:?} not found in non_terminal_map {:?}", nonterminal, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+                  let goto = item_set_map.get_by_left(&next_item_set).map_or(Goto::Accept, |&next_state_id| Goto::State(next_state_id));
+                  if goto == Goto::Accept { assert!(next_item_set.is_empty()); }
+                  gotos.insert(non_terminal_id, goto);
+              }
+
+              stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos });
+          }
+
+          let start_item = Item {
+              production: productions[start_production_id].clone(),
+              dot_position: 0,
+          };
+          let start_state_id = *item_set_map.get_by_left(&BTreeSet::from([start_item])).unwrap();
+
+          (stage_7_table, item_set_map, start_state_id)
+      }
+
+      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>) -> GLRParser {
+          let original_productions = productions.to_vec();
+
+          crate::debug!(2, "Removing productions with undefined non-terminals");
+          let productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
+          // (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id);
+
+          // Resolve right-recursion
+          let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
+          let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
+          let mut productions = productions.to_vec();
+          // crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
+          crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
+          // println!("After direct right recursion:\n{}", display_productions(&productions));
+
+          // crate::debug!(2, "Validating");
+          // validate(&productions).expect("Validation error");
+
+          crate::debug!(2, "Stage 1");
+          let stage_1_table = stage_1(&productions, start_production_id);
+          crate::debug!(6, &stage_1_table);
+          crate::debug!(2, "Stage 2");
+          let stage_2_table = stage_2(stage_1_table, &productions);
+          crate::debug!(6, &stage_2_table);
+          crate::debug!(2, "Stage 3");
+          let stage_3_table = stage_3(stage_2_table, &productions);
+          crate::debug!(6, &stage_3_table);
+          crate::debug!(2, "Stage 4");
+          let stage_4_table = stage_4(stage_3_table, &productions);
+          crate::debug!(6, &stage_4_table);
+          crate::debug!(2, "Stage 5");
+          let stage_5_table = stage_5(stage_4_table, &productions);
+          crate::debug!(6, &stage_5_table);
+          crate::debug!(2, "Stage 6");
+          let stage_6_table = stage_6(stage_5_table);
+          crate::debug!(6, &stage_6_table);
+          crate::debug!(2, "Stage 7");
+          let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
+          crate::debug!(6, &stage_7_table);
+          crate::debug!(2, "Done generating GLR parser");
+
+          GLRParser::new(stage_7_table, original_productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions)
+      }
+
+      pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
+          let terminal_map = assign_terminal_ids(productions);
+          let non_terminal_map = assign_non_terminal_ids(productions);
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
+      }
+
+      pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
+          let non_terminal_map = assign_non_terminal_ids(productions);
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
+      }
+
+      pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
+          let mut terminal_map = BiBTreeMap::new();
+          let mut next_terminal_id = 0;
+
+          for p in productions {
+              for symbol in &p.rhs {
+                  if let Symbol::Terminal(t) = symbol {
+                      if !terminal_map.contains_left(t) {
+                          terminal_map.insert(t.clone(), TerminalID(next_terminal_id));
+                          next_terminal_id += 1;
+                      }
+                  }
+              }
+          }
+
+          terminal_map
+      }
+
+      pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerminal, NonTerminalID> {
+          let mut non_terminal_map = BiBTreeMap::new();
+          let mut next_non_terminal_id = 0;
+
+          for p in productions {
+              if !non_terminal_map.contains_left(&p.lhs) {
+                  non_terminal_map.insert(p.lhs.clone(), NonTerminalID(next_non_terminal_id));
+                  next_non_terminal_id += 1;
+              }
+          }
+          non_terminal_map
+      }
     src/glr/analyze.rs: |+
       use std::cmp::PartialEq;
       use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -1330,36 +2565,33 @@ local_system:
           productions: &mut Vec<Production>,
           mut new_name_generator: impl FnMut(&str) -> String,
       ) {
-          // This function transforms direct right-recursion into left-recursion.
-          // A set of rules for a non-terminal `A` of the form:
-          //   A -> α₁ A | α₂ A | ... | αₘ A  (right-recursive rules)
-          //   A -> β₁ | β₂ | ... | βₙ          (non-recursive rules)
-          // generates the language (α₁|...|αₘ)* (β₁|...|βₙ).
+          // This function transforms direct right-recursion into left-recursion while preserving
+          // the original order of productions as much as possible.
           //
-          // This can be rewritten using a new non-terminal `A'` to be left-recursive:
-          //   A  -> A' β₁ | A' β₂ | ... | A' βₙ
-          //   A' -> A' α₁ | A' α₂ | ... | A' αₘ | ε
-          // This new form generates the same language and is left-recursive.
+          // The transformation for a non-terminal `A` with rules:
+          //   A -> α₁ A | ... | αₘ A  (right-recursive rules, where αᵢ is a prefix)
+          //   A -> β₁ | ... | βₙ      (non-recursive rules)
+          // is to replace them with:
+          //   A  -> A' β₁ | ... | A' βₙ
+          //   A' -> A' α₁ | ... | A' αₘ | ε
+          // where `A'` is a new non-terminal. This generates the same language `(α₁|...|αₘ)* (β₁|...|βₙ)`
+          // using left-recursion.
           //
-          // This implementation only considers "simple" direct right-recursion, where a rule
-          // is of the form `A -> α A` and `α` does not contain `A`. More complex recursions
-          // like `A -> α A β A` or `A -> α A A` are not transformed and are treated as
-          // non-recursive "β" terms.
+          // The implementation preserves order by iterating through the original production list.
+          // When it first encounters a rule for a right-recursive non-terminal, it replaces all
+          // rules for that non-terminal with the new, transformed set of rules at that position.
 
-          // 1. Group all productions by their LHS non-terminal.
+          // 1. Group productions by LHS to easily access all rules for a given non-terminal.
+          // The BTreeMap is just for efficient lookup; we don't iterate over its keys for ordering.
           let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
           for prod in productions.iter().cloned() {
               prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod);
           }
 
-          let mut new_productions = Vec::new();
-          let nts_to_process: Vec<NonTerminal> = prods_by_lhs.keys().cloned().collect();
-
-          for nt in nts_to_process {
-              let prods_for_nt = prods_by_lhs.get(&nt).unwrap();
-
-              // 2. Partition rules for `nt` into simple direct right-recursive and others.
-              let (recursive_rules, other_rules): (Vec<_>, Vec<_>) = prods_for_nt.iter().cloned().partition(|p| {
+          // 2. Identify all non-terminals that have simple direct right-recursive rules.
+          let mut recursive_nts = BTreeSet::new();
+          for (nt, prods_for_nt) in &prods_by_lhs {
+              let is_recursive = prods_for_nt.iter().any(|p| {
                   // A rule `A -> α A` is simple direct right-recursive if:
                   // a) `α` is not empty (i.e., rule is not `A -> A`).
                   if p.rhs.len() < 2 { return false; }
@@ -1369,42 +2601,71 @@ local_system:
                   let alpha = &p.rhs[..p.rhs.len() - 1];
                   !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
               });
-
-              if recursive_rules.is_empty() {
-                  // No simple direct right-recursion for this NT, so keep its original rules.
-                  new_productions.extend(prods_for_nt.clone());
-              } else {
-                  // 3. Found recursion, perform the transformation.
-                  let new_nt = NonTerminal(new_name_generator(&nt.0));
-                  crate::debug!(2, "Resolving direct right-recursion for '{}', creating new non-terminal '{}'", nt.0, new_nt.0);
-
-                  // 4. Create rules for the new non-terminal `A'`.
-                  // For each recursive rule `A -> αᵢ A`, create `A' -> A' αᵢ`.
-                  for rec_rule in &recursive_rules {
-                      let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
-                      let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
-                      new_rhs.extend_from_slice(alpha);
-                      let new_prod = Production { lhs: new_nt.clone(), rhs: new_rhs };
-                      crate::debug!(2, "  Transforming recursive rule '{}' -> '{}'", rec_rule, new_prod);
-                      new_productions.push(new_prod);
-                  }
-                  let epsilon_prod = Production { lhs: new_nt.clone(), rhs: vec![] }; // A' -> ε
-                  crate::debug!(2, "  Adding new epsilon rule: '{}'", epsilon_prod);
-                  new_productions.push(epsilon_prod);
-
-                  // 5. Create new rules for the original non-terminal `A`.
-                  // For each non-recursive rule `A -> βⱼ`, create `A -> A' βⱼ`.
-                  for non_rec_rule in &other_rules {
-                      let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
-                      new_rhs.extend_from_slice(&non_rec_rule.rhs);
-                      let new_prod = Production { lhs: nt.clone(), rhs: new_rhs };
-                      crate::debug!(2, "  Transforming non-recursive rule '{}' -> '{}'", non_rec_rule, new_prod);
-                      new_productions.push(new_prod);
-                  }
+              if is_recursive {
+                  recursive_nts.insert(nt.clone());
               }
           }
 
-          // 6. Replace the original productions with the new set.
+          // 3. Build the new production list, preserving order.
+          let mut new_productions = Vec::new();
+          let mut processed_recursive_nts = BTreeSet::new();
+
+          for prod in productions.iter().cloned() {
+              let lhs = &prod.lhs;
+
+              if !recursive_nts.contains(lhs) {
+                  // This production's LHS is not right-recursive, so we can keep the production as is.
+                  new_productions.push(prod);
+                  continue;
+              }
+
+              // The LHS is right-recursive. We need to process all of its rules at once.
+              // We do this only the first time we encounter a rule for this LHS.
+              if processed_recursive_nts.contains(lhs) {
+                  // We've already handled this NT and its rules, so we skip this and subsequent productions for it.
+                  continue;
+              }
+              processed_recursive_nts.insert(lhs.clone());
+
+              // --- Perform the transformation for `lhs` ---
+              let prods_for_nt = prods_by_lhs.get(lhs).unwrap();
+
+              let (recursive_rules, other_rules): (Vec<_>, Vec<_>) = prods_for_nt.iter().cloned().partition(|p| {
+                  if p.rhs.len() < 2 { return false; }
+                  if p.rhs.last() != Some(&Symbol::NonTerminal(p.lhs.clone())) { return false; }
+                  let alpha = &p.rhs[..p.rhs.len() - 1];
+                  !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
+              });
+
+              // `recursive_rules` is guaranteed to be non-empty because `lhs` is in `recursive_nts`.
+              let new_nt = NonTerminal(new_name_generator(&lhs.0));
+              crate::debug!(2, "Resolving direct right-recursion for '{}', creating new non-terminal '{}'", lhs.0, new_nt.0);
+
+              // Create new rules for the original non-terminal `A`: `A -> A' βⱼ`.
+              // The order of these new rules is based on the original order of the `β` rules.
+              for non_rec_rule in &other_rules {
+                  let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
+                  new_rhs.extend_from_slice(&non_rec_rule.rhs);
+                  let new_prod = Production { lhs: lhs.clone(), rhs: new_rhs };
+                  crate::debug!(2, "  Transforming non-recursive rule '{}' -> '{}'", non_rec_rule, new_prod);
+                  new_productions.push(new_prod);
+              }
+
+              // Create rules for the new non-terminal `A'`: `A' -> A' αᵢ` and `A' -> ε`.
+              for rec_rule in &recursive_rules {
+                  let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
+                  let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
+                  new_rhs.extend_from_slice(alpha);
+                  let new_prod = Production { lhs: new_nt.clone(), rhs: new_rhs };
+                  crate::debug!(2, "  Transforming recursive rule '{}' -> '{}'", rec_rule, new_prod);
+                  new_productions.push(new_prod);
+              }
+              let epsilon_prod = Production { lhs: new_nt.clone(), rhs: vec![] }; // A' -> ε
+              crate::debug!(2, "  Adding new epsilon rule: '{}'", epsilon_prod);
+              new_productions.push(epsilon_prod);
+          }
+
+          // 4. Replace the original productions with the new set.
           productions.clear();
           productions.extend(new_productions);
       }
@@ -1432,6 +2693,615 @@ system:
   temperature: 0.0
   apply_mode: git
 messages:
+  - user: |-
+      ```rust 'src/glr/table.rs'
+      use super::items::{compute_closure, compute_goto, split_on_dot, Item};
+      use crate::glr::grammar::{compute_first_sets, compute_follow_sets, NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::parser::{GLRParser, ActionFn};
+      use bimap::BiBTreeMap;
+      use std::collections::{HashMap, VecDeque};
+      use std::collections::{BTreeMap, BTreeSet};
+      use std::fmt::Display;
+      use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate};
+      pub use crate::types::{TerminalID};
+      use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+      use std::collections::BTreeMap as StdMap;
+      use crate::interface::display_productions;
+      // Added for derive macro pattern
+
+
+      type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
+      type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
+      type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
+      type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Row>;
+      type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
+      type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
+      pub type Stage7Table = BTreeMap<StateID, Stage7Row>;
+
+
+      type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
+      #[derive(Debug)]
+      struct Stage2Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeSet<Item>,
+      }
+      #[derive(Debug)]
+      struct Stage3Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Terminal, BTreeSet<Item>>,
+      }
+      #[derive(Debug)]
+      struct Stage4Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+      }
+      type Stage5Row = Stage4Row;
+      #[derive(Debug)]
+      struct Stage6Row {
+          shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+      }
+
+      #[derive(Debug)]
+      enum Stage6ShiftsAndReduces {
+          Shift(BTreeSet<Item>),
+          Reduce(ProductionID),
+          Split {
+              shift: Option<BTreeSet<Item>>,
+              reduces: BTreeSet<ProductionID>,
+          },
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub enum Stage7ShiftsAndReduces {
+          Shift(StateID),
+          Reduce { production_id: ProductionID, nonterminal_id: NonTerminalID, len: usize },
+          Split {
+              shift: Option<StateID>,
+              reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>,
+          },
+      }
+
+      impl JSONConvertible for Stage7ShiftsAndReduces {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              match self {
+                  Stage7ShiftsAndReduces::Shift(state_id) => {
+                      obj.insert("variant".to_string(), JSONNode::String("Shift".to_string()));
+                      obj.insert("state_id".to_string(), state_id.to_json());
+                  }
+                  Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len } => {
+                      obj.insert("variant".to_string(), JSONNode::String("Reduce".to_string()));
+                      obj.insert("production_id".to_string(), production_id.to_json());
+                      obj.insert("nonterminal_id".to_string(), nonterminal_id.to_json());
+                      obj.insert("len".to_string(), len.to_json());
+                  }
+                  Stage7ShiftsAndReduces::Split { shift, reduces } => {
+                      obj.insert("variant".to_string(), JSONNode::String("Split".to_string()));
+                      obj.insert("shift".to_string(), shift.to_json());
+                      obj.insert("reduces".to_string(), reduces.to_json());
+                  }
+              }
+              JSONNode::Object(obj)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for Stage7ShiftsAndReduces".to_string())
+                                         .and_then(String::from_json)?;
+                      match variant.as_str() {
+                          "Shift" => {
+                              let state_id = obj.remove("state_id").ok_or_else(|| "Missing field state_id for Shift".to_string())
+                                                .and_then(StateID::from_json)?;
+                              Ok(Stage7ShiftsAndReduces::Shift(state_id))
+                          }
+                          "Reduce" => {
+                              let production_id = obj.remove("production_id").ok_or_else(|| "Missing field production_id for Reduce".to_string())
+                                                     .and_then(ProductionID::from_json)?;
+                              let nonterminal_id = obj.remove("nonterminal_id").ok_or_else(|| "Missing field nonterminal_id for Reduce".to_string())
+                                                      .and_then(NonTerminalID::from_json)?;
+                              let len = obj.remove("len").ok_or_else(|| "Missing field len for Reduce".to_string())
+                                           .and_then(usize::from_json)?;
+                              Ok(Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len })
+                          }
+                          "Split" => {
+                              let shift = obj.remove("shift").ok_or_else(|| "Missing field shift for Split".to_string())
+                                             .and_then(Option::<StateID>::from_json)?;
+                              let reduces = obj.remove("reduces").ok_or_else(|| "Missing field reduces for Split".to_string())
+                                               .and_then(|n| BTreeMap::<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>::from_json(n))?;
+                              Ok(Stage7ShiftsAndReduces::Split { shift, reduces })
+                          }
+                          _ => Err(format!("Unknown variant {} for Stage7ShiftsAndReduces", variant)),
+                      }
+                  }
+                  _ => Err("Expected JSONNode::Object for Stage7ShiftsAndReduces".to_string()),
+              }
+          }
+      }
+
+      #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+      pub enum Goto {
+          State(StateID),
+          Accept,
+      }
+
+      impl JSONConvertible for Goto {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              match self {
+                  Goto::State(state_id) => {
+                      obj.insert("variant".to_string(), JSONNode::String("State".to_string()));
+                      obj.insert("value".to_string(), state_id.to_json());
+                  }
+                  Goto::Accept => {
+                      obj.insert("variant".to_string(), JSONNode::String("Accept".to_string()));
+                      // No value needed for Accept
+                  }
+              }
+              JSONNode::Object(obj)
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let variant = obj.remove("variant")
+                          .ok_or_else(|| "Missing field 'variant' for Goto".to_string())
+                          .and_then(String::from_json)?;
+                      match variant.as_str() {
+                          "State" => {
+                              let value_node = obj.remove("value").ok_or_else(|| "Missing field 'value' for Goto::State".to_string())?;
+                              StateID::from_json(value_node).map(Goto::State)
+                          }
+                          "Accept" => Ok(Goto::Accept),
+                          _ => Err(format!("Unknown variant '{}' for Goto", variant)),
+                      }
+                  }
+                  _ => Err("Expected JSONNode::Object for Goto".to_string()),
+              }
+          }
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub struct Stage7Row {
+          pub shifts_and_reduces: BTreeMap<TerminalID, Stage7ShiftsAndReduces>,
+          pub gotos: BTreeMap<NonTerminalID, Goto>,
+      }
+
+      // Manual impl for Stage7Row (could be derived)
+      impl JSONConvertible for Stage7Row {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("shifts_and_reduces".to_string(), self.shifts_and_reduces.to_json());
+              obj.insert("gotos".to_string(), self.gotos.to_json());
+              JSONNode::Object(obj)
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let shifts_and_reduces = obj.remove("shifts_and_reduces").ok_or_else(|| "Missing field shifts_and_reduces for Stage7Row".to_string())
+                                                  .and_then(|n| BTreeMap::<TerminalID, Stage7ShiftsAndReduces>::from_json(n))?;
+                      let gotos = obj.remove("gotos").ok_or_else(|| "Missing field gotos for Stage7Row".to_string())
+                                     .and_then(|n| BTreeMap::<NonTerminalID, Goto>::from_json(n))?;
+                      Ok(Stage7Row { shifts_and_reduces, gotos })
+                  }
+                  _ => Err("Expected JSONNode::Object for Stage7Row".to_string()),
+              }
+          }
+      }
+
+
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct StateID(pub usize);
+
+      impl JSONConvertible for StateID {
+          fn to_json(&self) -> JSONNode { self.0.to_json() }
+          fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(StateID) }
+      }
+
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct ProductionID(pub usize);
+
+      impl JSONConvertible for ProductionID {
+          fn to_json(&self) -> JSONNode { self.0.to_json() }
+          fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(ProductionID) }
+      }
+
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct NonTerminalID(pub usize);
+
+      impl JSONConvertible for NonTerminalID {
+          fn to_json(&self) -> JSONNode { self.0.to_json() }
+          fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(NonTerminalID) }
+      }
+
+
+      type Stage1Result = Stage1Table;
+      type Stage2Result = Stage2Table;
+      type Stage3Result = Stage3Table;
+      type Stage4Result = Stage4Table;
+      type Stage5Result = Stage5Table;
+      type Stage6Result = Stage6Table;
+      type Stage7Result = (
+          Stage7Table,
+          BiBTreeMap<BTreeSet<Item>, StateID>,
+          StateID,
+      );
+
+      fn stage_1(productions: &[Production], start_production_id: usize) -> Stage1Result {
+          let initial_item = Item {
+              production: productions[start_production_id].clone(),
+              dot_position: 0,
+          };
+          let initial_closure = BTreeSet::from([initial_item]);
+          let mut worklist = VecDeque::from([initial_closure.clone()]);
+
+          let mut transitions: BTreeMap<BTreeSet<Item>, BTreeMap<Option<Symbol>, BTreeSet<Item>>> = BTreeMap::new();
+
+          while let Some(items) = worklist.pop_front() {
+              if transitions.contains_key(&items) {
+                  continue;
+              }
+
+              let closure = compute_closure(&items, productions);
+              let splits = split_on_dot(&closure);
+              let mut row = BTreeMap::new();
+
+              for (symbol, items) in splits {
+                  if symbol.is_none() {
+                      continue;
+                  }
+                  let goto_set = compute_goto(&items);
+                  row.insert(symbol.clone(), goto_set.clone());
+                  worklist.push_back(goto_set);
+              }
+
+              transitions.insert(items.clone(), row);
+          }
+
+          transitions
+      }
+
+      fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
+          let mut stage_2_table = BTreeMap::new();
+          for (item_set, transitions) in stage_1_table {
+              let mut shifts = BTreeMap::new();
+              let mut gotos = BTreeMap::new();
+              let mut reduces = BTreeSet::new();
+
+              let closure = compute_closure(&item_set, productions);
+              for item in &closure { // Check the full closure for reductions
+                  if item.dot_position == item.production.rhs.len() {
+                      reduces.insert(item.clone());
+                  }
+              }
+
+              for (symbol_opt, next_item_set) in &transitions {
+                  if let Some(symbol) = symbol_opt {
+                      match symbol {
+                          Symbol::Terminal(t) => {
+                              shifts.insert(t.clone(), next_item_set.clone());
+                          }
+                          Symbol::NonTerminal(nt) => {
+                              gotos.insert(nt.clone(), next_item_set.clone());
+                          }
+                      }
+                  }
+              }
+
+              for item in &closure {
+                  // e.g. start rules
+                  if item.dot_position == 0 && !gotos.contains_key(&item.production.lhs) {
+                      gotos.insert(item.production.lhs.clone(), BTreeSet::new());
+                  }
+              }
+
+              stage_2_table.insert(
+                  item_set,
+                  Stage2Row {
+                      shifts,
+                      gotos,
+                      reduces,
+                  },
+              );
+          }
+          stage_2_table
+      }
+
+      fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
+          let follow_sets = compute_follow_sets(productions);
+          crate::debug!(3, "Follow sets:");
+          for (nt, follow_set) in &follow_sets {
+              crate::debug!(3, "  {}: {}", nt.0, follow_set.iter().map(|t| t.0.to_string()).collect::<Vec<_>>().join(", "));
+          }
+
+          let mut stage_3_table = BTreeMap::new();
+
+          for (item_set, row) in stage_2_table {
+              let mut reduces: BTreeMap<Terminal, BTreeSet<Item>> = BTreeMap::new();
+
+              for item in &row.reduces {
+                  let lhs = &item.production.lhs;
+                  let lookaheads = follow_sets.get(lhs).cloned().unwrap_or_default(); // Handle if NT not in follow_sets
+
+                  for terminal in lookaheads {
+                      reduces
+                          .entry(terminal.clone())
+                          .or_default()
+                          .insert(item.clone());
+                  }
+              }
+
+              stage_3_table.insert(
+                  item_set,
+                  Stage3Row {
+                      shifts: row.shifts,
+                      gotos: row.gotos,
+                      reduces,
+                  },
+              );
+          }
+
+          stage_3_table
+      }
+
+      fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
+          let production_ids: BTreeMap<Production, ProductionID> = productions
+              .iter()
+              .enumerate()
+              .map(|(i, p)| (p.clone(), ProductionID(i)))
+              .collect();
+
+          let mut stage_4_table = BTreeMap::new();
+
+          for (item_set, row) in stage_3_table {
+              let mut reduces = BTreeMap::new();
+
+              for (terminal, items) in row.reduces {
+                  let mut prod_ids = BTreeSet::new();
+                  for item in items {
+                      let prod_id = production_ids.get(&item.production).unwrap();
+                      prod_ids.insert(*prod_id);
+                  }
+                  reduces.insert(terminal.clone(), prod_ids);
+              }
+
+              stage_4_table.insert(
+                  item_set,
+                  Stage4Row {
+                      shifts: row.shifts,
+                      gotos: row.gotos,
+                      reduces,
+                  },
+              );
+          }
+
+          stage_4_table
+      }
+
+      fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Result {
+          // todo: remove this
+          stage_4_table
+      }
+
+      fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
+          let mut stage_6_table = BTreeMap::new();
+
+          for (item_set, row) in stage_5_table {
+              let mut shifts_and_reduces = BTreeMap::new();
+
+              for (terminal, next_item_set) in row.shifts {
+                  shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Shift(next_item_set));
+              }
+
+              for (terminal, mut production_ids) in row.reduces {
+                  if let Some(mut existing) = shifts_and_reduces.remove(&terminal) {
+                      match existing {
+                          Stage6ShiftsAndReduces::Shift(shift_set) => {
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
+                                  shift: Some(shift_set.clone()),
+                                  reduces: production_ids.clone(),
+                              });
+                          }
+                          Stage6ShiftsAndReduces::Reduce(existing_production_id) => {
+                              production_ids.insert(existing_production_id);
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
+                                  shift: None,
+                                  reduces: production_ids,
+                              });
+                          }
+                          Stage6ShiftsAndReduces::Split { shift, mut reduces } => {
+                              reduces.extend(production_ids.into_iter());
+                              shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift, reduces });
+                          }
+                      }
+                  } else {
+                      // If there's only one production ID, we can optimize by storing it directly
+                      if production_ids.len() == 1 {
+                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Reduce(production_ids.iter().next().unwrap().clone()));
+                      } else {
+                          shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift: None, reduces: production_ids });
+                      }
+                  }
+              }
+
+              stage_6_table.insert(
+                  item_set,
+                  Stage6Row {
+                      shifts_and_reduces,
+                      gotos: row.gotos,
+                  },
+              );
+          }
+
+          stage_6_table
+      }
+
+      fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
+          let mut item_set_map = BiBTreeMap::new();
+          let mut next_state_id = 0;
+
+          let mut terminals = BTreeSet::new();
+          let mut non_terminals = BTreeSet::new();
+
+          for (item_set, row) in &stage_6_table {
+              item_set_map.insert(item_set.clone(), StateID(next_state_id));
+              next_state_id += 1;
+
+              for t in row.shifts_and_reduces.keys() {
+                  terminals.insert(t.clone());
+              }
+
+              for nt in row.gotos.keys() {
+                  non_terminals.insert(nt.clone());
+              }
+          }
+
+          let mut stage_7_table = BTreeMap::new();
+
+          for (item_set, row) in stage_6_table {
+              let state_id = *item_set_map.get_by_left(&item_set).unwrap();
+              let mut shifts_and_reduces = BTreeMap::new();
+              let mut gotos = BTreeMap::new();
+
+              for (terminal, action) in row.shifts_and_reduces {
+                  let terminal_id = *terminal_map.get_by_left(&terminal).expect(format!("{:?} not found in terminal map {:?}", terminal, terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+                  let converted_action = match action {
+                      Stage6ShiftsAndReduces::Shift(next_item_set) => {
+                          let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
+                          Stage7ShiftsAndReduces::Shift(next_state_id)
+                      }
+                      Stage6ShiftsAndReduces::Reduce(production_id) => {
+                          let production = productions.get(production_id.0).unwrap();
+                          let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).expect(format!("{:?} not found in non_terminal_map {:?}", production.lhs, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+                          let len = production.rhs.len();
+                          Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len }
+                      }
+                      Stage6ShiftsAndReduces::Split { shift, reduces } => {
+                          let shift_state_id = shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
+                          let mut len_to_nt_to_production_id: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
+                          for production_id in reduces {
+                              let production = productions.get(production_id.0).unwrap();
+                              let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).expect(format!("{:?} not found in non_terminal_map {:?}", production.lhs, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+                              let len = production.rhs.len();
+                              len_to_nt_to_production_id.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id);
+                          }
+                          Stage7ShiftsAndReduces::Split { shift: shift_state_id, reduces: len_to_nt_to_production_id }
+                      }
+                  };
+                  shifts_and_reduces.insert(terminal_id, converted_action);
+              }
+
+              for (nonterminal, next_item_set) in row.gotos {
+                  let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(format!("{:?} not found in non_terminal_map {:?}", nonterminal, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+                  let goto = item_set_map.get_by_left(&next_item_set).map_or(Goto::Accept, |&next_state_id| Goto::State(next_state_id));
+                  if goto == Goto::Accept { assert!(next_item_set.is_empty()); }
+                  gotos.insert(non_terminal_id, goto);
+              }
+
+              stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos });
+          }
+
+          let start_item = Item {
+              production: productions[start_production_id].clone(),
+              dot_position: 0,
+          };
+          let start_state_id = *item_set_map.get_by_left(&BTreeSet::from([start_item])).unwrap();
+
+          (stage_7_table, item_set_map, start_state_id)
+      }
+
+      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>) -> GLRParser {
+          let original_productions = productions.to_vec();
+
+          crate::debug!(2, "Removing productions with undefined non-terminals");
+          let productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
+          // (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id);
+
+          // Resolve right-recursion
+          let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
+          let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
+          let mut productions = productions.to_vec();
+          // crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
+          crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
+          // println!("After direct right recursion:\n{}", display_productions(&productions));
+
+          // crate::debug!(2, "Validating");
+          // validate(&productions).expect("Validation error");
+
+          crate::debug!(2, "Stage 1");
+          let stage_1_table = stage_1(&productions, start_production_id);
+          crate::debug!(6, &stage_1_table);
+          crate::debug!(2, "Stage 2");
+          let stage_2_table = stage_2(stage_1_table, &productions);
+          crate::debug!(6, &stage_2_table);
+          crate::debug!(2, "Stage 3");
+          let stage_3_table = stage_3(stage_2_table, &productions);
+          crate::debug!(6, &stage_3_table);
+          crate::debug!(2, "Stage 4");
+          let stage_4_table = stage_4(stage_3_table, &productions);
+          crate::debug!(6, &stage_4_table);
+          crate::debug!(2, "Stage 5");
+          let stage_5_table = stage_5(stage_4_table, &productions);
+          crate::debug!(6, &stage_5_table);
+          crate::debug!(2, "Stage 6");
+          let stage_6_table = stage_6(stage_5_table);
+          crate::debug!(6, &stage_6_table);
+          crate::debug!(2, "Stage 7");
+          let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
+          crate::debug!(6, &stage_7_table);
+          crate::debug!(2, "Done generating GLR parser");
+
+          GLRParser::new(stage_7_table, original_productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions)
+      }
+
+      pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
+          let terminal_map = assign_terminal_ids(productions);
+          let non_terminal_map = assign_non_terminal_ids(productions);
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
+      }
+
+      pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
+          let non_terminal_map = assign_non_terminal_ids(productions);
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
+      }
+
+      pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
+          let mut terminal_map = BiBTreeMap::new();
+          let mut next_terminal_id = 0;
+
+          for p in productions {
+              for symbol in &p.rhs {
+                  if let Symbol::Terminal(t) = symbol {
+                      if !terminal_map.contains_left(t) {
+                          terminal_map.insert(t.clone(), TerminalID(next_terminal_id));
+                          next_terminal_id += 1;
+                      }
+                  }
+              }
+          }
+
+          terminal_map
+      }
+
+      pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerminal, NonTerminalID> {
+          let mut non_terminal_map = BiBTreeMap::new();
+          let mut next_non_terminal_id = 0;
+
+          for p in productions {
+              if !non_terminal_map.contains_left(&p.lhs) {
+                  non_terminal_map.insert(p.lhs.clone(), NonTerminalID(next_non_terminal_id));
+                  next_non_terminal_id += 1;
+              }
+          }
+          non_terminal_map
+      }
+
+      ```
+    metadata:
+      filename: src/glr/table.rs
   - user: |-
       ```rust 'src/glr/analyze.rs'
       use std::cmp::PartialEq;
@@ -2056,36 +3926,33 @@ messages:
           productions: &mut Vec<Production>,
           mut new_name_generator: impl FnMut(&str) -> String,
       ) {
-          // This function transforms direct right-recursion into left-recursion.
-          // A set of rules for a non-terminal `A` of the form:
-          //   A -> α₁ A | α₂ A | ... | αₘ A  (right-recursive rules)
-          //   A -> β₁ | β₂ | ... | βₙ          (non-recursive rules)
-          // generates the language (α₁|...|αₘ)* (β₁|...|βₙ).
+          // This function transforms direct right-recursion into left-recursion while preserving
+          // the original order of productions as much as possible.
           //
-          // This can be rewritten using a new non-terminal `A'` to be left-recursive:
-          //   A  -> A' β₁ | A' β₂ | ... | A' βₙ
-          //   A' -> A' α₁ | A' α₂ | ... | A' αₘ | ε
-          // This new form generates the same language and is left-recursive.
+          // The transformation for a non-terminal `A` with rules:
+          //   A -> α₁ A | ... | αₘ A  (right-recursive rules, where αᵢ is a prefix)
+          //   A -> β₁ | ... | βₙ      (non-recursive rules)
+          // is to replace them with:
+          //   A  -> A' β₁ | ... | A' βₙ
+          //   A' -> A' α₁ | ... | A' αₘ | ε
+          // where `A'` is a new non-terminal. This generates the same language `(α₁|...|αₘ)* (β₁|...|βₙ)`
+          // using left-recursion.
           //
-          // This implementation only considers "simple" direct right-recursion, where a rule
-          // is of the form `A -> α A` and `α` does not contain `A`. More complex recursions
-          // like `A -> α A β A` or `A -> α A A` are not transformed and are treated as
-          // non-recursive "β" terms.
+          // The implementation preserves order by iterating through the original production list.
+          // When it first encounters a rule for a right-recursive non-terminal, it replaces all
+          // rules for that non-terminal with the new, transformed set of rules at that position.
 
-          // 1. Group all productions by their LHS non-terminal.
+          // 1. Group productions by LHS to easily access all rules for a given non-terminal.
+          // The BTreeMap is just for efficient lookup; we don't iterate over its keys for ordering.
           let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
           for prod in productions.iter().cloned() {
               prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod);
           }
 
-          let mut new_productions = Vec::new();
-          let nts_to_process: Vec<NonTerminal> = prods_by_lhs.keys().cloned().collect();
-
-          for nt in nts_to_process {
-              let prods_for_nt = prods_by_lhs.get(&nt).unwrap();
-
-              // 2. Partition rules for `nt` into simple direct right-recursive and others.
-              let (recursive_rules, other_rules): (Vec<_>, Vec<_>) = prods_for_nt.iter().cloned().partition(|p| {
+          // 2. Identify all non-terminals that have simple direct right-recursive rules.
+          let mut recursive_nts = BTreeSet::new();
+          for (nt, prods_for_nt) in &prods_by_lhs {
+              let is_recursive = prods_for_nt.iter().any(|p| {
                   // A rule `A -> α A` is simple direct right-recursive if:
                   // a) `α` is not empty (i.e., rule is not `A -> A`).
                   if p.rhs.len() < 2 { return false; }
@@ -2095,42 +3962,71 @@ messages:
                   let alpha = &p.rhs[..p.rhs.len() - 1];
                   !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
               });
-
-              if recursive_rules.is_empty() {
-                  // No simple direct right-recursion for this NT, so keep its original rules.
-                  new_productions.extend(prods_for_nt.clone());
-              } else {
-                  // 3. Found recursion, perform the transformation.
-                  let new_nt = NonTerminal(new_name_generator(&nt.0));
-                  crate::debug!(2, "Resolving direct right-recursion for '{}', creating new non-terminal '{}'", nt.0, new_nt.0);
-
-                  // 4. Create rules for the new non-terminal `A'`.
-                  // For each recursive rule `A -> αᵢ A`, create `A' -> A' αᵢ`.
-                  for rec_rule in &recursive_rules {
-                      let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
-                      let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
-                      new_rhs.extend_from_slice(alpha);
-                      let new_prod = Production { lhs: new_nt.clone(), rhs: new_rhs };
-                      crate::debug!(2, "  Transforming recursive rule '{}' -> '{}'", rec_rule, new_prod);
-                      new_productions.push(new_prod);
-                  }
-                  let epsilon_prod = Production { lhs: new_nt.clone(), rhs: vec![] }; // A' -> ε
-                  crate::debug!(2, "  Adding new epsilon rule: '{}'", epsilon_prod);
-                  new_productions.push(epsilon_prod);
-
-                  // 5. Create new rules for the original non-terminal `A`.
-                  // For each non-recursive rule `A -> βⱼ`, create `A -> A' βⱼ`.
-                  for non_rec_rule in &other_rules {
-                      let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
-                      new_rhs.extend_from_slice(&non_rec_rule.rhs);
-                      let new_prod = Production { lhs: nt.clone(), rhs: new_rhs };
-                      crate::debug!(2, "  Transforming non-recursive rule '{}' -> '{}'", non_rec_rule, new_prod);
-                      new_productions.push(new_prod);
-                  }
+              if is_recursive {
+                  recursive_nts.insert(nt.clone());
               }
           }
 
-          // 6. Replace the original productions with the new set.
+          // 3. Build the new production list, preserving order.
+          let mut new_productions = Vec::new();
+          let mut processed_recursive_nts = BTreeSet::new();
+
+          for prod in productions.iter().cloned() {
+              let lhs = &prod.lhs;
+
+              if !recursive_nts.contains(lhs) {
+                  // This production's LHS is not right-recursive, so we can keep the production as is.
+                  new_productions.push(prod);
+                  continue;
+              }
+
+              // The LHS is right-recursive. We need to process all of its rules at once.
+              // We do this only the first time we encounter a rule for this LHS.
+              if processed_recursive_nts.contains(lhs) {
+                  // We've already handled this NT and its rules, so we skip this and subsequent productions for it.
+                  continue;
+              }
+              processed_recursive_nts.insert(lhs.clone());
+
+              // --- Perform the transformation for `lhs` ---
+              let prods_for_nt = prods_by_lhs.get(lhs).unwrap();
+
+              let (recursive_rules, other_rules): (Vec<_>, Vec<_>) = prods_for_nt.iter().cloned().partition(|p| {
+                  if p.rhs.len() < 2 { return false; }
+                  if p.rhs.last() != Some(&Symbol::NonTerminal(p.lhs.clone())) { return false; }
+                  let alpha = &p.rhs[..p.rhs.len() - 1];
+                  !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
+              });
+
+              // `recursive_rules` is guaranteed to be non-empty because `lhs` is in `recursive_nts`.
+              let new_nt = NonTerminal(new_name_generator(&lhs.0));
+              crate::debug!(2, "Resolving direct right-recursion for '{}', creating new non-terminal '{}'", lhs.0, new_nt.0);
+
+              // Create new rules for the original non-terminal `A`: `A -> A' βⱼ`.
+              // The order of these new rules is based on the original order of the `β` rules.
+              for non_rec_rule in &other_rules {
+                  let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
+                  new_rhs.extend_from_slice(&non_rec_rule.rhs);
+                  let new_prod = Production { lhs: lhs.clone(), rhs: new_rhs };
+                  crate::debug!(2, "  Transforming non-recursive rule '{}' -> '{}'", non_rec_rule, new_prod);
+                  new_productions.push(new_prod);
+              }
+
+              // Create rules for the new non-terminal `A'`: `A' -> A' αᵢ` and `A' -> ε`.
+              for rec_rule in &recursive_rules {
+                  let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
+                  let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
+                  new_rhs.extend_from_slice(alpha);
+                  let new_prod = Production { lhs: new_nt.clone(), rhs: new_rhs };
+                  crate::debug!(2, "  Transforming recursive rule '{}' -> '{}'", rec_rule, new_prod);
+                  new_productions.push(new_prod);
+              }
+              let epsilon_prod = Production { lhs: new_nt.clone(), rhs: vec![] }; // A' -> ε
+              crate::debug!(2, "  Adding new epsilon rule: '{}'", epsilon_prod);
+              new_productions.push(epsilon_prod);
+          }
+
+          // 4. Replace the original productions with the new set.
           productions.clear();
           productions.extend(new_productions);
       }
@@ -2139,202 +4035,92 @@ messages:
       ```
     metadata:
       filename: src/glr/analyze.rs
-  - user: Modify `resolve_direct_right_recursion` so it preserves the order of productions
-      as much as possible. It is crucial that the production at index 0 stays at index
-      0 (or if transformed that its transformed root is at 0).
+  - user: |-
+      After calling `crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);` in `generate_glr_parser_with_maps`, there are some new, internal rules created via `create_unique_name_generator`. However, these rules aren't added to `non_terminal_map`, leading to this error:
+      ```rust
+      RUSTFLAGS=-Awarnings CARGO_PROFILE_DEV_OPT_LEVEL=1 /Users/isaacbreen/.cargo/bin/cargo test --color=always --package sep1 --lib test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab --profile test --no-fail-fast -- unstable-options --show-output --nocapture > .temp
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+          Finished `test` profile [optimized + debuginfo] target(s) in 13.07s
+           Running unittests src/lib.rs (target/debug/deps/sep1-7e124d52000db6c9)
+        [00:00:05] [██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████] 50257/50257 (100%, 0s)
+      thread 'test_constraint_python::test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab' panicked at src/test_constraint_python.rs:808:9:
+      Expected LLMTokenID(4496) for 'za' to be in the mask. Mask (first 100 if many): []
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/17067e9ac6d7ecb70e50f92c1944e545188d2359/library/std/src/panicking.rs:697:5
+         1: core::panicking::panic_fmt
+                   at /rustc/17067e9ac6d7ecb70e50f92c1944e545188d2359/library/core/src/panicking.rs:75:14
+         2: sep1::test_constraint_python::test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab
+                   at ./src/test_constraint_python.rs:808:9
+         3: sep1::test_constraint_python::test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab::{{closure}}
+                   at ./src/test_constraint_python.rs:283:73
+         4: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+         5: core::ops::function::FnOnce::call_once
+                   at /rustc/17067e9ac6d7ecb70e50f92c1944e545188d2359/library/core/src/ops/function.rs:250:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+      error: test failed, to rerun pass `-p sep1 --lib`
+      error: 1 target failed:
+          `-p sep1 --lib`
+      ```
+      Fix this.
     metadata:
   - assistant: |-
-      Of course! Dealing with grammar transformations while preserving production order is important for maintaining the grammar's structure and ensuring the start symbol remains in place.
+      Hello! As a helpful assistant, I'm here to help you with your code. Based on your description and the error log, you've correctly identified that new non-terminals created during the right-recursion elimination step are not being added to the `non_terminal_map`. This leads to incorrect parser table generation and subsequent failures.
 
-      Here are the modifications for `src/glr/analyze.rs` to update `resolve_direct_right_recursion` to preserve the order of productions.
+      Here is the patch to fix this issue by updating the `non_terminal_map` after the grammar transformation.
 
-      ### `src/glr/analyze.rs`
+      ### `src/glr/table.rs`
 
-      I've rewritten `resolve_direct_right_recursion` to first identify which non-terminals are right-recursive and then iterate through the original productions. When a right-recursive non-terminal is encountered for the first time, all of its rules are transformed and inserted at that point, preserving the overall order of the grammar.
+      I'll modify `generate_glr_parser_with_maps` to make the `non_terminal_map` mutable and update it with any new non-terminals generated by `resolve_direct_right_recursion`.
 
       ```diff
-      --- a/src/glr/analyze.rs
-      +++ b/src/glr/analyze.rs
-      @@ -680,68 +680,93 @@
-           productions: &mut Vec<Production>,
-           mut new_name_generator: impl FnMut(&str) -> String,
-       ) {
-      -    // This function transforms direct right-recursion into left-recursion.
-      -    // A set of rules for a non-terminal `A` of the form:
-      -    //   A -> α₁ A | α₂ A | ... | αₘ A  (right-recursive rules)
-      -    //   A -> β₁ | β₂ | ... | βₙ          (non-recursive rules)
-      -    // generates the language (α₁|...|αₘ)* (β₁|...|βₙ).
-      -    //
-      -    // This can be rewritten using a new non-terminal `A'` to be left-recursive:
-      -    //   A  -> A' β₁ | A' β₂ | ... | A' βₙ
-      -    //   A' -> A' α₁ | A' α₂ | ... | A' αₘ | ε
-      -    // This new form generates the same language and is left-recursive.
-      -    //
-      -    // This implementation only considers "simple" direct right-recursion, where a rule
-      -    // is of the form `A -> α A` and `α` does not contain `A`. More complex recursions
-      -    // like `A -> α A β A` or `A -> α A A` are not transformed and are treated as
-      -    // non-recursive "β" terms.
-      -
-      -    // 1. Group all productions by their LHS non-terminal.
-      +    // This function transforms direct right-recursion into left-recursion while preserving
-      +    // the original order of productions as much as possible.
-      +    //
-      +    // The transformation for a non-terminal `A` with rules:
-      +    //   A -> α₁ A | ... | αₘ A  (right-recursive rules, where αᵢ is a prefix)
-      +    //   A -> β₁ | ... | βₙ      (non-recursive rules)
-      +    // is to replace them with:
-      +    //   A  -> A' β₁ | ... | A' βₙ
-      +    //   A' -> A' α₁ | ... | A' αₘ | ε
-      +    // where `A'` is a new non-terminal. This generates the same language `(α₁|...|αₘ)* (β₁|...|βₙ)`
-      +    // using left-recursion.
-      +    //
-      +    // The implementation preserves order by iterating through the original production list.
-      +    // When it first encounters a rule for a right-recursive non-terminal, it replaces all
-      +    // rules for that non-terminal with the new, transformed set of rules at that position.
-      +
-      +    // 1. Group productions by LHS to easily access all rules for a given non-terminal.
-      +    // The BTreeMap is just for efficient lookup; we don't iterate over its keys for ordering.
-           let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
-           for prod in productions.iter().cloned() {
-               prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod);
-           }
-       
-      +    // 2. Identify all non-terminals that have simple direct right-recursive rules.
-      +    let mut recursive_nts = BTreeSet::new();
-      +    for (nt, prods_for_nt) in &prods_by_lhs {
-      +        let is_recursive = prods_for_nt.iter().any(|p| {
-      +            // A rule `A -> α A` is simple direct right-recursive if:
-      +            // a) `α` is not empty (i.e., rule is not `A -> A`).
-      +            if p.rhs.len() < 2 { return false; }
-      +            // b) The last symbol is `A`.
-      +            if p.rhs.last() != Some(&Symbol::NonTerminal(p.lhs.clone())) { return false; }
-      +            // c) `α` (the prefix) does not contain `A`.
-      +            let alpha = &p.rhs[..p.rhs.len() - 1];
-      +            !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
-      +        });
-      +        if is_recursive {
-      +            recursive_nts.insert(nt.clone());
-      +        }
-      +    }
-      +
-      +    // 3. Build the new production list, preserving order.
-           let mut new_productions = Vec::new();
-      -    let nts_to_process: Vec<NonTerminal> = prods_by_lhs.keys().cloned().collect();
-      -
-      -    for nt in nts_to_process {
-      -        let prods_for_nt = prods_by_lhs.get(&nt).unwrap();
-      -
-      -        // 2. Partition rules for `nt` into simple direct right-recursive and others.
-      +    let mut processed_recursive_nts = BTreeSet::new();
-      +
-      +    for prod in productions.iter().cloned() {
-      +        let lhs = &prod.lhs;
-      +
-      +        if !recursive_nts.contains(lhs) {
-      +            // This production's LHS is not right-recursive, so we can keep the production as is.
-      +            new_productions.push(prod);
-      +            continue;
-      +        }
-      +
-      +        // The LHS is right-recursive. We need to process all of its rules at once.
-      +        // We do this only the first time we encounter a rule for this LHS.
-      +        if processed_recursive_nts.contains(lhs) {
-      +            // We've already handled this NT and its rules, so we skip this and subsequent productions for it.
-      +            continue;
-      +        }
-      +        processed_recursive_nts.insert(lhs.clone());
-      +
-      +        // --- Perform the transformation for `lhs` ---
-      +        let prods_for_nt = prods_by_lhs.get(lhs).unwrap();
-      +
-               let (recursive_rules, other_rules): (Vec<_>, Vec<_>) = prods_for_nt.iter().cloned().partition(|p| {
-      -            // A rule `A -> α A` is simple direct right-recursive if:
-      -            // a) `α` is not empty (i.e., rule is not `A -> A`).
-                   if p.rhs.len() < 2 { return false; }
-      -            // b) The last symbol is `A`.
-                   if p.rhs.last() != Some(&Symbol::NonTerminal(p.lhs.clone())) { return false; }
-      -            // c) `α` (the prefix) does not contain `A`.
-                   let alpha = &p.rhs[..p.rhs.len() - 1];
-                   !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
-               });
-       
-      -        if recursive_rules.is_empty() {
-      -            // No simple direct right-recursion for this NT, so keep its original rules.
-      -            new_productions.extend(prods_for_nt.clone());
-      -        } else {
-      -            // 3. Found recursion, perform the transformation.
-      -            let new_nt = NonTerminal(new_name_generator(&nt.0));
-      -            crate::debug!(2, "Resolving direct right-recursion for '{}', creating new non-terminal '{}'", nt.0, new_nt.0);
-      -
-      -            // 4. Create rules for the new non-terminal `A'`.
-      -            // For each recursive rule `A -> αᵢ A`, create `A' -> A' αᵢ`.
-      -            for rec_rule in &recursive_rules {
-      -                let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
-      -                let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
-      -                new_rhs.extend_from_slice(alpha);
-      -                let new_prod = Production { lhs: new_nt.clone(), rhs: new_rhs };
-      -                crate::debug!(2, "  Transforming recursive rule '{}' -> '{}'", rec_rule, new_prod);
-      -                new_productions.push(new_prod);
-      -            }
-      -            let epsilon_prod = Production { lhs: new_nt.clone(), rhs: vec![] }; // A' -> ε
-      -            crate::debug!(2, "  Adding new epsilon rule: '{}'", epsilon_prod);
-      -            new_productions.push(epsilon_prod);
-      -
-      -            // 5. Create new rules for the original non-terminal `A`.
-      -            // For each non-recursive rule `A -> βⱼ`, create `A -> A' βⱼ`.
-      -            for non_rec_rule in &other_rules {
-      -                let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
-      -                new_rhs.extend_from_slice(&non_rec_rule.rhs);
-      -                let new_prod = Production { lhs: nt.clone(), rhs: new_rhs };
-      -                crate::debug!(2, "  Transforming non-recursive rule '{}' -> '{}'", non_rec_rule, new_prod);
-      -                new_productions.push(new_prod);
-      -            }
-      -        }
-      -    }
-      -
-      -    // 6. Replace the original productions with the new set.
-      +        // `recursive_rules` is guaranteed to be non-empty because `lhs` is in `recursive_nts`.
-      +        let new_nt = NonTerminal(new_name_generator(&lhs.0));
-      +        crate::debug!(2, "Resolving direct right-recursion for '{}', creating new non-terminal '{}'", lhs.0, new_nt.0);
-      +
-      +        // Create new rules for the original non-terminal `A`: `A -> A' βⱼ`.
-      +        // The order of these new rules is based on the original order of the `β` rules.
-      +        for non_rec_rule in &other_rules {
-      +            let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
-      +            new_rhs.extend_from_slice(&non_rec_rule.rhs);
-      +            let new_prod = Production { lhs: lhs.clone(), rhs: new_rhs };
-      +            crate::debug!(2, "  Transforming non-recursive rule '{}' -> '{}'", non_rec_rule, new_prod);
-      +            new_productions.push(new_prod);
-      +        }
-      +
-      +        // Create rules for the new non-terminal `A'`: `A' -> A' αᵢ` and `A' -> ε`.
-      +        for rec_rule in &recursive_rules {
-      +            let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
-      +            let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
-      +            new_rhs.extend_from_slice(alpha);
-      +            let new_prod = Production { lhs: new_nt.clone(), rhs: new_rhs };
-      +            crate::debug!(2, "  Transforming recursive rule '{}' -> '{}'", rec_rule, new_prod);
-      +            new_productions.push(new_prod);
-      +        }
-      +        let epsilon_prod = Production { lhs: new_nt.clone(), rhs: vec![] }; // A' -> ε
-      +        crate::debug!(2, "  Adding new epsilon rule: '{}'", epsilon_prod);
-      +        new_productions.push(epsilon_prod);
-      +    }
-      +
-      +    // 4. Replace the original productions with the new set.
-           productions.clear();
-           productions.extend(new_productions);
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -528,17 +528,27 @@
+           (stage_7_table, item_set_map, start_state_id)
        }
+       
+      -pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>) -> GLRParser {
+      +pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>) -> GLRParser {
+           let original_productions = productions.to_vec();
+       
+           crate::debug!(2, "Removing productions with undefined non-terminals");
+           let productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
+           // (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id);
+       
+           // Resolve right-recursion
+           let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
+           let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
+           let mut productions = productions.to_vec();
+           // crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
+           crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
+           // println!("After direct right recursion:\n{}", display_productions(&productions));
+      +
+      +    // After recursion resolution, new non-terminals may have been added.
+      +    // We need to update the non_terminal_map.
+      +    let mut next_non_terminal_id = non_terminal_map.len();
+      +    for p in &productions {
+      +        if !non_terminal_map.contains_left(&p.lhs) {
+      +            non_terminal_map.insert(p.lhs.clone(), NonTerminalID(next_non_terminal_id));
+      +            next_non_terminal_id += 1;
+      +        }
+      +    }
+       
+           // crate::debug!(2, "Validating");
+           // validate(&productions).expect("Validation error");
 
       ```
+
+      This change ensures that the `non_terminal_map` is comprehensive before being used to build the final parsing table in `stage_7`, which should resolve the test failure you're observing. Let me know if you have any other questions
     metadata:
   - user: |
       Git apply result:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/glr/analyze.rs
-      Applying patch to 'src/glr/analyze.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/analyze.rs.
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
     metadata:
 ...
