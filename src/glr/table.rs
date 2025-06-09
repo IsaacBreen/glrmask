@@ -529,7 +529,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let mut productions = productions.to_vec();
     // crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
     crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
-    println!("After direct right recursion: {}", display_productions(&productions));
+    // println!("After direct right recursion:\n{}", display_productions(&productions));
 
     // crate::debug!(2, "Validating");
     // validate(&productions).expect("Validation error");
