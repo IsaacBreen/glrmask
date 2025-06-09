@@ -66,9 +66,13 @@ fn print_node_recursive(
         0.0
     };
 
+    let total_str = format!("{:.3}ms", total_ms);
+    let own_str = format!("{:.3}ms", own_ms);
+    let percentage_str = format!("{:.1}%", percentage);
+
     println!(
-        "{:<100} {:>10} {:>12.3}ms {:>12.3}ms {:>7.1}%",
-        name_with_indent, node.hits, total_ms, own_ms, percentage
+        "{:<100} {:>10} {:>15} {:>15} {:>15}",
+        name_with_indent, node.hits, total_str, own_str, percentage_str
     );
 
     let mut sorted_children: Vec<_> = node.children.iter().collect();
@@ -96,7 +100,7 @@ pub fn print_summary() {
     if !no_timing_data {
         println!("\n[Hierarchical Timings]");
         println!(
-            "{:<100} {:>10} {:>12} {:>12} {:>8}",
+            "{:<100} {:>10} {:>15} {:>15} {:>15}",
             "Name", "Hits", "Total Time", "Own Time", "% of Parent"
         );
 
@@ -125,6 +129,74 @@ pub fn print_summary() {
     }
 
     println!("\n--- End Profiler Summary ---");
+}
+
+fn flatten_tree_recursive(
+    nodes: &HashMap<String, ProfileNode>,
+    flat_map: &mut HashMap<String, ProfileNode>,
+) {
+    for (name, node) in nodes {
+        let entry = flat_map.entry(name.clone()).or_default();
+        entry.hits += node.hits;
+        entry.own_time += node.own_time;
+        entry.total_time += node.total_time;
+
+        if !node.children.is_empty() {
+            flatten_tree_recursive(&node.children, flat_map);
+        }
+    }
+}
+
+/// Prints a summary of the collected profiling data as a flat list, merging all calls to the same function.
+pub fn print_summary_flat() {
+    let data = profiler().lock().unwrap();
+    println!("--- Profiler Summary (Flat) ---");
+
+    let no_timing_data = data.call_tree.children.is_empty();
+    let no_hit_data = data.hits.is_empty();
+
+    if no_timing_data && no_hit_data {
+        println!("No data collected.");
+        println!("--- End Profiler Summary (Flat) ---");
+        return;
+    }
+
+    if !no_timing_data {
+        let mut flat_map: HashMap<String, ProfileNode> = HashMap::new();
+        flatten_tree_recursive(&data.call_tree.children, &mut flat_map);
+
+        println!("\n[Flat Timings]");
+        println!(
+            "{:<50} {:>10} {:>15} {:>15}",
+            "Name", "Hits", "Total Time", "Own Time"
+        );
+
+        let mut sorted_list: Vec<_> = flat_map.iter().collect();
+        sorted_list.sort_by(|a, b| b.1.total_time.cmp(&a.1.total_time));
+
+        for (name, node) in sorted_list {
+            let total_ms = node.total_time.as_secs_f64() * 1000.0;
+            let own_ms = node.own_time.as_secs_f64() * 1000.0;
+            let total_str = format!("{:.3}ms", total_ms);
+            let own_str = format!("{:.3}ms", own_ms);
+
+            println!(
+                "{:<50} {:>10} {:>15} {:>15}",
+                name, node.hits, total_str, own_str
+            );
+        }
+    }
+
+    if !no_hit_data {
+        println!("\n[Hits]");
+        let mut sorted_hits: Vec<_> = data.hits.iter().collect();
+        sorted_hits.sort_by_key(|k| k.0);
+        for (name, count) in sorted_hits {
+            println!("  {:>10}x: {}", count, name);
+        }
+    }
+
+    println!("\n--- End Profiler Summary (Flat) ---");
 }
 
 /// Returns a clone of the hits data from `hit!` macro.

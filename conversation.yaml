@@ -1,46 +1,9 @@
 local_system:
   attached_files:
-    - Cargo.toml
     - src/profiler.rs
-    - profiler_macro/Cargo.toml
-    - profiler_macro/src/lib.rs
   conversation_file:
   compile_command:
   initial_file_contents:
-    Cargo.toml: |
-      [package]
-      name = "sep1"
-      version = "0.1.0"
-      edition = "2024"
-
-      [dependencies]
-      bimap = "0.6.3"
-      regex = "1.11.1"
-      fixedbitset = "0.5.7"
-      bitvec = "1.0.1"
-      kdam = "0.6.0"
-      keyed_priority_queue = "0.4.2"
-      serde = { version = "1.0.219", features = ["derive"] }
-      serde_json = "1.0.107"
-      chrono = "0.4.41"
-      indicatif = "0.17.11"
-      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
-      range-set-blaze = { version = "0.1.16", default-features = false, features = ["alloc"] }
-
-      # Add the derive macro crate
-      json_convertible_derive = { path = "json_convertible_derive" }
-      profiler_macro = { path = "profiler_macro" }
-      deterministic-hash = "1.0.1"
-      crc = "3.3.0"
-      rand = "0.9.1"
-      ordered_hash_map = "0.4.0"
-
-      [dev-dependencies]
-      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
-
-      [profile.dev]
-      debug = true
-      #opt-level = 1
     src/profiler.rs: |
       use std::collections::HashMap;
       use std::sync::{Mutex, OnceLock};
@@ -111,7 +74,7 @@ local_system:
           };
 
           println!(
-              "{:<50} {:>10} {:>12.3}ms {:>12.3}ms {:>7.1}%",
+              "{:<100} {:>10} {:>12.3}ms {:>12.3}ms {:>7.1}%",
               name_with_indent, node.hits, total_ms, own_ms, percentage
           );
 
@@ -140,7 +103,7 @@ local_system:
           if !no_timing_data {
               println!("\n[Hierarchical Timings]");
               println!(
-                  "{:<50} {:>10} {:>12} {:>12} {:>8}",
+                  "{:<100} {:>10} {:>12} {:>12} {:>8}",
                   "Name", "Hits", "Total Time", "Own Time", "% of Parent"
               );
 
@@ -311,129 +274,8 @@ local_system:
           ($name:expr) => {
               $crate::profiler::hit($name)
           };
-      }
-    profiler_macro/Cargo.toml: |
-      [package]
-      name = "profiler_macro"
-      version = "0.1.0"
-      edition = "2021"
-
-      [lib]
-      proc-macro = true
-
-      [dependencies]
-      syn = { version = "2.0", features = ["full"] }
-      quote = "1.0"
-    profiler_macro/src/lib.rs: |
-      use proc_macro::TokenStream;
-      use quote::quote;
-      use syn::{
-          parse::{Parse, ParseStream},
-          parse_macro_input, Expr, ItemFn, LitStr, Token,
-      };
-
-      #[proc_macro_attribute]
-      pub fn time_it(attr: TokenStream, item: TokenStream) -> TokenStream {
-          let item_fn = parse_macro_input!(item as ItemFn);
-
-          let timer_name_expr = if attr.is_empty() {
-              let fn_name = item_fn.sig.ident.to_string();
-              quote! { format!("{}::{}", module_path!(), #fn_name) }
-          } else {
-              let attr_str = parse_macro_input!(attr as LitStr);
-              let name = attr_str.value();
-              quote! { String::from(#name) }
-          };
-
-          let fn_vis = &item_fn.vis;
-          let fn_sig = &item_fn.sig;
-          let fn_block = &item_fn.block;
-          let fn_attrs = &item_fn.attrs;
-
-          let result = quote! {
-              #(#fn_attrs)*
-              #fn_vis #fn_sig {
-                  let _guard = crate::profiler::TimedBlockGuard::new(#timer_name_expr);
-                  #fn_block
-              }
-          };
-
-          result.into()
-      }
-
-      enum TimeitArgs {
-          Named { name: LitStr, expr: Expr },
-          Unnamed { expr: Expr },
-      }
-
-      impl Parse for TimeitArgs {
-          fn parse(input: ParseStream) -> syn::Result<Self> {
-              if input.peek(LitStr) && input.peek2(Token![,]) {
-                  let name: LitStr = input.parse()?;
-                  let _: Token![,] = input.parse()?;
-                  let expr: Expr = input.parse()?;
-                  Ok(TimeitArgs::Named { name, expr })
-              } else {
-                  let expr: Expr = input.parse()?;
-                  Ok(TimeitArgs::Unnamed { expr })
-              }
-          }
-      }
-
-      #[proc_macro]
-      pub fn timeit(input: TokenStream) -> TokenStream {
-          let args = parse_macro_input!(input as TimeitArgs);
-
-          let (name_literal, expr) = match args {
-              TimeitArgs::Named { name, expr } => (quote! { #name }, expr),
-              TimeitArgs::Unnamed { expr } => {
-                  let expr_str = quote! { #expr }.to_string();
-                  (quote! { #expr_str }, expr)
-              }
-          };
-
-          let result = quote! {{
-              let _guard = crate::profiler::TimedBlockGuard::new(String::from(#name_literal));
-              #expr
-          }};
-
-          result.into()
       }
   prev_file_contents:
-    Cargo.toml: |
-      [package]
-      name = "sep1"
-      version = "0.1.0"
-      edition = "2024"
-
-      [dependencies]
-      bimap = "0.6.3"
-      regex = "1.11.1"
-      fixedbitset = "0.5.7"
-      bitvec = "1.0.1"
-      kdam = "0.6.0"
-      keyed_priority_queue = "0.4.2"
-      serde = { version = "1.0.219", features = ["derive"] }
-      serde_json = "1.0.107"
-      chrono = "0.4.41"
-      indicatif = "0.17.11"
-      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
-      range-set-blaze = { version = "0.1.16", default-features = false, features = ["alloc"] }
-
-      # Add the derive macro crate
-      json_convertible_derive = { path = "json_convertible_derive" }
-      profiler_macro = { path = "profiler_macro" }
-      deterministic-hash = "1.0.1"
-      crc = "3.3.0"
-      rand = "0.9.1"
-      ordered_hash_map = "0.4.0"
-
-      [dev-dependencies]
-      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
-
-      [profile.dev]
-      debug = true
-      #opt-level = 1
     src/profiler.rs: |
       use std::collections::HashMap;
       use std::sync::{Mutex, OnceLock};
@@ -504,7 +346,7 @@ local_system:
           };
 
           println!(
-              "{:<50} {:>10} {:>12.3}ms {:>12.3}ms {:>7.1}%",
+              "{:<100} {:>10} {:>12.3}ms {:>12.3}ms {:>7.1}%",
               name_with_indent, node.hits, total_ms, own_ms, percentage
           );
 
@@ -533,7 +375,7 @@ local_system:
           if !no_timing_data {
               println!("\n[Hierarchical Timings]");
               println!(
-                  "{:<50} {:>10} {:>12} {:>12} {:>8}",
+                  "{:<100} {:>10} {:>12} {:>12} {:>8}",
                   "Name", "Hits", "Total Time", "Own Time", "% of Parent"
               );
 
@@ -704,93 +546,6 @@ local_system:
           ($name:expr) => {
               $crate::profiler::hit($name)
           };
-      }
-    profiler_macro/Cargo.toml: |
-      [package]
-      name = "profiler_macro"
-      version = "0.1.0"
-      edition = "2021"
-
-      [lib]
-      proc-macro = true
-
-      [dependencies]
-      syn = { version = "2.0", features = ["full"] }
-      quote = "1.0"
-    profiler_macro/src/lib.rs: |
-      use proc_macro::TokenStream;
-      use quote::quote;
-      use syn::{
-          parse::{Parse, ParseStream},
-          parse_macro_input, Expr, ItemFn, LitStr, Token,
-      };
-
-      #[proc_macro_attribute]
-      pub fn time_it(attr: TokenStream, item: TokenStream) -> TokenStream {
-          let item_fn = parse_macro_input!(item as ItemFn);
-
-          let timer_name_expr = if attr.is_empty() {
-              let fn_name = item_fn.sig.ident.to_string();
-              quote! { format!("{}::{}", module_path!(), #fn_name) }
-          } else {
-              let attr_str = parse_macro_input!(attr as LitStr);
-              let name = attr_str.value();
-              quote! { String::from(#name) }
-          };
-
-          let fn_vis = &item_fn.vis;
-          let fn_sig = &item_fn.sig;
-          let fn_block = &item_fn.block;
-          let fn_attrs = &item_fn.attrs;
-
-          let result = quote! {
-              #(#fn_attrs)*
-              #fn_vis #fn_sig {
-                  let _guard = crate::profiler::TimedBlockGuard::new(#timer_name_expr);
-                  #fn_block
-              }
-          };
-
-          result.into()
-      }
-
-      enum TimeitArgs {
-          Named { name: LitStr, expr: Expr },
-          Unnamed { expr: Expr },
-      }
-
-      impl Parse for TimeitArgs {
-          fn parse(input: ParseStream) -> syn::Result<Self> {
-              if input.peek(LitStr) && input.peek2(Token![,]) {
-                  let name: LitStr = input.parse()?;
-                  let _: Token![,] = input.parse()?;
-                  let expr: Expr = input.parse()?;
-                  Ok(TimeitArgs::Named { name, expr })
-              } else {
-                  let expr: Expr = input.parse()?;
-                  Ok(TimeitArgs::Unnamed { expr })
-              }
-          }
-      }
-
-      #[proc_macro]
-      pub fn timeit(input: TokenStream) -> TokenStream {
-          let args = parse_macro_input!(input as TimeitArgs);
-
-          let (name_literal, expr) = match args {
-              TimeitArgs::Named { name, expr } => (quote! { #name }, expr),
-              TimeitArgs::Unnamed { expr } => {
-                  let expr_str = quote! { #expr }.to_string();
-                  (quote! { #expr_str }, expr)
-              }
-          };
-
-          let result = quote! {{
-              let _guard = crate::profiler::TimedBlockGuard::new(String::from(#name_literal));
-              #expr
-          }};
-
-          result.into()
       }
   diffs_applied_this_send: true
 system:
@@ -815,45 +570,6 @@ system:
   temperature: 0.0
   apply_mode: git
 messages:
-  - user: |-
-      ```text 'Cargo.toml'
-      [package]
-      name = "sep1"
-      version = "0.1.0"
-      edition = "2024"
-
-      [dependencies]
-      bimap = "0.6.3"
-      regex = "1.11.1"
-      fixedbitset = "0.5.7"
-      bitvec = "1.0.1"
-      kdam = "0.6.0"
-      keyed_priority_queue = "0.4.2"
-      serde = { version = "1.0.219", features = ["derive"] }
-      serde_json = "1.0.107"
-      chrono = "0.4.41"
-      indicatif = "0.17.11"
-      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
-      range-set-blaze = { version = "0.1.16", default-features = false, features = ["alloc"] }
-
-      # Add the derive macro crate
-      json_convertible_derive = { path = "json_convertible_derive" }
-      profiler_macro = { path = "profiler_macro" }
-      deterministic-hash = "1.0.1"
-      crc = "3.3.0"
-      rand = "0.9.1"
-      ordered_hash_map = "0.4.0"
-
-      [dev-dependencies]
-      reqwest = { version = "0.12.15", features = ["blocking", "json"] }
-
-      [profile.dev]
-      debug = true
-      #opt-level = 1
-
-      ```
-    metadata:
-      filename: Cargo.toml
   - user: |-
       ```rust 'src/profiler.rs'
       use std::collections::HashMap;
@@ -925,7 +641,7 @@ messages:
           };
 
           println!(
-              "{:<50} {:>10} {:>12.3}ms {:>12.3}ms {:>7.1}%",
+              "{:<100} {:>10} {:>12.3}ms {:>12.3}ms {:>7.1}%",
               name_with_indent, node.hits, total_ms, own_ms, percentage
           );
 
@@ -954,7 +670,7 @@ messages:
           if !no_timing_data {
               println!("\n[Hierarchical Timings]");
               println!(
-                  "{:<50} {:>10} {:>12} {:>12} {:>8}",
+                  "{:<100} {:>10} {:>12} {:>12} {:>8}",
                   "Name", "Hits", "Total Time", "Own Time", "% of Parent"
               );
 
@@ -1130,194 +846,137 @@ messages:
       ```
     metadata:
       filename: src/profiler.rs
-  - user: |-
-      ```text 'profiler_macro/Cargo.toml'
-      [package]
-      name = "profiler_macro"
-      version = "0.1.0"
-      edition = "2021"
-
-      [lib]
-      proc-macro = true
-
-      [dependencies]
-      syn = { version = "2.0", features = ["full"] }
-      quote = "1.0"
-
-      ```
-    metadata:
-      filename: profiler_macro/Cargo.toml
-  - user: |-
-      ```rust 'profiler_macro/src/lib.rs'
-      use proc_macro::TokenStream;
-      use quote::quote;
-      use syn::{
-          parse::{Parse, ParseStream},
-          parse_macro_input, Expr, ItemFn, LitStr, Token,
-      };
-
-      #[proc_macro_attribute]
-      pub fn time_it(attr: TokenStream, item: TokenStream) -> TokenStream {
-          let item_fn = parse_macro_input!(item as ItemFn);
-
-          let timer_name_expr = if attr.is_empty() {
-              let fn_name = item_fn.sig.ident.to_string();
-              quote! { format!("{}::{}", module_path!(), #fn_name) }
-          } else {
-              let attr_str = parse_macro_input!(attr as LitStr);
-              let name = attr_str.value();
-              quote! { String::from(#name) }
-          };
-
-          let fn_vis = &item_fn.vis;
-          let fn_sig = &item_fn.sig;
-          let fn_block = &item_fn.block;
-          let fn_attrs = &item_fn.attrs;
-
-          let result = quote! {
-              #(#fn_attrs)*
-              #fn_vis #fn_sig {
-                  let _guard = crate::profiler::TimedBlockGuard::new(#timer_name_expr);
-                  #fn_block
-              }
-          };
-
-          result.into()
-      }
-
-      enum TimeitArgs {
-          Named { name: LitStr, expr: Expr },
-          Unnamed { expr: Expr },
-      }
-
-      impl Parse for TimeitArgs {
-          fn parse(input: ParseStream) -> syn::Result<Self> {
-              if input.peek(LitStr) && input.peek2(Token![,]) {
-                  let name: LitStr = input.parse()?;
-                  let _: Token![,] = input.parse()?;
-                  let expr: Expr = input.parse()?;
-                  Ok(TimeitArgs::Named { name, expr })
-              } else {
-                  let expr: Expr = input.parse()?;
-                  Ok(TimeitArgs::Unnamed { expr })
-              }
-          }
-      }
-
-      #[proc_macro]
-      pub fn timeit(input: TokenStream) -> TokenStream {
-          let args = parse_macro_input!(input as TimeitArgs);
-
-          let (name_literal, expr) = match args {
-              TimeitArgs::Named { name, expr } => (quote! { #name }, expr),
-              TimeitArgs::Unnamed { expr } => {
-                  let expr_str = quote! { #expr }.to_string();
-                  (quote! { #expr_str }, expr)
-              }
-          };
-
-          let result = quote! {{
-              let _guard = crate::profiler::TimedBlockGuard::new(String::from(#name_literal));
-              #expr
-          }};
-
-          result.into()
-      }
-
-      ```
-    metadata:
-      filename: profiler_macro/src/lib.rs
-  - user: Make it easy to specify a custom 'key' for a timeit call, e.g. by passing
-      a runtime-defined String.
+  - user: Add a function that prints a summary, but where all calls are merged. A
+      call list, not a tree.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your code. Modifying procedural macros to handle more flexible arguments is a great way to improve their usability. Here are the suggested changes to allow `timeit!` to accept a runtime expression for the timer key.
+      Of course! Dealing with profiling data can be tricky, and a flat view is often very useful for spotting the biggest time sinks regardless of where they are called from.
 
-      I'll provide a git diff for the file that needs to be modified.
+      Here are the changes to add a `print_summary_flat` function. I've also taken the liberty of fixing a small formatting issue in the existing `print_summary` function to ensure the columns align correctly.
 
-      ### Explanation of Changes
-
-      I've updated the `timeit` procedural macro in `profiler_macro/src/lib.rs` to allow the timer name to be an expression that evaluates to a `String` or `&str` at runtime.
-
-      1.  **`TimeitArgs` enum:** The `name` field in the `Named` variant was changed from `LitStr` to `Expr`. This allows it to hold any expression, not just a string literal.
-
-      2.  **`Parse` implementation for `TimeitArgs`:** The parsing logic was updated to handle this change. It now tries to parse an expression. If it's followed by a comma, it assumes the `timeit!(name, expression)` form. Otherwise, it assumes the `timeit!(expression)` form. This is robust enough to distinguish between `timeit!(my_variable, { ... })` and `timeit!({ ... })`.
-
-      3.  **`timeit` macro implementation:** The code generation part was adjusted.
-          *   For `timeit!(name_expr, block)`, it now generates `(#name_expr).into()`. This will convert the result of `name_expr` (e.g., a `String` or `&str`) into the `String` expected by `TimedBlockGuard::new`.
-          *   For `timeit!(block)`, the behavior is unchanged: it stringifies the block of code and uses that as the name.
-
-      This makes the `timeit!` macro much more flexible, allowing for dynamic timer names like `timeit!(format!("iteration-{}", i), { ... })`.
-
-      Here is the patch for `profiler_macro/src/lib.rs`:
+      Here is the git diff for `src/profiler.rs`:
 
       ```diff
-      --- a/profiler_macro/src/lib.rs
-      +++ b/profiler_macro/src/lib.rs
-      @@ -33,38 +33,36 @@
-       }
+      --- a/src/profiler.rs
+      +++ b/src/profiler.rs
+      @@ -60,18 +60,20 @@
+           let own_ms = node.own_time.as_secs_f64() * 1000.0;
        
-       enum TimeitArgs {
-      -    Named { name: LitStr, expr: Expr },
-      +    Named { name: Expr, expr: Expr },
-           Unnamed { expr: Expr },
-       }
-       
-       impl Parse for TimeitArgs {
-           fn parse(input: ParseStream) -> syn::Result<Self> {
-      -        if input.peek(LitStr) && input.peek2(Token![,]) {
-      -            let name: LitStr = input.parse()?;
-      +        let first_expr = input.parse::<Expr>()?;
-      +        if input.peek(Token![,]) {
-                   let _: Token![,] = input.parse()?;
-      -            let expr: Expr = input.parse()?;
-      -            Ok(TimeitArgs::Named { name, expr })
-      +            let expr = input.parse::<Expr>()?;
-      +            Ok(TimeitArgs::Named {
-      +                name: first_expr,
-      +                expr,
-      +            })
-               } else {
-      -            let expr: Expr = input.parse()?;
-      -            Ok(TimeitArgs::Unnamed { expr })
-      +            Ok(TimeitArgs::Unnamed { expr: first_expr })
-               }
-           }
-       }
-       
-       #[proc_macro]
-       pub fn timeit(input: TokenStream) -> TokenStream {
-           let args = parse_macro_input!(input as TimeitArgs);
-       
-      -    let (name_literal, expr) = match args {
-      -        TimeitArgs::Named { name, expr } => (quote! { #name }, expr),
-      +    let (name_code, expr) = match args {
-      +        TimeitArgs::Named { name, expr } => (quote! { (#name).into() }, expr),
-               TimeitArgs::Unnamed { expr } => {
-                   let expr_str = quote! { #expr }.to_string();
-      -            (quote! { #expr_str }, expr)
-      +            (quote! { String::from(#expr_str) }, expr)
-               }
+           let percentage = if !parent_total_time.is_zero() {
+               (node.total_time.as_secs_f64() / parent_total_time.as_secs_f64()) * 100.0
+           } else {
+               0.0
            };
        
-           let result = quote! {{
-      -        let _guard = crate::profiler::TimedBlockGuard::new(String::from(#name_literal));
-      +        let _guard = crate::profiler::TimedBlockGuard::new(#name_code);
-               #expr
-           }};
+      +    let total_str = format!("{:.3}ms", total_ms);
+      +    let own_str = format!("{:.3}ms", own_ms);
+      +    let percentage_str = format!("{:.1}%", percentage);
+      +
+           println!(
+      -        "{:<100} {:>10} {:>12.3}ms {:>12.3}ms {:>7.1}%",
+      -        name_with_indent, node.hits, total_ms, own_ms, percentage
+      +        "{:<100} {:>10} {:>15} {:>15} {:>15}",
+      +        name_with_indent, node.hits, total_str, own_str, percentage_str
+           );
        
+           let mut sorted_children: Vec<_> = node.children.iter().collect();
+           sorted_children.sort_by_key(|(name, _)| *name);
+      @@ -96,8 +98,8 @@
+           if !no_timing_data {
+               println!("\n[Hierarchical Timings]");
+               println!(
+      -            "{:<100} {:>10} {:>12} {:>12} {:>8}",
+      -            "Name", "Hits", "Total Time", "Own Time", "% of Parent"
+      +            "{:<100} {:>10} {:>15} {:>15} {:>15}",
+      +            "Name", "Hits", "Total Time", "Own Time", "% of Parent"
+               );
+       
+               let root_total_time: Duration = data
+      @@ -126,6 +128,67 @@
+           }
+       
+           println!("\n--- End Profiler Summary ---");
+      +}
+      +
+      +fn flatten_tree_recursive(
+      +    nodes: &HashMap<String, ProfileNode>,
+      +    flat_map: &mut HashMap<String, ProfileNode>,
+      +) {
+      +    for (name, node) in nodes {
+      +        let entry = flat_map.entry(name.clone()).or_default();
+      +        entry.hits += node.hits;
+      +        entry.own_time += node.own_time;
+      +        entry.total_time += node.total_time;
+      +
+      +        if !node.children.is_empty() {
+      +            flatten_tree_recursive(&node.children, flat_map);
+      +        }
+      +    }
+      +}
+      +
+      +/// Prints a summary of the collected profiling data as a flat list, merging all calls to the same function.
+      +pub fn print_summary_flat() {
+      +    let data = profiler().lock().unwrap();
+      +    println!("--- Profiler Summary (Flat) ---");
+      +
+      +    let no_timing_data = data.call_tree.children.is_empty();
+      +    let no_hit_data = data.hits.is_empty();
+      +
+      +    if no_timing_data && no_hit_data {
+      +        println!("No data collected.");
+      +        println!("--- End Profiler Summary (Flat) ---");
+      +        return;
+      +    }
+      +
+      +    if !no_timing_data {
+      +        let mut flat_map: HashMap<String, ProfileNode> = HashMap::new();
+      +        flatten_tree_recursive(&data.call_tree.children, &mut flat_map);
+      +
+      +        println!("\n[Flat Timings]");
+      +        println!(
+      +            "{:<50} {:>10} {:>15} {:>15}",
+      +            "Name", "Hits", "Total Time", "Own Time"
+      +        );
+      +
+      +        let mut sorted_list: Vec<_> = flat_map.iter().collect();
+      +        sorted_list.sort_by(|a, b| b.1.total_time.cmp(&a.1.total_time));
+      +
+      +        for (name, node) in sorted_list {
+      +            let total_ms = node.total_time.as_secs_f64() * 1000.0;
+      +            let own_ms = node.own_time.as_secs_f64() * 1000.0;
+      +            let total_str = format!("{:.3}ms", total_ms);
+      +            let own_str = format!("{:.3}ms", own_ms);
+      +
+      +            println!(
+      +                "{:<50} {:>10} {:>15} {:>15}",
+      +                name, node.hits, total_str, own_str
+      +            );
+      +        }
+      +    }
+      +
+      +    if !no_hit_data {
+      +        println!("\n[Hits]");
+      +        let mut sorted_hits: Vec<_> = data.hits.iter().collect();
+      +        sorted_hits.sort_by_key(|k| k.0);
+      +        for (name, count) in sorted_hits {
+      +            println!("  {:>10}x: {}", count, name);
+      +        }
+      +    }
+      +
+      +    println!("\n--- End Profiler Summary (Flat) ---");
+       }
+       
+       /// Returns a clone of the hits data from `hit!` macro.
 
       ```
-
-      No other files need to be changed. Let me know if you have any other questions
     metadata:
   - user: |
       Git apply result:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: profiler_macro/src/lib.rs
-      Applying patch to 'profiler_macro/src/lib.rs' using custom patcher...
-      Successfully applied patch and wrote to profiler_macro/src/lib.rs.
+      Identified target file: src/profiler.rs
+      Applying patch to 'src/profiler.rs' using custom patcher...
+      Successfully applied patch and wrote to src/profiler.rs.
     metadata:
 ...
