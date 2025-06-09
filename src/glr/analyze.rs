@@ -876,7 +876,7 @@ pub fn resolve_right_recursion(
 /// # Arguments
 /// * `productions` - A mutable vector of the grammar's productions. This will be modified in-place.
 /// * `new_name_generator` - A closure that generates unique names for new non-terminals.
-pub fn remove_direct_right_recursion(
+pub fn resolve_direct_right_recursion(
     productions: &mut Vec<Production>,
     mut new_name_generator: impl FnMut(&str) -> String,
 ) {
