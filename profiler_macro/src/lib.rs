@@ -35,20 +35,22 @@ pub fn time_it(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 enum TimeitArgs {
-    Named { name: LitStr, expr: Expr },
+    Named { name: Expr, expr: Expr },
     Unnamed { expr: Expr },
 }
 
 impl Parse for TimeitArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        if input.peek(LitStr) && input.peek2(Token![,]) {
-            let name: LitStr = input.parse()?;
+        let first_expr = input.parse::<Expr>()?;
+        if input.peek(Token![,]) {
             let _: Token![,] = input.parse()?;
-            let expr: Expr = input.parse()?;
-            Ok(TimeitArgs::Named { name, expr })
+            let expr = input.parse::<Expr>()?;
+            Ok(TimeitArgs::Named {
+                name: first_expr,
+                expr,
+            })
         } else {
-            let expr: Expr = input.parse()?;
-            Ok(TimeitArgs::Unnamed { expr })
+            Ok(TimeitArgs::Unnamed { expr: first_expr })
         }
     }
 }
@@ -57,16 +59,16 @@ impl Parse for TimeitArgs {
 pub fn timeit(input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(input as TimeitArgs);
 
-    let (name_literal, expr) = match args {
-        TimeitArgs::Named { name, expr } => (quote! { #name }, expr),
+    let (name_code, expr) = match args {
+        TimeitArgs::Named { name, expr } => (quote! { (#name).into() }, expr),
         TimeitArgs::Unnamed { expr } => {
             let expr_str = quote! { #expr }.to_string();
-            (quote! { #expr_str }, expr)
+            (quote! { String::from(#expr_str) }, expr)
         }
     };
 
     let result = quote! {{
-        let _guard = crate::profiler::TimedBlockGuard::new(String::from(#name_literal));
+        let _guard = crate::profiler::TimedBlockGuard::new(#name_code);
         #expr
     }};
 
