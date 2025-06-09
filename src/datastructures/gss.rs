@@ -415,51 +415,57 @@ impl GSSNode {
     }
 
     pub fn pop(&self) -> Self {
-        let mut result_acc = Acc::new_for_merging();
-        let mut result_predecessors = NodeMap::new();
+        crate::time!("GSSNode::pop", {
+            let mut result_acc = Acc::new_for_merging();
+            let mut result_predecessors = NodeMap::new();
 
-        for (pred_arc, _edge_val) in self.predecessors_with_values() {
-            // The acc of the path *through* self to pred_arc is self.acc intersected with pred_arc.acc
-            let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
-            result_acc.union_assign(path_acc.clone()); // Union accs of all popped paths
+            for (pred_arc, _edge_val) in self.predecessors_with_values() {
+                // The acc of the path *through* self to pred_arc is self.acc intersected with pred_arc.acc
+                let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
+                result_acc.union_assign(path_acc.clone()); // Union accs of all popped paths
 
-            // Merge predecessors of pred_arc into result_predecessors
-            // Each merged predecessor needs its acc updated based on path_acc
-            for (inner_edge, inner_pred_arc) in &pred_arc.predecessors {
-                let mut new_inner_pred_node_data = (**inner_pred_arc).clone();
-                new_inner_pred_node_data.acc = path_acc.clone().intersect(inner_pred_arc.acc.clone());
+                // Merge predecessors of pred_arc into result_predecessors
+                // Each merged predecessor needs its acc updated based on path_acc
+                for (inner_edge, inner_pred_arc) in &pred_arc.predecessors {
+                    let mut new_inner_pred_node_data = (**inner_pred_arc).clone();
+                    new_inner_pred_node_data.acc = path_acc.clone().intersect(inner_pred_arc.acc.clone());
 
-                match result_predecessors.entry(inner_edge.clone()) {
-                    std::collections::btree_map::Entry::Vacant(entry) => {
-                        entry.insert(Arc::new(new_inner_pred_node_data));
-                    }
-                    std::collections::btree_map::Entry::Occupied(mut entry) => {
-                        Arc::make_mut(entry.get_mut()).merge(&Arc::new(new_inner_pred_node_data));
+                    match result_predecessors.entry(inner_edge.clone()) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(Arc::new(new_inner_pred_node_data));
+                        }
+                        std::collections::btree_map::Entry::Occupied(mut entry) => {
+                            Arc::make_mut(entry.get_mut()).merge(&Arc::new(new_inner_pred_node_data));
+                        }
                     }
                 }
             }
-        }
-        Self::new_with_map(result_acc, result_predecessors)
+            Self::new_with_map(result_acc, result_predecessors)
+        })
     }
 
 
     pub fn popn(&self, n: usize) -> Self {
-        if n == 0 {
-            self.clone()
-        } else {
-            self.pop().popn(n - 1)
-        }
+        crate::time!("GSSNode::popn", {
+            if n == 0 {
+                self.clone()
+            } else {
+                self.pop().popn(n - 1)
+            }
+        })
     }
 
     pub fn pop_iter(&self) -> Vec<(ParseStateEdgeContent, Arc<Self>)> {
-        self.predecessors.iter().map(|(edge_val, pred_arc)| {
-            let mut pred_arc = pred_arc.clone();
-            // The acc for the path ending at pred_arc (after popping self)
-            // is self.acc intersected with pred_arc's original acc.
-            let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
-            pred_arc = Arc::new(pred_arc.as_ref().clone().with_acc(path_acc));
-            (edge_val.clone(), pred_arc)
-        }).collect()
+        crate::time!("GSSNode::pop_iter", {
+            self.predecessors.iter().map(|(edge_val, pred_arc)| {
+                let mut pred_arc = pred_arc.clone();
+                // The acc for the path ending at pred_arc (after popping self)
+                // is self.acc intersected with pred_arc's original acc.
+                let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
+                pred_arc = Arc::new(pred_arc.as_ref().clone().with_acc(path_acc));
+                (edge_val.clone(), pred_arc)
+            }).collect()
+        })
     }
 
     pub fn peek_iter(&self) -> impl Iterator<Item = GSSPeek<'_>> {
@@ -473,21 +479,23 @@ impl GSSNode {
     }
 
     pub fn merge(&mut self, other: &Self) {
-        if self == other { return; }
+        crate::time!("GSSNode::merge", {
+            if self == other { return; }
 
-        self.acc.union_assign(other.acc.clone());
+            self.acc.union_assign(other.acc.clone());
 
-        for (edge_val, other_pred_arc) in &other.predecessors {
-            match self.predecessors.entry(edge_val.clone()) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(other_pred_arc.clone());
-                }
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    Arc::make_mut(entry.get_mut()).merge(other_pred_arc);
+            for (edge_val, other_pred_arc) in &other.predecessors {
+                match self.predecessors.entry(edge_val.clone()) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(other_pred_arc.clone());
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        Arc::make_mut(entry.get_mut()).merge(other_pred_arc);
+                    }
                 }
             }
-        }
-        self.hash_key_cache = compute_hash_key(&self.predecessors);
+            self.hash_key_cache = compute_hash_key(&self.predecessors);
+        })
     }
 
     pub fn merged(mut self, other: Self) -> Self {
