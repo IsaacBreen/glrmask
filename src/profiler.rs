@@ -52,8 +52,7 @@ fn print_node_recursive(
     node: &ProfileNode,
     name: &str,
     indent_level: usize,
-    root_total_time: Duration,
-    min_proportion_of_root: f64,
+    parent_total_time: Duration,
 ) {
     let indent = "  ".repeat(indent_level);
     let name_with_indent = format!("{}{}", indent, name);
@@ -61,44 +60,27 @@ fn print_node_recursive(
     let total_ms = node.total_time.as_secs_f64() * 1000.0;
     let own_ms = node.own_time.as_secs_f64() * 1000.0;
 
-    let proportion_of_root = if !root_total_time.is_zero() {
-        node.total_time.as_secs_f64() / root_total_time.as_secs_f64()
+    let percentage = if !parent_total_time.is_zero() {
+        (node.total_time.as_secs_f64() / parent_total_time.as_secs_f64()) * 100.0
     } else {
         0.0
     };
-    let percentage_of_root = proportion_of_root * 100.0;
 
     println!(
         "{:<50} {:>10} {:>12.3}ms {:>12.3}ms {:>7.1}%",
-        name_with_indent, node.hits, total_ms, own_ms, percentage_of_root
+        name_with_indent, node.hits, total_ms, own_ms, percentage
     );
-
-    // Collapse children if this node's contribution is too small and it has children
-    if proportion_of_root < min_proportion_of_root && !node.children.is_empty() {
-        let collapsed_indent = "  ".repeat(indent_level + 1);
-        println!("{}[... children collapsed ...]", collapsed_indent);
-        return;
-    }
 
     let mut sorted_children: Vec<_> = node.children.iter().collect();
     sorted_children.sort_by_key(|(name, _)| *name);
 
     for (child_name, child_node) in sorted_children {
-        print_node_recursive(
-            child_node,
-            child_name,
-            indent_level + 1,
-            root_total_time,
-            min_proportion_of_root,
-        );
+        print_node_recursive(child_node, child_name, indent_level + 1, node.total_time);
     }
 }
 
 /// Prints a summary of the collected profiling data to stdout.
-///
-/// Nodes whose total time is less than `min_proportion_of_root` of the total
-/// profiled time will be collapsed.
-pub fn print_summary(min_proportion_of_root: f64) {
+pub fn print_summary() {
     let data = profiler().lock().unwrap();
     println!("--- Profiler Summary ---");
 
@@ -115,7 +97,7 @@ pub fn print_summary(min_proportion_of_root: f64) {
         println!("\n[Hierarchical Timings]");
         println!(
             "{:<50} {:>10} {:>12} {:>12} {:>8}",
-            "Name", "Hits", "Total Time", "Own Time", "% of Root"
+            "Name", "Hits", "Total Time", "Own Time", "% of Parent"
         );
 
         let root_total_time: Duration = data
@@ -129,13 +111,7 @@ pub fn print_summary(min_proportion_of_root: f64) {
         sorted_children.sort_by_key(|(name, _)| *name);
 
         for (name, node) in sorted_children {
-            print_node_recursive(
-                node,
-                name,
-                0,
-                root_total_time,
-                min_proportion_of_root,
-            );
+            print_node_recursive(node, name, 0, root_total_time);
         }
     }
 
@@ -242,18 +218,13 @@ impl Drop for TimedBlockGuard {
         time_block_end();
     }
 }
-///     time!("my_function_call", my_function());
-/// });
+
+/// Macro to time a block of code or an expression.
 ///
-/// // Print full summary (collapse threshold is 0.0)
-/// print_summary(0.0);
+/// It measures the "own time" of the block, excluding time spent in nested
+/// `time!` blocks. Timing a block also increments its "hit" count.
 ///
-/// // Print summary, collapsing nodes that are less than 1% (0.01) of total time
-/// print_summary(0.01);
-///
-/// reset();
-/// ```
-#[macro_export]
+/// # Examples
 ///
 /// ```ignore
 /// use sep1::profiler::{time, print_summary, reset};
@@ -289,7 +260,7 @@ macro_rules! time {
 ///     hit!("some_condition was true");
 /// }
 ///
-/// print_summary(0.0); // Show all nodes
+/// print_summary();
 /// ```
 #[macro_export]
 macro_rules! hit {
