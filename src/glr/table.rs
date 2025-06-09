@@ -478,7 +478,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
                 }
                 Stage6ShiftsAndReduces::Reduce(production_id) => {
                     let production = productions.get(production_id.0).unwrap();
-                    let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
+                    let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).expect(format!("{:?} not found in non_terminal_map {:?}", production.lhs, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
                     let len = production.rhs.len();
                     Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len }
                 }
@@ -487,7 +487,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
                     let mut len_to_nt_to_production_id: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
                     for production_id in reduces {
                         let production = productions.get(production_id.0).unwrap();
-                        let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
+                        let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).expect(format!("{:?} not found in non_terminal_map {:?}", production.lhs, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
                         let len = production.rhs.len();
                         len_to_nt_to_production_id.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id);
                     }
@@ -498,7 +498,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
         }
 
         for (nonterminal, next_item_set) in row.gotos {
-            let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
+            let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(format!("{:?} not found in non_terminal_map {:?}", nonterminal, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
             let goto = item_set_map.get_by_left(&next_item_set).map_or(Goto::Accept, |&next_state_id| Goto::State(next_state_id));
             if goto == Goto::Accept { assert!(next_item_set.is_empty()); }
             gotos.insert(non_terminal_id, goto);
