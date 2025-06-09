@@ -98,7 +98,7 @@ fn detect_cycles_recursive(
 ///    A rule `A ::= α` contributes to a potential cycle if `α` consists of
 /// 3. Left-nullable left recursion: Rules of the form `A ::= B1 ... Bk A ...` where `k > 0`
 ///    zero or more nullable non-terminals, followed by a single non-terminal `B`,
-///    and nothing else (i.e., `A ::= Nullable* B`).
+///    and nothing else (i.e., `A ::= Nullable* B).
 pub fn validate(productions: &[Production]) -> Result<(), String> {
     // --- Check 1: Missing Productions ---
     let mut lhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
@@ -620,5 +620,75 @@ pub fn resolve_direct_right_recursion(
     productions: &mut Vec<Production>,
     mut new_name_generator: impl FnMut(&str) -> String,
 ) {
-    todo!("resolve_direct_right_recursion");
+    // This function transforms direct right-recursion into left-recursion.
+    // A set of rules for a non-terminal `A` of the form:
+    //   A -> α₁ A | α₂ A | ... | αₘ A  (right-recursive rules)
+    //   A -> β₁ | β₂ | ... | βₙ          (non-recursive rules)
+    // generates the language (α₁|...|αₘ)* (β₁|...|βₙ).
+    //
+    // This can be rewritten using a new non-terminal `A'` to be left-recursive:
+    //   A  -> A' β₁ | A' β₂ | ... | A' βₙ
+    //   A' -> A' α₁ | A' α₂ | ... | A' αₘ | ε
+    // This new form generates the same language and is left-recursive.
+    //
+    // This implementation only considers "simple" direct right-recursion, where a rule
+    // is of the form `A -> α A` and `α` does not contain `A`. More complex recursions
+    // like `A -> α A β A` or `A -> α A A` are not transformed and are treated as
+    // non-recursive "β" terms.
+
+    // 1. Group all productions by their LHS non-terminal.
+    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
+    for prod in productions.iter().cloned() {
+        prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod);
+    }
+
+    let mut new_productions = Vec::new();
+    let nts_to_process: Vec<NonTerminal> = prods_by_lhs.keys().cloned().collect();
+
+    for nt in nts_to_process {
+        let prods_for_nt = prods_by_lhs.get(&nt).unwrap();
+
+        // 2. Partition rules for `nt` into simple direct right-recursive and others.
+        let (recursive_rules, other_rules): (Vec<_>, Vec<_>) = prods_for_nt.iter().cloned().partition(|p| {
+            // A rule `A -> α A` is simple direct right-recursive if:
+            // a) `α` is not empty (i.e., rule is not `A -> A`).
+            if p.rhs.len() < 2 { return false; }
+            // b) The last symbol is `A`.
+            if p.rhs.last() != Some(&Symbol::NonTerminal(p.lhs.clone())) { return false; }
+            // c) `α` (the prefix) does not contain `A`.
+            let alpha = &p.rhs[..p.rhs.len() - 1];
+            !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
+        });
+
+        if recursive_rules.is_empty() {
+            // No simple direct right-recursion for this NT, so keep its original rules.
+            new_productions.extend(prods_for_nt.clone());
+        } else {
+            // 3. Found recursion, perform the transformation.
+            let new_nt = NonTerminal(new_name_generator(&nt.0));
+
+            // 4. Create rules for the new non-terminal `A'`.
+            // For each recursive rule `A -> αᵢ A`, create `A' -> A' αᵢ`.
+            for rec_rule in &recursive_rules {
+                let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
+                let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
+                new_rhs.extend_from_slice(alpha);
+                new_productions.push(Production { lhs: new_nt.clone(), rhs: new_rhs });
+            }
+            new_productions.push(Production { lhs: new_nt.clone(), rhs: vec![] }); // A' -> ε
+
+            // 5. Create new rules for the original non-terminal `A`.
+            // For each non-recursive rule `A -> βⱼ`, create `A -> A' βⱼ`.
+            for non_rec_rule in &other_rules {
+                let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
+                new_rhs.extend_from_slice(&non_rec_rule.rhs);
+                new_productions.push(Production { lhs: nt.clone(), rhs: new_rhs });
+            }
+        }
+    }
+
+    // 6. Replace the original productions with the new set.
+    productions.clear();
+    productions.extend(new_productions);
 }
+
