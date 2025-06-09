@@ -1251,6 +1251,7 @@ impl<'a> GrammarConstraintState<'a> {
             }
     
             crate::profiler::print_summary();
+            crate::profiler::print_summary_flat();
             crate::profiler::reset();
     
             crate::debug!(2, "Done computing mask");
