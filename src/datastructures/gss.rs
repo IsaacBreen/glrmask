@@ -67,7 +67,11 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 }
                 let self_bv_len = round_down_to_power_of_10(self_bv.inner().ranges_len());
                 let other_bv_len = round_down_to_power_of_10(other_bv.inner().ranges_len());
-                let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv_len, other_bv_len);
+                let overlap = (self_bv & &other_bv).len() as f64 / (self_bv | &other_bv).len() as f64;
+                // Round overlap to 2 dp
+                let overlap = format!("{:.2}", overlap);
+                let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}, overlap: {}",
+                    self_bv_len, other_bv_len, overlap);
                 timeit!(time_str,
                     *self_bv |= &other_bv
                 );
@@ -292,12 +296,12 @@ pub mod acc_mod {
     }
 
     impl PathAccumulator for Acc {
-        // #[time_it("Acc::union_assign")]
+        #[time_it("Acc::union_assign")]
         fn union_assign(&mut self, other: Self) {
             self.acc.union_assign(other.acc);
             allowed_terminals_union_assign(&mut self.allowed_terminals, other.allowed_terminals);
         }
-        // #[time_it("Acc::intersect_assign")]
+        #[time_it("Acc::intersect_assign")]
         fn intersect_assign(&mut self, right: Self) {
             self.acc.intersect_assign(right.acc);
             allowed_terminals_intersect_assign(&mut self.allowed_terminals, right.allowed_terminals);
