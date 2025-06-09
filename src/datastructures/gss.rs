@@ -57,27 +57,28 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 //     println!("other_bv: {:?}", &other_bv);
                 // }
                 // let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
-                fn round_down_to_power_of_10(x: usize) -> usize {
-                    if x == 0 {
-                        return 0;
-                    }
 
-                    let mut power = 1;
-                    while power * 10 <= x {
-                        power *= 10;
-                    }
-                    power
-                }
-                let self_bv_len = round_down_to_power_of_10(self_bv.inner().ranges_len());
-                let other_bv_len = round_down_to_power_of_10(other_bv.inner().ranges_len());
-                let overlap_len = round_down_to_power_of_10((&*self_bv & &other_bv).inner().ranges_len());
-                let difference_len = round_down_to_power_of_10(((&*self_bv | &other_bv) - (&*self_bv & &other_bv)).inner().ranges_len());
-                let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}, overlap_len: {}, difference_len: {}",
-                    self_bv_len, other_bv_len, overlap_len, difference_len
-                );
-                timeit!(time_str,
+                // fn round_down_to_power_of_10(x: usize) -> usize {
+                //     if x == 0 {
+                //         return 0;
+                //     }
+                //
+                //     let mut power = 1;
+                //     while power * 10 <= x {
+                //         power *= 10;
+                //     }
+                //     power
+                // }
+                // let self_bv_len = round_down_to_power_of_10(self_bv.inner().ranges_len());
+                // let other_bv_len = round_down_to_power_of_10(other_bv.inner().ranges_len());
+                // let overlap_len = round_down_to_power_of_10((&*self_bv & &other_bv).inner().ranges_len());
+                // let difference_len = round_down_to_power_of_10(((&*self_bv | &other_bv) - (&*self_bv & &other_bv)).inner().ranges_len());
+                // let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}, overlap_len: {}, difference_len: {}",
+                //     self_bv_len, other_bv_len, overlap_len, difference_len
+                // );
+                // timeit!(time_str,
                     *self_bv |= &other_bv
-                );
+                // );
                 // An empty bitset resulting from a union is still Some(empty_bv), not None.
             }
             (None, Some(other_bv)) => {
@@ -95,7 +96,9 @@ impl PathAccumulator for Option<LLMTokenBV> {
     fn intersect_assign(&mut self, right: Self) {
         match (self.as_mut(), right) {
             (Some(self_bv), Some(right_bv)) => {
-                *self_bv &= right_bv;
+                if self_bv.inner() == right_bv.inner() {
+                    return;
+                }*self_bv &= right_bv;
             }
             (None, Some(right_bv)) => {
                 *self = Some(right_bv);
