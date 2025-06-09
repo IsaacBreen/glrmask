@@ -602,8 +602,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     //     }
     // }).collect();
 
-    // Remove tokens longer than length 4
-    gpt2_raw_vocab.retain(|_, v| v.len() <= 4);
+    // Remove tokens longer than length
+    gpt2_raw_vocab.retain(|v, _| v.len() <= 3);
 
     let mut llm_token_map = LLMTokenMap::new();
     let mut max_original_llm_token_id_val: usize = 0;
