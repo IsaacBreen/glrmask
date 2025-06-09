@@ -50,7 +50,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 if self_bv.inner() == other_bv.inner() {
                     return;
                 }
-                let BIG_RANGE_LEN = 100;
+                let BIG_RANGE_LEN = 2;
                 if other_bv.inner().ranges_len() > BIG_RANGE_LEN && self_bv.inner().ranges_len() > BIG_RANGE_LEN {
                     println!("WARNING: union_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN && other_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
                     println!("self_bv: {:?}", &self_bv);
