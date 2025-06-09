@@ -585,7 +585,22 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // gpt2_raw_vocab.insert("  ".to_string(), 3);
     // gpt2_raw_vocab.insert("    ".to_string(), 4);
 
-    todo!();
+    // Filter the vocabulary. The goal is to keep tokens that are NOT of the form "Ġ" + alphanumeric,
+    // but if they ARE of that form, only keep them if they are "ĠCali" + alphanumeric.
+    let gpt2_raw_vocab: BTreeMap<String, u32> = gpt2_raw_vocab.into_iter().filter(|(token, _id)| {
+        let is_alphanumeric_continuation =
+            token.starts_with('Ġ') &&
+            token.len() > 1 &&
+            token.chars().skip(1).all(|c| c.is_ascii_alphanumeric());
+
+        if is_alphanumeric_continuation {
+            // This is a token of the form " [a-zA-Z0-9]+". Only keep it if it matches " Cali[...]"
+            token.starts_with("ĠCali")
+        } else {
+            // Keep all other tokens that don't match the initial pattern.
+            true
+        }
+    }).collect();
 
     let mut llm_token_map = LLMTokenMap::new();
     let mut max_original_llm_token_id_val: usize = 0;
