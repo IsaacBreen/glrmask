@@ -1129,13 +1129,13 @@ impl<'a> GrammarConstraintState<'a> {
         crate::time!("GrammarConstraintState::get_mask", {
             crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
             let mut final_mask_internal = HybridBitset::zeros();
-    
+
             if self.state.is_empty() {
                 return self.parent.internal_bv_to_original(&final_mask_internal);
             }
-    
+
             let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, usize>::new()));
-    
+
             let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
             for (tokenizer_state_id, glr_state) in &self.state {
                 // crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
@@ -1171,16 +1171,16 @@ impl<'a> GrammarConstraintState<'a> {
                     panic!("No precomputed trie found for tokenizer state {:?}.", tokenizer_state_id);
                 }
             }
-    
+
             if initial_values_for_map.is_empty() {
                  // This can happen if all GLR states had empty GSS stacks or no corresponding precomputed tries.
                  crate::debug!(2, "No valid initial states for get_mask's special_map traversal.");
                  return self.parent.internal_bv_to_original(&final_mask_internal);
             }
-    
+
             let step_counts_clone1 = Arc::clone(&step_counts);
             let step_counts_clone2 = Arc::clone(&step_counts);
-    
+
             Trie::special_map(
                 initial_values_for_map,
                 // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
@@ -1190,12 +1190,12 @@ impl<'a> GrammarConstraintState<'a> {
                     // glr_s.log_gss("Stepping with edge_llm_tokens_bv", grammar_token_opt.unwrap_or(TerminalID(0)));
                     intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
                     // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
-    
+
                     if let Some(gtid) = grammar_token_opt {
                         *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
                         glr_s.step(*gtid);
                     }
-    
+
                     if glr_s.is_ok() {
                         Some(glr_s)
                     } else {
@@ -1211,35 +1211,35 @@ impl<'a> GrammarConstraintState<'a> {
                     if final_glr_s.active_state.stack.is_empty() {
                         return false;
                     }
-    
-    
+
+
                     if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
                         let glr_active_tokens = final_glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
                         let mask_contribution = &glr_active_tokens & clean_end_bv;
                         final_mask_internal |= mask_contribution;
                     }
-    
+
                     for (grammar_token, finalizer) in precomputed_node_data.value.finalizers() {
                         // crate::debug!(4, "Finalizing token {}", grammar_token.0);
                         let mut temp_glr_s_for_finalizer_step = final_glr_s.clone();
                         *step_counts_clone2.lock().unwrap().entry(*grammar_token).or_insert(0) += 1;
                         temp_glr_s_for_finalizer_step.step(*grammar_token);
-    
+
                         if temp_glr_s_for_finalizer_step.is_ok() {
                             let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
                             let mask_contribution = &glr_active_after_step & &finalizer.content;
                             final_mask_internal |= &mask_contribution;
                         }
                     }
-                    true 
+                    true
                 },
             );
-    
+
             let counts = step_counts.lock().unwrap();
             if !counts.is_empty() {
                 let mut sorted_counts: Vec<_> = counts.iter().collect();
                 sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(*count));
-    
+
                 let mut log_msg = String::from("get_mask step() counts:");
                 for (terminal_id, count) in sorted_counts {
                     let terminal_name = self.parent.parser.terminal_map.get_by_right(terminal_id)
@@ -1249,10 +1249,10 @@ impl<'a> GrammarConstraintState<'a> {
                 }
                 crate::debug!(2, "{}", log_msg);
             }
-    
-            crate::profiler::print_summary();
+
+            crate::profiler::print_summary(0.01);
             crate::profiler::reset();
-    
+
             crate::debug!(2, "Done computing mask");
             self.parent.internal_bv_to_original(&final_mask_internal)
         })
