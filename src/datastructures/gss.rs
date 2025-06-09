@@ -267,12 +267,12 @@ pub mod acc_mod {
     }
 
     impl PathAccumulator for Acc {
-        // #[time_it("Acc::union_assign")]
+        #[time_it("Acc::union_assign")]
         fn union_assign(&mut self, other: Self) {
             self.acc.union_assign(other.acc);
             allowed_terminals_union_assign(&mut self.allowed_terminals, other.allowed_terminals);
         }
-        // #[time_it("Acc::intersect_assign")]
+        #[time_it("Acc::intersect_assign")]
         fn intersect_assign(&mut self, right: Self) {
             self.acc.intersect_assign(right.acc);
             allowed_terminals_intersect_assign(&mut self.allowed_terminals, right.allowed_terminals);
