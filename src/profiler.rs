@@ -67,7 +67,7 @@ fn print_node_recursive(
     };
 
     println!(
-        "{:<50} {:>10} {:>12.3}ms {:>12.3}ms {:>7.1}%",
+        "{:<80} {:>10} {:>12.3}ms {:>12.3}ms {:>7.1}%",
         name_with_indent, node.hits, total_ms, own_ms, percentage
     );
 
@@ -96,7 +96,7 @@ pub fn print_summary() {
     if !no_timing_data {
         println!("\n[Hierarchical Timings]");
         println!(
-            "{:<50} {:>10} {:>12} {:>12} {:>8}",
+            "{:<80} {:>10} {:>12} {:>12} {:>8}",
             "Name", "Hits", "Total Time", "Own Time", "% of Parent"
         );
 
