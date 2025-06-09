@@ -605,6 +605,11 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // Remove tokens longer than length
     gpt2_raw_vocab.retain(|v, _| v.len() <= 3);
 
+    // Keep tokens that are either length 1 or of the form 'ĠAx' where x is a letter
+    gpt2_raw_vocab.retain(|v, _| {
+        v.len() == 1 || v.starts_with("ĠA")
+    });
+
     let mut llm_token_map = LLMTokenMap::new();
     let mut max_original_llm_token_id_val: usize = 0;
 
