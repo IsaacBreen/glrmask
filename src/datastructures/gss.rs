@@ -492,7 +492,18 @@ impl GSSNode {
                     entry.insert(other_pred_arc.clone());
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    Arc::make_mut(entry.get_mut()).merge(other_pred_arc);
+                    let self_pred_arc = entry.get_mut();
+                    if Arc::ptr_eq(self_pred_arc, other_pred_arc) {
+                        continue;
+                    }
+                    // Optimization: If the predecessors are structurally identical (ignoring their own acc),
+                    // we can just merge the accumulators and stop the recursion. This avoids deep, expensive
+                    // merges on sub-graphs that have already been canonicalized by simplification.
+                    if self_pred_arc.hash_key_cache == other_pred_arc.hash_key_cache && self_pred_arc.predecessors == other_pred_arc.predecessors {
+                        Arc::make_mut(self_pred_arc).acc.union_assign(other_pred_arc.acc.clone());
+                    } else {
+                        Arc::make_mut(self_pred_arc).merge(other_pred_arc);
+                    }
                 }
             }
         }
