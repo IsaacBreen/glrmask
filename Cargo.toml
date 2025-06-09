@@ -3,6 +3,10 @@ name = "sep1"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["attributes"]
+attributes = ["dep:profiler_attribute"]
+
 [dependencies]
 bimap = "0.6.3"
 regex = "1.11.1"
@@ -18,6 +22,7 @@ reqwest = { version = "0.12.15", features = ["blocking", "json"] }
 range-set-blaze = { version = "0.1.16", default-features = false, features = ["alloc"] }
 
 # Add the derive macro crate
+profiler_attribute = { path = "profiler_attribute", optional = true }
 json_convertible_derive = { path = "json_convertible_derive" }
 deterministic-hash = "1.0.1"
 crc = "3.3.0"
