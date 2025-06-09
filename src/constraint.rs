@@ -1126,134 +1126,136 @@ pub struct GrammarConstraintState<'a> {
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
-        crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
-        let mut final_mask_internal = HybridBitset::zeros();
-
-        if self.state.is_empty() {
-            return self.parent.internal_bv_to_original(&final_mask_internal);
-        }
-
-        let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, usize>::new()));
-
-        let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
-        for (tokenizer_state_id, glr_state) in &self.state {
-            // crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
-            // Ensure the GLR state's GSS stack is not empty before proceeding
-            if glr_state.active_state.stack.is_empty() {
-                continue;
+        crate::time!("GrammarConstraintState::get_mask", {
+            crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
+            let mut final_mask_internal = HybridBitset::zeros();
+    
+            if self.state.is_empty() {
+                return self.parent.internal_bv_to_original(&final_mask_internal);
             }
-            if let Some(precomputed_trie_root_data) = self.parent.precomputed.get(tokenizer_state_id) {
-                let mut forbidden_llm_tokens = LLMTokenBV::zeros();
-                forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.internal_max_llm_token + 1);
-                let allowed_terminals_for_gss = glr_state.active_state.stack.acc2().allowed_terminals();
-                for (tokenizer_state_id, allowed_terminals_for_state) in allowed_terminals_for_gss {
-                    let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
-                    for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
-                        if !allowed_terminals_for_state.contains(terminal_id.0) {
-                            // This terminal is not allowed
-                            // crate::debug!(4, "Allowed terminals for GSS: {:?}", allowed_terminals_for_gss);
-                            // crate::debug!(4, "Possible matches for state {}: {:?}", tokenizer_state_id.0, possible_matches_for_state);
-                            // crate::debug!(4, "Subtracting forbidden LLM tokens for terminal {:?} (ID {}) for state {}: {:?}", self.parent.parser.terminal_map.get_by_right(terminal_id).map(|t| t.0.clone()).unwrap_or("UNKNOWN_TERMINAL".to_string()), terminal_id.0, tokenizer_state_id.0, llm_tokens_that_match_this_terminal);
-                            forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
+    
+            let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, usize>::new()));
+    
+            let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
+            for (tokenizer_state_id, glr_state) in &self.state {
+                // crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
+                // Ensure the GLR state's GSS stack is not empty before proceeding
+                if glr_state.active_state.stack.is_empty() {
+                    continue;
+                }
+                if let Some(precomputed_trie_root_data) = self.parent.precomputed.get(tokenizer_state_id) {
+                    let mut forbidden_llm_tokens = LLMTokenBV::zeros();
+                    forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.internal_max_llm_token + 1);
+                    let allowed_terminals_for_gss = glr_state.active_state.stack.acc2().allowed_terminals();
+                    for (tokenizer_state_id, allowed_terminals_for_state) in allowed_terminals_for_gss {
+                        let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
+                        for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
+                            if !allowed_terminals_for_state.contains(terminal_id.0) {
+                                // This terminal is not allowed
+                                // crate::debug!(4, "Allowed terminals for GSS: {:?}", allowed_terminals_for_gss);
+                                // crate::debug!(4, "Possible matches for state {}: {:?}", tokenizer_state_id.0, possible_matches_for_state);
+                                // crate::debug!(4, "Subtracting forbidden LLM tokens for terminal {:?} (ID {}) for state {}: {:?}", self.parent.parser.terminal_map.get_by_right(terminal_id).map(|t| t.0.clone()).unwrap_or("UNKNOWN_TERMINAL".to_string()), terminal_id.0, tokenizer_state_id.0, llm_tokens_that_match_this_terminal);
+                                forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
+                            }
                         }
                     }
-                }
-                let mut glr_state = glr_state.clone();
-                if forbidden_llm_tokens != (LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.internal_max_llm_token + 1)) {
-                    // glr_state.log_gss(format!("Subtracting forbidden LLM tokens: {:?}", forbidden_llm_tokens).as_str(), TerminalID(0));
-                    subtract_llm_tokens_and_prune_arc(&mut glr_state.active_state.stack, &forbidden_llm_tokens, &mut HashMap::new());
-                    // glr_state.log_gss("Done subtracting forbidden LLM tokens.", TerminalID(0));
-                }
-                let precomputed_trie_arc = Arc::new(Mutex::new(precomputed_trie_root_data.clone()));
-                initial_values_for_map.push((precomputed_trie_arc, glr_state));
-            } else {
-                panic!("No precomputed trie found for tokenizer state {:?}.", tokenizer_state_id);
-            }
-        }
-
-        if initial_values_for_map.is_empty() {
-             // This can happen if all GLR states had empty GSS stacks or no corresponding precomputed tries.
-             crate::debug!(2, "No valid initial states for get_mask's special_map traversal.");
-             return self.parent.internal_bv_to_original(&final_mask_internal);
-        }
-
-        let step_counts_clone1 = Arc::clone(&step_counts);
-        let step_counts_clone2 = Arc::clone(&step_counts);
-
-        Trie::special_map(
-            initial_values_for_map,
-            // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
-            |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
-                let mut glr_s = glr_s.clone();
-                // crate::debug!(4, "Stepping with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
-                // glr_s.log_gss("Stepping with edge_llm_tokens_bv", grammar_token_opt.unwrap_or(TerminalID(0)));
-                intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
-                // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
-
-                if let Some(gtid) = grammar_token_opt {
-                    *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
-                    glr_s.step(*gtid);
-                }
-
-                if glr_s.is_ok() {
-                    Some(glr_s)
-                } else {
-                    None
-                }
-            },
-            // merge_fn
-            |glr_s1, glr_s2| {
-                glr_s1.merge_with(glr_s2);
-            },
-            // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
-            |precomputed_node_data, final_glr_s| {
-                if final_glr_s.active_state.stack.is_empty() {
-                    return false;
-                }
-
-
-                if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
-                    let glr_active_tokens = final_glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
-                    let mask_contribution = &glr_active_tokens & clean_end_bv;
-                    final_mask_internal |= mask_contribution;
-                }
-
-                for (grammar_token, finalizer) in precomputed_node_data.value.finalizers() {
-                    // crate::debug!(4, "Finalizing token {}", grammar_token.0);
-                    let mut temp_glr_s_for_finalizer_step = final_glr_s.clone();
-                    *step_counts_clone2.lock().unwrap().entry(*grammar_token).or_insert(0) += 1;
-                    temp_glr_s_for_finalizer_step.step(*grammar_token);
-
-                    if temp_glr_s_for_finalizer_step.is_ok() {
-                        let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
-                        let mask_contribution = &glr_active_after_step & &finalizer.content;
-                        final_mask_internal |= &mask_contribution;
+                    let mut glr_state = glr_state.clone();
+                    if forbidden_llm_tokens != (LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.internal_max_llm_token + 1)) {
+                        // glr_state.log_gss(format!("Subtracting forbidden LLM tokens: {:?}", forbidden_llm_tokens).as_str(), TerminalID(0));
+                        subtract_llm_tokens_and_prune_arc(&mut glr_state.active_state.stack, &forbidden_llm_tokens, &mut HashMap::new());
+                        // glr_state.log_gss("Done subtracting forbidden LLM tokens.", TerminalID(0));
                     }
+                    let precomputed_trie_arc = Arc::new(Mutex::new(precomputed_trie_root_data.clone()));
+                    initial_values_for_map.push((precomputed_trie_arc, glr_state));
+                } else {
+                    panic!("No precomputed trie found for tokenizer state {:?}.", tokenizer_state_id);
                 }
-                true 
-            },
-        );
-
-        let counts = step_counts.lock().unwrap();
-        if !counts.is_empty() {
-            let mut sorted_counts: Vec<_> = counts.iter().collect();
-            sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(*count));
-
-            let mut log_msg = String::from("get_mask step() counts:");
-            for (terminal_id, count) in sorted_counts {
-                let terminal_name = self.parent.parser.terminal_map.get_by_right(terminal_id)
-                    .map(|s| s.0.as_str())
-                    .unwrap_or("UNKNOWN_TERMINAL");
-                log_msg.push_str(&format!("\n  - '{}': {}", terminal_name, count));
             }
-            crate::debug!(2, "{}", log_msg);
-        }
-
-        crate::profiler::print_summary();
-        crate::profiler::reset();
-
-        crate::debug!(2, "Done computing mask");
-        self.parent.internal_bv_to_original(&final_mask_internal)
+    
+            if initial_values_for_map.is_empty() {
+                 // This can happen if all GLR states had empty GSS stacks or no corresponding precomputed tries.
+                 crate::debug!(2, "No valid initial states for get_mask's special_map traversal.");
+                 return self.parent.internal_bv_to_original(&final_mask_internal);
+            }
+    
+            let step_counts_clone1 = Arc::clone(&step_counts);
+            let step_counts_clone2 = Arc::clone(&step_counts);
+    
+            Trie::special_map(
+                initial_values_for_map,
+                // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
+                |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
+                    let mut glr_s = glr_s.clone();
+                    // crate::debug!(4, "Stepping with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
+                    // glr_s.log_gss("Stepping with edge_llm_tokens_bv", grammar_token_opt.unwrap_or(TerminalID(0)));
+                    intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
+                    // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
+    
+                    if let Some(gtid) = grammar_token_opt {
+                        *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
+                        glr_s.step(*gtid);
+                    }
+    
+                    if glr_s.is_ok() {
+                        Some(glr_s)
+                    } else {
+                        None
+                    }
+                },
+                // merge_fn
+                |glr_s1, glr_s2| {
+                    glr_s1.merge_with(glr_s2);
+                },
+                // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
+                |precomputed_node_data, final_glr_s| {
+                    if final_glr_s.active_state.stack.is_empty() {
+                        return false;
+                    }
+    
+    
+                    if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
+                        let glr_active_tokens = final_glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                        let mask_contribution = &glr_active_tokens & clean_end_bv;
+                        final_mask_internal |= mask_contribution;
+                    }
+    
+                    for (grammar_token, finalizer) in precomputed_node_data.value.finalizers() {
+                        // crate::debug!(4, "Finalizing token {}", grammar_token.0);
+                        let mut temp_glr_s_for_finalizer_step = final_glr_s.clone();
+                        *step_counts_clone2.lock().unwrap().entry(*grammar_token).or_insert(0) += 1;
+                        temp_glr_s_for_finalizer_step.step(*grammar_token);
+    
+                        if temp_glr_s_for_finalizer_step.is_ok() {
+                            let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                            let mask_contribution = &glr_active_after_step & &finalizer.content;
+                            final_mask_internal |= &mask_contribution;
+                        }
+                    }
+                    true 
+                },
+            );
+    
+            let counts = step_counts.lock().unwrap();
+            if !counts.is_empty() {
+                let mut sorted_counts: Vec<_> = counts.iter().collect();
+                sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(*count));
+    
+                let mut log_msg = String::from("get_mask step() counts:");
+                for (terminal_id, count) in sorted_counts {
+                    let terminal_name = self.parent.parser.terminal_map.get_by_right(terminal_id)
+                        .map(|s| s.0.as_str())
+                        .unwrap_or("UNKNOWN_TERMINAL");
+                    log_msg.push_str(&format!("\n  - '{}': {}", terminal_name, count));
+                }
+                crate::debug!(2, "{}", log_msg);
+            }
+    
+            crate::profiler::print_summary();
+            crate::profiler::reset();
+    
+            crate::debug!(2, "Done computing mask");
+            self.parent.internal_bv_to_original(&final_mask_internal)
+        })
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
