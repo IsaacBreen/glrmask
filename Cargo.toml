@@ -19,6 +19,7 @@ range-set-blaze = { version = "0.1.16", default-features = false, features = ["a
 
 # Add the derive macro crate
 json_convertible_derive = { path = "json_convertible_derive" }
+profiler_macro = { path = "profiler_macro" }
 deterministic-hash = "1.0.1"
 crc = "3.3.0"
 rand = "0.9.1"
