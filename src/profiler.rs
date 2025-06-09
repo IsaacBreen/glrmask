@@ -161,30 +161,6 @@ macro_rules! time {
     }};
 }
 
-/// Attribute to time a function using a decorator.
-///
-/// This is a convenience wrapper around the `time!` macro. It will automatically
-/// use the function's name as the profiler event name.
-///
-/// This is only available if the `attributes` feature is enabled (on by default).
-///
-/// # Example
-///
-/// ```ignore
-/// use sep1::profiler::{timed, print_summary, reset};
-///
-/// #[timed]
-/// fn my_function() {
-///     std::thread::sleep(std::time::Duration::from_millis(50));
-/// }
-///
-/// my_function();
-/// print_summary();
-/// reset();
-/// ```
-#[cfg(feature = "attributes")]
-pub use profiler_attribute::timed;
-
 /// Macro to record a single hit for a named event.
 ///
 /// # Example
