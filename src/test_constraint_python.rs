@@ -623,6 +623,10 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         max_original_llm_token_id_val
     );
     println!("GrammarConstraint constructed successfully.");
+    println!("GrammarConstraint original to internal ID map:");
+    for (original_id, internal_id) in grammar_constraint.original_to_internal_id_bimap.iter() {
+        println!("  {}: {:?}", original_id, internal_id);
+    }
 
     // Ensure there's an edge in the root precompute node for state 0 that has the terminal for `IGNORE[0][0][1]` on the edge key and which the LLM token for "\n" on the edge value.
     {

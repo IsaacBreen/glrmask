@@ -52,7 +52,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 }
                 let BIG_RANGE_LEN = 100;
                 if other_bv.inner().ranges_len() > BIG_RANGE_LEN && self_bv.inner().ranges_len() > BIG_RANGE_LEN {
-                    println!("WARNING: union_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN || other_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
+                    println!("WARNING: union_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN && other_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
                     println!("self_bv: {:?}", &self_bv);
                     println!("other_bv: {:?}", &other_bv);
                 }
@@ -101,7 +101,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 }
                 let BIG_RANGE_LEN = 100;
                 if right_bv.inner().ranges_len() > BIG_RANGE_LEN && self_bv.inner().ranges_len() > BIG_RANGE_LEN {
-                    println!("WARNING: intersection_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN || right_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, right_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), right_bv.inner().ranges_len());
+                    println!("WARNING: intersection_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN && right_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, right_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), right_bv.inner().ranges_len());
                     println!("self_bv: {:?}", &self_bv);
                     println!("right_bv: {:?}", &right_bv);
                 }
