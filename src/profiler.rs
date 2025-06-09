@@ -142,15 +142,21 @@ fn time_block_start(name: String) {
     let mut data = profiler().lock().unwrap();
     let now = Instant::now();
 
+    // Get parent's own time start if it exists. This immutable borrow ends immediately.
+    let parent_own_time_start_opt = data.timing_stack.last().map(|(_, _, t)| *t);
+
+    // Collect the path to the parent node to avoid conflicting borrows.
+    let path: Vec<String> = data.timing_stack.iter().map(|(s, _, _)| s.clone()).collect();
+
+    // Now, get a mutable reference to the parent node and traverse.
     let mut current_node = &mut data.call_tree;
-    // Traverse to the parent node.
-    for (node_name, _, _) in data.timing_stack.iter() {
+    for node_name in &path {
         current_node = current_node.children.get_mut(node_name).unwrap();
     }
 
     // If there is a parent, pause its own-time clock.
-    if let Some((_, _, parent_own_time_start)) = data.timing_stack.last() {
-        let own_time_lapsed = now.duration_since(*parent_own_time_start);
+    if let Some(parent_own_time_start) = parent_own_time_start_opt {
+        let own_time_lapsed = now.duration_since(parent_own_time_start);
         current_node.own_time += own_time_lapsed;
     }
 
@@ -171,9 +177,13 @@ fn time_block_end() {
         let total_duration = now.duration_since(total_start_time);
         let own_duration = now.duration_since(own_start_time);
 
+        // The `timing_stack` has been popped, so it now represents the parent path.
+        // Collect the path to avoid conflicting borrows.
+        let parent_path: Vec<String> = data.timing_stack.iter().map(|(s, _, _)| s.clone()).collect();
+
         // Get a mutable reference to the parent of the node that just ended.
         let mut parent_node = &mut data.call_tree;
-        for (node_name, _, _) in data.timing_stack.iter() {
+        for node_name in &parent_path {
             parent_node = parent_node.children.get_mut(node_name).unwrap();
         }
 
