@@ -50,13 +50,13 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 if self_bv.inner() == other_bv.inner() {
                     return;
                 }
-                // let BIG_RANGE_LEN = 1000;
-                // if other_bv.inner().ranges_len() > BIG_RANGE_LEN || self_bv.inner().ranges_len() > BIG_RANGE_LEN {
-                //     println!("WARNING: union_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN || other_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
-                //     println!("self_bv: {:?}", &self_bv);
-                //     println!("other_bv: {:?}", &other_bv);
-                // }
-                // let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
+                let BIG_RANGE_LEN = 1000;
+                if other_bv.inner().ranges_len() > BIG_RANGE_LEN || self_bv.inner().ranges_len() > BIG_RANGE_LEN {
+                    println!("WARNING: union_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN || other_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
+                    println!("self_bv: {:?}", &self_bv);
+                    println!("other_bv: {:?}", &other_bv);
+                }
+                let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
 
                 // fn round_down_to_power_of_10(x: usize) -> usize {
                 //     if x == 0 {
