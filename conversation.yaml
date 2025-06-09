@@ -691,7 +691,7 @@ local_system:
               $crate::profiler::hit($name)
           };
       }
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
 system:
   message: |2
 
@@ -705,7 +705,6 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - copy-all/paste
     - copy-one/paste
   code_completion_model:
     - gemini/gemini-2.5-flash-preview-05-20
@@ -1065,5 +1064,71 @@ messages:
       filename: src/profiler.rs
   - user: Modify this to print the name columns at the END, not at the beginning of
       the row.
+    metadata:
+  - assistant: |-
+      Of course! I can help with that. Moving the name column to the end of the profiler output is a good way to make the numerical data more prominent and easier to compare.
+
+      Here are the changes for `src/profiler.rs` to adjust the print format.
+
+      ```diff
+      --- a/src/profiler.rs
+      +++ b/src/profiler.rs
+      @@ -63,8 +63,8 @@
+           let percentage_str = format!("{:.1}%", percentage);
+       
+           println!(
+      -        "{:<100} {:>10} {:>15} {:>15} {:>15}",
+      -        name_with_indent, node.hits, total_str, own_str, percentage_str
+      +        "{:>10} {:>15} {:>15} {:>15}  {}",
+      +        node.hits, total_str, own_str, percentage_str, name_with_indent
+           );
+       
+           let mut sorted_children: Vec<_> = node.children.iter().collect();
+      @@ -90,8 +90,8 @@
+           if !no_timing_data {
+               println!("\n[Hierarchical Timings]");
+               println!(
+      -            "{:<100} {:>10} {:>15} {:>15} {:>15}",
+      -            "Name", "Hits", "Total Time", "Own Time", "% of Parent"
+      +            "{:>10} {:>15} {:>15} {:>15}  {}",
+      +            "Hits", "Total Time", "Own Time", "% of Parent", "Name"
+               );
+       
+               let root_total_time: Duration = data
+      @@ -143,8 +143,8 @@
+       
+               println!("\n[Flat Timings]");
+               println!(
+      -            "{:<100} {:>10} {:>15} {:>15}",
+      -            "Name", "Hits", "Total Time", "Own Time"
+      +            "{:>10} {:>15} {:>15}  {}",
+      +            "Hits", "Total Time", "Own Time", "Name"
+               );
+       
+               let mut sorted_list: Vec<_> = flat_map.iter().collect();
+      @@ -157,8 +157,8 @@
+                   let own_str = format!("{:.3}ms", own_ms);
+       
+                   println!(
+      -                "{:<100} {:>10} {:>15} {:>15}",
+      -                name, node.hits, total_str, own_str
+      +                "{:>10} {:>15} {:>15}  {}",
+      +                node.hits, total_str, own_str, name
+                   );
+               }
+           }
+
+      ```
+
+      I've updated `print_summary` and `print_summary_flat` (and its recursive helper) to reorder the columns in the output, placing the name at the end. This should make the timing data easier to read. Let me know if you have any other questions
+    metadata:
+  - user: |
+      Git apply result:
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/profiler.rs
+      Applying patch to 'src/profiler.rs' using custom patcher...
+      Successfully applied patch and wrote to src/profiler.rs.
     metadata:
 ...

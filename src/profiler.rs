@@ -71,8 +71,8 @@ fn print_node_recursive(
     let percentage_str = format!("{:.1}%", percentage);
 
     println!(
-        "{:<100} {:>10} {:>15} {:>15} {:>15}",
-        name_with_indent, node.hits, total_str, own_str, percentage_str
+        "{:>10} {:>15} {:>15} {:>15}  {}",
+        node.hits, total_str, own_str, percentage_str, name_with_indent
     );
 
     let mut sorted_children: Vec<_> = node.children.iter().collect();
@@ -100,8 +100,8 @@ pub fn print_summary() {
     if !no_timing_data {
         println!("\n[Hierarchical Timings]");
         println!(
-            "{:<100} {:>10} {:>15} {:>15} {:>15}",
-            "Name", "Hits", "Total Time", "Own Time", "% of Parent"
+            "{:>10} {:>15} {:>15} {:>15}  {}",
+            "Hits", "Total Time", "Own Time", "% of Parent", "Name"
         );
 
         let root_total_time: Duration = data
@@ -167,8 +167,8 @@ pub fn print_summary_flat() {
 
         println!("\n[Flat Timings]");
         println!(
-            "{:<100} {:>10} {:>15} {:>15}",
-            "Name", "Hits", "Total Time", "Own Time"
+            "{:>10} {:>15} {:>15}  {}",
+            "Hits", "Total Time", "Own Time", "Name"
         );
 
         let mut sorted_list: Vec<_> = flat_map.iter().collect();
@@ -181,8 +181,8 @@ pub fn print_summary_flat() {
             let own_str = format!("{:.3}ms", own_ms);
 
             println!(
-                "{:<100} {:>10} {:>15} {:>15}",
-                name, node.hits, total_str, own_str
+                "{:>10} {:>15} {:>15}  {}",
+                node.hits, total_str, own_str, name
             );
         }
     }
