@@ -620,33 +620,36 @@ pub fn resolve_direct_right_recursion(
     productions: &mut Vec<Production>,
     mut new_name_generator: impl FnMut(&str) -> String,
 ) {
-    // This function transforms direct right-recursion into left-recursion while preserving
-    // the original order of productions as much as possible.
+    // This function transforms direct right-recursion into left-recursion.
+    // A set of rules for a non-terminal `A` of the form:
+    //   A -> α₁ A | α₂ A | ... | αₘ A  (right-recursive rules)
+    //   A -> β₁ | β₂ | ... | βₙ          (non-recursive rules)
+    // generates the language (α₁|...|αₘ)* (β₁|...|βₙ).
     //
-    // The transformation for a non-terminal `A` with rules:
-    //   A -> α₁ A | ... | αₘ A  (right-recursive rules, where αᵢ is a prefix)
-    //   A -> β₁ | ... | βₙ      (non-recursive rules)
-    // is to replace them with:
-    //   A  -> A' β₁ | ... | A' βₙ
-    //   A' -> A' α₁ | ... | A' αₘ | ε
-    // where `A'` is a new non-terminal. This generates the same language `(α₁|...|αₘ)* (β₁|...|βₙ)`
-    // using left-recursion.
+    // This can be rewritten using a new non-terminal `A'` to be left-recursive:
+    //   A  -> A' β₁ | A' β₂ | ... | A' βₙ
+    //   A' -> A' α₁ | A' α₂ | ... | A' αₘ | ε
+    // This new form generates the same language and is left-recursive.
     //
-    // The implementation preserves order by iterating through the original production list.
-    // When it first encounters a rule for a right-recursive non-terminal, it replaces all
-    // rules for that non-terminal with the new, transformed set of rules at that position.
+    // This implementation only considers "simple" direct right-recursion, where a rule
+    // is of the form `A -> α A` and `α` does not contain `A`. More complex recursions
+    // like `A -> α A β A` or `A -> α A A` are not transformed and are treated as
+    // non-recursive "β" terms.
 
-    // 1. Group productions by LHS to easily access all rules for a given non-terminal.
-    // The BTreeMap is just for efficient lookup; we don't iterate over its keys for ordering.
+    // 1. Group all productions by their LHS non-terminal.
     let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
     for prod in productions.iter().cloned() {
         prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod);
     }
 
-    // 2. Identify all non-terminals that have simple direct right-recursive rules.
-    let mut recursive_nts = BTreeSet::new();
-    for (nt, prods_for_nt) in &prods_by_lhs {
-        let is_recursive = prods_for_nt.iter().any(|p| {
+    let mut new_productions = Vec::new();
+    let nts_to_process: Vec<NonTerminal> = prods_by_lhs.keys().cloned().collect();
+
+    for nt in nts_to_process {
+        let prods_for_nt = prods_by_lhs.get(&nt).unwrap();
+
+        // 2. Partition rules for `nt` into simple direct right-recursive and others.
+        let (recursive_rules, other_rules): (Vec<_>, Vec<_>) = prods_for_nt.iter().cloned().partition(|p| {
             // A rule `A -> α A` is simple direct right-recursive if:
             // a) `α` is not empty (i.e., rule is not `A -> A`).
             if p.rhs.len() < 2 { return false; }
@@ -656,71 +659,42 @@ pub fn resolve_direct_right_recursion(
             let alpha = &p.rhs[..p.rhs.len() - 1];
             !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
         });
-        if is_recursive {
-            recursive_nts.insert(nt.clone());
+
+        if recursive_rules.is_empty() {
+            // No simple direct right-recursion for this NT, so keep its original rules.
+            new_productions.extend(prods_for_nt.clone());
+        } else {
+            // 3. Found recursion, perform the transformation.
+            let new_nt = NonTerminal(new_name_generator(&nt.0));
+            crate::debug!(2, "Resolving direct right-recursion for '{}', creating new non-terminal '{}'", nt.0, new_nt.0);
+
+            // 4. Create rules for the new non-terminal `A'`.
+            // For each recursive rule `A -> αᵢ A`, create `A' -> A' αᵢ`.
+            for rec_rule in &recursive_rules {
+                let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
+                let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
+                new_rhs.extend_from_slice(alpha);
+                let new_prod = Production { lhs: new_nt.clone(), rhs: new_rhs };
+                crate::debug!(2, "  Transforming recursive rule '{}' -> '{}'", rec_rule, new_prod);
+                new_productions.push(new_prod);
+            }
+            let epsilon_prod = Production { lhs: new_nt.clone(), rhs: vec![] }; // A' -> ε
+            crate::debug!(2, "  Adding new epsilon rule: '{}'", epsilon_prod);
+            new_productions.push(epsilon_prod);
+
+            // 5. Create new rules for the original non-terminal `A`.
+            // For each non-recursive rule `A -> βⱼ`, create `A -> A' βⱼ`.
+            for non_rec_rule in &other_rules {
+                let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
+                new_rhs.extend_from_slice(&non_rec_rule.rhs);
+                let new_prod = Production { lhs: nt.clone(), rhs: new_rhs };
+                crate::debug!(2, "  Transforming non-recursive rule '{}' -> '{}'", non_rec_rule, new_prod);
+                new_productions.push(new_prod);
+            }
         }
     }
 
-    // 3. Build the new production list, preserving order.
-    let mut new_productions = Vec::new();
-    let mut processed_recursive_nts = BTreeSet::new();
-
-    for prod in productions.iter().cloned() {
-        let lhs = &prod.lhs;
-
-        if !recursive_nts.contains(lhs) {
-            // This production's LHS is not right-recursive, so we can keep the production as is.
-            new_productions.push(prod);
-            continue;
-        }
-
-        // The LHS is right-recursive. We need to process all of its rules at once.
-        // We do this only the first time we encounter a rule for this LHS.
-        if processed_recursive_nts.contains(lhs) {
-            // We've already handled this NT and its rules, so we skip this and subsequent productions for it.
-            continue;
-        }
-        processed_recursive_nts.insert(lhs.clone());
-
-        // --- Perform the transformation for `lhs` ---
-        let prods_for_nt = prods_by_lhs.get(lhs).unwrap();
-
-        let (recursive_rules, other_rules): (Vec<_>, Vec<_>) = prods_for_nt.iter().cloned().partition(|p| {
-            if p.rhs.len() < 2 { return false; }
-            if p.rhs.last() != Some(&Symbol::NonTerminal(p.lhs.clone())) { return false; }
-            let alpha = &p.rhs[..p.rhs.len() - 1];
-            !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
-        });
-
-        // `recursive_rules` is guaranteed to be non-empty because `lhs` is in `recursive_nts`.
-        let new_nt = NonTerminal(new_name_generator(&lhs.0));
-        crate::debug!(2, "Resolving direct right-recursion for '{}', creating new non-terminal '{}'", lhs.0, new_nt.0);
-
-        // Create new rules for the original non-terminal `A`: `A -> A' βⱼ`.
-        // The order of these new rules is based on the original order of the `β` rules.
-        for non_rec_rule in &other_rules {
-            let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
-            new_rhs.extend_from_slice(&non_rec_rule.rhs);
-            let new_prod = Production { lhs: lhs.clone(), rhs: new_rhs };
-            crate::debug!(2, "  Transforming non-recursive rule '{}' -> '{}'", non_rec_rule, new_prod);
-            new_productions.push(new_prod);
-        }
-
-        // Create rules for the new non-terminal `A'`: `A' -> A' αᵢ` and `A' -> ε`.
-        for rec_rule in &recursive_rules {
-            let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
-            let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
-            new_rhs.extend_from_slice(alpha);
-            let new_prod = Production { lhs: new_nt.clone(), rhs: new_rhs };
-            crate::debug!(2, "  Transforming recursive rule '{}' -> '{}'", rec_rule, new_prod);
-            new_productions.push(new_prod);
-        }
-        let epsilon_prod = Production { lhs: new_nt.clone(), rhs: vec![] }; // A' -> ε
-        crate::debug!(2, "  Adding new epsilon rule: '{}'", epsilon_prod);
-        new_productions.push(epsilon_prod);
-    }
-
-    // 4. Replace the original productions with the new set.
+    // 6. Replace the original productions with the new set.
     productions.clear();
     productions.extend(new_productions);
 }
