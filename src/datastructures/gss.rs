@@ -472,19 +472,6 @@ impl GSSNode {
         })
     }
 
-    // Internal helper, needs careful handling due to private acc_mut
-    fn push_down_acc(&mut self) {
-        for pred_arc_val in self.predecessors.values_mut() { // Renamed pred_arc
-            let mut_pred_node = Arc::make_mut(pred_arc_val);
-            mut_pred_node.acc.intersect_assign(self.acc.clone());
-            // After modifying acc, hash_key_cache might need update if acc is part of it.
-            // Current compute_hash_key does not include self.acc, only predecessors.
-            // However, if the acc of a predecessor changes, its own hash_key_cache changes.
-            mut_pred_node.hash_key_cache = compute_hash_key(&mut_pred_node.predecessors);
-        }
-        // self.hash_key_cache = compute_hash_key(&self.predecessors); // Recompute for self too
-    }
-
     pub fn merge(&mut self, other: &Self) {
         if self == other { return; }
 
