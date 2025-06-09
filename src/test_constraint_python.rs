@@ -618,13 +618,13 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             max_original_llm_token_id_val = id_val;
         }
     }
-    
+
     // Remove tokens longer than length
     llm_token_map.retain(|v, _| v.len() <= 3);
 
-    // Keep tokens that are either length 1 or of the form 'ĠAx' where x is a letter
+    // Keep tokens that are either length 1 or of the form ' Ax' where x is a letter
     llm_token_map.retain(|v, _| {
-        v.len() == 1 || v.starts_with(b"\xC4\xA0A")
+        v.len() == 1 || v.starts_with(b" A")
     });
 
     // Print the vocab
