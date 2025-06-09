@@ -103,6 +103,7 @@ fn compute_hash_key(predecessors: &NodeMap) -> u64 {
     hasher.finish()
 }
 
+#[time_it("allowed_terminals_union_assign")]
 pub fn allowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
     let mut common_keys = BTreeSet::new();
     common_keys.extend(left.keys());
@@ -115,6 +116,7 @@ pub fn allowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalIn
     }
 }
 
+#[time_it("allowed_terminals_intersect_assign")]
 pub fn allowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
     let mut common_keys = BTreeSet::new();
     common_keys.extend(left.keys());
