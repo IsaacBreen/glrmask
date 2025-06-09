@@ -54,16 +54,16 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 //     println!("other_bv: {:?}", &other_bv);
                 // }
                 // let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
-                // Round down to nearest power of 10
                 fn round_down_to_power_of_10(x: usize) -> usize {
-                    let mut x = x;
-                    while x > 0 {
-                        if x % 10 == 0 {
-                            break;
-                        }
-                        x /= 10;
+                    if x == 0 {
+                        return 0;
                     }
-                    x * 10
+
+                    let mut power = 1;
+                    while power * 10 <= x {
+                        power *= 10;
+                    }
+                    power
                 }
                 let self_bv_len = round_down_to_power_of_10(self_bv.inner().ranges_len());
                 let other_bv_len = round_down_to_power_of_10(other_bv.inner().ranges_len());
