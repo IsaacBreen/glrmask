@@ -47,6 +47,9 @@ impl PathAccumulator for Option<LLMTokenBV> {
     fn union_assign(&mut self, other: Self) {
         match (self.as_mut(), other) {
             (Some(self_bv), Some(other_bv)) => {
+                if self_bv.inner() == other_bv.inner() {
+                    return;
+                }
                 // let BIG_RANGE_LEN = 1000;
                 // if other_bv.inner().ranges_len() > BIG_RANGE_LEN || self_bv.inner().ranges_len() > BIG_RANGE_LEN {
                 //     println!("WARNING: union_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN || other_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
