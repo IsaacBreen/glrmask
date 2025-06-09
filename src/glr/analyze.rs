@@ -666,6 +666,7 @@ pub fn resolve_direct_right_recursion(
         } else {
             // 3. Found recursion, perform the transformation.
             let new_nt = NonTerminal(new_name_generator(&nt.0));
+            crate::debug!(2, "Resolving direct right-recursion for '{}', creating new non-terminal '{}'", nt.0, new_nt.0);
 
             // 4. Create rules for the new non-terminal `A'`.
             // For each recursive rule `A -> αᵢ A`, create `A' -> A' αᵢ`.
@@ -673,16 +674,22 @@ pub fn resolve_direct_right_recursion(
                 let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
                 let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
                 new_rhs.extend_from_slice(alpha);
-                new_productions.push(Production { lhs: new_nt.clone(), rhs: new_rhs });
+                let new_prod = Production { lhs: new_nt.clone(), rhs: new_rhs };
+                crate::debug!(2, "  Transforming recursive rule '{}' -> '{}'", rec_rule, new_prod);
+                new_productions.push(new_prod);
             }
-            new_productions.push(Production { lhs: new_nt.clone(), rhs: vec![] }); // A' -> ε
+            let epsilon_prod = Production { lhs: new_nt.clone(), rhs: vec![] }; // A' -> ε
+            crate::debug!(2, "  Adding new epsilon rule: '{}'", epsilon_prod);
+            new_productions.push(epsilon_prod);
 
             // 5. Create new rules for the original non-terminal `A`.
             // For each non-recursive rule `A -> βⱼ`, create `A -> A' βⱼ`.
             for non_rec_rule in &other_rules {
                 let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
                 new_rhs.extend_from_slice(&non_rec_rule.rhs);
-                new_productions.push(Production { lhs: nt.clone(), rhs: new_rhs });
+                let new_prod = Production { lhs: nt.clone(), rhs: new_rhs };
+                crate::debug!(2, "  Transforming non-recursive rule '{}' -> '{}'", non_rec_rule, new_prod);
+                new_productions.push(new_prod);
             }
         }
     }
