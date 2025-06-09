@@ -52,7 +52,7 @@ fn print_node_recursive(
     node: &ProfileNode,
     name: &str,
     indent_level: usize,
-    root_total_time: Duration,
+    parent_total_time: Duration,
 ) {
     let indent = "  ".repeat(indent_level);
     let name_with_indent = format!("{}{}", indent, name);
@@ -60,8 +60,8 @@ fn print_node_recursive(
     let total_ms = node.total_time.as_secs_f64() * 1000.0;
     let own_ms = node.own_time.as_secs_f64() * 1000.0;
 
-    let percentage = if !root_total_time.is_zero() {
-        (node.total_time.as_secs_f64() / root_total_time.as_secs_f64()) * 100.0
+    let percentage = if !parent_total_time.is_zero() {
+        (node.total_time.as_secs_f64() / parent_total_time.as_secs_f64()) * 100.0
     } else {
         0.0
     };
@@ -75,7 +75,7 @@ fn print_node_recursive(
     sorted_children.sort_by_key(|(name, _)| *name);
 
     for (child_name, child_node) in sorted_children {
-        print_node_recursive(child_node, child_name, indent_level + 1, root_total_time);
+        print_node_recursive(child_node, child_name, indent_level + 1, node.total_time);
     }
 }
 
@@ -97,7 +97,7 @@ pub fn print_summary() {
         println!("\n[Hierarchical Timings]");
         println!(
             "{:<50} {:>10} {:>12} {:>12} {:>8}",
-            "Name", "Hits", "Total Time", "Own Time", "% of Root"
+            "Name", "Hits", "Total Time", "Own Time", "% of Parent"
         );
 
         let root_total_time: Duration = data
