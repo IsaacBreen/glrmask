@@ -484,7 +484,7 @@ impl GSSNode {
     pub fn merge(&mut self, other: &Self) {
         if self == other { return; }
 
-        timeit!("GSSNode::merge::acc.union_assign", self.acc.union_assign(other.acc.clone()));
+        self.acc.union_assign(other.acc.clone());
 
         for (edge_val, other_pred_arc) in &other.predecessors {
             match self.predecessors.entry(edge_val.clone()) {
