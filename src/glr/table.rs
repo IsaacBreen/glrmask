@@ -8,7 +8,9 @@ use std::fmt::Display;
 use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate};
 pub use crate::types::{TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
+use std::collections::BTreeMap as StdMap;
+use crate::interface::display_productions;
+// Added for derive macro pattern
 
 
 type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
@@ -527,7 +529,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let mut productions = productions.to_vec();
     // crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
     crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
-    dbg!(&productions);
+    println!("After direct right recursion: {}", display_productions(&productions));
 
     // crate::debug!(2, "Validating");
     // validate(&productions).expect("Validation error");
