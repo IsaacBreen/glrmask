@@ -50,7 +50,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 if self_bv.inner() == other_bv.inner() {
                     return;
                 }
-                let BIG_RANGE_LEN = 1000;
+                let BIG_RANGE_LEN = 100;
                 if other_bv.inner().ranges_len() > BIG_RANGE_LEN && self_bv.inner().ranges_len() > BIG_RANGE_LEN {
                     println!("WARNING: union_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN || other_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
                     println!("self_bv: {:?}", &self_bv);
@@ -98,7 +98,36 @@ impl PathAccumulator for Option<LLMTokenBV> {
             (Some(self_bv), Some(right_bv)) => {
                 if self_bv.inner() == right_bv.inner() {
                     return;
-                }*self_bv &= right_bv;
+                }
+                let BIG_RANGE_LEN = 100;
+                if right_bv.inner().ranges_len() > BIG_RANGE_LEN && self_bv.inner().ranges_len() > BIG_RANGE_LEN {
+                    println!("WARNING: intersection_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN || right_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, right_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), right_bv.inner().ranges_len());
+                    println!("self_bv: {:?}", &self_bv);
+                    println!("right_bv: {:?}", &right_bv);
+                }
+                let time_str = format!("intersection_assign: self_bv.inner().ranges_len(): {}, right_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), right_bv.inner().ranges_len());
+
+                // fn round_down_to_power_of_10(x: usize) -> usize {
+                //     if x == 0 {
+                //         return 0;
+                //     }
+                //
+                //     let mut power = 1;
+                //     while power * 10 <= x {
+                //         power *= 10;
+                //     }
+                //     power
+                // }
+                // let self_bv_len = round_down_to_power_of_10(self_bv.inner().ranges_len());
+                // let right_bv_len = round_down_to_power_of_10(right_bv.inner().ranges_len());
+                // let overlap_len = round_down_to_power_of_10((&*self_bv & &right_bv).inner().ranges_len());
+                // let difference_len = round_down_to_power_of_10(((&*self_bv | &right_bv) - (&*self_bv & &right_bv)).inner().ranges_len());
+                // let time_str = format!("intersection_assign: self_bv.inner().ranges_len(): {}, right_bv.inner().ranges_len(): {}, overlap_len: {}, difference_len: {}",
+                //     self_bv_len, right_bv_len, overlap_len, difference_len
+                // );
+                // timeit!(time_str,
+                *self_bv &= &right_bv
+                // );
             }
             (None, Some(right_bv)) => {
                 *self = Some(right_bv);
