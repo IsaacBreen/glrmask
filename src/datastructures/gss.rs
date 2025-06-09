@@ -50,6 +50,8 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 let BIG_RANGE_LEN = 1000;
                 if other_bv.inner().ranges_len() > BIG_RANGE_LEN || self_bv.inner().ranges_len() > BIG_RANGE_LEN {
                     println!("WARNING: union_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN || other_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
+                    dbg!(&self_bv);
+                    dbg!(&other_bv);
                 }
                 *self_bv |= &other_bv;
                 // An empty bitset resulting from a union is still Some(empty_bv), not None.
