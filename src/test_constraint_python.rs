@@ -628,7 +628,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     temp.sort_by_key(|(original_id, internal_id)| *internal_id);
     for (original_id, internal_id) in temp {
         let token = llm_token_map.get_by_right(&LLMTokenID(*original_id)).unwrap();
-        println!("  original {}, internal {}, token {:?}, raw: {:?}, {:?}", original_id, internal_id, String::from_utf8_lossy(token), token, String::from_utf8_lossy(llm_token_map.get_by_right(&LLMTokenID(*original_id)).unwrap()));
+        println!("  original {}, internal {}, token {:?}, raw: {:?}", original_id, internal_id, String::from_utf8_lossy(token), token);
     }
 
     // Ensure there's an edge in the root precompute node for state 0 that has the terminal for `IGNORE[0][0][1]` on the edge key and which the LLM token for "\n" on the edge value.
