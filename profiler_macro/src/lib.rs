@@ -34,30 +34,39 @@ pub fn time_it(attr: TokenStream, item: TokenStream) -> TokenStream {
     result.into()
 }
 
-struct TimeitArgs {
-    name: LitStr,
-    _comma: Token![,],
-    expr: Expr,
+enum TimeitArgs {
+    Named { name: LitStr, expr: Expr },
+    Unnamed { expr: Expr },
 }
 
 impl Parse for TimeitArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        Ok(TimeitArgs {
-            name: input.parse()?,
-            _comma: input.parse()?,
-            expr: input.parse()?,
-        })
+        if input.peek(LitStr) && input.peek2(Token![,]) {
+            let name: LitStr = input.parse()?;
+            let _: Token![,] = input.parse()?;
+            let expr: Expr = input.parse()?;
+            Ok(TimeitArgs::Named { name, expr })
+        } else {
+            let expr: Expr = input.parse()?;
+            Ok(TimeitArgs::Unnamed { expr })
+        }
     }
 }
 
 #[proc_macro]
 pub fn timeit(input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(input as TimeitArgs);
-    let name = args.name.value();
-    let expr = &args.expr;
+
+    let (name_literal, expr) = match args {
+        TimeitArgs::Named { name, expr } => (quote! { #name }, expr),
+        TimeitArgs::Unnamed { expr } => {
+            let expr_str = quote! { #expr }.to_string();
+            (quote! { #expr_str }, expr)
+        }
+    };
 
     let result = quote! {{
-        let _guard = crate::profiler::TimedBlockGuard::new(String::from(#name));
+        let _guard = crate::profiler::TimedBlockGuard::new(String::from(#name_literal));
         #expr
     }};
 
