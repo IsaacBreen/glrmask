@@ -526,7 +526,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
     let mut productions = productions.to_vec();
     // crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
-    // crate::glr::analyze::remove_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
+    crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
     dbg!(&productions);
 
     // crate::debug!(2, "Validating");
