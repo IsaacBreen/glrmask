@@ -602,14 +602,6 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     //     }
     // }).collect();
 
-    // Remove tokens longer than length
-    gpt2_raw_vocab.retain(|v, _| v.len() <= 3);
-
-    // Keep tokens that are either length 1 or of the form 'ĠAx' where x is a letter
-    gpt2_raw_vocab.retain(|v, _| {
-        v.len() == 1 || v.starts_with("ĠA")
-    });
-
     let mut llm_token_map = LLMTokenMap::new();
     let mut max_original_llm_token_id_val: usize = 0;
 
@@ -626,6 +618,14 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             max_original_llm_token_id_val = id_val;
         }
     }
+    
+    // Remove tokens longer than length
+    llm_token_map.retain(|v, _| v.len() <= 3);
+
+    // Keep tokens that are either length 1 or of the form 'ĠAx' where x is a letter
+    llm_token_map.retain(|v, _| {
+        v.len() == 1 || v.starts_with(b"\xC4\xA0A")
+    });
 
     // Print the vocab
     println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
