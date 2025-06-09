@@ -2,12 +2,29 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// A node in the profiler's call tree.
+#[derive(Default, Clone)]
+pub struct ProfileNode {
+    /// Number of times this block was entered.
+    pub hits: u64,
+    /// Time spent in this block, excluding children.
+    pub own_time: Duration,
+    /// Time spent in this block, including children.
+    pub total_time: Duration,
+    /// Children nodes in the call tree.
+    pub children: HashMap<String, ProfileNode>,
+}
+
 /// Holds all profiling data.
 #[derive(Default)]
 pub struct ProfilerData {
+    /// The root of the call tree. Its children are the top-level timed blocks.
+    call_tree: ProfileNode,
+    /// A stack to keep track of the current path in the call tree.
+    /// Each element is (name, start_time_for_total, start_time_for_own)
+    timing_stack: Vec<(String, Instant, Instant)>,
+    /// Separate hits counter for the `hit!` macro.
     hits: HashMap<String, u64>,
-    timings: HashMap<String, Duration>,
-    timing_stack: Vec<(String, Instant)>,
 }
 
 // Global, thread-safe profiler data instance.
@@ -17,8 +34,7 @@ fn profiler() -> &'static Mutex<ProfilerData> {
     PROFILER.get_or_init(|| Mutex::new(ProfilerData::default()))
 }
 
-/// Records a single hit for a named event.
-/// This is also called automatically by the `time!` macro.
+/// Records a single hit for a named event (for use with `hit!` macro).
 pub fn hit(name: &str) {
     let mut data = profiler().lock().unwrap();
     *data.hits.entry(name.to_string()).or_insert(0) += 1;
@@ -27,24 +43,79 @@ pub fn hit(name: &str) {
 /// Resets all profiling data (hits and timings).
 pub fn reset() {
     let mut data = profiler().lock().unwrap();
-    data.hits.clear();
-    data.timings.clear();
+    data.call_tree = ProfileNode::default();
     data.timing_stack.clear();
+    data.hits.clear();
+}
+
+fn print_node_recursive(
+    node: &ProfileNode,
+    name: &str,
+    indent_level: usize,
+    root_total_time: Duration,
+) {
+    let indent = "  ".repeat(indent_level);
+    let name_with_indent = format!("{}{}", indent, name);
+
+    let total_ms = node.total_time.as_secs_f64() * 1000.0;
+    let own_ms = node.own_time.as_secs_f64() * 1000.0;
+
+    let percentage = if !root_total_time.is_zero() {
+        (node.total_time.as_secs_f64() / root_total_time.as_secs_f64()) * 100.0
+    } else {
+        0.0
+    };
+
+    println!(
+        "{:<50} {:>10} {:>12.3}ms {:>12.3}ms {:>7.1}%",
+        name_with_indent, node.hits, total_ms, own_ms, percentage
+    );
+
+    let mut sorted_children: Vec<_> = node.children.iter().collect();
+    sorted_children.sort_by_key(|(name, _)| *name);
+
+    for (child_name, child_node) in sorted_children {
+        print_node_recursive(child_node, child_name, indent_level + 1, root_total_time);
+    }
 }
 
 /// Prints a summary of the collected profiling data to stdout.
-/// The summary is sorted alphabetically by event name.
 pub fn print_summary() {
     let data = profiler().lock().unwrap();
     println!("--- Profiler Summary ---");
 
-    if data.hits.is_empty() && data.timings.is_empty() {
+    let no_timing_data = data.call_tree.children.is_empty();
+    let no_hit_data = data.hits.is_empty();
+
+    if no_timing_data && no_hit_data {
         println!("No data collected.");
         println!("--- End Profiler Summary ---");
         return;
     }
 
-    if !data.hits.is_empty() {
+    if !no_timing_data {
+        println!("\n[Hierarchical Timings]");
+        println!(
+            "{:<50} {:>10} {:>12} {:>12} {:>8}",
+            "Name", "Hits", "Total Time", "Own Time", "% of Root"
+        );
+
+        let root_total_time: Duration = data
+            .call_tree
+            .children
+            .values()
+            .map(|node| node.total_time)
+            .sum();
+
+        let mut sorted_children: Vec<_> = data.call_tree.children.iter().collect();
+        sorted_children.sort_by_key(|(name, _)| *name);
+
+        for (name, node) in sorted_children {
+            print_node_recursive(node, name, 0, root_total_time);
+        }
+    }
+
+    if !no_hit_data {
         println!("\n[Hits]");
         let mut sorted_hits: Vec<_> = data.hits.iter().collect();
         sorted_hits.sort_by_key(|k| k.0);
@@ -53,61 +124,68 @@ pub fn print_summary() {
         }
     }
 
-    if !data.timings.is_empty() {
-        println!("\n[Own Time]");
-        let mut sorted_timings: Vec<_> = data.timings.iter().collect();
-        sorted_timings.sort_by_key(|k| k.0);
-        for (name, duration) in sorted_timings {
-            println!("  {:>12.3}ms: {}", duration.as_secs_f64() * 1000.0, name);
-        }
-    }
-
     println!("\n--- End Profiler Summary ---");
 }
 
-/// Returns a clone of the hits data.
+/// Returns a clone of the hits data from `hit!` macro.
 pub fn get_hits() -> HashMap<String, u64> {
     profiler().lock().unwrap().hits.clone()
 }
 
-/// Returns a clone of the timings data.
-pub fn get_timings() -> HashMap<String, Duration> {
-    profiler().lock().unwrap().timings.clone()
+/// Returns a clone of the call tree.
+pub fn get_call_tree() -> ProfileNode {
+    profiler().lock().unwrap().call_tree.clone()
 }
-
 
 // Internal functions for timing blocks
 fn time_block_start(name: String) {
     let mut data = profiler().lock().unwrap();
     let now = Instant::now();
 
-    // Pause the parent timer. We must clone the parent's name to release the immutable
-    // borrow on `data.timing_stack` before we can get a mutable borrow on `data.timings`.
-    if let Some((parent_name, parent_start_time)) = data.timing_stack.last().map(|(s, i)| (s.clone(), *i)) {
-        let duration = now.duration_since(parent_start_time);
-        *data.timings.entry(parent_name).or_default() += duration;
+    let mut current_node = &mut data.call_tree;
+    // Traverse to the parent node.
+    for (node_name, _, _) in data.timing_stack.iter() {
+        current_node = current_node.children.get_mut(node_name).unwrap();
     }
 
-    // Push the new timer onto the stack
-    data.timing_stack.push((name.clone(), now));
+    // If there is a parent, pause its own-time clock.
+    if let Some((_, _, parent_own_time_start)) = data.timing_stack.last() {
+        let own_time_lapsed = now.duration_since(*parent_own_time_start);
+        current_node.own_time += own_time_lapsed;
+    }
 
-    // Also record a hit
-    *data.hits.entry(name).or_insert(0) += 1;
+    // `current_node` is now the parent. Get or insert the new node and increment its hit count.
+    let new_node = current_node.children.entry(name.clone()).or_default();
+    new_node.hits += 1;
+
+    // Push the new timer onto the stack.
+    data.timing_stack.push((name, now, now));
 }
 
 fn time_block_end() {
     let mut data = profiler().lock().unwrap();
     let now = Instant::now();
 
-    // End the current timer
-    if let Some((name, start_time)) = data.timing_stack.pop() {
-        let duration = now.duration_since(start_time);
-        *data.timings.entry(name).or_default() += duration;
+    // Pop the current timer from the stack.
+    if let Some((name, total_start_time, own_start_time)) = data.timing_stack.pop() {
+        let total_duration = now.duration_since(total_start_time);
+        let own_duration = now.duration_since(own_start_time);
+
+        // Get a mutable reference to the parent of the node that just ended.
+        let mut parent_node = &mut data.call_tree;
+        for (node_name, _, _) in data.timing_stack.iter() {
+            parent_node = parent_node.children.get_mut(node_name).unwrap();
+        }
+
+        // Get the node that ended and update its timings.
+        let ended_node = parent_node.children.get_mut(&name).unwrap();
+        ended_node.total_time += total_duration;
+        ended_node.own_time += own_duration;
     }
 
-    // Resume the parent timer by updating its start time
+    // Resume the new parent timer by updating its own-time start time.
     if let Some(parent) = data.timing_stack.last_mut() {
-        parent.1 = now;
+        parent.2 = now; // parent.2 is own_time_start
     }
 }
 

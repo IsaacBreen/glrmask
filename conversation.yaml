@@ -239,27 +239,66 @@ local_system:
     profiler_macro/src/lib.rs: |
       use proc_macro::TokenStream;
       use quote::quote;
-      use syn::{parse_macro_input, ItemFn, LitStr};
+      use syn::{
+          parse::{Parse, ParseStream},
+          parse_macro_input, Expr, ItemFn, LitStr, Token,
+      };
 
       #[proc_macro_attribute]
       pub fn time_it(attr: TokenStream, item: TokenStream) -> TokenStream {
           let item_fn = parse_macro_input!(item as ItemFn);
-          let attr_str = parse_macro_input!(attr as LitStr);
+
+          let timer_name_expr = if attr.is_empty() {
+              let fn_name = item_fn.sig.ident.to_string();
+              quote! { format!("{}::{}", module_path!(), #fn_name) }
+          } else {
+              let attr_str = parse_macro_input!(attr as LitStr);
+              let name = attr_str.value();
+              quote! { String::from(#name) }
+          };
 
           let fn_vis = &item_fn.vis;
           let fn_sig = &item_fn.sig;
           let fn_block = &item_fn.block;
           let fn_attrs = &item_fn.attrs;
 
-          let timer_name = attr_str.value();
-
           let result = quote! {
               #(#fn_attrs)*
               #fn_vis #fn_sig {
-                  let _guard = crate::profiler::TimedBlockGuard::new(String::from(#timer_name));
+                  let _guard = crate::profiler::TimedBlockGuard::new(#timer_name_expr);
                   #fn_block
               }
           };
+
+          result.into()
+      }
+
+      struct TimeitArgs {
+          name: LitStr,
+          _comma: Token![,],
+          expr: Expr,
+      }
+
+      impl Parse for TimeitArgs {
+          fn parse(input: ParseStream) -> syn::Result<Self> {
+              Ok(TimeitArgs {
+                  name: input.parse()?,
+                  _comma: input.parse()?,
+                  expr: input.parse()?,
+              })
+          }
+      }
+
+      #[proc_macro]
+      pub fn timeit(input: TokenStream) -> TokenStream {
+          let args = parse_macro_input!(input as TimeitArgs);
+          let name = args.name.value();
+          let expr = &args.expr;
+
+          let result = quote! {{
+              let _guard = crate::profiler::TimedBlockGuard::new(String::from(#name));
+              #expr
+          }};
 
           result.into()
       }
@@ -496,27 +535,66 @@ local_system:
     profiler_macro/src/lib.rs: |
       use proc_macro::TokenStream;
       use quote::quote;
-      use syn::{parse_macro_input, ItemFn, LitStr};
+      use syn::{
+          parse::{Parse, ParseStream},
+          parse_macro_input, Expr, ItemFn, LitStr, Token,
+      };
 
       #[proc_macro_attribute]
       pub fn time_it(attr: TokenStream, item: TokenStream) -> TokenStream {
           let item_fn = parse_macro_input!(item as ItemFn);
-          let attr_str = parse_macro_input!(attr as LitStr);
+
+          let timer_name_expr = if attr.is_empty() {
+              let fn_name = item_fn.sig.ident.to_string();
+              quote! { format!("{}::{}", module_path!(), #fn_name) }
+          } else {
+              let attr_str = parse_macro_input!(attr as LitStr);
+              let name = attr_str.value();
+              quote! { String::from(#name) }
+          };
 
           let fn_vis = &item_fn.vis;
           let fn_sig = &item_fn.sig;
           let fn_block = &item_fn.block;
           let fn_attrs = &item_fn.attrs;
 
-          let timer_name = attr_str.value();
-
           let result = quote! {
               #(#fn_attrs)*
               #fn_vis #fn_sig {
-                  let _guard = crate::profiler::TimedBlockGuard::new(String::from(#timer_name));
+                  let _guard = crate::profiler::TimedBlockGuard::new(#timer_name_expr);
                   #fn_block
               }
           };
+
+          result.into()
+      }
+
+      struct TimeitArgs {
+          name: LitStr,
+          _comma: Token![,],
+          expr: Expr,
+      }
+
+      impl Parse for TimeitArgs {
+          fn parse(input: ParseStream) -> syn::Result<Self> {
+              Ok(TimeitArgs {
+                  name: input.parse()?,
+                  _comma: input.parse()?,
+                  expr: input.parse()?,
+              })
+          }
+      }
+
+      #[proc_macro]
+      pub fn timeit(input: TokenStream) -> TokenStream {
+          let args = parse_macro_input!(input as TimeitArgs);
+          let name = args.name.value();
+          let expr = &args.expr;
+
+          let result = quote! {{
+              let _guard = crate::profiler::TimedBlockGuard::new(String::from(#name));
+              #expr
+          }};
 
           result.into()
       }
@@ -791,27 +869,66 @@ messages:
       ```rust 'profiler_macro/src/lib.rs'
       use proc_macro::TokenStream;
       use quote::quote;
-      use syn::{parse_macro_input, ItemFn, LitStr};
+      use syn::{
+          parse::{Parse, ParseStream},
+          parse_macro_input, Expr, ItemFn, LitStr, Token,
+      };
 
       #[proc_macro_attribute]
       pub fn time_it(attr: TokenStream, item: TokenStream) -> TokenStream {
           let item_fn = parse_macro_input!(item as ItemFn);
-          let attr_str = parse_macro_input!(attr as LitStr);
+
+          let timer_name_expr = if attr.is_empty() {
+              let fn_name = item_fn.sig.ident.to_string();
+              quote! { format!("{}::{}", module_path!(), #fn_name) }
+          } else {
+              let attr_str = parse_macro_input!(attr as LitStr);
+              let name = attr_str.value();
+              quote! { String::from(#name) }
+          };
 
           let fn_vis = &item_fn.vis;
           let fn_sig = &item_fn.sig;
           let fn_block = &item_fn.block;
           let fn_attrs = &item_fn.attrs;
 
-          let timer_name = attr_str.value();
-
           let result = quote! {
               #(#fn_attrs)*
               #fn_vis #fn_sig {
-                  let _guard = crate::profiler::TimedBlockGuard::new(String::from(#timer_name));
+                  let _guard = crate::profiler::TimedBlockGuard::new(#timer_name_expr);
                   #fn_block
               }
           };
+
+          result.into()
+      }
+
+      struct TimeitArgs {
+          name: LitStr,
+          _comma: Token![,],
+          expr: Expr,
+      }
+
+      impl Parse for TimeitArgs {
+          fn parse(input: ParseStream) -> syn::Result<Self> {
+              Ok(TimeitArgs {
+                  name: input.parse()?,
+                  _comma: input.parse()?,
+                  expr: input.parse()?,
+              })
+          }
+      }
+
+      #[proc_macro]
+      pub fn timeit(input: TokenStream) -> TokenStream {
+          let args = parse_macro_input!(input as TimeitArgs);
+          let name = args.name.value();
+          let expr = &args.expr;
+
+          let result = quote! {{
+              let _guard = crate::profiler::TimedBlockGuard::new(String::from(#name));
+              #expr
+          }};
 
           result.into()
       }
@@ -820,109 +937,273 @@ messages:
     metadata:
       filename: profiler_macro/src/lib.rs
   - user: |-
-      Modify the `time_it` decorator so it *can* accept a string for the name but doesn't have it. And if one isn't passed, it uses the function name or something. But qualified.
-      Or if qualification isn't possible (?) maybe line numbers? Needs to work for duplicate names.
-
-      And make it possible to time a block of code (not just a function). eg something like this should be possible.
-      ```rust
-      let z = timeit!("calling f(x, y)", f(x,y));
-      ```
+      Make it so that the full heirarchy of timings is preserved. ie if f calls g calls h, and f g h are all timed, then we should be able to derive a tree that shows time spent in each one under its own calls.
+      It should be able to display both total time and own time.
     metadata:
   - assistant: |-
-      Of course! I can help with that. Modifying the procedural macros to be more flexible is a great idea. Here are the changes for `profiler_macro/src/lib.rs` to implement the requested features.
+      Of course, I can help with that. Preserving the full call hierarchy for timings requires a more complex data structure than a simple map. A tree structure is a natural fit for this. Each node in the tree will represent a timed block and store its own time, total time, and its children (i.e., other timed blocks called from it).
 
-      I've updated the `#[time_it]` attribute to make the name optional. If you don't provide one, it will automatically use the function's name, prefixed with its module path, to ensure it's reasonably unique.
+      Here are the necessary changes to `src/profiler.rs`. The other files you provided do not require any modifications.
 
-      I've also added the new `timeit!` macro for timing arbitrary expressions or blocks of code.
+      ### `src/profiler.rs`
 
-      Here is the patch for `profiler_macro/src/lib.rs`:
+      I'll update `src/profiler.rs` to implement a tree-based profiler. This will involve:
+      1.  Introducing a `ProfileNode` struct to represent a node in the call tree.
+      2.  Changing `ProfilerData` to use a `ProfileNode` as the root of the call tree.
+      3.  Updating the timing logic (`time_block_start`, `time_block_end`) to build this tree.
+      4.  Rewriting `print_summary` to recursively print the hierarchical timing data, showing both total and own time.
+      5.  Replacing `get_timings` with `get_call_tree` to allow programmatic access to the new data structure.
+
+      The `hit!` macro and its associated `hit()` function will be preserved for tracking simple, non-timed events.
 
       ```diff
-      --- a/profiler_macro/src/lib.rs
-      +++ b/profiler_macro/src/lib.rs
-      @@ -1,26 +1,61 @@
-       use proc_macro::TokenStream;
-       use quote::quote;
-      -use syn::{parse_macro_input, ItemFn, LitStr};
-      +use syn::{
-      +    parse::{Parse, ParseStream},
-      +    parse_macro_input, Expr, ItemFn, LitStr, Token,
-      +};
+      --- a/src/profiler.rs
+      +++ b/src/profiler.rs
+      @@ -1,20 +1,34 @@
+       use std::collections::HashMap;
+       use std::sync::{Mutex, OnceLock};
+       use std::time::{Duration, Instant};
        
-       #[proc_macro_attribute]
-       pub fn time_it(attr: TokenStream, item: TokenStream) -> TokenStream {
-           let item_fn = parse_macro_input!(item as ItemFn);
-      -    let attr_str = parse_macro_input!(attr as LitStr);
+      +/// A node in the profiler's call tree.
+      +#[derive(Default, Clone)]
+      +pub struct ProfileNode {
+      +    /// Number of times this block was entered.
+      +    pub hits: u64,
+      +    /// Time spent in this block, excluding children.
+      +    pub own_time: Duration,
+      +    /// Time spent in this block, including children.
+      +    pub total_time: Duration,
+      +    /// Children nodes in the call tree.
+      +    pub children: HashMap<String, ProfileNode>,
+      +}
       +
-      +    let timer_name_expr = if attr.is_empty() {
-      +        let fn_name = item_fn.sig.ident.to_string();
-      +        quote! { format!("{}::{}", module_path!(), #fn_name) }
-      +    } else {
-      +        let attr_str = parse_macro_input!(attr as LitStr);
-      +        let name = attr_str.value();
-      +        quote! { String::from(#name) }
-      +    };
-       
-           let fn_vis = &item_fn.vis;
-           let fn_sig = &item_fn.sig;
-           let fn_block = &item_fn.block;
-           let fn_attrs = &item_fn.attrs;
-       
-      -    let timer_name = attr_str.value();
-      -
-           let result = quote! {
-               #(#fn_attrs)*
-               #fn_vis #fn_sig {
-      -            let _guard = crate::profiler::TimedBlockGuard::new(String::from(#timer_name));
-      +            let _guard = crate::profiler::TimedBlockGuard::new(#timer_name_expr);
-                   #fn_block
-               }
-           };
-       
-           result.into()
+       /// Holds all profiling data.
+       #[derive(Default)]
+       pub struct ProfilerData {
+      +    /// The root of the call tree. Its children are the top-level timed blocks.
+      +    call_tree: ProfileNode,
+      +    /// A stack to keep track of the current path in the call tree.
+      +    /// Each element is (name, start_time_for_total, start_time_for_own)
+      +    timing_stack: Vec<(String, Instant, Instant)>,
+      +    /// Separate hits counter for the `hit!` macro.
+           hits: HashMap<String, u64>,
+      -    timings: HashMap<String, Duration>,
+      -    timing_stack: Vec<(String, Instant)>,
        }
-      +
-      +struct TimeitArgs {
-      +    name: LitStr,
-      +    _comma: Token![,],
-      +    expr: Expr,
+       
+       // Global, thread-safe profiler data instance.
+       static PROFILER: OnceLock<Mutex<ProfilerData>> = OnceLock::new();
+       
+       fn profiler() -> &'static Mutex<ProfilerData> {
+           PROFILER.get_or_init(|| Mutex::new(ProfilerData::default()))
+       }
+       
+      -/// Records a single hit for a named event.
+      -/// This is also called automatically by the `time!` macro.
+      +/// Records a single hit for a named event (for use with `hit!` macro).
+       pub fn hit(name: &str) {
+           let mut data = profiler().lock().unwrap();
+           *data.hits.entry(name.to_string()).or_insert(0) += 1;
+      @@ -23,79 +37,106 @@
+       /// Resets all profiling data (hits and timings).
+       pub fn reset() {
+           let mut data = profiler().lock().unwrap();
+      +    data.call_tree = ProfileNode::default();
+      +    data.timing_stack.clear();
+           data.hits.clear();
+      -    data.timings.clear();
+      -    data.timing_stack.clear();
       +}
       +
-      +impl Parse for TimeitArgs {
-      +    fn parse(input: ParseStream) -> syn::Result<Self> {
-      +        Ok(TimeitArgs {
-      +            name: input.parse()?,
-      +            _comma: input.parse()?,
-      +            expr: input.parse()?,
-      +        })
+      +fn print_node_recursive(
+      +    node: &ProfileNode,
+      +    name: &str,
+      +    indent_level: usize,
+      +    root_total_time: Duration,
+      +) {
+      +    let indent = "  ".repeat(indent_level);
+      +    let name_with_indent = format!("{}{}", indent, name);
+      +
+      +    let total_ms = node.total_time.as_secs_f64() * 1000.0;
+      +    let own_ms = node.own_time.as_secs_f64() * 1000.0;
+      +
+      +    let percentage = if !root_total_time.is_zero() {
+      +        (node.total_time.as_secs_f64() / root_total_time.as_secs_f64()) * 100.0
+      +    } else {
+      +        0.0
+      +    };
+      +
+      +    println!(
+      +        "{:<50} {:>10} {:>12.3}ms {:>12.3}ms {:>7.1}%",
+      +        name_with_indent, node.hits, total_ms, own_ms, percentage
+      +    );
+      +
+      +    let mut sorted_children: Vec<_> = node.children.iter().collect();
+      +    sorted_children.sort_by_key(|(name, _)| *name);
+      +
+      +    for (child_name, child_node) in sorted_children {
+      +        print_node_recursive(child_node, child_name, indent_level + 1, root_total_time);
       +    }
+       }
+       
+       /// Prints a summary of the collected profiling data to stdout.
+      -/// The summary is sorted alphabetically by event name.
+       pub fn print_summary() {
+           let data = profiler().lock().unwrap();
+           println!("--- Profiler Summary ---");
+       
+      -    if data.hits.is_empty() && data.timings.is_empty() {
+      +    let no_timing_data = data.call_tree.children.is_empty();
+      +    let no_hit_data = data.hits.is_empty();
+      +
+      +    if no_timing_data && no_hit_data {
+               println!("No data collected.");
+               println!("--- End Profiler Summary ---");
+               return;
+           }
+       
+      -    if !data.hits.is_empty() {
+      +    if !no_timing_data {
+      +        println!("\n[Hierarchical Timings]");
+      +        println!(
+      +            "{:<50} {:>10} {:>12} {:>12} {:>8}",
+      +            "Name", "Hits", "Total Time", "Own Time", "% of Root"
+      +        );
+      +
+      +        let root_total_time: Duration = data
+      +            .call_tree
+      +            .children
+      +            .values()
+      +            .map(|node| node.total_time)
+      +            .sum();
+      +
+      +        let mut sorted_children: Vec<_> = data.call_tree.children.iter().collect();
+      +        sorted_children.sort_by_key(|(name, _)| *name);
+      +
+      +        for (name, node) in sorted_children {
+      +            print_node_recursive(node, name, 0, root_total_time);
+      +        }
+      +    }
+      +
+      +    if !no_hit_data {
+               println!("\n[Hits]");
+               let mut sorted_hits: Vec<_> = data.hits.iter().collect();
+               sorted_hits.sort_by_key(|k| k.0);
+               for (name, count) in sorted_hits {
+                   println!("  {:>10}x: {}", count, name);
+               }
+           }
+       
+      -    if !data.timings.is_empty() {
+      -        println!("\n[Own Time]");
+      -        let mut sorted_timings: Vec<_> = data.timings.iter().collect();
+      -        sorted_timings.sort_by_key(|k| k.0);
+      -        for (name, duration) in sorted_timings {
+      -            println!("  {:>12.3}ms: {}", duration.as_secs_f64() * 1000.0, name);
+      -        }
+      -    }
+      -
+           println!("\n--- End Profiler Summary ---");
+       }
+       
+      -/// Returns a clone of the hits data.
+      +/// Returns a clone of the hits data from `hit!` macro.
+       pub fn get_hits() -> HashMap<String, u64> {
+           profiler().lock().unwrap().hits.clone()
+       }
+       
+      -/// Returns a clone of the timings data.
+      -pub fn get_timings() -> HashMap<String, Duration> {
+      -    profiler().lock().unwrap().timings.clone()
+      -}
+      -
+      +/// Returns a clone of the call tree.
+      +pub fn get_call_tree() -> ProfileNode {
+      +    profiler().lock().unwrap().call_tree.clone()
       +}
+       
+       // Internal functions for timing blocks
+       fn time_block_start(name: String) {
+           let mut data = profiler().lock().unwrap();
+           let now = Instant::now();
+       
+      -    // Pause the parent timer. We must clone the parent's name to release the immutable
+      -    // borrow on `data.timing_stack` before we can get a mutable borrow on `data.timings`.
+      -    if let Some((parent_name, parent_start_time)) = data.timing_stack.last().map(|(s, i)| (s.clone(), *i)) {
+      -        let duration = now.duration_since(parent_start_time);
+      -        *data.timings.entry(parent_name).or_default() += duration;
+      -    }
+      -
+      -    // Push the new timer onto the stack
+      -    data.timing_stack.push((name.clone(), now));
+      -
+      -    // Also record a hit
+      -    *data.hits.entry(name).or_insert(0) += 1;
+      +    let mut current_node = &mut data.call_tree;
+      +    // Traverse to the parent node.
+      +    for (node_name, _, _) in data.timing_stack.iter() {
+      +        current_node = current_node.children.get_mut(node_name).unwrap();
+      +    }
       +
-      +#[proc_macro]
-      +pub fn timeit(input: TokenStream) -> TokenStream {
-      +    let args = parse_macro_input!(input as TimeitArgs);
-      +    let name = args.name.value();
-      +    let expr = &args.expr;
+      +    // If there is a parent, pause its own-time clock.
+      +    if let Some((_, _, parent_own_time_start)) = data.timing_stack.last() {
+      +        let own_time_lapsed = now.duration_since(*parent_own_time_start);
+      +        current_node.own_time += own_time_lapsed;
+      +    }
       +
-      +    let result = quote! {{
-      +        let _guard = crate::profiler::TimedBlockGuard::new(String::from(#name));
-      +        #expr
-      +    }};
+      +    // `current_node` is now the parent. Get or insert the new node and increment its hit count.
+      +    let new_node = current_node.children.entry(name.clone()).or_default();
+      +    new_node.hits += 1;
       +
-      +    result.into()
-      +}
+      +    // Push the new timer onto the stack.
+      +    data.timing_stack.push((name, now, now));
+       }
+       
+       fn time_block_end() {
+           let mut data = profiler().lock().unwrap();
+           let now = Instant::now();
+       
+      -    // End the current timer
+      -    if let Some((name, start_time)) = data.timing_stack.pop() {
+      -        let duration = now.duration_since(start_time);
+      -        *data.timings.entry(name).or_default() += duration;
+      -    }
+      -
+      -    // Resume the parent timer by updating its start time
+      +    // Pop the current timer from the stack.
+      +    if let Some((name, total_start_time, own_start_time)) = data.timing_stack.pop() {
+      +        let total_duration = now.duration_since(total_start_time);
+      +        let own_duration = now.duration_since(own_start_time);
+      +
+      +        // Get a mutable reference to the parent of the node that just ended.
+      +        let mut parent_node = &mut data.call_tree;
+      +        for (node_name, _, _) in data.timing_stack.iter() {
+      +            parent_node = parent_node.children.get_mut(node_name).unwrap();
+      +        }
+      +
+      +        // Get the node that ended and update its timings.
+      +        let ended_node = parent_node.children.get_mut(&name).unwrap();
+      +        ended_node.total_time += total_duration;
+      +        ended_node.own_time += own_duration;
+      +    }
+      +
+      +    // Resume the new parent timer by updating its own-time start time.
+           if let Some(parent) = data.timing_stack.last_mut() {
+      -        parent.1 = now;
+      +        parent.2 = now; // parent.2 is own_time_start
+           }
+       }
+       
 
       ```
-
-      These changes should give you the more flexible profiling macros you're looking for. Let me know if you have any other questions
     metadata:
   - user: |
       Git apply result:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: profiler_macro/src/lib.rs
-      Applying patch to 'profiler_macro/src/lib.rs' using custom patcher...
-      Successfully applied patch and wrote to profiler_macro/src/lib.rs.
+      Identified target file: src/profiler.rs
+      Applying patch to 'src/profiler.rs' using custom patcher...
+      Successfully applied patch and wrote to src/profiler.rs.
     metadata:
 ...
