@@ -1,4 +1,5 @@
 use ordered_hash_map::OrderedHashMap;
+use std::cell::RefCell;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -166,17 +167,50 @@ macro_rules! hit {
 macro_rules! time_block {
     ($id:expr, $block:expr) => {{
         if $crate::profiler::PROFILING_ENABLED {
+            // Before starting, capture the time accumulated by any sibling blocks
+            // that have already run, and reset the accumulator for our own children.
+            let accumulated_from_siblings = $crate::profiler::NESTED_BLOCK_TIME.with(|cell| {
+                cell.replace(::std::time::Duration::ZERO)
+            });
+
             let start = std::time::Instant::now();
             let result = $block;
-            let elapsed = start.elapsed();
+            let total_elapsed = start.elapsed();
+
+            // After running, get the time accumulated by our direct children.
+            let children_time = $crate::profiler::NESTED_BLOCK_TIME.with(|cell| {
+                *cell.borrow()
+            });
+
+            // Calculate our own time by subtracting the time our children took.
+            let own_time = total_elapsed.saturating_sub(children_time);
+
+            // Update the global profiler data with our own time.
             let mut data = $crate::profiler::profiler_data().lock().unwrap();
             data.timings
                 .entry($id.to_string())
-                .and_modify(|stats| stats.update(elapsed))
-                .or_insert_with(|| $crate::profiler::TimingStats::new(elapsed));
+                .and_modify(|stats| stats.update(own_time))
+                .or_insert_with(|| $crate::profiler::TimingStats::new(own_time));
+
+            // Now, update the thread-local accumulator for our parent.
+            // We add our *total* elapsed time to the time that was already
+            // accumulated by our prior siblings.
+            $crate::profiler::NESTED_BLOCK_TIME.with(|cell| {
+                *cell.borrow_mut() = accumulated_from_siblings + total_elapsed;
+            });
+
             result
         } else {
             $block
         }
     }};
+}
+
+// This is public so the macro can access it, but it's not meant for direct use.
+#[doc(hidden)]
+thread_local! {
+    /// Thread-local storage to track the total time spent in nested timed blocks.
+    /// When a timed block ends, its total elapsed time is added to this value.
+    /// The parent block then subtracts this from its own total time to get its "own time".
+    pub static NESTED_BLOCK_TIME: RefCell<Duration> = RefCell::new(Duration::ZERO);
 }
