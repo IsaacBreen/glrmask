@@ -220,6 +220,10 @@ impl HybridBitset {
             }
         }
     }
+
+    pub fn inner(&self) -> &RangeSetBlaze<usize> {
+        &self.inner
+    }
 }
 
 // --- Iterator ---
