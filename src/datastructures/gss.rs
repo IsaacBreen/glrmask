@@ -56,7 +56,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                     println!("self_bv: {:?}", &self_bv);
                     println!("other_bv: {:?}", &other_bv);
                 }
-                
+
                 // Count number of 'holes' - gaps between ranges of size 1
                 let BIG_HOLE_LEN = 5;
                 let mut self_holes = 0;
@@ -85,13 +85,13 @@ impl PathAccumulator for Option<LLMTokenBV> {
                         prev_range_end = *range.end();
                     }
                 }
-                if self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN {
-                    eprintln!("WARNING: intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
+                if self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN {
+                    eprintln!("WARNING: intersection_assign: self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
                     eprintln!("self_bv: {:?}", &self_bv);
                     eprintln!("other_bv: {:?}", &other_bv);
                     panic!("intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
                 }
-                
+
                 let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
 
                 // fn round_down_to_power_of_10(x: usize) -> usize {
@@ -170,8 +170,8 @@ impl PathAccumulator for Option<LLMTokenBV> {
                         prev_range_end = *range.end();
                     }
                 }
-                if self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN {
-                    eprintln!("WARNING: intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
+                if self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN {
+                    eprintln!("WARNING: intersection_assign: self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
                     eprintln!("self_bv: {:?}", &self_bv);
                     eprintln!("right_bv: {:?}", &right_bv);
                     panic!("intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
