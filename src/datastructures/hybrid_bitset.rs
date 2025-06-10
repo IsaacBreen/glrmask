@@ -224,6 +224,112 @@ impl HybridBitset {
     pub fn inner(&self) -> &RangeSetBlaze<usize> {
         &self.inner
     }
+
+    /// Given a collection of HybridBitsets, this function finds a "good" permutation
+    /// of the underlying integers to reduce the total number of disjoint intervals
+    /// across all sets. This is a heuristic approach to the NP-hard problem of
+    /// minimizing "total fragmentation".
+    ///
+    /// The algorithm works by:
+    /// 1. Building a graph where nodes are the integers and edge weights represent
+    ///    how often two integers are consecutive in the input sets.
+    /// 2. Greedily forming chains of integers based on the heaviest edges.
+    /// 3. Concatenating these chains to produce a final linear ordering.
+    ///
+    /// The returned permutation is a map from the original integer values to their
+    /// new positions (0, 1, 2, ...).
+    pub fn find_good_permutation(sets: &[&Self]) -> std::collections::HashMap<usize, usize> {
+        use std::collections::{HashMap, HashSet, VecDeque};
+
+        // --- Step 1: Build Adjacency Graph and Collect All Nodes ---
+        let mut adj_graph: HashMap<usize, HashMap<usize, usize>> = HashMap::new();
+        let mut all_nodes: HashSet<usize> = HashSet::new();
+
+        for set in sets.iter() {
+            let mut iter = set.iter().peekable();
+            while let Some(u) = iter.next() {
+                all_nodes.insert(u);
+                if let Some(&v) = iter.peek() {
+                    // u and v are consecutive in this set, increment edge weight
+                    *adj_graph.entry(u).or_default().entry(v).or_default() += 1;
+                    *adj_graph.entry(v).or_default().entry(u).or_default() += 1;
+                }
+            }
+        }
+
+        // --- Step 2: Generate Permutation Order ---
+
+        // 2a. Create a list of all edges and sort by weight descending
+        let mut edges: Vec<(usize, usize, usize)> = Vec::new();
+        for (&u, neighbors) in &adj_graph {
+            for (&v, &weight) in neighbors {
+                if u < v { // Add each edge only once
+                    edges.push((u, v, weight));
+                }
+            }
+        }
+        edges.sort_unstable_by_key(|&(_, _, weight)| std::cmp::Reverse(weight));
+
+        // 2b. Build chains of nodes by processing edges from heaviest to lightest
+        let mut used_nodes: HashSet<usize> = HashSet::new();
+        let mut chains: Vec<VecDeque<usize>> = Vec::new();
+
+        for &(u, v, _) in &edges {
+            if used_nodes.contains(&u) || used_nodes.contains(&v) {
+                continue; // Skip if either node is already in a chain
+            }
+
+            // Start a new chain with this edge
+            let mut current_chain = VecDeque::from([u, v]);
+            used_nodes.insert(u);
+            used_nodes.insert(v);
+
+            // Greedily extend the chain to the right
+            let mut current_end = v;
+            loop {
+                let best_neighbor = adj_graph.get(&current_end).and_then(|neighbors| {
+                    neighbors.iter()
+                        .filter(|(node, _)| !used_nodes.contains(node))
+                        .max_by_key(|(_, weight)| **weight)
+                        .map(|(node, _)| *node)
+                });
+
+                if let Some(neighbor) = best_neighbor {
+                    current_chain.push_back(neighbor);
+                    used_nodes.insert(neighbor);
+                    current_end = neighbor;
+                } else { break; }
+            }
+
+            // Greedily extend the chain to the left
+            let mut current_start = u;
+            loop {
+                let best_neighbor = adj_graph.get(&current_start).and_then(|neighbors| {
+                    neighbors.iter()
+                        .filter(|(node, _)| !used_nodes.contains(node))
+                        .max_by_key(|(_, weight)| **weight)
+                        .map(|(node, _)| *node)
+                });
+
+                if let Some(neighbor) = best_neighbor {
+                    current_chain.push_front(neighbor);
+                    used_nodes.insert(neighbor);
+                    current_start = neighbor;
+                } else { break; }
+            }
+            chains.push(current_chain);
+        }
+
+        // 2c. Handle nodes that were not part of any edge (singletons)
+        for &node in &all_nodes {
+            if !used_nodes.contains(&node) {
+                chains.push(VecDeque::from([node]));
+            }
+        }
+
+        // --- Step 3: Produce the Final Permutation Map ---
+        chains.into_iter().flat_map(|chain| chain.into_iter()).enumerate().map(|(new_idx, old_idx)| (old_idx, new_idx)).collect()
+    }
 }
 
 // --- Iterator ---
@@ -841,5 +947,46 @@ mod tests {
         let set_ones_zero = HybridBitset::ones(0); // Should be empty
         assert_eq!(set_ones_zero.len(), 0);
         assert!(set_ones_zero.is_empty());
+    }
+
+    #[test]
+    fn test_find_good_permutation() {
+        // Example from the problem description
+        let s1 = HybridBitset::from_iter(vec![1, 2, 3, 4, 8, 9]);
+        let s2 = HybridBitset::from_iter(vec![2, 3, 5, 7, 8, 9, 15]);
+        let s3 = HybridBitset::from_iter(vec![1, 4, 5, 6, 7, 8, 12, 13]);
+
+        let sets = vec![&s1, &s2, &s3];
+
+        // Calculate original cost
+        let original_cost: usize = sets.iter().map(|s| s.inner().ranges_len()).sum();
+        assert_eq!(original_cost, 2 + 4 + 3); // 9
+
+        // Find the permutation
+        let perm_map = HybridBitset::find_good_permutation(&sets);
+
+        // Apply the permutation
+        let apply_permutation = |set: &HybridBitset, map: &std::collections::HashMap<usize, usize>| -> HybridBitset {
+            set.iter().map(|val| *map.get(&val).unwrap()).collect()
+        };
+
+        let pi_s1 = apply_permutation(&s1, &perm_map);
+        let pi_s2 = apply_permutation(&s2, &perm_map);
+        let pi_s3 = apply_permutation(&s3, &perm_map);
+
+        // Calculate new cost
+        let new_cost = pi_s1.inner().ranges_len() + pi_s2.inner().ranges_len() + pi_s3.inner().ranges_len();
+
+        // The heuristic should improve the cost for this non-trivial case.
+        assert!(new_cost < original_cost, "Expected new cost {} to be less than original cost {}", new_cost, original_cost);
+
+        // Test with sets that have no shared adjacencies
+        let s4 = HybridBitset::from_iter(vec![100, 200, 300]);
+        let s5 = HybridBitset::from_iter(vec![400, 500]);
+        let disjoint_sets = vec![&s4, &s5];
+        let original_disjoint_cost: usize = disjoint_sets.iter().map(|s| s.inner().ranges_len()).sum();
+        let perm_map_disjoint = HybridBitset::find_good_permutation(&disjoint_sets);
+        let new_disjoint_cost: usize = disjoint_sets.iter().map(|s| apply_permutation(s, &perm_map_disjoint).inner().ranges_len()).sum();
+        assert_eq!(new_disjoint_cost, original_disjoint_cost, "Cost should not change for sets with no adjacencies");
     }
 }
