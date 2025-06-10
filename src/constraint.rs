@@ -327,13 +327,29 @@ impl GrammarConstraint {
         }
         crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map_ids.len());
 
-        let precomputed = Self::precompute(
+        let (precomputed, permutation_map) = Self::precompute(
             &tokenizer, // This is the tokenizer parameter being moved into the struct
             &internal_llm_token_map_for_precompute, 
             &token_name_map,
             internal_max_llm_token, 
             &terminal_follow_map_ids, // Pass the new map
+            &mut computed_possible_matches,
         );
+
+        crate::debug!(2, "Remapping internal token IDs based on permutation.");
+        let mut new_original_to_internal_id_bimap = BiBTreeMap::new();
+        for (original_id, old_internal_id) in original_to_internal_id_bimap.iter() {
+            let new_internal_id = *permutation_map.get(old_internal_id).unwrap_or_else(|| {
+                panic!("Old internal ID {} not found in new permutation map", old_internal_id)
+            });
+            new_original_to_internal_id_bimap.insert(*original_id, new_internal_id);
+        }
+
+        let new_internal_max_llm_token = if permutation_map.is_empty() {
+            0
+        } else {
+            permutation_map.values().max().copied().unwrap_or(0)
+        };
 
         Self {
             tokenizer, // This is the tokenizer parameter being moved into the struct
@@ -342,8 +358,8 @@ impl GrammarConstraint {
             llm_token_map, 
             token_name_map,
             max_original_llm_token_id,
-            original_to_internal_id_bimap,
-            internal_max_llm_token,
+            original_to_internal_id_bimap: new_original_to_internal_id_bimap,
+            internal_max_llm_token: new_internal_max_llm_token,
             possible_matches: computed_possible_matches, // Add this line
         }
     }
@@ -354,7 +370,8 @@ impl GrammarConstraint {
         token_name_map:   &BiBTreeMap<String, usize>,
         internal_max_llm_token: usize,                       
         terminal_follow_map_ids: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-    ) -> Precomputed {
+        possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+    ) -> (Precomputed, HashMap<usize, usize>) {
         let mut helper = Precomputer::new(
             tokenizer,
             internal_llm_token_map,    
@@ -367,7 +384,7 @@ impl GrammarConstraint {
         helper.prune_precomputed_graph();
         helper.prune_terminal_sequences(); // New pruning pass << ADD THIS LINE HERE
         helper.merge_nodes();
-        helper.finish(token_name_map)
+        helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
@@ -815,7 +832,12 @@ impl<'r> Precomputer<'r> {
         }
     }
     
-    fn finish(mut self, token_name_map: &BiBTreeMap<String, usize>) -> Precomputed {
+    fn finish(
+        mut self,
+        token_name_map: &BiBTreeMap<String, usize>,
+        possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+        internal_max_llm_token: usize,
+    ) -> (Precomputed, HashMap<usize, usize>) {
         crate::debug!(2, "Checking for cycles in precomputed graph…");
         for (sid, root) in &self.roots {
             if PrecomputeNode::has_any_cycle(root.clone()) {
@@ -824,6 +846,92 @@ impl<'r> Precomputer<'r> {
                     sid
                 );
             }
+        }
+
+        // --- Remapping logic ---
+        // 1. Collect all HybridBitsets
+        let mut all_bitsets_cloned: Vec<HybridBitset> = Vec::new();
+        let mut visited_nodes_for_collection = std::collections::HashSet::new();
+        let mut queue_collect: Vec<_> = self.roots.values().cloned().collect();
+
+        while let Some(node_arc) = queue_collect.pop() {
+            let node_ptr = Arc::as_ptr(&node_arc);
+            if !visited_nodes_for_collection.insert(node_ptr) {
+                continue;
+            }
+
+            let node_guard = node_arc.lock().unwrap();
+            if let Some(bv) = &node_guard.value.clean_end {
+                all_bitsets_cloned.push(bv.clone());
+            }
+            for finalizer in node_guard.value.finalizers.values() {
+                all_bitsets_cloned.push(finalizer.content.clone());
+            }
+            for dest_map in node_guard.children().values() {
+                for (child_wrapper, edge_bv) in dest_map.iter() {
+                    all_bitsets_cloned.push(edge_bv.clone());
+                    queue_collect.push(child_wrapper.as_arc().clone());
+                }
+            }
+        }
+
+        for state_map in possible_matches.values() {
+            for bv in state_map.values() {
+                all_bitsets_cloned.push(bv.clone());
+            }
+        }
+
+        let all_bitsets_refs: Vec<&HybridBitset> = all_bitsets_cloned.iter().collect();
+
+        // 2. Find permutation
+        crate::debug!(2, "Finding good LLM token permutation to reduce fragmentation...");
+        let mut permutation_map = HybridBitset::find_good_permutation(&all_bitsets_refs);
+        crate::debug!(2, "Found permutation for {} tokens. Extending to full map.", permutation_map.len());
+
+        // Extend to a full permutation for all possible internal token IDs
+        let mut next_new_id = permutation_map.len();
+        for old_id in 0..=internal_max_llm_token {
+            if !permutation_map.contains_key(&old_id) {
+                permutation_map.insert(old_id, next_new_id);
+                next_new_id += 1;
+            }
+        }
+
+        // 3. Apply permutation
+        let remap_bitset = |bv: &mut HybridBitset| {
+            let mut new_bv = HybridBitset::zeros();
+            for old_id in bv.iter() {
+                let new_id = permutation_map.get(&old_id).unwrap();
+                new_bv.insert(*new_id);
+            }
+            *bv = new_bv;
+        };
+
+        // Remap in precomputed graph
+        let mut visited_nodes_for_remapping = std::collections::HashSet::new();
+        let mut queue_remap: Vec<_> = self.roots.values().cloned().collect();
+        while let Some(node_arc) = queue_remap.pop() {
+            let node_ptr = Arc::as_ptr(&node_arc);
+            if !visited_nodes_for_remapping.insert(node_ptr) { continue; }
+
+            let children_to_visit: Vec<Arc<Mutex<PrecomputeNode>>> = {
+                let node_guard = node_arc.lock().unwrap();
+                node_guard.children().values().flat_map(|dest_map| dest_map.keys().map(|wrapper| wrapper.as_arc().clone())).collect()
+            };
+
+            let mut node_guard = node_arc.lock().unwrap();
+            if let Some(bv) = &mut node_guard.value.clean_end { remap_bitset(bv); }
+            for finalizer in node_guard.value.finalizers.values_mut() { remap_bitset(&mut finalizer.content); }
+            for dest_map in node_guard.children_mut().values_mut() {
+                for edge_bv in dest_map.values_mut() { remap_bitset(edge_bv); }
+            }
+            drop(node_guard);
+            queue_remap.extend(children_to_visit);
+        }
+
+        // Remap in possible_matches
+        for state_map in possible_matches.values_mut() {
+            for bv in state_map.values_mut() { remap_bitset(bv); }
         }
 
         calculate_final_stats(&self.roots, &mut self.stats);
@@ -852,7 +960,7 @@ impl<'r> Precomputer<'r> {
                 clones
             );
         }
-        out
+        (out, permutation_map)
     }
 
     fn dfs(
