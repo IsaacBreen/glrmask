@@ -107,7 +107,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 // }
 
                 // Count number of 'holes' - gaps between ranges of size 1
-                let BIG_HOLE_LEN = 1;
+                let BIG_HOLE_LEN = 5;
                 let mut self_holes = 0;
                 let mut right_holes = 0;
                 let mut ranges = self_bv.inner().ranges();
@@ -135,9 +135,10 @@ impl PathAccumulator for Option<LLMTokenBV> {
                     }
                 }
                 if self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN {
-                    println!("WARNING: intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
-                    println!("self_bv: {:?}", &self_bv);
-                    println!("right_bv: {:?}", &right_bv);
+                    eprintln!("WARNING: intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
+                    eprintln!("self_bv: {:?}", &self_bv);
+                    eprintln!("right_bv: {:?}", &right_bv);
+                    panic!("intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
                 }
 
                 // let time_str = format!("intersection_assign: self_bv.inner().ranges_len(): {}, right_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), right_bv.inner().ranges_len());
