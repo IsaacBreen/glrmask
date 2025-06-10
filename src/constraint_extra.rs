@@ -19,10 +19,7 @@ fn format_bv_indices(
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>
 ) -> String {
     let indices: Vec<String> = bv.iter().map(|internal_id_val| {
-        if let Some(bimap) = original_internal_bimap {
-            // We have an internal_id_val (which is a right-side value in the bimap),
-            // and we want to find its corresponding original_id_val (left-side value).
-            bimap.get_by_right(&internal_id_val).map_or_else(
+        if let Some(bimap) = original_internal_bimap { // We have an internal_id_val (which is a right-side value in the bimap), // and we want to find its corresponding original_id_val (left-side value). bimap.get_by_right(&internal_id_val).map_or_else(
                 || format!("{} (unmapped internal)", internal_id_val),
                 |original_id_val| original_id_val.to_string()
             )
@@ -31,9 +28,7 @@ fn format_bv_indices(
         }
     }).collect();
     if indices.len() > 10 {
-        // format!("[{} indices starting with {}...]", indices.len(), indices[0..5].join(", "))
-        let range = bv;
-        format!("{:?}", range)
+        format!("[{} indices starting with {}...]", indices.len(), &indices[0..5].join(", "))
     } else if indices.is_empty() {
         "[]".to_string()
     } else {
@@ -160,6 +155,7 @@ pub struct PrecomputeStats {
     pub final_edges_pruned_by_token: BTreeMap<GrammarTokenID, usize>,
 
     pub edges_pruned_by_terminal_sequence: usize,
+    pub final_total_ranges_in_bvs: usize,
 }
 
 // Manual impl for PrecomputeStats
@@ -186,6 +182,7 @@ impl JSONConvertible for PrecomputeStats {
         obj.insert("final_edges_pruned_total".to_string(), self.final_edges_pruned_total.to_json());
         obj.insert("final_edges_pruned_by_token".to_string(), self.final_edges_pruned_by_token.to_json());
         obj.insert("edges_pruned_by_terminal_sequence".to_string(), self.edges_pruned_by_terminal_sequence.to_json());
+        obj.insert("final_total_ranges_in_bvs".to_string(), self.final_total_ranges_in_bvs.to_json());
         JSONNode::Object(obj)
     }
 
@@ -212,6 +209,7 @@ impl JSONConvertible for PrecomputeStats {
                 let final_edges_pruned_total = obj.remove("final_edges_pruned_total").ok_or_else(|| "Missing field final_edges_pruned_total for PrecomputeStats".to_string()).and_then(usize::from_json)?;
                 let final_edges_pruned_by_token = obj.remove("final_edges_pruned_by_token").ok_or_else(|| "Missing field final_edges_pruned_by_token for PrecomputeStats".to_string()).and_then(|n| BTreeMap::<GrammarTokenID, usize>::from_json(n))?;
                 let edges_pruned_by_terminal_sequence = obj.remove("edges_pruned_by_terminal_sequence").ok_or_else(|| "Missing field edges_pruned_by_terminal_sequence for PrecomputeStats".to_string()).and_then(usize::from_json)?;
+                let final_total_ranges_in_bvs = obj.remove("final_total_ranges_in_bvs").ok_or_else(|| "Missing field final_total_ranges_in_bvs for PrecomputeStats".to_string()).and_then(usize::from_json)?;
                 Ok(PrecomputeStats {
                     initial_root_nodes_created,
                     final_unique_nodes_count,
@@ -233,6 +231,7 @@ impl JSONConvertible for PrecomputeStats {
                     final_edges_pruned_total,
                     final_edges_pruned_by_token,
                     edges_pruned_by_terminal_sequence,
+                    final_total_ranges_in_bvs,
                 })
             }
             _ => Err("Expected JSONNode::Object for PrecomputeStats".to_string()),
@@ -303,6 +302,7 @@ pub fn calculate_final_stats(
     stats.final_non_root_internal_nodes_count = 0;
     stats.final_leaf_nodes_count = 0;
     stats.edges_pruned_by_terminal_sequence = 0;
+    stats.final_total_ranges_in_bvs = 0;
 
 
     for comp_arc_node in &all_reachable_nodes_for_final_stats {
@@ -336,6 +336,7 @@ pub fn calculate_final_stats(
                         .entry(*gtid)
                         .or_default()
                         .push(llm_token_bv_on_edge.len());
+                    stats.final_total_ranges_in_bvs += llm_token_bv_on_edge.inner().ranges_len();
                 }
                 if num_edges_for_this_key_to_distinct_children > 0 {
                     stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key_to_distinct_children;
@@ -351,11 +352,13 @@ pub fn calculate_final_stats(
         }
 
         // Existing logic for clean_end
-        if node_guard.value.clean_end.is_some() {
+        if let Some(clean_end_bv) = &node_guard.value.clean_end {
             stats.final_nodes_with_clean_end += 1;
+            stats.final_total_ranges_in_bvs += clean_end_bv.inner().ranges_len();
         }
         // Existing logic for finalizers
         for finalizer_for_gtid in node_guard.value.finalizers().values() { // Use .finalizers() method
+            stats.final_total_ranges_in_bvs += finalizer_for_gtid.content.inner().ranges_len();
             stats.final_total_finalizer_entries_in_graph += 1; // Count each finalizer once, regardless of content
         }
     }
@@ -395,6 +398,7 @@ pub fn print_precompute_stats(
     println!("  Total Finalizer Entries (sum of map sizes in all unique nodes): {}", stats.final_total_finalizer_entries_in_graph);
     println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
     println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
+    println!("  Total ranges in all HybridBitsets: {}", stats.final_total_ranges_in_bvs);
 
     let mut grammar_token_stats_new: Vec<(
         GrammarTokenID,
