@@ -111,22 +111,28 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 let mut self_holes = 0;
                 let mut right_holes = 0;
                 let mut ranges = self_bv.inner().ranges();
-                let mut prev_range_end = *ranges.next().unwrap().start();
-                for range in ranges {
-                    let gap = range.start() - prev_range_end;
-                    if gap == 1 {
-                        self_holes += 1;
+                let mut prev_range_end;
+                if let Some(start_range) = ranges.next() {
+                    prev_range_end = *start_range.end();
+                    for range in ranges {
+                        let gap = range.start() - prev_range_end;
+                        if gap == 1 {
+                            self_holes += 1;
+                        }
+                        prev_range_end = *range.end();
                     }
-                    prev_range_end = *range.end();
                 }
                 let mut ranges = right_bv.inner().ranges();
-                let mut prev_range_end = *ranges.next().unwrap().start();
-                for range in ranges {
-                    let gap = range.start() - prev_range_end;
-                    if gap == 1 {
-                        right_holes += 1;
+                let mut prev_range_end;
+                if let Some(start_range) = ranges.next() {
+                    prev_range_end = *start_range.end();
+                    for range in ranges {
+                        let gap = range.start() - prev_range_end;
+                        if gap == 1 {
+                            right_holes += 1;
+                        }
+                        prev_range_end = *range.end();
                     }
-                    prev_range_end = *range.end();
                 }
                 if self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN {
                     println!("WARNING: intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
