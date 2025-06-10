@@ -19,7 +19,10 @@ fn format_bv_indices(
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>
 ) -> String {
     let indices: Vec<String> = bv.iter().map(|internal_id_val| {
-        if let Some(bimap) = original_internal_bimap { // We have an internal_id_val (which is a right-side value in the bimap), // and we want to find its corresponding original_id_val (left-side value). bimap.get_by_right(&internal_id_val).map_or_else(
+        if let Some(bimap) = original_internal_bimap {
+            // We have an internal_id_val (which is a right-side value in the bimap),
+            // and we want to find its corresponding original_id_val (left-side value).
+            bimap.get_by_right(&internal_id_val).map_or_else(
                 || format!("{} (unmapped internal)", internal_id_val),
                 |original_id_val| original_id_val.to_string()
             )
@@ -28,7 +31,8 @@ fn format_bv_indices(
         }
     }).collect();
     if indices.len() > 10 {
-        format!("[{} indices starting with {}...]", indices.len(), &indices[0..5].join(", "))
+        // format!("[{} indices starting with {}...]", indices.len(), indices[0..5].join(", "))
+        format!("{:?}", indices)
     } else if indices.is_empty() {
         "[]".to_string()
     } else {
