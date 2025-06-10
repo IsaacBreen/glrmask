@@ -647,6 +647,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         dummy_eof_placeholder,
         max_original_llm_token_id_val
     );
+    grammar_constraint.dump_precomputed();
     println!("GrammarConstraint constructed successfully.");
     println!("GrammarConstraint original to internal ID map:");
     let mut temp = grammar_constraint.original_to_internal_id_bimap.iter().collect::<Vec<_>>();
