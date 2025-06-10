@@ -643,8 +643,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     //     v.iter().all(|c| c.is_ascii_alphabetic()));
 
     // Remove tokens that contain more than two different digits
-    // llm_token_map.retain(|v, _| v.len() == 1 ||
-    //     v.iter().filter(|c| c.is_ascii_digit()).collect::<BTreeSet<_>>().len() <= 5);
+    llm_token_map.retain(|v, _| v.len() == 1 ||
+        v.iter().filter(|c| c.is_ascii_digit()).collect::<BTreeSet<_>>().len() <= 5);
 
 
     // Print the vocab
