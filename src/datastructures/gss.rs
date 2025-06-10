@@ -56,6 +56,42 @@ impl PathAccumulator for Option<LLMTokenBV> {
                     println!("self_bv: {:?}", &self_bv);
                     println!("other_bv: {:?}", &other_bv);
                 }
+                
+                // Count number of 'holes' - gaps between ranges of size 1
+                let BIG_HOLE_LEN = 5;
+                let mut self_holes = 0;
+                let mut right_holes = 0;
+                let mut ranges = self_bv.inner().ranges();
+                let mut prev_range_end;
+                if let Some(start_range) = ranges.next() {
+                    prev_range_end = *start_range.end();
+                    for range in ranges {
+                        let gap = range.start() - prev_range_end;
+                        if gap == 1 {
+                            self_holes += 1;
+                        }
+                        prev_range_end = *range.end();
+                    }
+                }
+                let mut ranges = other_bv.inner().ranges();
+                let mut prev_range_end;
+                if let Some(start_range) = ranges.next() {
+                    prev_range_end = *start_range.end();
+                    for range in ranges {
+                        let gap = range.start() - prev_range_end;
+                        if gap == 1 {
+                            right_holes += 1;
+                        }
+                        prev_range_end = *range.end();
+                    }
+                }
+                if self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN {
+                    eprintln!("WARNING: intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
+                    eprintln!("self_bv: {:?}", &self_bv);
+                    eprintln!("other_bv: {:?}", &other_bv);
+                    panic!("intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
+                }
+                
                 let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
 
                 // fn round_down_to_power_of_10(x: usize) -> usize {
