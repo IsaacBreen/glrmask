@@ -89,7 +89,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                         prev_range_end = *range.end();
                     }
                 }
-                let min_hole_pos = 850;
+                let min_hole_pos = 0;
                 let max_hole_pos = 2000;
                 let is_eligible = self_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos) || right_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos);
                 if (self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN) && is_eligible {
@@ -183,7 +183,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                         prev_range_end = *range.end();
                     }
                 }
-                let min_hole_pos = 850;
+                let min_hole_pos = 0;
                 let max_hole_pos = 2000;
                 let is_eligible = self_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos) || right_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos);
                 if (self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN) && is_eligible {
