@@ -893,13 +893,13 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Found permutation for {} tokens. Extending to full map.", permutation_map.len());
 
         // Extend to a full permutation for all possible internal token IDs
-        // let mut next_new_id = permutation_map.len();
-        // for old_id in 0..=internal_max_llm_token {
-        //     if !permutation_map.contains_key(&old_id) {
-        //         permutation_map.insert(old_id, next_new_id);
-        //         next_new_id += 1;
-        //     }
-        // }
+        let mut next_new_id = permutation_map.len();
+        for old_id in 0..=internal_max_llm_token {
+            if !permutation_map.contains_key(&old_id) {
+                permutation_map.insert(old_id, next_new_id);
+                next_new_id += 1;
+            }
+        }
 
         // 3. Apply permutation
         let remap_bitset = |bv: &mut HybridBitset| {
