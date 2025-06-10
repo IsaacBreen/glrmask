@@ -152,7 +152,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                     prev_range_end = *start_range.end();
                     for range in ranges {
                         let gap = range.start() - prev_range_end;
-                        if gap == 1 {
+                        if gap == 2 {
                             self_holes += 1;
                         }
                         prev_range_end = *range.end();
