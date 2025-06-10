@@ -89,7 +89,9 @@ impl PathAccumulator for Option<LLMTokenBV> {
                         prev_range_end = *range.end();
                     }
                 }
-                if self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN {
+                let max_hole_pos = 1000;
+                let is_eligible = self_holes_pos.iter().any(|&pos| pos < max_hole_pos);
+                if (self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN) && is_eligible {
                     eprintln!("WARNING: intersection_assign: self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
                     eprintln!("self_bv: {:?}", &self_bv);
                     eprintln!("other_bv: {:?}", &other_bv);
