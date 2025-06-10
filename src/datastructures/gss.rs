@@ -58,7 +58,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 }
 
                 // Count number of 'holes' - gaps between ranges of size 1
-                let BIG_HOLE_LEN = 10;
+                let BIG_HOLE_LEN = 1;
                 let mut self_holes = 0;
                 let mut right_holes = 0;
                 let mut self_holes_pos = Vec::new();
@@ -152,7 +152,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 // }
 
                 // Count number of 'holes' - gaps between ranges of size 1
-                let BIG_HOLE_LEN = 10;
+                let BIG_HOLE_LEN = 1;
                 let mut self_holes = 0;
                 let mut right_holes = 0;
                 let mut self_holes_pos = Vec::new();
