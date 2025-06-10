@@ -885,17 +885,21 @@ impl<'r> Precomputer<'r> {
 
         // 2. Find permutation
         crate::debug!(2, "Finding good LLM token permutation to reduce fragmentation...");
-        let mut permutation_map = HybridBitset::find_good_permutation(&all_bitsets_refs);
+        // let mut permutation_map = HybridBitset::find_good_permutation(&all_bitsets_refs);
+        let mut permutation_map = HashMap::new();
+        for i in 0..internal_max_llm_token {
+            permutation_map.insert(i, i);
+        }
         crate::debug!(2, "Found permutation for {} tokens. Extending to full map.", permutation_map.len());
 
         // Extend to a full permutation for all possible internal token IDs
-        let mut next_new_id = permutation_map.len();
-        for old_id in 0..=internal_max_llm_token {
-            if !permutation_map.contains_key(&old_id) {
-                permutation_map.insert(old_id, next_new_id);
-                next_new_id += 1;
-            }
-        }
+        // let mut next_new_id = permutation_map.len();
+        // for old_id in 0..=internal_max_llm_token {
+        //     if !permutation_map.contains_key(&old_id) {
+        //         permutation_map.insert(old_id, next_new_id);
+        //         next_new_id += 1;
+        //     }
+        // }
 
         // 3. Apply permutation
         let remap_bitset = |bv: &mut HybridBitset| {
