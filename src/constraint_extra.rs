@@ -31,7 +31,9 @@ fn format_bv_indices(
         }
     }).collect();
     if indices.len() > 10 {
-        format!("[{} indices starting with {}...]", indices.len(), indices[0..5].join(", "))
+        // format!("[{} indices starting with {}...]", indices.len(), indices[0..5].join(", "))
+        let range = bv;
+        format!("{:?}", range)
     } else if indices.is_empty() {
         "[]".to_string()
     } else {
