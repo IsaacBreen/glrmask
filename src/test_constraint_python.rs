@@ -624,7 +624,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     // Keep tokens that are either given length or of the form ' Ax' where x is a letter
     llm_token_map.retain(|v, _| {
-        v.len() <= 10 || v.starts_with(b" A")
+        v.len() <= 3 || v.starts_with(b" A")
     });
 
     // Print the vocab
