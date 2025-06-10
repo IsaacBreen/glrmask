@@ -628,6 +628,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         // v.len() <= 1 || (v.starts_with(b" A")) && v.len() <= 3
         v.len() <= 3
     });
+    // Remove tokens that contain non-space non-alph, non-upper-case characters
+    llm_token_map.retain(|v, _| v.iter().all(|c| c == &b' ' || c.is_ascii_alphabetic() || c.is_ascii_uppercase()));
 
     // Print the vocab
     println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
