@@ -30,14 +30,14 @@ fn format_bv_indices(
             internal_id_val.to_string() // No map provided, print the internal ID
         }
     }).collect();
-    if indices.len() > 10 {
-        // format!("[{} indices starting with {}...]", indices.len(), indices[0..5].join(", "))
-        format!("{:?}", indices)
-    } else if indices.is_empty() {
-        "[]".to_string()
-    } else {
-        format!("[{}]", indices.join(", "))
-    }
+    // if indices.len() > 10 {
+    //     format!("[{} indices starting with {}...]", indices.len(), indices[0..5].join(", "))
+    // } else if indices.is_empty() {
+    //     "[]".to_string()
+    // } else {
+    //     format!("[{}]", indices.join(", "))
+    // }
+    format!("{:?}", bv)
 }
 
 /// Helper function to print PrecomputedFinalizer details.
