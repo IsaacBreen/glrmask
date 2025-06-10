@@ -58,17 +58,20 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 }
 
                 // Count number of 'holes' - gaps between ranges of size 1
-                let BIG_HOLE_LEN = 1;
+                let BIG_HOLE_LEN = 10;
                 let mut self_holes = 0;
                 let mut right_holes = 0;
+                let mut self_holes_pos = Vec::new();
+                let mut right_holes_pos = Vec::new();
                 let mut ranges = self_bv.inner().ranges();
                 let mut prev_range_end;
                 if let Some(start_range) = ranges.next() {
                     prev_range_end = *start_range.end();
                     for range in ranges {
                         let gap = range.start() - prev_range_end;
-                        if gap == 1 {
+                        if gap == 2 {
                             self_holes += 1;
+                            self_holes_pos.push(range.start() - 1);
                         }
                         prev_range_end = *range.end();
                     }
@@ -79,8 +82,9 @@ impl PathAccumulator for Option<LLMTokenBV> {
                     prev_range_end = *start_range.end();
                     for range in ranges {
                         let gap = range.start() - prev_range_end;
-                        if gap == 1 {
+                        if gap == 2 {
                             right_holes += 1;
+                            right_holes_pos.push(range.start() - 1);
                         }
                         prev_range_end = *range.end();
                     }
@@ -89,6 +93,8 @@ impl PathAccumulator for Option<LLMTokenBV> {
                     eprintln!("WARNING: intersection_assign: self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
                     eprintln!("self_bv: {:?}", &self_bv);
                     eprintln!("other_bv: {:?}", &other_bv);
+                    eprintln!("self_holes_pos: {:?}", &self_holes_pos);
+                    eprintln!("right_holes_pos: {:?}", &right_holes_pos);
                     panic!("intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
                 }
 
@@ -143,9 +149,11 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 // }
 
                 // Count number of 'holes' - gaps between ranges of size 1
-                let BIG_HOLE_LEN = 1;
+                let BIG_HOLE_LEN = 10;
                 let mut self_holes = 0;
                 let mut right_holes = 0;
+                let mut self_holes_pos = Vec::new();
+                let mut right_holes_pos = Vec::new();
                 let mut ranges = self_bv.inner().ranges();
                 let mut prev_range_end;
                 if let Some(start_range) = ranges.next() {
@@ -154,6 +162,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                         let gap = range.start() - prev_range_end;
                         if gap == 2 {
                             self_holes += 1;
+                            self_holes_pos.push(range.start() - 1);
                         }
                         prev_range_end = *range.end();
                     }
@@ -164,8 +173,9 @@ impl PathAccumulator for Option<LLMTokenBV> {
                     prev_range_end = *start_range.end();
                     for range in ranges {
                         let gap = range.start() - prev_range_end;
-                        if gap == 1 {
+                        if gap == 2 {
                             right_holes += 1;
+                            right_holes_pos.push(range.start() - 1);
                         }
                         prev_range_end = *range.end();
                     }
@@ -174,6 +184,8 @@ impl PathAccumulator for Option<LLMTokenBV> {
                     eprintln!("WARNING: intersection_assign: self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
                     eprintln!("self_bv: {:?}", &self_bv);
                     eprintln!("right_bv: {:?}", &right_bv);
+                    eprintln!("self_holes_pos: {:?}", &self_holes_pos);
+                    eprintln!("right_holes_pos: {:?}", &right_holes_pos);
                     panic!("intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
                 }
 
