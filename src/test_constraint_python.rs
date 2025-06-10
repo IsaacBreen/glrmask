@@ -623,9 +623,9 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // llm_token_map.retain(|v, _| v.len() <= 3);
 
     // Keep tokens that are either given length or of the form ' Ax' where x is a letter
-    // llm_token_map.retain(|v, _| {
-    //     v.len() <= 100 || v.starts_with(b" A")
-    // });
+    llm_token_map.retain(|v, _| {
+        v.len() <= 4 || v.starts_with(b" A")
+    });
 
     // Print the vocab
     println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);

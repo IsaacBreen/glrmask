@@ -58,7 +58,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 }
 
                 // Count number of 'holes' - gaps between ranges of size 1
-                let BIG_HOLE_LEN = 5;
+                let BIG_HOLE_LEN = 1;
                 let mut self_holes = 0;
                 let mut right_holes = 0;
                 let mut ranges = self_bv.inner().ranges();
@@ -143,7 +143,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 // }
 
                 // Count number of 'holes' - gaps between ranges of size 1
-                let BIG_HOLE_LEN = 5;
+                let BIG_HOLE_LEN = 1;
                 let mut self_holes = 0;
                 let mut right_holes = 0;
                 let mut ranges = self_bv.inner().ranges();
