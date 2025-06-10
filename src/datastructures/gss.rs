@@ -91,14 +91,14 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 }
                 let min_hole_pos = 10;
                 let max_hole_pos = 1000;
-                let is_eligible = self_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos > max_hole_pos) || right_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos > max_hole_pos);
+                let is_eligible = self_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos) || right_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos);
                 if (self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN) && is_eligible {
-                    eprintln!("WARNING: intersection_assign: self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
+                    eprintln!("WARNING: union_assign: self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
                     eprintln!("self_bv: {:?}", &self_bv);
                     eprintln!("other_bv: {:?}", &other_bv);
                     eprintln!("self_holes_pos: {:?}", &self_holes_pos);
                     eprintln!("right_holes_pos: {:?}", &right_holes_pos);
-                    panic!("intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
+                    panic!("union_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
                 }
 
                 let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
@@ -185,7 +185,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 }
                 let min_hole_pos = 10;
                 let max_hole_pos = 1000;
-                let is_eligible = self_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos > max_hole_pos) || right_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos > max_hole_pos);
+                let is_eligible = self_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos) || right_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos);
                 if (self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN) && is_eligible {
                     eprintln!("WARNING: intersection_assign: self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
                     eprintln!("self_bv: {:?}", &self_bv);
