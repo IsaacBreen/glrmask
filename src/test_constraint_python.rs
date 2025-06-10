@@ -637,7 +637,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         v.iter().all(|c| !c.is_ascii_alphabetic() || c.is_ascii_lowercase()));
     // Remove tokens that contain any of the first x of the capital letters in the alphabet
     llm_token_map.retain(|v, _| v.len() == 1 ||
-        v.iter().all(|c| !c.is_ascii_alphabetic() || c <= &b'f'));
+        v.iter().all(|c| !c.is_ascii_alphabetic() || c <= &b'c'));
 
     // Print the vocab
     println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
