@@ -300,6 +300,7 @@ fn test_precompute_for_python_name_token() {
         &BiBTreeMap::new(), // empty name‐map
         internal_llm_token_map_for_precompute.iter().map(|(_, id)| id.0).max().unwrap_or(0),
         &BTreeMap::new(), // empty terminal_follow_map
+        &mut BTreeMap::new(),
     );
     // print_precomputed(&_precomputed);
     println!("Done precomputing");
@@ -330,6 +331,7 @@ fn test_precompute_explosion() {
         &BiBTreeMap::new(), // empty name‐map
         internal_llm_token_map_for_precompute.iter().map(|(_, id)| id.0).max().unwrap_or(0),
         &BTreeMap::new(), // empty terminal_follow_map
+        &mut BTreeMap::new(),
     );
     // print_precomputed(&_precomputed);
     println!("Done precomputing");
