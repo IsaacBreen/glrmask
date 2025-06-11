@@ -631,3 +631,63 @@ fn test_simple_def_match_non_zero_llm_id() {
         def_original_llm_id
     );
 }
+
+#[test]
+fn test_precompute_a_plus_tokenizer() {
+    // Tokenizer for `a+`
+    let tokenizer_expr = groups![repeat1_fast(eat_u8(b'a'))];
+    let tokenizer = tokenizer_expr.build();
+
+    // LLM tokens "a" and "aa"
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"aa".to_vec(), LLMTokenID(1));
+    let max_original_llm_token_id = 1;
+
+    // Grammar S -> A_PLUS
+    let productions = vec![prod("S", vec![t("A_PLUS")])];
+
+    // Map grammar terminal to tokenizer group
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(Terminal("A_PLUS".to_string()), TerminalID(0));
+
+    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone());
+
+    // Token name map for stats
+    let mut token_name_map = BiBTreeMap::new();
+    token_name_map.insert("A_PLUS".to_string(), 0);
+
+    // Create the constraint, which runs precomputation
+    let constraint = GrammarConstraint::new(
+        tokenizer.clone(),
+        parser,
+        llm_token_map,
+        token_name_map,
+        max_original_llm_token_id,
+    );
+
+    // --- Verification ---
+    assert_eq!(constraint.precomputed.len(), 1, "Expected precomputed trie for only one tokenizer state");
+    let initial_state_id = tokenizer.initial_state_id();
+    let root_node = constraint.precomputed.get(&initial_state_id).expect("No precomputed trie for initial state");
+
+    // 1. Check root node's finalizer
+    let root_value = &root_node.value;
+    let finalizer_map = &root_value.finalizers;
+    assert_eq!(finalizer_map.len(), 1, "Root should have one finalizer key");
+    let (finalizer_gtid, finalizer) = finalizer_map.iter().next().unwrap();
+    assert_eq!(*finalizer_gtid, TerminalID(0), "Finalizer should be for grammar token 0");
+    let expected_tokens = HybridBitset::from_iter(vec![0, 1]); // LLM tokens "a" and "aa"
+    assert_eq!(finalizer.content, expected_tokens, "Finalizer content is incorrect");
+
+    // 2. Check root node's children and the leaf node
+    assert_eq!(root_node.children.len(), 1, "Root should have one child edge key");
+    let (edge_gtid_opt, destinations) = root_node.children.iter().next().unwrap();
+    assert_eq!(*edge_gtid_opt, Some(TerminalID(0)), "Edge key should be for grammar token 0");
+    assert_eq!(destinations.len(), 1, "Should be one destination for the edge");
+    let (child_arc_wrapper, edge_bv) = destinations.iter().next().unwrap();
+    assert_eq!(*edge_bv, expected_tokens, "Edge token bitset is incorrect");
+    let child_node = child_arc_wrapper.as_arc().lock().unwrap();
+    assert!(child_node.is_leaf(), "Child node should be a leaf after pruning");
+    assert_eq!(*child_node.value.clean_end.as_ref().unwrap(), expected_tokens, "Clean_end bitset is incorrect");
+}
