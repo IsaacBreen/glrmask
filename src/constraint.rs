@@ -40,21 +40,27 @@ const MERGE_THRESHOLD: usize = 100000000000;
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrecomputedNodeContents {
-    pub clean_end: Option<LLMTokenBV>,
+    pub end: bool,
+}
+
+impl PrecomputedNodeContents {
+    pub fn end() -> Self {
+        Self { end: true }
+    }
 }
 
 impl JSONConvertible for PrecomputedNodeContents {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
-        obj.insert("clean_end".to_string(), self.clean_end.to_json());
+        obj.insert("clean_end".to_string(), self.end.to_json());
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let clean_end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
-                                   .and_then(Option::<LLMTokenBV>::from_json)?;
-                Ok(PrecomputedNodeContents { clean_end })
+                let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
+                                   .and_then(bool::from_json)?;
+                Ok(PrecomputedNodeContents { end })
             }
             _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
         }
@@ -265,7 +271,7 @@ impl GrammarConstraint {
         }
         crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map_ids.len());
 
-        let (precomputed, permutation_map) = Self::precompute(
+        let precomputed = Self::precompute(
             &tokenizer, // This is the tokenizer parameter being moved into the struct
             &internal_llm_token_map_for_precompute, 
             &token_name_map,
@@ -274,21 +280,6 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
         );
 
-        crate::debug!(2, "Remapping internal token IDs based on permutation.");
-        let mut new_original_to_internal_id_bimap = BiBTreeMap::new();
-        for (original_id, old_internal_id) in original_to_internal_id_bimap.iter() {
-            let new_internal_id = *permutation_map.get(old_internal_id).unwrap_or_else(|| {
-                panic!("Old internal ID {} not found in new permutation map", old_internal_id)
-            });
-            new_original_to_internal_id_bimap.insert(*original_id, new_internal_id);
-        }
-
-        let new_internal_max_llm_token = if permutation_map.is_empty() {
-            0
-        } else {
-            permutation_map.values().max().copied().unwrap_or(0)
-        };
-
         Self {
             tokenizer, // This is the tokenizer parameter being moved into the struct
             parser,
@@ -296,20 +287,20 @@ impl GrammarConstraint {
             llm_token_map, 
             token_name_map,
             max_original_llm_token_id,
-            original_to_internal_id_bimap: new_original_to_internal_id_bimap,
-            internal_max_llm_token: new_internal_max_llm_token,
+            original_to_internal_id_bimap,
+            internal_max_llm_token,
             possible_matches: computed_possible_matches, // Add this line
         }
     }
 
     pub fn precompute(
         tokenizer:        &Regex,
-        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, 
+        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         token_name_map:   &BiBTreeMap<String, usize>,
-        internal_max_llm_token: usize,                       
+        internal_max_llm_token: usize,
         terminal_follow_map_ids: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-    ) -> (Precomputed, HashMap<usize, usize>) {
+    ) -> BTreeMap<TokenizerStateID, PrecomputeNode> {
         let mut helper = Precomputer::new(
             tokenizer,
             internal_llm_token_map,    
@@ -449,6 +440,7 @@ struct Precomputer<'r> {
     terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
     // Map each precompute node to its contents and the token node/position/state used to compute its
     tags:             RefCell<OrderedHashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, PrecomputeNodeKernel>>,
+    final_node:       ArcPtrWrapper<Mutex<PrecomputeNode>>,
 }
 
 impl<'r> Precomputer<'r> {
@@ -498,6 +490,7 @@ impl<'r> Precomputer<'r> {
             stats: PrecomputeStats::default(),
             terminal_follow_map, // Store the map
             tags: RefCell::new(OrderedHashMap::new()),
+            final_node: ArcPtrWrapper::new(Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::end())))),
         }
     }
 
@@ -590,120 +583,6 @@ impl<'r> Precomputer<'r> {
         }
     }
 
-    fn prune_precomputed_graph(&mut self) {
-        crate::debug!(2, "Starting precomputed graph pruning.");
-
-        let mut completable_cache: HashMap<*const Mutex<PrecomputeNode>, LLMTokenBV> = HashMap::new();
-
-        for root_arc in self.roots.values() {
-            let mut recursion_stack_for_pass1 = HashSet::new();
-            self.compute_completable_tokens_recursive(root_arc, &mut recursion_stack_for_pass1, &mut completable_cache);
-        }
-        crate::debug!(3, "Completed pass 1 (compute completable tokens). Cache size: {}", completable_cache.len());
-
-        let mut visited_nodes_for_pruning_pass = HashSet::new();
-        for root_arc in self.roots.clone().values() {
-            self.filter_and_prune_edges_recursive(root_arc, &mut visited_nodes_for_pruning_pass, &completable_cache);
-        }
-        crate::debug!(3, "Completed pass 2 (filter and prune edges).");
-
-        crate::debug!(2, "Finished precomputed graph pruning.");
-    }
-
-    fn compute_completable_tokens_recursive(
-        &self,
-        node_arc: &Arc<Mutex<PrecomputeNode>>,
-        recursion_stack: &mut HashSet<*const Mutex<PrecomputeNode>>,
-        completable_cache: &mut HashMap<*const Mutex<PrecomputeNode>, LLMTokenBV>
-    ) -> LLMTokenBV {
-        let node_ptr = Arc::as_ptr(node_arc);
-
-        if let Some(cached_completable_tokens) = completable_cache.get(&node_ptr) {
-            return cached_completable_tokens.clone();
-        }
-
-        if recursion_stack.contains(&node_ptr) {
-            return LLMTokenBV::zeros();
-        }
-
-        recursion_stack.insert(node_ptr);
-
-        let node_guard = node_arc.lock().expect("Mutex poisoned during compute_completable_tokens_recursive lock");
-        
-        let mut current_node_completable = node_guard.value.clean_end.as_ref().cloned().unwrap_or_else(LLMTokenBV::zeros);
-
-        let children_arcs_to_visit: Vec<Arc<Mutex<PrecomputeNode>>> = node_guard.children().values()
-            .flat_map(|destinations_map| destinations_map.keys().map(|arc_ptr_wrapper| arc_ptr_wrapper.as_arc().clone()))
-            .collect();
-        
-        drop(node_guard); 
-
-        for child_arc in children_arcs_to_visit {
-            let child_completable_tokens = self.compute_completable_tokens_recursive(&child_arc, recursion_stack, completable_cache);
-            current_node_completable |= &child_completable_tokens; 
-        }
-
-        recursion_stack.remove(&node_ptr); 
-        
-        completable_cache.insert(node_ptr, current_node_completable.clone());
-        current_node_completable
-    }
-
-    fn filter_and_prune_edges_recursive(
-        &mut self, 
-        node_arc: &Arc<Mutex<PrecomputeNode>>,
-        visited_for_pruning: &mut HashSet<*const Mutex<PrecomputeNode>>,
-        completable_cache: &HashMap<*const Mutex<PrecomputeNode>, LLMTokenBV>
-    ) {
-        let node_ptr = Arc::as_ptr(node_arc);
-        if !visited_for_pruning.insert(node_ptr) {
-            return;
-        }
-
-        let children_to_visit_recursively: Vec<Arc<Mutex<PrecomputeNode>>> = {
-            let node_guard = node_arc.lock().expect("Mutex poisoned: filter_and_prune_edges_recursive lock (read children)");
-            node_guard.children().values()
-                .flat_map(|destinations_map| destinations_map.keys().map(|arc_ptr_wrapper| arc_ptr_wrapper.as_arc().clone()))
-                .collect()
-        }; 
-
-        {
-            let mut node_guard = node_arc.lock().expect("Mutex poisoned: filter_and_prune_edges_recursive lock (modify children)");
-            
-            let original_children_map = std::mem::take(node_guard.children_mut());
-            let mut new_children_map_for_current_node: BTreeMap<_, OrderedHashMap<_, _>> = BTreeMap::new();
-
-            for (edge_key, destinations_map) in original_children_map {
-                let mut new_destinations_for_this_edge_key: OrderedHashMap<_, _> = OrderedHashMap::new();
-                for (child_arc_ptr_wrapper, current_edge_value) in destinations_map {
-                    let child_arc = child_arc_ptr_wrapper.as_arc();
-                    let child_ptr = Arc::as_ptr(child_arc);
-
-                    let completable_tokens_for_child = completable_cache.get(&child_ptr)
-                                                      .cloned()
-                                                      .unwrap_or_else(LLMTokenBV::zeros);
-                    
-                    let mut filtered_edge_value = current_edge_value.clone(); 
-                    filtered_edge_value &= &completable_tokens_for_child;
-
-                    if !filtered_edge_value.is_empty() {
-                        new_destinations_for_this_edge_key.insert(child_arc_ptr_wrapper.clone(), filtered_edge_value);
-                    } else {
-                        self.stats.final_edges_pruned_total += 1;
-                    }
-                }
-                if !new_destinations_for_this_edge_key.is_empty() {
-                    new_children_map_for_current_node.insert(edge_key.clone(), new_destinations_for_this_edge_key);
-                }
-            }
-            *node_guard.children_mut() = new_children_map_for_current_node;
-        } 
-
-        for child_arc_to_recurse_on in children_to_visit_recursively {
-            self.filter_and_prune_edges_recursive(&child_arc_to_recurse_on, visited_for_pruning, completable_cache);
-        }
-    }
-
     fn prune_terminal_sequences(&mut self) {
         crate::debug!(2, "Starting terminal sequence pruning.");
         let mut visited_contexts = HashSet::new(); // To avoid redundant work on same node from same context
@@ -783,102 +662,7 @@ impl<'r> Precomputer<'r> {
         token_name_map: &BiBTreeMap<String, usize>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
         internal_max_llm_token: usize,
-    ) -> (Precomputed, HashMap<usize, usize>) {
-        crate::debug!(2, "Checking for cycles in precomputed graph…");
-        for (sid, root) in &self.roots {
-            if PrecomputeNode::has_any_cycle(root.clone()) {
-                panic!(
-                    "Cycle detected in precomputed graph for tokenizer_state_id {:?}",
-                    sid
-                );
-            }
-        }
-
-        // --- Remapping logic ---
-        // 1. Collect all HybridBitsets
-        let mut all_bitsets_cloned: Vec<HybridBitset> = Vec::new();
-        let mut visited_nodes_for_collection = std::collections::HashSet::new();
-        let mut queue_collect: Vec<_> = self.roots.values().cloned().collect();
-
-        while let Some(node_arc) = queue_collect.pop() {
-            let node_ptr = Arc::as_ptr(&node_arc);
-            if !visited_nodes_for_collection.insert(node_ptr) {
-                continue;
-            }
-
-            let node_guard = node_arc.lock().unwrap();
-            if let Some(bv) = &node_guard.value.clean_end {
-                all_bitsets_cloned.push(bv.clone());
-            }
-            for dest_map in node_guard.children().values() {
-                for (child_wrapper, edge_bv) in dest_map.iter() {
-                    all_bitsets_cloned.push(edge_bv.clone());
-                    queue_collect.push(child_wrapper.as_arc().clone());
-                }
-            }
-        }
-
-        for state_map in possible_matches.values() {
-            for bv in state_map.values() {
-                all_bitsets_cloned.push(bv.clone());
-            }
-        }
-
-        let all_bitsets_refs: Vec<&HybridBitset> = all_bitsets_cloned.iter().collect();
-
-        // 2. Find permutation
-        crate::debug!(2, "Finding good LLM token permutation to reduce fragmentation...");
-        // let mut permutation_map = HybridBitset::find_good_permutation(&all_bitsets_refs);
-        let mut permutation_map = HashMap::new();
-        for i in 0..internal_max_llm_token {
-            permutation_map.insert(i, i);
-        }
-        crate::debug!(2, "Found permutation for {} tokens. Extending to full map.", permutation_map.len());
-
-        // Extend to a full permutation for all possible internal token IDs
-        let mut next_new_id = permutation_map.len();
-        for old_id in 0..=internal_max_llm_token {
-            if !permutation_map.contains_key(&old_id) {
-                permutation_map.insert(old_id, next_new_id);
-                next_new_id += 1;
-            }
-        }
-
-        // 3. Apply permutation
-        let remap_bitset = |bv: &mut HybridBitset| {
-            let mut new_bv = HybridBitset::zeros();
-            for old_id in bv.iter() {
-                let new_id = permutation_map.get(&old_id).unwrap();
-                new_bv.insert(*new_id);
-            }
-            *bv = new_bv;
-        };
-
-        // Remap in precomputed graph
-        let mut visited_nodes_for_remapping = std::collections::HashSet::new();
-        let mut queue_remap: Vec<_> = self.roots.values().cloned().collect();
-        while let Some(node_arc) = queue_remap.pop() {
-            let node_ptr = Arc::as_ptr(&node_arc);
-            if !visited_nodes_for_remapping.insert(node_ptr) { continue; }
-
-            let children_to_visit: Vec<Arc<Mutex<PrecomputeNode>>> = {
-                let node_guard = node_arc.lock().unwrap();
-                node_guard.children().values().flat_map(|dest_map| dest_map.keys().map(|wrapper| wrapper.as_arc().clone())).collect()
-            };
-
-            let mut node_guard = node_arc.lock().unwrap();
-            if let Some(bv) = &mut node_guard.value.clean_end { remap_bitset(bv); }
-            for dest_map in node_guard.children_mut().values_mut() {
-                for edge_bv in dest_map.values_mut() { remap_bitset(edge_bv); }
-            }
-            drop(node_guard);
-            queue_remap.extend(children_to_visit);
-        }
-
-        // Remap in possible_matches
-        for state_map in possible_matches.values_mut() {
-            for bv in state_map.values_mut() { remap_bitset(bv); }
-        }
+    ) -> BTreeMap<TokenizerStateID, PrecomputeNode> {
 
         calculate_final_stats(&self.roots, &mut self.stats);
         print_precompute_stats(&self.stats, token_name_map);
@@ -906,7 +690,7 @@ impl<'r> Precomputer<'r> {
                 clones
             );
         }
-        (out, permutation_map)
+        out
     }
 
     fn dfs(
@@ -916,6 +700,7 @@ impl<'r> Precomputer<'r> {
             TokenizerStateID,
             OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
+
     ) {
         todo!()
     }
@@ -1054,11 +839,11 @@ impl<'a> GrammarConstraintState<'a> {
                     }
     
     
-                    if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
-                        let glr_active_tokens = final_glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
-                        let mask_contribution = &glr_active_tokens & clean_end_bv;
-                        final_mask_internal |= mask_contribution;
-                    }
+                    // if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
+                    //     let glr_active_tokens = final_glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                    //     let mask_contribution = &glr_active_tokens & clean_end_bv;
+                    //     final_mask_internal |= mask_contribution;
+                    // }
                     true 
                 },
             );
