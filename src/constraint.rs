@@ -26,7 +26,7 @@ use crate::finite_automata::Regex;
 use crate::glr::parser::{
     GLRParser, GLRParserState, ParseState, ParseStateEdgeContent,
 };
-use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, TokenizerStateID};
+use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
@@ -960,7 +960,17 @@ impl<'r> Precomputer<'r> {
                         self.possible_matches(&child_vocab_ref, TokenizerStateID(end_state_id))
                     });
 
-                    for m in &exec_result.matches {
+                    let mut matches = exec_result.matches;
+                    if let Some(final_state_val) = exec_result.end_state {
+                        for terminal_id in self.tokenizer.tokens_accessible_from_state(TokenizerStateID(final_state_val)) {
+                            matches.push(Token { id: terminal_id.0, width: segment_bytes.len() - offset });
+                        }
+                    }
+                    // Eliminate duplicate matches
+                    matches.sort();
+                    matches.dedup();
+
+                    for m in &matches {
                         let grammar_tok = GrammarTokenID(m.id);
                         let match_end_offset = offset + m.width;
                         let active_tokens = child_vocab_ref.reachable_token_ids();
@@ -981,14 +991,6 @@ impl<'r> Precomputer<'r> {
                                     &mut next_level
                                 );
                             }
-                        }
-                    }
-
-                    if let Some(final_state_val) = exec_result.end_state {
-                        let final_sid = TokenizerStateID(final_state_val);
-                        for src in &merged_src_set {
-                            next_level
-                                .entry(final_sid).or_default().insert(src.clone());
                         }
                     }
                 }
