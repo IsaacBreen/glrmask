@@ -992,16 +992,91 @@ impl<'r> Precomputer<'r> {
 
                         if !edge_tokens.is_empty() {
                             for src in &merged_src_set {
-                                self.insert_edge(
-                                    src.as_arc().clone(),
-                                    grammar_tok,
-                                    edge_tokens.clone(),
-                                    child_vocab_ref.token_id(),
-                                    match_end_offset,
-                                    segment_bytes.len(),
-                                    &mut queue,
-                                    &mut next_level
+                                // Insert edge
+                                let source_arc = src.as_arc().clone();
+                                let edge_tokens1 = edge_tokens.clone();
+                                let final_llm_token_id_at_child_vocab = child_vocab_ref.token_id();
+                                let segment_len = segment_bytes.len();
+                                crate::debug!(4, "Pushing path from {:p} with edge value {:?}", Arc::as_ptr(&source_arc), edge_tokens1);
+                                let mut inserter = EdgeInserter::new(
+                                    source_arc.clone(),
+                                    Some(grammar_tok),
+                                    edge_tokens1.clone(),
+                                    |existing: &mut HybridBitset, new_bv_ref: HybridBitset| *existing |= new_bv_ref,
                                 );
+
+                                inserter = inserter.try_children();
+
+                                let mut pot: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
+
+                                let gather_set = |set: &OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+                                                  pot_val: &mut Vec<Arc<Mutex<PrecomputeNode>>>| {
+                                    pot_val.extend(
+                                        set.iter()
+                                            .map(|h| h.as_arc().clone()),
+                                    );
+                                };
+
+                                if match_end_offset < segment_len {
+                                    if let Some(map_at_offset) = queue.get(&match_end_offset) {
+                                        if let Some(set_of_nodes_at_offset_for_new_state) = map_at_offset.get(&TokenizerStateID(0)) {
+                                            gather_set(set_of_nodes_at_offset_for_new_state, &mut pot);
+                                        }
+                                    }
+                                } else {
+                                    if let Some(set_of_nodes_at_next_level_for_new_state) = next_level.get(&TokenizerStateID(0)) {
+                                        gather_set(set_of_nodes_at_next_level_for_new_state, &mut pot);
+                                    }
+                                }
+
+                                inserter = inserter.try_destinations(&pot);
+
+                                if inserter.clone_into_option().is_none() {
+                                    let mut extra = Vec::new();
+                                    {
+                                        let guard = source_arc.lock().unwrap();
+                                        if let Some(dest_map) =
+                                            guard.children().get(&Some(grammar_tok))
+                                        {
+                                            for child_wrap in dest_map.keys() {
+                                                 extra.push(child_wrap.as_arc().clone());
+                                            }
+                                        }
+                                    }
+                                    inserter = inserter.try_destinations(&extra);
+                                }
+
+                                let target = inserter
+                                    .else_create_destination_with_value(PrecomputedNodeContents::default())
+                                    .unwrap();
+
+                                // This block was empty, removed.
+                                // {
+                                //     let mut guard = target.lock().unwrap();
+                                // }
+
+                                let handle = ArcPtrWrapper::new(target.clone());
+
+                                if match_end_offset == segment_len {
+                                    crate::debug!(5, "Marking clean end for child vocab node {:p} representing LLM token {:?}", handle.as_ref(), final_llm_token_id_at_child_vocab);
+                                    next_level
+                                        .entry(TokenizerStateID(0))
+                                        .or_default()
+                                        .insert(handle);
+
+                                    let mut g = target.lock().unwrap();
+                                    g.value
+                                        .clean_end
+                                        .get_or_insert_with(HybridBitset::zeros)
+                                        .insert(final_llm_token_id_at_child_vocab);
+                                } else {
+                                    queue
+                                        .entry(match_end_offset)
+                                        .or_default()
+                                        .entry(TokenizerStateID(0))
+                                        .or_default()
+                                        .insert(handle);
+                                }
                             }
                         }
                     }
@@ -1009,106 +1084,6 @@ impl<'r> Precomputer<'r> {
             }
 
             self.dfs(child_vocab_ref, next_level);
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn insert_edge(
-        &self,
-        source_arc: Arc<Mutex<PrecomputeNode>>,
-        grammar_tok: GrammarTokenID,
-        edge_tokens: LLMTokenBV,
-        final_llm_token_id_at_child_vocab: usize, 
-        match_end_offset_in_segment: usize,
-        segment_len: usize,
-        queue: &mut BTreeMap<
-            usize,
-            BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
-        >,
-        next_level: &mut BTreeMap<
-            TokenizerStateID,
-            OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
-        >,
-    ) {
-        crate::debug!(4, "Pushing path from {:p} with edge value {:?}", Arc::as_ptr(&source_arc), edge_tokens);
-        let mut inserter = EdgeInserter::new(
-            source_arc.clone(),
-            Some(grammar_tok),
-            edge_tokens.clone(), 
-            |existing: &mut HybridBitset, new_bv_ref: HybridBitset| *existing |= new_bv_ref,
-        );
-
-        inserter = inserter.try_children();
-
-        let mut pot: Vec<Arc<Mutex<PrecomputeNode>>> = Vec::new();
-
-        let gather_set = |set: &OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
-                          pot_val: &mut Vec<Arc<Mutex<PrecomputeNode>>>| {
-            pot_val.extend(
-                set.iter()
-                    .map(|h| h.as_arc().clone()),
-            );
-        };
-
-        if match_end_offset_in_segment < segment_len {
-            if let Some(map_at_offset) = queue.get(&match_end_offset_in_segment) {
-                if let Some(set_of_nodes_at_offset_for_new_state) = map_at_offset.get(&TokenizerStateID(0)) {
-                    gather_set(set_of_nodes_at_offset_for_new_state, &mut pot);
-                }
-            }
-        } else {
-            if let Some(set_of_nodes_at_next_level_for_new_state) = next_level.get(&TokenizerStateID(0)) {
-                gather_set(set_of_nodes_at_next_level_for_new_state, &mut pot);
-            }
-        }
-
-        inserter = inserter.try_destinations(&pot);
-
-        if inserter.clone_into_option().is_none() {
-            let mut extra = Vec::new();
-            {
-                let guard = source_arc.lock().unwrap();
-                if let Some(dest_map) =
-                    guard.children().get(&Some(grammar_tok))
-                {
-                    for child_wrap in dest_map.keys() {
-                         extra.push(child_wrap.as_arc().clone());
-                    }
-                }
-            }
-            inserter = inserter.try_destinations(&extra);
-        }
-
-        let target = inserter
-            .else_create_destination_with_value(PrecomputedNodeContents::default())
-            .unwrap();
-
-        // This block was empty, removed.
-        // {
-        //     let mut guard = target.lock().unwrap();
-        // }
-
-        let handle = ArcPtrWrapper::new(target.clone());
-
-        if match_end_offset_in_segment == segment_len {
-            crate::debug!(5, "Marking clean end for child vocab node {:p} representing LLM token {:?}", handle.as_ref(), final_llm_token_id_at_child_vocab);
-            next_level
-                .entry(TokenizerStateID(0)) 
-                .or_default()
-                .insert(handle);
-
-            let mut g = target.lock().unwrap();
-            g.value
-                .clean_end
-                .get_or_insert_with(HybridBitset::zeros)
-                .insert(final_llm_token_id_at_child_vocab); 
-        } else {
-            queue
-                .entry(match_end_offset_in_segment)
-                .or_default()
-                .entry(TokenizerStateID(0)) 
-                .or_default()
-                .insert(handle);
         }
     }
 
