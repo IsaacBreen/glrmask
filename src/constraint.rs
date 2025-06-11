@@ -1046,12 +1046,7 @@ impl<'r> Precomputer<'r> {
                                 let target = inserter
                                     .else_create_destination_with_value(PrecomputedNodeContents::default())
                                     .unwrap();
-
-                                // This block was empty, removed.
-                                // {
-                                //     let mut guard = target.lock().unwrap();
-                                // }
-
+                                
                                 let handle = ArcPtrWrapper::new(target.clone());
 
                                 // Tag it
