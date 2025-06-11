@@ -43,26 +43,87 @@ const MERGE_THRESHOLD: usize = 100000000000;
 // Pre-computation node values
 // -----------------------------------------------------------------------------
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[derive(Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PrecomputedNodeContents {
-    pub is_clean_end: bool,
+pub struct PrecomputedFinalizer {
+    pub content: LLMTokenBV,
 }
 
-impl JSONConvertible for PrecomputedNodeContents {
+impl Default for PrecomputedFinalizer {
+    fn default() -> Self {
+        Self { content: LLMTokenBV::zeros() }
+    }
+}
+
+impl JSONConvertible for PrecomputedFinalizer {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
-        obj.insert("is_clean_end".to_string(), self.is_clean_end.to_json());
+        obj.insert("content".to_string(), self.content.to_json());
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let is_clean_end = obj.remove("is_clean_end").ok_or_else(|| "Missing field is_clean_end for PrecomputedNodeContents".to_string())
-                                   .and_then(bool::from_json)?;
-                Ok(PrecomputedNodeContents { is_clean_end })
+                let content = obj.remove("content").ok_or_else(|| "Missing field content for PrecomputedFinalizer".to_string())
+                                   .and_then(LLMTokenBV::from_json)?;
+                Ok(PrecomputedFinalizer { content })
+            }
+            _ => Err("Expected JSONNode::Object for PrecomputedFinalizer".to_string()),
+        }
+    }
+}
+
+
+impl PrecomputedFinalizer {
+    fn new(tokens: LLMTokenBV) -> Self {
+        Self {
+            content: tokens,
+        }
+    }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PrecomputedNodeContents {
+    finalizers: BTreeMap<GrammarTokenID, PrecomputedFinalizer>,
+    pub clean_end: Option<LLMTokenBV>,
+}
+
+impl JSONConvertible for PrecomputedNodeContents {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("finalizers".to_string(), self.finalizers.to_json());
+        obj.insert("clean_end".to_string(), self.clean_end.to_json());
+        JSONNode::Object(obj)
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let finalizers = obj.remove("finalizers").ok_or_else(|| "Missing field finalizers for PrecomputedNodeContents".to_string())
+                                    .and_then(|n| BTreeMap::<GrammarTokenID, PrecomputedFinalizer>::from_json(n))?;
+                let clean_end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
+                                   .and_then(Option::<LLMTokenBV>::from_json)?;
+                Ok(PrecomputedNodeContents { finalizers, clean_end })
             }
             _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
         }
+    }
+}
+
+
+impl PrecomputedNodeContents {
+    pub(crate) fn finalizers(&self) -> &BTreeMap<GrammarTokenID, PrecomputedFinalizer> {
+        &self.finalizers
+    }
+
+    fn push_finalizer_info(
+        &mut self,
+        grammar_token: GrammarTokenID,
+        llm_token: LLMTokenID, 
+        _tokenizer_state: TokenizerStateID,
+    ) {
+        self.finalizers
+            .entry(grammar_token)
+            .or_default()
+            .content
+            .insert(llm_token.0);
     }
 }
 
@@ -540,6 +601,7 @@ impl<'r> Precomputer<'r> {
         }
 
         crate::debug!(2, "Starting precompute DFS");
+        crate::debug!(3, "Roots for each tokenizer state:");
         for (sid, root) in &self.roots {
             crate::debug!(3, "  {}: {:p}", sid.0, Arc::as_ptr(root));
         }
@@ -575,6 +637,124 @@ impl<'r> Precomputer<'r> {
                     PrecomputeNode's Ord/Eq implementation or the merge_nodes logic itself.",
                     _tokenizer_state_id);
             };
+        }
+    }
+
+    fn prune_precomputed_graph(&mut self) {
+        crate::debug!(2, "Starting precomputed graph pruning.");
+
+        let mut completable_cache: HashMap<*const Mutex<PrecomputeNode>, LLMTokenBV> = HashMap::new();
+
+        for root_arc in self.roots.values() {
+            let mut recursion_stack_for_pass1 = HashSet::new();
+            self.compute_completable_tokens_recursive(root_arc, &mut recursion_stack_for_pass1, &mut completable_cache);
+        }
+        crate::debug!(3, "Completed pass 1 (compute completable tokens). Cache size: {}", completable_cache.len());
+
+        let mut visited_nodes_for_pruning_pass = HashSet::new();
+        for root_arc in self.roots.clone().values() {
+            self.filter_and_prune_edges_recursive(root_arc, &mut visited_nodes_for_pruning_pass, &completable_cache);
+        }
+        crate::debug!(3, "Completed pass 2 (filter and prune edges).");
+
+        crate::debug!(2, "Finished precomputed graph pruning.");
+    }
+
+    fn compute_completable_tokens_recursive(
+        &self,
+        node_arc: &Arc<Mutex<PrecomputeNode>>,
+        recursion_stack: &mut HashSet<*const Mutex<PrecomputeNode>>,
+        completable_cache: &mut HashMap<*const Mutex<PrecomputeNode>, LLMTokenBV>
+    ) -> LLMTokenBV {
+        let node_ptr = Arc::as_ptr(node_arc);
+
+        if let Some(cached_completable_tokens) = completable_cache.get(&node_ptr) {
+            return cached_completable_tokens.clone();
+        }
+
+        if recursion_stack.contains(&node_ptr) {
+            return LLMTokenBV::zeros();
+        }
+
+        recursion_stack.insert(node_ptr);
+
+        let node_guard = node_arc.lock().expect("Mutex poisoned during compute_completable_tokens_recursive lock");
+        
+        let mut current_node_completable = node_guard.value.clean_end.as_ref().cloned().unwrap_or_else(LLMTokenBV::zeros);
+
+        for finalizer in node_guard.value.finalizers.values() {
+            current_node_completable |= &finalizer.content;
+        }
+
+        let children_arcs_to_visit: Vec<Arc<Mutex<PrecomputeNode>>> = node_guard.children().values()
+            .flat_map(|destinations_map| destinations_map.keys().map(|arc_ptr_wrapper| arc_ptr_wrapper.as_arc().clone()))
+            .collect();
+        
+        drop(node_guard); 
+
+        for child_arc in children_arcs_to_visit {
+            let child_completable_tokens = self.compute_completable_tokens_recursive(&child_arc, recursion_stack, completable_cache);
+            current_node_completable |= &child_completable_tokens; 
+        }
+
+        recursion_stack.remove(&node_ptr); 
+        
+        completable_cache.insert(node_ptr, current_node_completable.clone());
+        current_node_completable
+    }
+
+    fn filter_and_prune_edges_recursive(
+        &mut self, 
+        node_arc: &Arc<Mutex<PrecomputeNode>>,
+        visited_for_pruning: &mut HashSet<*const Mutex<PrecomputeNode>>,
+        completable_cache: &HashMap<*const Mutex<PrecomputeNode>, LLMTokenBV>
+    ) {
+        let node_ptr = Arc::as_ptr(node_arc);
+        if !visited_for_pruning.insert(node_ptr) {
+            return;
+        }
+
+        let children_to_visit_recursively: Vec<Arc<Mutex<PrecomputeNode>>> = {
+            let node_guard = node_arc.lock().expect("Mutex poisoned: filter_and_prune_edges_recursive lock (read children)");
+            node_guard.children().values()
+                .flat_map(|destinations_map| destinations_map.keys().map(|arc_ptr_wrapper| arc_ptr_wrapper.as_arc().clone()))
+                .collect()
+        }; 
+
+        {
+            let mut node_guard = node_arc.lock().expect("Mutex poisoned: filter_and_prune_edges_recursive lock (modify children)");
+            
+            let original_children_map = std::mem::take(node_guard.children_mut());
+            let mut new_children_map_for_current_node: BTreeMap<_, OrderedHashMap<_, _>> = BTreeMap::new();
+
+            for (edge_key, destinations_map) in original_children_map {
+                let mut new_destinations_for_this_edge_key: OrderedHashMap<_, _> = OrderedHashMap::new();
+                for (child_arc_ptr_wrapper, current_edge_value) in destinations_map {
+                    let child_arc = child_arc_ptr_wrapper.as_arc();
+                    let child_ptr = Arc::as_ptr(child_arc);
+
+                    let completable_tokens_for_child = completable_cache.get(&child_ptr)
+                                                      .cloned()
+                                                      .unwrap_or_else(LLMTokenBV::zeros);
+                    
+                    let mut filtered_edge_value = current_edge_value.clone(); 
+                    filtered_edge_value &= &completable_tokens_for_child;
+
+                    if !filtered_edge_value.is_empty() {
+                        new_destinations_for_this_edge_key.insert(child_arc_ptr_wrapper.clone(), filtered_edge_value);
+                    } else {
+                        self.stats.final_edges_pruned_total += 1;
+                    }
+                }
+                if !new_destinations_for_this_edge_key.is_empty() {
+                    new_children_map_for_current_node.insert(edge_key.clone(), new_destinations_for_this_edge_key);
+                }
+            }
+            *node_guard.children_mut() = new_children_map_for_current_node;
+        } 
+
+        for child_arc_to_recurse_on in children_to_visit_recursively {
+            self.filter_and_prune_edges_recursive(&child_arc_to_recurse_on, visited_for_pruning, completable_cache);
         }
     }
 
@@ -681,6 +861,12 @@ impl<'r> Precomputer<'r> {
             }
 
             let node_guard = node_arc.lock().unwrap();
+            if let Some(bv) = &node_guard.value.clean_end {
+                all_bitsets_cloned.push(bv.clone());
+            }
+            for finalizer in node_guard.value.finalizers.values() {
+                all_bitsets_cloned.push(finalizer.content.clone());
+            }
             for dest_map in node_guard.children().values() {
                 for (child_wrapper, edge_bv) in dest_map.iter() {
                     all_bitsets_cloned.push(edge_bv.clone());
@@ -738,6 +924,8 @@ impl<'r> Precomputer<'r> {
             };
 
             let mut node_guard = node_arc.lock().unwrap();
+            if let Some(bv) = &mut node_guard.value.clean_end { remap_bitset(bv); }
+            for finalizer in node_guard.value.finalizers.values_mut() { remap_bitset(&mut finalizer.content); }
             for dest_map in node_guard.children_mut().values_mut() {
                 for edge_bv in dest_map.values_mut() { remap_bitset(edge_bv); }
             }
@@ -885,6 +1073,19 @@ impl<'r> Precomputer<'r> {
                             .entry(final_sid)
                             .or_default()
                             .insert(src.clone());
+
+                        let mut guard = src.as_arc().lock().unwrap();
+                        for gtid in self
+                            .tokenizer
+                            .tokens_accessible_from_state(final_sid)
+                        {
+                            crate::debug!(5, "Pushing finalizer info for token {:?} in state {:?}", gtid.0, final_sid.0);
+                            guard.value.push_finalizer_info(
+                                gtid,
+                                LLMTokenID(child_vocab_of_segment.token_id()),
+                                final_sid,
+                            );
+                        }
                     }
                 }
             }
@@ -979,7 +1180,10 @@ impl<'r> Precomputer<'r> {
                 .insert(handle);
 
             let mut g = target.lock().unwrap();
-            g.value.is_clean_end = true;
+            g.value
+                .clean_end
+                .get_or_insert_with(HybridBitset::zeros)
+                .insert(final_llm_token_id_at_child_vocab); 
         } else {
             queue
                 .entry(match_end_offset_in_segment)
@@ -1038,11 +1242,11 @@ pub struct GrammarConstraintState<'a> {
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
         crate::time!("GrammarConstraintState::get_mask", {
-            crate::debug!(2, "Computing mask with {} tokenizer states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
-            let final_mask_internal = Arc::new(Mutex::new(HybridBitset::zeros()));
+            crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
+            let mut final_mask_internal = HybridBitset::zeros();
     
             if self.state.is_empty() {
-                return self.parent.internal_bv_to_original(&final_mask_internal.lock().unwrap());
+                return self.parent.internal_bv_to_original(&final_mask_internal);
             }
     
             let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, usize>::new()));
@@ -1086,35 +1290,28 @@ impl<'a> GrammarConstraintState<'a> {
             if initial_values_for_map.is_empty() {
                  // This can happen if all GLR states had empty GSS stacks or no corresponding precomputed tries.
                  crate::debug!(2, "No valid initial states for get_mask's special_map traversal.");
-                 return self.parent.internal_bv_to_original(&final_mask_internal.lock().unwrap());
+                 return self.parent.internal_bv_to_original(&final_mask_internal);
             }
     
-            let final_mask_clone = Arc::clone(&final_mask_internal);
-            let step_counts_clone = Arc::clone(&step_counts);
+            let step_counts_clone1 = Arc::clone(&step_counts);
+            let step_counts_clone2 = Arc::clone(&step_counts);
     
             Trie::special_map(
                 initial_values_for_map,
                 // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
-                move |glr_s, grammar_token_opt, edge_llm_tokens_bv, child_node_trie_data| {
+                |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
                     let mut glr_s = glr_s.clone();
-
-                    let gss_allowed_before_intersect = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
-                    let allowed_on_edge = &gss_allowed_before_intersect & edge_llm_tokens_bv;
-                    if allowed_on_edge.is_empty() {
-                        return None;
-                    }
-
-                    intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &allowed_on_edge, &mut HashMap::new());
+                    // crate::debug!(4, "Stepping with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
+                    // glr_s.log_gss("Stepping with edge_llm_tokens_bv", grammar_token_opt.unwrap_or(TerminalID(0)));
+                    intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
+                    // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
     
                     if let Some(gtid) = grammar_token_opt {
-                        *step_counts_clone.lock().unwrap().entry(*gtid).or_insert(0) += 1;
+                        *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
                         glr_s.step(*gtid);
                     }
     
                     if glr_s.is_ok() {
-                        if child_node_trie_data.value.is_clean_end {
-                            final_mask_clone.lock().unwrap().bitor_assign(&allowed_on_edge);
-                        }
                         Some(glr_s)
                     } else {
                         None
@@ -1125,13 +1322,34 @@ impl<'a> GrammarConstraintState<'a> {
                     glr_s1.merge_with(glr_s2);
                 },
                 // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
-                |_precomputed_node_data, final_glr_s| {
-                    !final_glr_s.active_state.stack.is_empty()
+                |precomputed_node_data, final_glr_s| {
+                    if final_glr_s.active_state.stack.is_empty() {
+                        return false;
+                    }
+    
+    
+                    if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
+                        let glr_active_tokens = final_glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                        let mask_contribution = &glr_active_tokens & clean_end_bv;
+                        final_mask_internal |= mask_contribution;
+                    }
+    
+                    for (grammar_token, finalizer) in precomputed_node_data.value.finalizers() {
+                        // crate::debug!(4, "Finalizing token {}", grammar_token.0);
+                        let mut temp_glr_s_for_finalizer_step = final_glr_s.clone();
+                        *step_counts_clone2.lock().unwrap().entry(*grammar_token).or_insert(0) += 1;
+                        temp_glr_s_for_finalizer_step.step(*grammar_token);
+    
+                        if temp_glr_s_for_finalizer_step.is_ok() {
+                            let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                            let mask_contribution = &glr_active_after_step & &finalizer.content;
+                            final_mask_internal |= &mask_contribution;
+                        }
+                    }
+                    true 
                 },
             );
     
-            let final_mask_internal = Arc::try_unwrap(final_mask_internal).expect("Arc unwrap failed").into_inner().expect("Mutex unwrap failed");
-
             let counts = step_counts.lock().unwrap();
             if !counts.is_empty() {
                 let mut sorted_counts: Vec<_> = counts.iter().collect();
