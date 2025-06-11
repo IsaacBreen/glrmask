@@ -665,6 +665,7 @@ fn test_precompute_a_plus_tokenizer() {
         token_name_map,
         max_original_llm_token_id,
     );
+    constraint.dump_precomputed();
 
     // --- Verification ---
     assert_eq!(constraint.precomputed.len(), 1, "Expected precomputed trie for only one tokenizer state");
