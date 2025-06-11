@@ -428,10 +428,10 @@ impl GrammarConstraint {
     }
 }
 
-enum PrecomputeNodeKernel<'r> {
+enum PrecomputeNodeKernel {
     RepresentsEnd,
     RepresentsVocabSegmentInPosAndState {
-        dest_vocab_node: &'r VocabPrefixTreeNode,
+        dest_vocab_node: *const VocabPrefixTreeNode,
         pos: usize,
         state: TokenizerStateID,
     }
@@ -448,7 +448,7 @@ struct Precomputer<'r> {
     stats:            PrecomputeStats,
     terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
     // Map each precompute node to its contents and the token node/position/state used to compute its
-    tags:             RefCell<OrderedHashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, PrecomputeNodeKernel<'r>>>,
+    tags:             RefCell<OrderedHashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, PrecomputeNodeKernel>>,
 }
 
 impl<'r> Precomputer<'r> {
@@ -1055,7 +1055,8 @@ impl<'r> Precomputer<'r> {
                                 let handle = ArcPtrWrapper::new(target.clone());
 
                                 // Tag it
-                                self.tags.borrow_mut().insert(handle.clone(), PrecomputeNodeKernel::RepresentsEnd);
+                                let kernel = PrecomputeNodeKernel::RepresentsVocabSegmentInPosAndState { dest_vocab_node: child_vocab_ref, pos: match_end_offset, state: TokenizerStateID(0) };
+                                self.tags.borrow_mut().insert(handle.clone(), kernel);
 
                                 if match_end_offset == segment_bytes.len() {
                                     crate::debug!(5, "Marking clean end for child vocab node {:p} representing LLM token {:?}", handle.as_ref(), final_llm_token_id_at_child_vocab);
