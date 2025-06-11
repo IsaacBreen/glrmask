@@ -1022,6 +1022,7 @@ impl<'r> Precomputer<'r> {
         > = BTreeMap::from([(0, sources_per_state.clone())]);
 
         while let Some((offset, map_at_offset)) = queue.pop_first() {
+            dbg!(offset, &map_at_offset);
             for (state_before, src_set_val) in map_at_offset { // Renamed src_set
                 if src_set_val.is_empty() { // Use src_set_val
                     continue;
@@ -1046,6 +1047,7 @@ impl<'r> Precomputer<'r> {
                     let match_end_offset = offset + m.width;
                     let active_tokens = child_vocab_of_segment.reachable_token_ids();
                     let tokens_with_future_match = possible_future_matches.get(&grammar_tok).cloned().unwrap_or(LLMTokenBV::zeros());
+                    println!("Possible future matches for token {:?}: {:?}", grammar_tok, tokens_with_future_match);
                     let edge_tokens = active_tokens.clone() - tokens_with_future_match;
 
                     if !edge_tokens.is_empty() {
@@ -1066,7 +1068,7 @@ impl<'r> Precomputer<'r> {
 
                 if let Some(final_state_val) = exec_result.end_state {
                     let final_sid = TokenizerStateID(final_state_val);
-                    for src in &merged_src_set { 
+                    for src in &merged_src_set {
                         next_level
                             .entry(final_sid)
                             .or_default()
@@ -1080,7 +1082,7 @@ impl<'r> Precomputer<'r> {
                             crate::debug!(5, "Pushing finalizer info for token {:?} in state {:?}", gtid.0, final_sid.0);
                             guard.value.push_finalizer_info(
                                 gtid,
-                                LLMTokenID(child_vocab_of_segment.token_id()), 
+                                LLMTokenID(child_vocab_of_segment.token_id()),
                                 final_sid,
                             );
                         }
@@ -1110,6 +1112,7 @@ impl<'r> Precomputer<'r> {
             OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
     ) {
+        crate::debug!(4, "Pushing path from {:?} to {:?} with tokens {:?}", source_arc, grammar_tok, edge_tokens);
         let mut inserter = EdgeInserter::new(
             source_arc.clone(),
             Some(grammar_tok),
