@@ -928,85 +928,74 @@ impl<'r> Precomputer<'r> {
                 String::from_utf8_lossy(child_vocab_ref.prefix())
             );
 
-            self.process_segment(segment_bytes, child_vocab_ref, &effective);
-        }
-    }
+            // Process segment
+            let mut next_level: BTreeMap<
+                TokenizerStateID,
+                OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+            > = BTreeMap::new();
 
-    fn process_segment(
-        &self,
-        segment_bytes: &[u8],
-        child_vocab_of_segment: &VocabPrefixTreeNode,
-        sources_per_state: &BTreeMap<
-            TokenizerStateID,
-            OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
-        >,
-    ) {
-        let mut next_level: BTreeMap<
-            TokenizerStateID,
-            OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
-        > = BTreeMap::new();
+            let mut queue: BTreeMap<
+                usize,
+                BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
+            > = BTreeMap::from([(0, effective.clone())]);
 
-        let mut queue: BTreeMap<
-            usize,
-            BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>,
-        > = BTreeMap::from([(0, sources_per_state.clone())]);
+            while let Some((offset, map_at_offset)) = queue.pop_first() {
+                dbg!(offset, &map_at_offset);
+                for (state_before, src_set_val) in map_at_offset { // Renamed src_set
+                    if src_set_val.is_empty() { // Use src_set_val
+                        continue;
+                    }
 
-        while let Some((offset, map_at_offset)) = queue.pop_first() {
-            dbg!(offset, &map_at_offset);
-            for (state_before, src_set_val) in map_at_offset { // Renamed src_set
-                if src_set_val.is_empty() { // Use src_set_val
-                    continue;
-                }
+                    let merged_src_set = self.merge_handles(&src_set_val); // Use src_set_val
+                    if merged_src_set.is_empty() {
+                        continue;
+                    }
 
-                let merged_src_set = self.merge_handles(&src_set_val); // Use src_set_val
-                if merged_src_set.is_empty() { 
-                    continue;
-                }
+                    let suffix      = &segment_bytes[offset..];
+                    let exec_result = self
+                        .tokenizer
+                        .execute_from_state(suffix, state_before);
 
-                let suffix      = &segment_bytes[offset..];
-                let exec_result = self
-                    .tokenizer
-                    .execute_from_state(suffix, state_before);
+                    let possible_future_matches: BTreeMap<GrammarTokenID, LLMTokenBV> = exec_result.end_state.map_or_else(BTreeMap::new, |end_state_id| {
+                        self.possible_matches(&child_vocab_ref, TokenizerStateID(end_state_id))
+                    });
 
-                let possible_future_matches: BTreeMap<GrammarTokenID, LLMTokenBV> = exec_result.end_state.map_or_else(BTreeMap::new, |end_state_id| {
-                    self.possible_matches(&child_vocab_of_segment, TokenizerStateID(end_state_id))
-                });
+                    for m in &exec_result.matches {
+                        let grammar_tok = GrammarTokenID(m.id);
+                        let match_end_offset = offset + m.width;
+                        let active_tokens = child_vocab_ref.reachable_token_ids();
+                        let tokens_with_future_match = possible_future_matches.get(&grammar_tok).cloned().unwrap_or(LLMTokenBV::zeros());
+                        println!("Possible future matches for token {:?}: {:?}", grammar_tok, tokens_with_future_match);
+                        let edge_tokens = active_tokens.clone() - tokens_with_future_match;
 
-                for m in &exec_result.matches {
-                    let grammar_tok = GrammarTokenID(m.id);
-                    let match_end_offset = offset + m.width;
-                    let active_tokens = child_vocab_of_segment.reachable_token_ids();
-                    let tokens_with_future_match = possible_future_matches.get(&grammar_tok).cloned().unwrap_or(LLMTokenBV::zeros());
-                    println!("Possible future matches for token {:?}: {:?}", grammar_tok, tokens_with_future_match);
-                    let edge_tokens = active_tokens.clone() - tokens_with_future_match;
+                        if !edge_tokens.is_empty() {
+                            for src in &merged_src_set {
+                                self.insert_edge(
+                                    src.as_arc().clone(),
+                                    grammar_tok,
+                                    edge_tokens.clone(),
+                                    child_vocab_ref.token_id(),
+                                    match_end_offset,
+                                    segment_bytes.len(),
+                                    &mut queue,
+                                    &mut next_level
+                                );
+                            }
+                        }
+                    }
 
-                    if !edge_tokens.is_empty() {
+                    if let Some(final_state_val) = exec_result.end_state {
+                        let final_sid = TokenizerStateID(final_state_val);
                         for src in &merged_src_set {
-                            self.insert_edge(
-                                src.as_arc().clone(),
-                                grammar_tok,
-                                edge_tokens.clone(),
-                                child_vocab_of_segment.token_id(),
-                                match_end_offset,
-                                segment_bytes.len(),
-                                &mut queue,
-                                &mut next_level
-                            );
+                            next_level
+                                .entry(final_sid).or_default().insert(src.clone());
                         }
                     }
                 }
-
-                if let Some(final_state_val) = exec_result.end_state {
-                    let final_sid = TokenizerStateID(final_state_val);
-                    for src in &merged_src_set {
-                        next_level
-                            .entry(final_sid).or_default().insert(src.clone());
-                    }
-                }
             }
-        }
 
-        self.dfs(child_vocab_of_segment, next_level);
+            self.dfs(child_vocab_ref, next_level);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
