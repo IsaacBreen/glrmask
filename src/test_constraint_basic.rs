@@ -673,7 +673,7 @@ fn test_precompute_a_plus_tokenizer() {
 
     // 1. Check root node's finalizer
     let root_value = &root_node.value;
-    let finalizer_map = &root_value.finalizers;
+    let finalizer_map = &root_value.finalizers();
     assert_eq!(finalizer_map.len(), 1, "Root should have one finalizer key");
     let (finalizer_gtid, finalizer) = finalizer_map.iter().next().unwrap();
     assert_eq!(*finalizer_gtid, TerminalID(0), "Finalizer should be for grammar token 0");
@@ -681,8 +681,8 @@ fn test_precompute_a_plus_tokenizer() {
     assert_eq!(finalizer.content, expected_tokens, "Finalizer content is incorrect");
 
     // 2. Check root node's children and the leaf node
-    assert_eq!(root_node.children.len(), 1, "Root should have one child edge key");
-    let (edge_gtid_opt, destinations) = root_node.children.iter().next().unwrap();
+    assert_eq!(root_node.children().len(), 1, "Root should have one child edge key");
+    let (edge_gtid_opt, destinations) = root_node.children().iter().next().unwrap();
     assert_eq!(*edge_gtid_opt, Some(TerminalID(0)), "Edge key should be for grammar token 0");
     assert_eq!(destinations.len(), 1, "Should be one destination for the edge");
     let (child_arc_wrapper, edge_bv) = destinations.iter().next().unwrap();
