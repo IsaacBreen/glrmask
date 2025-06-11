@@ -1,4 +1,4 @@
-use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode, PrecomputedNodeContents, PrecomputedFinalizer, LLMTokenBV};
+use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode, PrecomputedNodeContents, LLMTokenBV};
 use crate::types::{TerminalID as GrammarTokenID};
 use crate::datastructures::trie::{Trie, node_ptr};
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
@@ -40,17 +40,6 @@ fn format_bv_indices(
     format!("{:?}", bv)
 }
 
-/// Helper function to print PrecomputedFinalizer details.
-pub(crate) fn print_finalizer(
-    grammar_token_id: GrammarTokenID,
-    finalizer: &PrecomputedFinalizer,
-    indent: &str,
-    original_internal_bimap: Option<&BiBTreeMap<usize, usize>>
-) {
-    println!("{}  - Finalizer for GrammarTokenID({}):", indent, grammar_token_id.0);
-    println!("{}    LLM Tokens: {}", indent, format_bv_indices(&finalizer.content, original_internal_bimap));
-}
-
 /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
 fn dump_precompute_trie_recursive(
     node_arc: &Arc<Mutex<PrecomputeNode>>,
@@ -69,13 +58,6 @@ fn dump_precompute_trie_recursive(
 
     println!("{}-> Node {:p} (Data {:p}, MaxDepth: {})", indent, Arc::as_ptr(node_arc), &*node, node.max_depth);
 
-    // Print Node Value (Finalizers)
-    if !node.value.finalizers().is_empty() {
-        println!("{}  Finalizers:", indent);
-        for (grammar_token_id, finalizer) in node.value.finalizers() {
-            print_finalizer(*grammar_token_id, finalizer, &indent, original_internal_bimap); // Pass original_internal_bimap
-        }
-    }
     if let Some(clean_end) = &node.value.clean_end { // clean_end stores internal IDs
         println!("{}  Clean End LLM Tokens: {}", indent, format_bv_indices(clean_end, original_internal_bimap)); // Pass original_internal_bimap
     }
@@ -141,7 +123,6 @@ pub struct PrecomputeStats {
     pub final_edges_with_none_key: usize,
     pub final_edges_with_some_key: usize,
     pub final_nodes_with_clean_end: usize,
-    pub final_total_finalizer_entries_in_graph: usize, // Sum of node.value.finalizers.values().map(|pf| pf.content.len()).sum() across unique nodes
 
     // For average edge occupancy per key type
     pub final_total_occupancy_sum_for_some_keys: usize,
@@ -175,7 +156,6 @@ impl JSONConvertible for PrecomputeStats {
         obj.insert("final_edges_with_none_key".to_string(), self.final_edges_with_none_key.to_json());
         obj.insert("final_edges_with_some_key".to_string(), self.final_edges_with_some_key.to_json());
         obj.insert("final_nodes_with_clean_end".to_string(), self.final_nodes_with_clean_end.to_json());
-        obj.insert("final_total_finalizer_entries_in_graph".to_string(), self.final_total_finalizer_entries_in_graph.to_json());
         obj.insert("final_total_occupancy_sum_for_some_keys".to_string(), self.final_total_occupancy_sum_for_some_keys.to_json());
         obj.insert("final_num_occupied_some_edge_keys".to_string(), self.final_num_occupied_some_edge_keys.to_json());
         obj.insert("final_total_occupancy_sum_for_none_keys".to_string(), self.final_total_occupancy_sum_for_none_keys.to_json());
@@ -202,7 +182,6 @@ impl JSONConvertible for PrecomputeStats {
                 let final_edges_with_none_key = obj.remove("final_edges_with_none_key").ok_or_else(|| "Missing field final_edges_with_none_key for PrecomputeStats".to_string()).and_then(usize::from_json)?;
                 let final_edges_with_some_key = obj.remove("final_edges_with_some_key").ok_or_else(|| "Missing field final_edges_with_some_key for PrecomputeStats".to_string()).and_then(usize::from_json)?;
                 let final_nodes_with_clean_end = obj.remove("final_nodes_with_clean_end").ok_or_else(|| "Missing field final_nodes_with_clean_end for PrecomputeStats".to_string()).and_then(usize::from_json)?;
-                let final_total_finalizer_entries_in_graph = obj.remove("final_total_finalizer_entries_in_graph").ok_or_else(|| "Missing field final_total_finalizer_entries_in_graph for PrecomputeStats".to_string()).and_then(usize::from_json)?;
                 let final_total_occupancy_sum_for_some_keys = obj.remove("final_total_occupancy_sum_for_some_keys").ok_or_else(|| "Missing field final_total_occupancy_sum_for_some_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
                 let final_num_occupied_some_edge_keys = obj.remove("final_num_occupied_some_edge_keys").ok_or_else(|| "Missing field final_num_occupied_some_edge_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
                 let final_total_occupancy_sum_for_none_keys = obj.remove("final_total_occupancy_sum_for_none_keys").ok_or_else(|| "Missing field final_total_occupancy_sum_for_none_keys for PrecomputeStats".to_string()).and_then(usize::from_json)?;
@@ -224,7 +203,6 @@ impl JSONConvertible for PrecomputeStats {
                     final_edges_with_none_key,
                     final_edges_with_some_key,
                     final_nodes_with_clean_end,
-                    final_total_finalizer_entries_in_graph,
                     final_total_occupancy_sum_for_some_keys,
                     final_num_occupied_some_edge_keys,
                     final_total_occupancy_sum_for_none_keys,
@@ -298,7 +276,6 @@ pub fn calculate_final_stats(
     stats.final_edges_with_none_key = 0;
     stats.final_edges_with_some_key = 0;
     stats.final_nodes_with_clean_end = 0;
-    stats.final_total_finalizer_entries_in_graph = 0;
     stats.final_grammar_token_edge_key_counts.clear();
     stats.final_grammar_token_edge_fanouts_dist.clear();
     stats.final_grammar_token_edge_token_set_sizes_dist.clear();
@@ -360,11 +337,6 @@ pub fn calculate_final_stats(
             stats.final_nodes_with_clean_end += 1;
             stats.final_total_ranges_in_bvs += clean_end_bv.inner().ranges_len();
         }
-        // Existing logic for finalizers
-        for finalizer_for_gtid in node_guard.value.finalizers().values() { // Use .finalizers() method
-            stats.final_total_ranges_in_bvs += finalizer_for_gtid.content.inner().ranges_len();
-            stats.final_total_finalizer_entries_in_graph += 1; // Count each finalizer once, regardless of content
-        }
     }
     crate::debug!(2, "Finished calculating final precompute statistics (within constraint_extra).");
 }
@@ -399,7 +371,6 @@ pub fn print_precompute_stats(
     println!("    Edges with None Key: {}", stats.final_edges_with_none_key);
     println!("    Edges with Some Key: {}", stats.final_edges_with_some_key);
     println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
-    println!("  Total Finalizer Entries (sum of map sizes in all unique nodes): {}", stats.final_total_finalizer_entries_in_graph);
     println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
     println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
     println!("  Total ranges in all HybridBitsets: {}", stats.final_total_ranges_in_bvs);

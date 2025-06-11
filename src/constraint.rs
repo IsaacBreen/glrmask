@@ -36,71 +36,25 @@ use crate::glr::analyze::{compute_nullable_nonterminals, compute_terminal_follow
 pub type LLMTokenBV = HybridBitset;
 pub type TerminalBV = HybridBitset;
 
-
 const MERGE_THRESHOLD: usize = 100000000000;
-
-// -----------------------------------------------------------------------------
-// Pre-computation node values
-// -----------------------------------------------------------------------------
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PrecomputedFinalizer {
-    pub content: LLMTokenBV,
-}
-
-impl Default for PrecomputedFinalizer {
-    fn default() -> Self {
-        Self { content: LLMTokenBV::zeros() }
-    }
-}
-
-impl JSONConvertible for PrecomputedFinalizer {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("content".to_string(), self.content.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let content = obj.remove("content").ok_or_else(|| "Missing field content for PrecomputedFinalizer".to_string())
-                                   .and_then(LLMTokenBV::from_json)?;
-                Ok(PrecomputedFinalizer { content })
-            }
-            _ => Err("Expected JSONNode::Object for PrecomputedFinalizer".to_string()),
-        }
-    }
-}
-
-
-impl PrecomputedFinalizer {
-    fn new(tokens: LLMTokenBV) -> Self {
-        Self {
-            content: tokens,
-        }
-    }
-}
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrecomputedNodeContents {
-    finalizers: BTreeMap<GrammarTokenID, PrecomputedFinalizer>,
     pub clean_end: Option<LLMTokenBV>,
 }
 
 impl JSONConvertible for PrecomputedNodeContents {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
-        obj.insert("finalizers".to_string(), self.finalizers.to_json());
         obj.insert("clean_end".to_string(), self.clean_end.to_json());
         JSONNode::Object(obj)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let finalizers = obj.remove("finalizers").ok_or_else(|| "Missing field finalizers for PrecomputedNodeContents".to_string())
-                                    .and_then(|n| BTreeMap::<GrammarTokenID, PrecomputedFinalizer>::from_json(n))?;
                 let clean_end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
                                    .and_then(Option::<LLMTokenBV>::from_json)?;
-                Ok(PrecomputedNodeContents { finalizers, clean_end })
+                Ok(PrecomputedNodeContents { clean_end })
             }
             _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
         }
@@ -109,22 +63,6 @@ impl JSONConvertible for PrecomputedNodeContents {
 
 
 impl PrecomputedNodeContents {
-    pub(crate) fn finalizers(&self) -> &BTreeMap<GrammarTokenID, PrecomputedFinalizer> {
-        &self.finalizers
-    }
-
-    fn push_finalizer_info(
-        &mut self,
-        grammar_token: GrammarTokenID,
-        llm_token: LLMTokenID, 
-        _tokenizer_state: TokenizerStateID,
-    ) {
-        self.finalizers
-            .entry(grammar_token)
-            .or_default()
-            .content
-            .insert(llm_token.0);
-    }
 }
 
 pub type PrecomputeNode =
@@ -1070,22 +1008,7 @@ impl<'r> Precomputer<'r> {
                     let final_sid = TokenizerStateID(final_state_val);
                     for src in &merged_src_set {
                         next_level
-                            .entry(final_sid)
-                            .or_default()
-                            .insert(src.clone());
-
-                        let mut guard = src.as_arc().lock().unwrap();
-                        for gtid in self
-                            .tokenizer
-                            .tokens_accessible_from_state(final_sid)
-                        {
-                            crate::debug!(5, "Pushing finalizer info for token {:?} in state {:?}", gtid.0, final_sid.0);
-                            guard.value.push_finalizer_info(
-                                gtid,
-                                LLMTokenID(child_vocab_of_segment.token_id()),
-                                final_sid,
-                            );
-                        }
+                            .entry(final_sid).or_default().insert(src.clone());
                     }
                 }
             }
@@ -1332,19 +1255,6 @@ impl<'a> GrammarConstraintState<'a> {
                         let glr_active_tokens = final_glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
                         let mask_contribution = &glr_active_tokens & clean_end_bv;
                         final_mask_internal |= mask_contribution;
-                    }
-    
-                    for (grammar_token, finalizer) in precomputed_node_data.value.finalizers() {
-                        // crate::debug!(4, "Finalizing token {}", grammar_token.0);
-                        let mut temp_glr_s_for_finalizer_step = final_glr_s.clone();
-                        *step_counts_clone2.lock().unwrap().entry(*grammar_token).or_insert(0) += 1;
-                        temp_glr_s_for_finalizer_step.step(*grammar_token);
-    
-                        if temp_glr_s_for_finalizer_step.is_ok() {
-                            let glr_active_after_step = temp_glr_s_for_finalizer_step.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
-                            let mask_contribution = &glr_active_after_step & &finalizer.content;
-                            final_mask_internal |= &mask_contribution;
-                        }
                     }
                     true 
                 },
