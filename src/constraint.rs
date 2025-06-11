@@ -548,7 +548,7 @@ impl<'r> Precomputer<'r> {
         for (sid, root) in &self.roots {
             crate::debug!(3, "  {}: {:p}", sid.0, Arc::as_ptr(root));
         }
-        self.dfs(&self.vocab.root, assoc);
+        self.dfs(&self.vocab.root, assoc, BTreeMap::new());
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish_with_message("Precomputation complete");
         crate::debug!(2, "Precomputation complete");
@@ -700,6 +700,7 @@ impl<'r> Precomputer<'r> {
             TokenizerStateID,
             OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
+        no_go: BTreeMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>,
 
     ) {
         todo!()
