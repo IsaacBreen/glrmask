@@ -672,14 +672,11 @@ fn test_precompute_a_plus_tokenizer() {
     let initial_state_id = tokenizer.initial_state_id();
     let root_node = constraint.precomputed.get(&initial_state_id).expect("No precomputed trie for initial state");
 
-    // 1. Check root node's finalizer
+    // 1. Check root node's clean_end
     let root_value = &root_node.value;
-    let finalizer_map = &root_value.finalizers();
-    assert_eq!(finalizer_map.len(), 1, "Root should have one finalizer key");
-    let (finalizer_gtid, finalizer) = finalizer_map.iter().next().unwrap();
-    assert_eq!(*finalizer_gtid, TerminalID(0), "Finalizer should be for grammar token 0");
+    let clean_end_bv = root_value.clean_end.as_ref().expect("Root should have a clean_end bitset");
     let expected_tokens = HybridBitset::from_iter(vec![0, 1]); // LLM tokens "a" and "aa"
-    assert_eq!(finalizer.content, expected_tokens, "Finalizer content is incorrect");
+    assert_eq!(*clean_end_bv, expected_tokens, "Clean_end content is incorrect");
 
     // 2. Check root node's children and the leaf node
     assert_eq!(root_node.children().len(), 1, "Root should have one child edge key");

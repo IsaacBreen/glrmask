@@ -620,10 +620,6 @@ impl<'r> Precomputer<'r> {
         
         let mut current_node_completable = node_guard.value.clean_end.as_ref().cloned().unwrap_or_else(LLMTokenBV::zeros);
 
-        for finalizer in node_guard.value.finalizers.values() {
-            current_node_completable |= &finalizer.content;
-        }
-
         let children_arcs_to_visit: Vec<Arc<Mutex<PrecomputeNode>>> = node_guard.children().values()
             .flat_map(|destinations_map| destinations_map.keys().map(|arc_ptr_wrapper| arc_ptr_wrapper.as_arc().clone()))
             .collect();
@@ -802,9 +798,6 @@ impl<'r> Precomputer<'r> {
             if let Some(bv) = &node_guard.value.clean_end {
                 all_bitsets_cloned.push(bv.clone());
             }
-            for finalizer in node_guard.value.finalizers.values() {
-                all_bitsets_cloned.push(finalizer.content.clone());
-            }
             for dest_map in node_guard.children().values() {
                 for (child_wrapper, edge_bv) in dest_map.iter() {
                     all_bitsets_cloned.push(edge_bv.clone());
@@ -863,7 +856,6 @@ impl<'r> Precomputer<'r> {
 
             let mut node_guard = node_arc.lock().unwrap();
             if let Some(bv) = &mut node_guard.value.clean_end { remap_bitset(bv); }
-            for finalizer in node_guard.value.finalizers.values_mut() { remap_bitset(&mut finalizer.content); }
             for dest_map in node_guard.children_mut().values_mut() {
                 for edge_bv in dest_map.values_mut() { remap_bitset(edge_bv); }
             }
