@@ -1112,7 +1112,7 @@ impl<'r> Precomputer<'r> {
             OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
     ) {
-        crate::debug!(4, "Pushing path from {:?} to {:?} with tokens {:?}", source_arc, grammar_tok, edge_tokens);
+        crate::debug!(4, "Pushing path from {:p} with edge value {:?}", Arc::as_ptr(&source_arc), edge_tokens);
         let mut inserter = EdgeInserter::new(
             source_arc.clone(),
             Some(grammar_tok),
