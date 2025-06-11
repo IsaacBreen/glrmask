@@ -428,6 +428,15 @@ impl GrammarConstraint {
     }
 }
 
+enum PrecomputeNodeKernel<'r> {
+    RepresentsEnd,
+    RepresentsVocabSegmentInPosAndState {
+        dest_vocab_node: &'r VocabPrefixTreeNode,
+        pos: usize,
+        state: TokenizerStateID,
+    }
+}
+
 struct Precomputer<'r> {
     tokenizer:        &'r Regex,
     vocab:            VocabPrefixTree,
@@ -437,7 +446,9 @@ struct Precomputer<'r> {
     merge_threshold:  usize,
     pb:               ProgressBar,
     stats:            PrecomputeStats,
-    terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>, // New field
+    terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
+    // Map each precompute node to its contents and the token node/position/state used to compute its
+    tags:             BTreeMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, PrecomputeNodeKernel<'r>>,
 }
 
 impl<'r> Precomputer<'r> {
@@ -486,6 +497,7 @@ impl<'r> Precomputer<'r> {
             pb,
             stats: PrecomputeStats::default(),
             terminal_follow_map, // Store the map
+            tags: BTreeMap::default(),
         }
     }
 
