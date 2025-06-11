@@ -993,15 +993,12 @@ impl<'r> Precomputer<'r> {
                         if !edge_tokens.is_empty() {
                             for src in &merged_src_set {
                                 // Insert edge
-                                let source_arc = src.as_arc().clone();
-                                let edge_tokens1 = edge_tokens.clone();
                                 let final_llm_token_id_at_child_vocab = child_vocab_ref.token_id();
-                                let segment_len = segment_bytes.len();
-                                crate::debug!(4, "Pushing path from {:p} with edge value {:?}", Arc::as_ptr(&source_arc), edge_tokens1);
+                                crate::debug!(4, "Pushing path from {:p} with edge value {:?}", Arc::as_ptr(&src.as_arc().clone()), edge_tokens);
                                 let mut inserter = EdgeInserter::new(
-                                    source_arc.clone(),
+                                    src.as_arc().clone().clone(),
                                     Some(grammar_tok),
-                                    edge_tokens1.clone(),
+                                    edge_tokens.clone().clone(),
                                     |existing: &mut HybridBitset, new_bv_ref: HybridBitset| *existing |= new_bv_ref,
                                 );
 
@@ -1017,7 +1014,7 @@ impl<'r> Precomputer<'r> {
                                     );
                                 };
 
-                                if match_end_offset < segment_len {
+                                if match_end_offset < segment_bytes.len() {
                                     if let Some(map_at_offset) = queue.get(&match_end_offset) {
                                         if let Some(set_of_nodes_at_offset_for_new_state) = map_at_offset.get(&TokenizerStateID(0)) {
                                             gather_set(set_of_nodes_at_offset_for_new_state, &mut pot);
@@ -1034,7 +1031,7 @@ impl<'r> Precomputer<'r> {
                                 if inserter.clone_into_option().is_none() {
                                     let mut extra = Vec::new();
                                     {
-                                        let guard = source_arc.lock().unwrap();
+                                        let guard = src.as_arc().lock().unwrap();
                                         if let Some(dest_map) =
                                             guard.children().get(&Some(grammar_tok))
                                         {
@@ -1057,7 +1054,7 @@ impl<'r> Precomputer<'r> {
 
                                 let handle = ArcPtrWrapper::new(target.clone());
 
-                                if match_end_offset == segment_len {
+                                if match_end_offset == segment_bytes.len() {
                                     crate::debug!(5, "Marking clean end for child vocab node {:p} representing LLM token {:?}", handle.as_ref(), final_llm_token_id_at_child_vocab);
                                     next_level
                                         .entry(TokenizerStateID(0))
