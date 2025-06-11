@@ -448,7 +448,7 @@ struct Precomputer<'r> {
     stats:            PrecomputeStats,
     terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
     // Map each precompute node to its contents and the token node/position/state used to compute its
-    tags:             BTreeMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, PrecomputeNodeKernel<'r>>,
+    tags:             RefCell<OrderedHashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, PrecomputeNodeKernel<'r>>>,
 }
 
 impl<'r> Precomputer<'r> {
@@ -497,7 +497,7 @@ impl<'r> Precomputer<'r> {
             pb,
             stats: PrecomputeStats::default(),
             terminal_follow_map, // Store the map
-            tags: BTreeMap::default(),
+            tags: RefCell::new(OrderedHashMap::new()),
         }
     }
 
@@ -1053,6 +1053,9 @@ impl<'r> Precomputer<'r> {
                                 // }
 
                                 let handle = ArcPtrWrapper::new(target.clone());
+
+                                // Tag it
+                                self.tags.borrow_mut().insert(handle.clone(), PrecomputeNodeKernel::RepresentsEnd);
 
                                 if match_end_offset == segment_bytes.len() {
                                     crate::debug!(5, "Marking clean end for child vocab node {:p} representing LLM token {:?}", handle.as_ref(), final_llm_token_id_at_child_vocab);
