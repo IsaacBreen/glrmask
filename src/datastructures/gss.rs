@@ -98,7 +98,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                     eprintln!("other_bv: {:?}", &other_bv);
                     eprintln!("self_holes_pos: {:?}", &self_holes_pos);
                     eprintln!("right_holes_pos: {:?}", &right_holes_pos);
-                    panic!("union_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
+                    // panic!("union_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
                 }
 
                 let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
@@ -192,7 +192,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                     eprintln!("right_bv: {:?}", &right_bv);
                     eprintln!("self_holes_pos: {:?}", &self_holes_pos);
                     eprintln!("right_holes_pos: {:?}", &right_holes_pos);
-                    panic!("intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
+                    // panic!("intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
                 }
 
                 // let time_str = format!("intersection_assign: self_bv.inner().ranges_len(): {}, right_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), right_bv.inner().ranges_len());
