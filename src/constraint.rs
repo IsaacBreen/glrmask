@@ -419,15 +419,6 @@ impl GrammarConstraint {
     }
 }
 
-enum PrecomputeNodeKernel {
-    RepresentsEnd,
-    RepresentsVocabSegmentInPosAndState {
-        dest_vocab_node: *const VocabPrefixTreeNode,
-        pos: usize,
-        state: TokenizerStateID,
-    }
-}
-
 struct Precomputer<'r> {
     tokenizer:        &'r Regex,
     vocab:            VocabPrefixTree,
@@ -439,8 +430,8 @@ struct Precomputer<'r> {
     stats:            PrecomputeStats,
     terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
     // Map each precompute node to its contents and the token node/position/state used to compute its
-    tags:             RefCell<OrderedHashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, PrecomputeNodeKernel>>,
-    final_node:       ArcPtrWrapper<Mutex<PrecomputeNode>>,
+    tags:             RefCell<OrderedHashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>>,
+    end_node:       ArcPtrWrapper<Mutex<PrecomputeNode>>,
 }
 
 impl<'r> Precomputer<'r> {
@@ -490,7 +481,7 @@ impl<'r> Precomputer<'r> {
             stats: PrecomputeStats::default(),
             terminal_follow_map, // Store the map
             tags: RefCell::new(OrderedHashMap::new()),
-            final_node: ArcPtrWrapper::new(Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::end())))),
+            end_node: ArcPtrWrapper::new(Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::end())))),
         }
     }
 
