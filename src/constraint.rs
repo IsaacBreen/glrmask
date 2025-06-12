@@ -694,7 +694,115 @@ impl<'r> Precomputer<'r> {
         no_go: BTreeMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>,
 
     ) {
-        todo!()
+        self.pb.inc(1);
+
+        if let Some(llm_token_id) = vocab_node.token_id() {
+            let mut edge_bv = HybridBitset::zeros();
+            edge_bv.insert(llm_token_id);
+            for nodes in assoc_by_state.values() {
+                for node_wrapper in nodes {
+                    if no_go.get(node_wrapper).map_or(false, |b| b.contains(llm_token_id)) {
+                        continue;
+                    }
+                    let inserter = EdgeInserter::new(
+                        node_wrapper.as_arc().clone(),
+                        None,
+                        edge_bv.clone(),
+                        |e, n| *e |= n,
+                    );
+                    inserter.try_destination(self.end_node.as_arc().clone());
+                }
+            }
+        }
+
+        for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
+            let mut work_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>> = BTreeMap::new();
+            work_queue.insert(0, assoc_by_state.clone());
+
+            let mut next_level_assoc = BTreeMap::new();
+
+            while let Some((pos, states_at_pos)) = work_queue.pop_first() {
+                if pos == segment_bytes.len() {
+                    for (tokenizer_state_id, nodes) in states_at_pos {
+                        next_level_assoc.entry(tokenizer_state_id).or_default().extend(nodes);
+                    }
+                    continue;
+                }
+
+                for (tokenizer_state_id, precompute_nodes) in states_at_pos {
+                    let exec_result = self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
+
+                    let possible_matches_at_end = if let Some(end_state_val) = exec_result.end_state {
+                        self.possible_matches(child_vocab_node, TokenizerStateID(end_state_val))
+                    } else {
+                        BTreeMap::new()
+                    };
+
+                    for match_info in &exec_result.matches {
+                        let terminal_id = GrammarTokenID(match_info.id);
+                        let next_pos = pos + match_info.width;
+
+                        for src_node_wrapper in &precompute_nodes {
+                            if next_pos == segment_bytes.len() {
+                                if let Some(llm_token_id) = child_vocab_node.token_id() {
+                                    let mut edge_bv = HybridBitset::zeros();
+                                    edge_bv.insert(llm_token_id);
+                                    let inserter = EdgeInserter::new(
+                                        src_node_wrapper.as_arc().clone(),
+                                        Some(terminal_id),
+                                        edge_bv,
+                                        |e, n| *e |= n,
+                                    );
+                                    inserter.try_destination(self.end_node.as_arc().clone());
+                                    continue;
+                                }
+                            }
+
+                            let mut edge_bv = child_vocab_node.reachable_token_ids();
+                            if let Some(matches_for_terminal) = possible_matches_at_end.get(&terminal_id) {
+                                edge_bv -= matches_for_terminal;
+                            }
+
+                            if edge_bv.is_empty() { continue; }
+
+                            let mut inserter = EdgeInserter::new(
+                                src_node_wrapper.as_arc().clone(),
+                                Some(terminal_id),
+                                edge_bv.clone(),
+                                |e, n| *e |= n,
+                            );
+
+                            let next_tokenizer_state = self.tokenizer.initial_state_id();
+                            let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().entry(next_tokenizer_state).or_default();
+
+                            inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()));
+
+                            let children_of_src: Vec<_> = {
+                                let guard = src_node_wrapper.as_arc().lock().unwrap();
+                                guard.children().values().flat_map(|m| m.keys().cloned()).collect()
+                            };
+                            let tags = self.tags.borrow();
+                            let eligible_children = children_of_src.iter().filter(|child_wrapper| {
+                                tags.get(child_wrapper).map_or(true, |tag| (tag & &edge_bv).is_empty())
+                            }).map(|w| w.as_arc().clone());
+                            inserter = inserter.try_destinations_iter(eligible_children);
+
+                            let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents::default()).unwrap();
+                            dest_nodes_in_queue.insert(ArcPtrWrapper::new(result_node.clone()));
+                            self.tags.borrow_mut().entry(ArcPtrWrapper::new(result_node)).or_default().bitor_assign(&edge_bv);
+                        }
+                    }
+
+                    if let Some(end_state_val) = exec_result.end_state {
+                        next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes.iter().cloned());
+                    }
+                }
+            }
+
+            if !next_level_assoc.is_empty() {
+                self.dfs(child_vocab_node, next_level_assoc, no_go.clone());
+            }
+        }
     }
 
     fn merge_handles(
