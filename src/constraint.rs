@@ -430,7 +430,7 @@ struct Precomputer<'r> {
     stats:            PrecomputeStats,
     terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
     // Map each precompute node to its contents and the token node/position/state used to compute its
-    tags:             RefCell<OrderedHashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>>,
+    tags:             RefCell<HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>>,
     end_node:       ArcPtrWrapper<Mutex<PrecomputeNode>>,
 }
 
@@ -480,7 +480,7 @@ impl<'r> Precomputer<'r> {
             pb,
             stats: PrecomputeStats::default(),
             terminal_follow_map, // Store the map
-            tags: RefCell::new(OrderedHashMap::new()),
+            tags: RefCell::new(Default::default()),
             end_node: ArcPtrWrapper::new(Arc::new(Mutex::new(PrecomputeNode::new(PrecomputedNodeContents::end())))),
         }
     }
@@ -539,7 +539,7 @@ impl<'r> Precomputer<'r> {
         for (sid, root) in &self.roots {
             crate::debug!(3, "  {}: {:p}", sid.0, Arc::as_ptr(root));
         }
-        self.dfs(&self.vocab.root, assoc, BTreeMap::new());
+        self.dfs(&self.vocab.root, assoc, HashMap::new());
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish_with_message("Precomputation complete");
         crate::debug!(2, "Precomputation complete");
@@ -691,27 +691,26 @@ impl<'r> Precomputer<'r> {
             TokenizerStateID,
             OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
-        no_go: BTreeMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>,
+        no_go: HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>,
 
     ) {
         self.pb.inc(1);
 
-        if let Some(llm_token_id) = vocab_node.token_id() {
-            let mut edge_bv = HybridBitset::zeros();
-            edge_bv.insert(llm_token_id);
-            for nodes in assoc_by_state.values() {
-                for node_wrapper in nodes {
-                    if no_go.get(node_wrapper).map_or(false, |b| b.contains(llm_token_id)) {
-                        continue;
-                    }
-                    let inserter = EdgeInserter::new(
-                        node_wrapper.as_arc().clone(),
-                        None,
-                        edge_bv.clone(),
-                        |e, n| *e |= n,
-                    );
-                    inserter.try_destination(self.end_node.as_arc().clone());
+        let llm_token_id = vocab_node.token_id();
+        let mut edge_bv = HybridBitset::zeros();
+        edge_bv.insert(llm_token_id);
+        for nodes in assoc_by_state.values() {
+            for node_wrapper in nodes {
+                if no_go.get(node_wrapper).map_or(false, |b| b.contains(llm_token_id)) {
+                    continue;
                 }
+                let inserter = EdgeInserter::new(
+                    node_wrapper.as_arc().clone(),
+                    None,
+                    edge_bv.clone(),
+                    |e, n| *e |= n,
+                );
+                inserter.try_destination(self.end_node.as_arc().clone());
             }
         }
 
@@ -719,7 +718,7 @@ impl<'r> Precomputer<'r> {
             let mut work_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>> = BTreeMap::new();
             work_queue.insert(0, assoc_by_state.clone());
 
-            let mut next_level_assoc = BTreeMap::new();
+            let mut next_level_assoc: BTreeMap<_, OrderedHashSet<_>> = BTreeMap::new();
 
             while let Some((pos, states_at_pos)) = work_queue.pop_first() {
                 if pos == segment_bytes.len() {
@@ -744,21 +743,20 @@ impl<'r> Precomputer<'r> {
 
                         for src_node_wrapper in &precompute_nodes {
                             if next_pos == segment_bytes.len() {
-                                if let Some(llm_token_id) = child_vocab_node.token_id() {
-                                    let mut edge_bv = HybridBitset::zeros();
-                                    edge_bv.insert(llm_token_id);
-                                    let inserter = EdgeInserter::new(
-                                        src_node_wrapper.as_arc().clone(),
-                                        Some(terminal_id),
-                                        edge_bv,
-                                        |e, n| *e |= n,
-                                    );
-                                    inserter.try_destination(self.end_node.as_arc().clone());
-                                    continue;
-                                }
+                                let llm_token_id = child_vocab_node.token_id();
+                                let mut edge_bv = HybridBitset::zeros();
+                                edge_bv.insert(llm_token_id);
+                                let inserter = EdgeInserter::new(
+                                    src_node_wrapper.as_arc().clone(),
+                                    Some(terminal_id),
+                                    edge_bv,
+                                    |e, n| *e |= n,
+                                );
+                                inserter.try_destination(self.end_node.as_arc().clone());
+                                continue;
                             }
 
-                            let mut edge_bv = child_vocab_node.reachable_token_ids();
+                            let mut edge_bv = child_vocab_node.reachable_token_ids().clone();
                             if let Some(matches_for_terminal) = possible_matches_at_end.get(&terminal_id) {
                                 edge_bv -= matches_for_terminal;
                             }
@@ -789,7 +787,7 @@ impl<'r> Precomputer<'r> {
 
                             let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents::default()).unwrap();
                             dest_nodes_in_queue.insert(ArcPtrWrapper::new(result_node.clone()));
-                            self.tags.borrow_mut().entry(ArcPtrWrapper::new(result_node)).or_default().bitor_assign(&edge_bv);
+                            *self.tags.borrow_mut().entry(ArcPtrWrapper::new(result_node)).or_insert_with(HybridBitset::zeros) |= &edge_bv;
                         }
                     }
 
