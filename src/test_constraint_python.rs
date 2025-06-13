@@ -624,32 +624,30 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // llm_token_map.retain(|v, _| v.len() <= 3);
     //
     // // Keep tokens that are either given length or of the form ' Ax' where x is a letter
-    // llm_token_map.retain(|v, _| {
-    //     // v.len() <= 1 || v.starts_with(b" A") && v.len() <= 3
-    //     // v.len() <= 1 || (v.starts_with(b" A")) && v.len() <= 3
-    //     v.len() <= 2
-    // });
+    // // llm_token_map.retain(|v, _| v.len() <= 1 || v.starts_with(b" A") && v.len() <= 3
+    // // v.len() <= 1 || (v.starts_with(b" A")) && v.len() <= 3
+    // llm_token_map.retain(|v, _| v.len() <= 2);
     // // Remove tokens that contain non-space non-alph, non-upper-case characters
     // // llm_token_map.retain(|v, _| v.len() == 1 ||
     // //     v.starts_with(b" A") &&
-    // //     v.iter().all(|c| c == &b' ' || c.is_ascii_alphabetic() || c.is_ascii_uppercase()));
+    // //     v.iter().all(|c| c.is_ascii_alphabetic() || c.is_ascii_uppercase()));
     // // Remove tokens that contain capital letters
-    // llm_token_map.retain(|v, _| v.len() == 1 ||
-    //     v.iter().all(|c| !c.is_ascii_alphabetic() || c.is_ascii_lowercase()));
+    // // llm_token_map.retain(|v, _| v.len() == 1 ||
+    // //     v.iter().all(|c| !c.is_ascii_alphabetic() || c.is_ascii_lowercase()));
     // // Remove tokens that contain any of the first x of the capital letters in the alphabet
-    // llm_token_map.retain(|v, _| v.len() == 1 ||
-    //     v.iter().all(|c| !c.is_ascii_alphabetic() || c <= &b'c'));
+    // // llm_token_map.retain(|v, _| v.len() == 1 ||
+    // //     v.iter().all(|c| !c.is_ascii_alphabetic() || c <= &b'c'));
     // // // Remove tokens that contain letters
     // // llm_token_map.retain(|v, _| v.len() == 1 ||
     // //     v.iter().all(|c| c.is_ascii_alphabetic()));
     //
     // // Remove tokens that contain more than two different digits
-    // llm_token_map.retain(|v, _| v.len() == 1 ||
-    //     v.iter().filter(|c| c.is_ascii_digit()).collect::<BTreeSet<_>>().len() <= 1);
+    // // llm_token_map.retain(|v, _| v.len() == 1 ||
+    // //     v.iter().filter(|c| c.is_ascii_digit()).collect::<BTreeSet<_>>().len() <= 1);
     //
     // // Keep only "1" and "11"
     // // llm_token_map.retain(|v, _| v.len() == 1 || v == b"1" || v == b"11");
-    // llm_token_map.retain(|v, _| v == b"1" || v == b"11");
+    // // llm_token_map.retain(|v, _| v == b"1" || v == b"11");
 
     // Print the vocab
     println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
@@ -1087,112 +1085,129 @@ where
     }
     println!("[Minimizer] Confirmed: Initial grammar triggers the bug predicate.");
 
-    let mut rng = StdRng::seed_from_u64(42);
     let mut pass_num = 0;
-
-    const ATTEMPTS_PER_STRATEGY_PASS: usize = 100;
-    const MAX_PRODUCTIONS_TO_REMOVE_IN_CHUNK: usize = 3;
-    const MAX_SYMBOLS_TO_REMOVE_IN_CHUNK: usize = 5;
-
-    'pass_loop: loop {
+    loop { // This is the main loop that alternates between production and symbol removal until convergence
         pass_num += 1;
         println!(
             "\n[Minimizer] Starting Pass {}. Current productions: {}",
             pass_num,
             current_productions.len()
         );
-        std::io::stdout().flush().unwrap();
-        let mut made_change_in_this_pass = false;
+        let prods_at_pass_start = current_productions.clone();
 
-        // --- Strategy 1: Try removing chunks of productions ---
-        if current_productions.len() > 1 {
-            print!("[Minimizer] Pass {}: Trying production chunk removal ({} attempts)...", pass_num, ATTEMPTS_PER_STRATEGY_PASS);
-            std::io::stdout().flush().unwrap();
-            for attempt in 0..ATTEMPTS_PER_STRATEGY_PASS {
-                let eligible_prod_indices: Vec<usize> = (0..current_productions.len())
-                    .filter(|&idx| current_productions[idx].lhs != augmented_start_rule_lhs)
-                    .collect();
+        // --- Production removal phase ---
+        println!("[Minimizer] Pass {}: Trying to remove productions.", pass_num);
+        let mut n_prods;
+        let mut removable_indices: Vec<usize> = (0..current_productions.len())
+            .filter(|&idx| current_productions[idx].lhs != augmented_start_rule_lhs)
+            .collect();
+        n_prods = removable_indices.len() / 2;
 
-                if eligible_prod_indices.is_empty() { break; }
+        while n_prods > 0 {
+            let mut current_n = n_prods;
+            if current_n > removable_indices.len() {
+                current_n = removable_indices.len();
+            }
+            if current_n == 0 { break; }
 
-                let chunk_size = rng.gen_range(1..=std::cmp::min(MAX_PRODUCTIONS_TO_REMOVE_IN_CHUNK, eligible_prod_indices.len()));
-
-                let chosen_indices_to_remove: Vec<usize> = eligible_prod_indices
-                    .choose_multiple(&mut rng, chunk_size)
-                    .cloned()
-                    .collect();
-
-                if chosen_indices_to_remove.is_empty() { continue; }
-
-                let mut temp_productions = current_productions.clone();
-                let mut sorted_indices = chosen_indices_to_remove;
-                sorted_indices.sort_unstable_by(|a, b| b.cmp(a));
-                for &idx_to_remove in &sorted_indices {
-                    temp_productions.remove(idx_to_remove);
-                }
-
-                if temp_productions.is_empty() || !temp_productions.iter().any(|p| p.lhs == augmented_start_rule_lhs) {
+            println!("[Minimizer]   Trying production chunk size: {}", current_n);
+            let mut i = 0;
+            let mut changed_this_sub_pass = false;
+            while i < removable_indices.len() {
+                let indices_to_remove: Vec<usize> = removable_indices.iter().skip(i).take(current_n).cloned().collect();
+                
+                if indices_to_remove.is_empty() {
+                    i += current_n.max(1);
                     continue;
                 }
 
-                if predicate(&temp_productions, &augmented_start_rule_lhs) {
-                    if attempt % (ATTEMPTS_PER_STRATEGY_PASS / 10 + 1) == 0 { print!("#"); std::io::stdout().flush().unwrap(); }
-                    current_productions = temp_productions;
-                    made_change_in_this_pass = true;
-                    println!("\n[Minimizer] Reduced by production chunk ({} removed). New count: {}", chunk_size, current_productions.len());
-                    continue 'pass_loop;
+                let mut temp_prods = current_productions.clone();
+                let mut sorted_indices = indices_to_remove;
+                sorted_indices.sort_unstable_by(|a, b| b.cmp(a));
+                for &idx_to_remove in &sorted_indices {
+                    temp_prods.remove(idx_to_remove);
                 }
+
+                if predicate(&temp_prods, &augmented_start_rule_lhs) {
+                    println!("[Minimizer]   Removed a chunk of {} productions. New count: {}", sorted_indices.len(), temp_prods.len());
+                    current_productions = temp_prods;
+                    changed_this_sub_pass = true;
+                    break; // Restart this phase with new `n`
+                }
+                i += current_n.max(1);
             }
-            println!();
+
+            if changed_this_sub_pass {
+                removable_indices = (0..current_productions.len())
+                    .filter(|&idx| current_productions[idx].lhs != augmented_start_rule_lhs)
+                    .collect();
+                n_prods = removable_indices.len() / 2;
+            } else {
+                n_prods /= 2;
+            }
         }
 
-        // --- Strategy 2: Try removing chunks of symbols ---
+        // --- Symbol removal phase ---
+        println!("[Minimizer] Pass {}: Trying to remove symbols.", pass_num);
         let mut all_symbol_locations: Vec<(usize, usize)> = Vec::new();
         for (prod_idx, prod) in current_productions.iter().enumerate() {
             for symbol_idx in 0..prod.rhs.len() {
                 all_symbol_locations.push((prod_idx, symbol_idx));
             }
         }
+        let mut n_symbols = all_symbol_locations.len() / 2;
 
-        if !all_symbol_locations.is_empty() {
-            print!("[Minimizer] Pass {}: Trying symbol chunk removal ({} attempts)...", pass_num, ATTEMPTS_PER_STRATEGY_PASS);
-            std::io::stdout().flush().unwrap();
-            for attempt in 0..ATTEMPTS_PER_STRATEGY_PASS {
-                let chunk_size = rng.gen_range(1..=std::cmp::min(MAX_SYMBOLS_TO_REMOVE_IN_CHUNK, all_symbol_locations.len()));
-                let locations_to_remove: Vec<(usize, usize)> = all_symbol_locations
-                    .choose_multiple(&mut rng, chunk_size)
-                    .cloned()
-                    .collect();
-
-                if locations_to_remove.is_empty() { continue; }
-
-                let mut temp_productions = current_productions.clone();
-                remove_symbols_at_locations_destructive(&mut temp_productions, &locations_to_remove);
-
-                if temp_productions.is_empty() || !temp_productions.iter().any(|p| p.lhs == augmented_start_rule_lhs) {
-                     continue;
-                }
-
-                if predicate(&temp_productions, &augmented_start_rule_lhs) {
-                    if attempt % (ATTEMPTS_PER_STRATEGY_PASS / 10 + 1) == 0 { print!("*"); std::io::stdout().flush().unwrap(); }
-                    current_productions = temp_productions;
-                    made_change_in_this_pass = true;
-                    println!("\n[Minimizer] Reduced by symbol chunk ({} removed). New count: {}", chunk_size, current_productions.len());
-                    continue 'pass_loop;
-                }
+        while n_symbols > 0 {
+            let mut current_n_symbols = n_symbols;
+            if current_n_symbols > all_symbol_locations.len() {
+                current_n_symbols = all_symbol_locations.len();
             }
-            println!();
+            if current_n_symbols == 0 { break; }
+
+            println!("[Minimizer]   Trying symbol chunk size: {}", current_n_symbols);
+            let mut i = 0;
+            let mut changed_this_sub_pass = false;
+            while i < all_symbol_locations.len() {
+                let locations_to_remove: Vec<(usize, usize)> = all_symbol_locations.iter().skip(i).take(current_n_symbols).cloned().collect();
+                
+                if locations_to_remove.is_empty() {
+                    i += current_n_symbols.max(1);
+                    continue;
+                }
+
+                let mut temp_prods = current_productions.clone();
+                remove_symbols_at_locations_destructive(&mut temp_prods, &locations_to_remove);
+
+                if predicate(&temp_prods, &augmented_start_rule_lhs) {
+                    println!("[Minimizer]   Removed a chunk of {} symbols.", locations_to_remove.len());
+                    current_productions = temp_prods;
+                    changed_this_sub_pass = true;
+                    break;
+                }
+                i += current_n_symbols.max(1);
+            }
+
+            if changed_this_sub_pass {
+                all_symbol_locations.clear();
+                for (prod_idx, prod) in current_productions.iter().enumerate() {
+                    for symbol_idx in 0..prod.rhs.len() {
+                        all_symbol_locations.push((prod_idx, symbol_idx));
+                    }
+                }
+                n_symbols = all_symbol_locations.len() / 2;
+            } else {
+                n_symbols /= 2;
+            }
         }
 
-        if !made_change_in_this_pass {
-            println!("[Minimizer] Pass {}: No further reductions found in this stochastic pass.", pass_num);
-            break 'pass_loop;
+        if current_productions == prods_at_pass_start {
+            println!("[Minimizer] Pass {}: No further reductions found. Converged.", pass_num);
+            break;
         }
     }
 
-    println!("\n[Minimizer] Stochastic minimization phase complete.");
-    println!("[Minimizer] Productions after stochastic phase: {}", current_productions.len());
-
+    println!("\n[Minimizer] Minimization phase complete.");
+ 
     // --- Final Simplification Pass: Inline A -> B rules ---
     println!("\n[Minimizer] Deterministic simplification phase starting.");
     loop {
