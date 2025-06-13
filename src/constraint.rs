@@ -914,17 +914,15 @@ impl<'a> GrammarConstraintState<'a> {
                     glr_s1.merge_with(glr_s2);
                 },
                 // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
-                |precomputed_node_data, final_glr_s| {
-                    if final_glr_s.active_state.stack.is_empty() {
+                |precomputed_node_data, glr_s| {
+                    if glr_s.active_state.stack.is_empty() {
                         return false;
                     }
-    
-    
-                    // if let Some(clean_end_bv) = &precomputed_node_data.value.clean_end {
-                    //     let glr_active_tokens = final_glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
-                    //     let mask_contribution = &glr_active_tokens & clean_end_bv;
-                    //     final_mask_internal |= mask_contribution;
-                    // }
+
+                    if precomputed_node_data.value.end {
+                        let glr_active_tokens = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                        final_mask_internal |= glr_active_tokens;
+                    }
                     true 
                 },
             );
