@@ -565,7 +565,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     //     let s = c.to_string();
     //     gpt2_raw_vocab.insert(s, i as usize);
     // }
-    let gpt2_raw_vocab = BTreeMap::from([("from", 0), (" typing", 1)]);
+    // let gpt2_raw_vocab = BTreeMap::from([("from", 0), (" typing", 1)]);
     // gpt2_raw_vocab.insert("import os".to_string(), 0);
     // gpt2_raw_vocab.insert("import ".to_string(), 1);
     // gpt2_raw_vocab.insert(" os".to_string(), 2);
@@ -980,7 +980,7 @@ fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>
         llm_token_map.insert(token_str.into_bytes(), LLMTokenID(id_val_u32 as usize));
     }
     // Ensure the specific tokens we need for the test are present
-    if llm_token_map.get_by_left(b"import".as_ref()).is_none() || llm_token_map.get_by_left(b" typing".as_ref()).is_none() {
+    if llm_token_map.get_by_left(b"from".as_ref()).is_none() || llm_token_map.get_by_left(b" typing".as_ref()).is_none() {
         panic!("The required tokens 'import' and ' typing' are not in the loaded vocabulary. Cannot run the mask bug minimizer.");
     }
     println!("[Minimizer] Vocabulary loaded.");
@@ -1017,12 +1017,12 @@ fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>
         // The actual test logic
         let bug_found = panic::catch_unwind(AssertUnwindSafe(|| {
             let mut constraint_state = constraint.init();
-            let import_token_id = llm_token_map.get_by_left(b"import".as_ref()).unwrap();
+            let import_token_id = llm_token_map.get_by_left(b"from".as_ref()).unwrap();
             let initial_mask = constraint_state.get_mask();
             dbg!(&initial_mask);
 
             if !initial_mask.contains(import_token_id.0) {
-                return true; // BUG: "import" should be allowed initially.
+                return true; // BUG: "from" should be allowed initially.
             }
 
             constraint_state.commit(*import_token_id);
@@ -1035,7 +1035,7 @@ fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>
             dbg!(&next_mask);
 
             if !next_mask.contains(typing_token_id.0) {
-                return true; // BUG: " typing" should be allowed after "import".
+                return true; // BUG: " typing" should be allowed after "from".
             }
             
             false // No bug found
