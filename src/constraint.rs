@@ -38,12 +38,16 @@ pub type TerminalBV = HybridBitset;
 
 const MERGE_THRESHOLD: usize = 100000000000;
 
-#[derive(Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrecomputedNodeContents {
     pub end: bool,
 }
 
 impl PrecomputedNodeContents {
+    pub fn no_end() -> Self {
+        Self { end: false }
+    }
+
     pub fn end() -> Self {
         Self { end: true }
     }
@@ -456,7 +460,7 @@ impl<'r> Precomputer<'r> {
             roots.insert(
                 sid,
                 Arc::new(Mutex::new(PrecomputeNode::new(
-                    PrecomputedNodeContents::default(),
+                    PrecomputedNodeContents::no_end(),
                 ))),
             );
         }
@@ -782,7 +786,7 @@ impl<'r> Precomputer<'r> {
                             }).map(|w| w.as_arc().clone());
                             inserter = inserter.try_destinations_iter(eligible_children);
 
-                            let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents::default()).unwrap();
+                            let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents::no_end()).unwrap();
                             dest_nodes_in_queue.insert(ArcPtrWrapper::new(result_node.clone()));
                             *self.tags.borrow_mut().entry(ArcPtrWrapper::new(result_node)).or_insert_with(HybridBitset::zeros) |= &edge_bv;
                         }
@@ -809,7 +813,7 @@ impl<'r> Precomputer<'r> {
         }
 
         let merged_node_arc = Arc::new(Mutex::new(PrecomputeNode::new( 
-            PrecomputedNodeContents::default(),
+            PrecomputedNodeContents::no_end(),
         )));
 
         for child_wrapper in set { 
