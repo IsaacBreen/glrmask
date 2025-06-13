@@ -764,6 +764,7 @@ impl<'r> Precomputer<'r> {
                                 tags.get(child_wrapper).map_or(true, |tag| (tag & &edge_bv).is_empty())
                             }).map(|w| w.as_arc().clone());
                             inserter = inserter.try_destinations_iter(eligible_children);
+                            drop(tags);
 
                             let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents::no_end()).unwrap();
                             dest_nodes_in_queue.insert(ArcPtrWrapper::new(result_node.clone()));
