@@ -752,11 +752,11 @@ impl<'r> Precomputer<'r> {
                                     edge_bv,
                                     |e, n| *e |= n,
                                 );
-                                inserter.try_destination(self.end_node.as_arc().clone());
-                                continue;
+                                inserter.try_destination(self.end_node.as_arc().clone()).unwrap();
                             }
 
                             let mut edge_bv = child_vocab_node.reachable_token_ids().clone();
+                            edge_bv.set(child_vocab_node.token_id(), false);
                             if let Some(matches_for_terminal) = possible_matches_at_end.get(&terminal_id) {
                                 edge_bv -= matches_for_terminal;
                             }
@@ -775,10 +775,7 @@ impl<'r> Precomputer<'r> {
 
                             inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()));
 
-                            let children_of_src: Vec<_> = {
-                                let guard = src_node_wrapper.as_arc().lock().unwrap();
-                                guard.children().values().flat_map(|m| m.keys().cloned()).collect()
-                            };
+                            let children_of_src: Vec<_> = src_node_wrapper.lock().unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
                             let tags = self.tags.borrow();
                             let eligible_children = children_of_src.iter().filter(|child_wrapper| {
                                 tags.get(child_wrapper).map_or(true, |tag| (tag & &edge_bv).is_empty())
