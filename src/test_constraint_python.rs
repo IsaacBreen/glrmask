@@ -1038,7 +1038,6 @@ fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>
 
             let typing_token_id = llm_token_map.get_by_left(b" typing".as_ref()).unwrap();
             let next_mask = constraint_state.get_mask();
-            dbg!(&next_mask);
 
             if !next_mask.contains(typing_token_id.0) {
                 return true; // BUG: " typing" should be allowed after "from".
