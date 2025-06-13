@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode, PrecomputedNodeContents, LLMTokenBV};
 use crate::types::{TerminalID as GrammarTokenID};
-use crate::datastructures::trie::{Trie, node_ptr};
+use crate::datastructures::trie::Trie;
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
 use std::collections::{HashSet, VecDeque, BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -44,46 +45,56 @@ fn format_bv_indices(
 pub fn dump_precompute_trie_recursive(
     node_arc: &Arc<Mutex<PrecomputeNode>>,
     indent: String,
-    visited: &mut HashSet<*const Mutex<PrecomputeNode>>,
+    visited: &mut HashSet<*const PrecomputeNode>,
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>
 ) {
-    let arc_ptr = Arc::as_ptr(node_arc);
-    if !visited.insert(arc_ptr) {
-        println!("{}-> Ref to Arc {:p} (already printed)", indent, arc_ptr);
-        return;
-    }
+    let node_ptr;
+    let children_to_visit;
+    let is_leaf;
 
+    {
+        let node = node_arc.lock().expect("Mutex poisoned during dump");
+        node_ptr = &*node as *const PrecomputeNode;
 
-    let node = node_arc.lock().expect("Mutex poisoned during dump");
-
-    println!("{}-> Node {:p} (Data {:p}, MaxDepth: {})", indent, Arc::as_ptr(node_arc), &*node, node.max_depth);
-
-    // if let Some(clean_end) = &node.value.clean_end { // clean_end stores internal IDs
-    //     println!("{}  Clean End LLM Tokens: {}", indent, format_bv_indices(clean_end, original_internal_bimap)); // Pass original_internal_bimap
-    // }
-    if node.value.end {
-        println!("{}  End", indent);
-    }
-
-    // Print Children (Edges)
-    if node.children().is_empty() {
-        println!("{}  (Leaf Node)", indent);
-    } else {
-        println!("{}  Children:", indent);
-        let new_indent = format!("{}    ", indent);
-        for (edge_key, children_vec) in node.children() {
-            for (child_wrapper_arc, edge_val_bv) in children_vec {
-                 println!(
-                    "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Arc Ptr: {:p}",
-                    indent,
-                    edge_key.map(|grammar_token_id| grammar_token_id.0),
-                    format_bv_indices(edge_val_bv, original_internal_bimap), // Pass original_internal_bimap
-                    Arc::as_ptr(child_wrapper_arc.as_arc())
-                );
-                // Recurse
-                dump_precompute_trie_recursive(child_wrapper_arc.as_arc(), new_indent.clone(), visited, original_internal_bimap); // Pass original_internal_bimap
-            }
+        if !visited.insert(node_ptr) {
+            println!("{}-> Ref to Node {:p} (already printed)", indent, node_ptr);
+            return;
         }
+
+        println!("{}-> Node {:p} (MaxDepth: {})", indent, node_ptr, node.max_depth);
+
+        if node.value.end {
+            println!("{}  End", indent);
+        }
+
+        is_leaf = node.children().is_empty();
+        if is_leaf {
+            println!("{}  (Leaf Node)", indent);
+            return;
+        }
+
+        println!("{}  Children:", indent);
+        children_to_visit = node.children().iter().flat_map(|(edge_key, dest_map)| {
+            dest_map.iter().map(move |(child_wrapper, edge_val)| {
+                (edge_key.clone(), edge_val.clone(), child_wrapper.as_arc().clone())
+            })
+        }).collect::<Vec<_>>();
+    }
+
+    let new_indent = format!("{}    ", indent);
+    for (edge_key, edge_val_bv, child_arc) in children_to_visit {
+        let child_node_ptr = {
+            let child_node_guard = child_arc.lock().expect("Mutex poisoned");
+            &*child_node_guard as *const PrecomputeNode
+        };
+        println!(
+            "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Node Ptr: {:p}",
+            indent,
+            edge_key.map(|grammar_token_id| grammar_token_id.0),
+            format_bv_indices(&edge_val_bv, original_internal_bimap),
+            child_node_ptr
+        );
+        dump_precompute_trie_recursive(&child_arc, new_indent.clone(), visited, original_internal_bimap);
     }
 }
 
@@ -93,7 +104,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         println!("Dumping Precomputed Trie Structure (showing original LLM Token IDs):");
         println!("===================================");
 
-        let mut visited: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
+        let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
         for (tokenizer_state_id, root_node_trie) in &self.precomputed {
             println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
             dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap));
@@ -245,23 +256,41 @@ pub fn calculate_final_stats(
     stats: &mut PrecomputeStats,
 ) {
     crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
-    let mut all_reachable_nodes_for_final_stats: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = HashSet::new();
-    for root_arc_mutex_node in precomputed_roots.values() {
-        // Assuming PrecomputeNode::all_nodes is accessible and returns Vec<Arc<Mutex<PrecomputeNode>>>
-        // If PrecomputeNode is crate::constraint::PrecomputeNode, it should be.
-        let nodes_from_this_root = crate::constraint::PrecomputeNode::all_nodes(root_arc_mutex_node.clone());
-        for node_arc in nodes_from_this_root {
-            all_reachable_nodes_for_final_stats.insert(ArcPtrWrapper::new(node_arc));
+
+    // Custom implementation of all_nodes using *const PrecomputeNode for visited set
+    let mut all_reachable_nodes: HashMap<*const PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = HashMap::new();
+    let mut queue: VecDeque<Arc<Mutex<PrecomputeNode>>> = precomputed_roots.values().cloned().collect();
+    let mut visited_data_ptrs: HashSet<*const PrecomputeNode> = HashSet::new();
+
+    while let Some(node_arc) = queue.pop_front() {
+        let (children_to_queue, node_ptr) = {
+            let node_guard = node_arc.lock().unwrap();
+            let ptr = &*node_guard as *const PrecomputeNode;
+            let children = node_guard.children()
+                .values()
+                .flat_map(|dest_map| dest_map.keys().map(|wrapper| wrapper.as_arc().clone()))
+                .collect::<Vec<_>>();
+            (children, ptr)
+        };
+
+        if visited_data_ptrs.insert(node_ptr) {
+            all_reachable_nodes.insert(node_ptr, node_arc.clone());
+            for child_arc in children_to_queue {
+                queue.push_back(child_arc);
+            }
         }
     }
-    stats.final_unique_nodes_count = all_reachable_nodes_for_final_stats.len();
-    stats.final_root_nodes_count = precomputed_roots.iter().map(|(_, node)| Arc::as_ptr(node)).collect::<BTreeSet<_>>().len(); // Calculate root count
 
-    // Create a set of root node wrappers for efficient lookup
-    let root_node_wrappers: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = precomputed_roots
+    stats.final_unique_nodes_count = all_reachable_nodes.len();
+
+    let root_node_pointers: HashSet<*const PrecomputeNode> = precomputed_roots
         .values()
-        .map(|arc_mutex_node| ArcPtrWrapper::new(arc_mutex_node.clone()))
+        .map(|arc| {
+            let guard = arc.lock().unwrap();
+            &*guard as *const PrecomputeNode
+        })
         .collect();
+    stats.final_root_nodes_count = root_node_pointers.len();
 
     // Initialize stats fields
     stats.final_total_occupancy_sum_for_some_keys = 0;
@@ -281,13 +310,11 @@ pub fn calculate_final_stats(
     stats.edges_pruned_by_terminal_sequence = 0;
     stats.final_total_ranges_in_bvs = 0;
 
-
-    for comp_arc_node in &all_reachable_nodes_for_final_stats {
-        let node_arc = comp_arc_node.as_arc();
+    for (node_ptr, node_arc) in &all_reachable_nodes {
         let node_guard = node_arc.lock().expect("Mutex poisoned during final stats calculation");
 
         // New logic for non-root internal and leaf nodes
-        if !root_node_wrappers.contains(comp_arc_node) {
+        if !root_node_pointers.contains(node_ptr) {
             if node_guard.children().is_empty() {
                 stats.final_leaf_nodes_count += 1;
             } else {

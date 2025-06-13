@@ -3844,12 +3844,12 @@ local_system:
       pub fn dump_precompute_trie_recursive(
           node_arc: &Arc<Mutex<PrecomputeNode>>,
           indent: String,
-          visited: &mut HashSet<*const PrecomputeNode>, // Changed to *const PrecomputeNode
+          visited: &mut HashSet<*const Mutex<PrecomputeNode>>,
           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>
       ) {
-          let node_ptr_val = node_ptr(node_arc);
-          if !visited.insert(node_ptr_val) {
-              println!("{}-> Ref {:p} (already printed)", indent, node_ptr_val);
+          let arc_ptr = Arc::as_ptr(node_arc);
+          if !visited.insert(arc_ptr) {
+              println!("{}-> Ref to Arc {:p} (already printed)", indent, arc_ptr);
               return;
           }
 
@@ -3874,11 +3874,11 @@ local_system:
               for (edge_key, children_vec) in node.children() {
                   for (child_wrapper_arc, edge_val_bv) in children_vec {
                        println!(
-                          "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Arc Ptr: {:p}", // Changed to Child Arc Ptr
+                          "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Arc Ptr: {:p}",
                           indent,
                           edge_key.map(|grammar_token_id| grammar_token_id.0),
                           format_bv_indices(edge_val_bv, original_internal_bimap), // Pass original_internal_bimap
-                          node_ptr(child_wrapper_arc.as_arc()) // Use as_arc() to get the Arc
+                          Arc::as_ptr(child_wrapper_arc.as_arc())
                       );
                       // Recurse
                       dump_precompute_trie_recursive(child_wrapper_arc.as_arc(), new_indent.clone(), visited, original_internal_bimap); // Pass original_internal_bimap
@@ -3893,17 +3893,10 @@ local_system:
               println!("Dumping Precomputed Trie Structure (showing original LLM Token IDs):");
               println!("===================================");
 
-              let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
+              let mut visited: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
               for (tokenizer_state_id, root_node_trie) in &self.precomputed {
                   println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
-
-                  // Need to wrap the root_node_trie (which is a Trie, not an Arc<Mutex<Trie>>)
-                  // in an Arc<Mutex<>> to match the recursive function's expectation.
-                  // This is slightly awkward but necessary for the shared recursive logic.
-                  let root_node_arc = Arc::new(Mutex::new(root_node_trie.clone()));
-
-                  // Pass the bimap
-                  dump_precompute_trie_recursive(&root_node_arc.as_ref().lock().unwrap(), "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap));
+                  dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap));
               }
               println!("\n===================================");
               println!("Dump Complete.");
@@ -8884,12 +8877,12 @@ local_system:
       pub fn dump_precompute_trie_recursive(
           node_arc: &Arc<Mutex<PrecomputeNode>>,
           indent: String,
-          visited: &mut HashSet<*const PrecomputeNode>, // Changed to *const PrecomputeNode
+          visited: &mut HashSet<*const Mutex<PrecomputeNode>>,
           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>
       ) {
-          let node_ptr_val = node_ptr(node_arc);
-          if !visited.insert(node_ptr_val) {
-              println!("{}-> Ref {:p} (already printed)", indent, node_ptr_val);
+          let arc_ptr = Arc::as_ptr(node_arc);
+          if !visited.insert(arc_ptr) {
+              println!("{}-> Ref to Arc {:p} (already printed)", indent, arc_ptr);
               return;
           }
 
@@ -8914,11 +8907,11 @@ local_system:
               for (edge_key, children_vec) in node.children() {
                   for (child_wrapper_arc, edge_val_bv) in children_vec {
                        println!(
-                          "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Arc Ptr: {:p}", // Changed to Child Arc Ptr
+                          "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Arc Ptr: {:p}",
                           indent,
                           edge_key.map(|grammar_token_id| grammar_token_id.0),
                           format_bv_indices(edge_val_bv, original_internal_bimap), // Pass original_internal_bimap
-                          node_ptr(child_wrapper_arc.as_arc()) // Use as_arc() to get the Arc
+                          Arc::as_ptr(child_wrapper_arc.as_arc())
                       );
                       // Recurse
                       dump_precompute_trie_recursive(child_wrapper_arc.as_arc(), new_indent.clone(), visited, original_internal_bimap); // Pass original_internal_bimap
@@ -8933,17 +8926,10 @@ local_system:
               println!("Dumping Precomputed Trie Structure (showing original LLM Token IDs):");
               println!("===================================");
 
-              let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
+              let mut visited: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
               for (tokenizer_state_id, root_node_trie) in &self.precomputed {
                   println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
-
-                  // Need to wrap the root_node_trie (which is a Trie, not an Arc<Mutex<Trie>>)
-                  // in an Arc<Mutex<>> to match the recursive function's expectation.
-                  // This is slightly awkward but necessary for the shared recursive logic.
-                  let root_node_arc = Arc::new(Mutex::new(root_node_trie.clone()));
-
-                  // Pass the bimap
-                  dump_precompute_trie_recursive(&root_node_arc.as_ref().lock().unwrap(), "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap));
+                  dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap));
               }
               println!("\n===================================");
               println!("Dump Complete.");
@@ -13957,12 +13943,12 @@ messages:
       pub fn dump_precompute_trie_recursive(
           node_arc: &Arc<Mutex<PrecomputeNode>>,
           indent: String,
-          visited: &mut HashSet<*const PrecomputeNode>, // Changed to *const PrecomputeNode
+          visited: &mut HashSet<*const Mutex<PrecomputeNode>>,
           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>
       ) {
-          let node_ptr_val = node_ptr(node_arc);
-          if !visited.insert(node_ptr_val) {
-              println!("{}-> Ref {:p} (already printed)", indent, node_ptr_val);
+          let arc_ptr = Arc::as_ptr(node_arc);
+          if !visited.insert(arc_ptr) {
+              println!("{}-> Ref to Arc {:p} (already printed)", indent, arc_ptr);
               return;
           }
 
@@ -13987,11 +13973,11 @@ messages:
               for (edge_key, children_vec) in node.children() {
                   for (child_wrapper_arc, edge_val_bv) in children_vec {
                        println!(
-                          "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Arc Ptr: {:p}", // Changed to Child Arc Ptr
+                          "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Arc Ptr: {:p}",
                           indent,
                           edge_key.map(|grammar_token_id| grammar_token_id.0),
                           format_bv_indices(edge_val_bv, original_internal_bimap), // Pass original_internal_bimap
-                          node_ptr(child_wrapper_arc.as_arc()) // Use as_arc() to get the Arc
+                          Arc::as_ptr(child_wrapper_arc.as_arc())
                       );
                       // Recurse
                       dump_precompute_trie_recursive(child_wrapper_arc.as_arc(), new_indent.clone(), visited, original_internal_bimap); // Pass original_internal_bimap
@@ -14006,17 +13992,10 @@ messages:
               println!("Dumping Precomputed Trie Structure (showing original LLM Token IDs):");
               println!("===================================");
 
-              let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
+              let mut visited: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
               for (tokenizer_state_id, root_node_trie) in &self.precomputed {
                   println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
-
-                  // Need to wrap the root_node_trie (which is a Trie, not an Arc<Mutex<Trie>>)
-                  // in an Arc<Mutex<>> to match the recursive function's expectation.
-                  // This is slightly awkward but necessary for the shared recursive logic.
-                  let root_node_arc = Arc::new(Mutex::new(root_node_trie.clone()));
-
-                  // Pass the bimap
-                  dump_precompute_trie_recursive(&root_node_arc.as_ref().lock().unwrap(), "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap));
+                  dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap));
               }
               println!("\n===================================");
               println!("Dump Complete.");
@@ -15168,1092 +15147,231 @@ messages:
       ```
     metadata:
       filename: src/test_constraint_basic.rs
-  - user: |-
-      `````ad-attachment
-      collapse: closed
-
-      ```
-      [DEBUG 15:56:58.421 2] src/glr/table.rs:522: Removing productions with undefined non-terminals
-      [DEBUG 15:56:58.421 2] src/glr/table.rs:547: Stage 1
-      [DEBUG 15:56:58.421 2] src/glr/table.rs:550: Stage 2
-      [DEBUG 15:56:58.421 2] src/glr/table.rs:553: Stage 3
-      [DEBUG 15:56:58.421 3] src/glr/table.rs:318: Follow sets:
-      [DEBUG 15:56:58.421 3] src/glr/table.rs:320:   S: 
-      [DEBUG 15:56:58.421 3] src/glr/table.rs:320:   X: EOF
-      [DEBUG 15:56:58.421 2] src/glr/table.rs:556: Stage 4
-      [DEBUG 15:56:58.421 2] src/glr/table.rs:559: Stage 5
-      [DEBUG 15:56:58.421 2] src/glr/table.rs:562: Stage 6
-      [DEBUG 15:56:58.421 2] src/glr/table.rs:565: Stage 7
-      [DEBUG 15:56:58.422 2] src/glr/table.rs:568: Done generating GLR parser
-      [src/test_constraint_basic.rs:71:5] &parser = GLRParser {
-          stage_7_table: {
-              StateID(
-                  0,
-              ): Stage7Row {
-                  shifts_and_reduces: {
-                      TerminalID(
-                          0,
-                      ): Shift(
-                          StateID(
-                              3,
-                          ),
-                      ),
-                      TerminalID(
-                          1,
-                      ): Shift(
-                          StateID(
-                              5,
-                          ),
-                      ),
-                  },
-                  gotos: {
-                      NonTerminalID(
-                          0,
-                      ): Accept,
-                      NonTerminalID(
-                          1,
-                      ): State(
-                          StateID(
-                              1,
-                          ),
-                      ),
-                  },
-              },
-              StateID(
-                  1,
-              ): Stage7Row {
-                  shifts_and_reduces: {
-                      TerminalID(
-                          3,
-                      ): Shift(
-                          StateID(
-                              2,
-                          ),
-                      ),
-                  },
-                  gotos: {},
-              },
-              StateID(
-                  2,
-              ): Stage7Row {
-                  shifts_and_reduces: {},
-                  gotos: {},
-              },
-              StateID(
-                  3,
-              ): Stage7Row {
-                  shifts_and_reduces: {
-                      TerminalID(
-                          2,
-                      ): Shift(
-                          StateID(
-                              4,
-                          ),
-                      ),
-                  },
-                  gotos: {},
-              },
-              StateID(
-                  4,
-              ): Stage7Row {
-                  shifts_and_reduces: {
-                      TerminalID(
-                          3,
-                      ): Reduce {
-                          production_id: ProductionID(
-                              1,
-                          ),
-                          nonterminal_id: NonTerminalID(
-                              1,
-                          ),
-                          len: 2,
-                      },
-                  },
-                  gotos: {},
-              },
-              StateID(
-                  5,
-              ): Stage7Row {
-                  shifts_and_reduces: {
-                      TerminalID(
-                          3,
-                      ): Reduce {
-                          production_id: ProductionID(
-                              2,
-                          ),
-                          nonterminal_id: NonTerminalID(
-                              1,
-                          ),
-                          len: 1,
-                      },
-                  },
-                  gotos: {},
-              },
-          },
-          productions: [
-              Production {
-                  lhs: NonTerminal(
-                      "S",
-                  ),
-                  rhs: [
-                      NonTerminal(
-                          NonTerminal(
-                              "X",
-                          ),
-                      ),
-                      Terminal(
-                          Terminal(
-                              "EOF",
-                          ),
-                      ),
-                  ],
-              },
-              Production {
-                  lhs: NonTerminal(
-                      "X",
-                  ),
-                  rhs: [
-                      Terminal(
-                          Terminal(
-                              "A",
-                          ),
-                      ),
-                      Terminal(
-                          Terminal(
-                              "B_OR_C",
-                          ),
-                      ),
-                  ],
-              },
-              Production {
-                  lhs: NonTerminal(
-                      "X",
-                  ),
-                  rhs: [
-                      Terminal(
-                          Terminal(
-                              "AB",
-                          ),
-                      ),
-                  ],
-              },
-          ],
-          terminal_map: {Terminal("A") <> TerminalID(0), Terminal("AB") <> TerminalID(1), Terminal("B_OR_C") <> TerminalID(2), Terminal("EOF") <> TerminalID(3)},
-          non_terminal_map: {NonTerminal("S") <> NonTerminalID(0), NonTerminal("X") <> NonTerminalID(1)},
-          item_set_map: {{Item { production: Production { lhs: NonTerminal("S"), rhs: [NonTerminal(NonTerminal("X")), Terminal(Terminal("EOF"))] }, dot_position: 0 }} <> StateID(0), {Item { production: Production { lhs: NonTerminal("S"), rhs: [NonTerminal(NonTerminal("X")), Terminal(Terminal("EOF"))] }, dot_position: 1 }} <> StateID(1), {Item { production: Production { lhs: NonTerminal("S"), rhs: [NonTerminal(NonTerminal("X")), Terminal(Terminal("EOF"))] }, dot_position: 2 }} <> StateID(2), {Item { production: Production { lhs: NonTerminal("X"), rhs: [Terminal(Terminal("A")), Terminal(Terminal("B_OR_C"))] }, dot_position: 1 }} <> StateID(3), {Item { production: Production { lhs: NonTerminal("X"), rhs: [Terminal(Terminal("A")), Terminal(Terminal("B_OR_C"))] }, dot_position: 2 }} <> StateID(4), {Item { production: Production { lhs: NonTerminal("X"), rhs: [Terminal(Terminal("AB"))] }, dot_position: 1 }} <> StateID(5)},
-          start_state_id: StateID(
-              0,
-          ),
-      }
-      [DEBUG 15:56:58.422 2] src/constraint.rs:227: Building vocab prefix tree for possible_matches computation
-      [DEBUG 15:56:58.422 2] src/datastructures/vocab_prefix_tree.rs:179: Building vocab prefix tree
-      [DEBUG 15:56:58.422 2] src/datastructures/vocab_prefix_tree.rs:200: Merging nodes
-      [DEBUG 15:56:58.422 2] src/datastructures/vocab_prefix_tree.rs:204: Computing reachable IDs
-      [DEBUG 15:56:58.422 2] src/datastructures/vocab_prefix_tree.rs:206: Done computing reachable IDs
-      [DEBUG 15:56:58.422 2] src/constraint.rs:229: Done building vocab prefix tree for possible_matches computation
-      [DEBUG 15:56:58.422 2] src/constraint.rs:235: Computing possible_matches for all 5 tokenizer states
-      [DEBUG 15:56:58.422 2] src/constraint.rs:245: Finished computing possible_matches
-      [DEBUG 15:56:58.422 2] src/constraint.rs:276: Computed terminal_follow_map_ids with 1 entries.
-      [DEBUG 15:56:58.422 2] src/constraint.rs:452: Building vocab prefix tree
-      [DEBUG 15:56:58.422 2] src/datastructures/vocab_prefix_tree.rs:179: Building vocab prefix tree
-      [DEBUG 15:56:58.422 2] src/datastructures/vocab_prefix_tree.rs:200: Merging nodes
-      [DEBUG 15:56:58.422 2] src/datastructures/vocab_prefix_tree.rs:204: Computing reachable IDs
-      [DEBUG 15:56:58.422 2] src/datastructures/vocab_prefix_tree.rs:206: Done computing reachable IDs
-      [DEBUG 15:56:58.422 2] src/constraint.rs:454: Done building vocab prefix tree
-      [DEBUG 15:56:58.423 2] src/constraint.rs:539: Starting precompute DFS
-      [DEBUG 15:56:58.423 3] src/constraint.rs:540: Roots for each tokenizer state:
-      [DEBUG 15:56:58.423 3] src/constraint.rs:542:   0: 0x600003398010
-      [DEBUG 15:56:58.423 3] src/constraint.rs:542:   1: 0x600003398060
-      [DEBUG 15:56:58.423 3] src/constraint.rs:542:   2: 0x6000033980b0
-      [DEBUG 15:56:58.423 3] src/constraint.rs:542:   3: 0x600003398100
-      [DEBUG 15:56:58.423 3] src/constraint.rs:542:   4: 0x600003398150
-      [DEBUG 15:56:58.423 2] src/constraint.rs:545: Finished precompute DFS
-      [DEBUG 15:56:58.423 2] src/constraint.rs:547: Precomputation complete
-      [DEBUG 15:56:58.423 2] src/constraint_extra.rs:254: Calculating final precompute statistics (within constraint_extra)...
-      [DEBUG 15:56:58.423 2] src/constraint_extra.rs:347: Finished calculating final precompute statistics (within constraint_extra).
-      --- Precomputation Statistics ---
-        Initial Root Nodes Created: 0
-
-      Node Counts Breakdown:
-        There are:
-        - 7 unique nodes, of which
-          - 5 are roots
-          - 2 are non-roots, of which
-              - 1 are internal (non-root, non-leaf)
-              - 1 are leaves (non-root)
-
-      Final Graph Structure (after sharing and deduplication):
-        Unique Nodes: 7
-        Total Edges: 4
-          Edges with None Key: 0
-          Edges with Some Key: 4
-        Nodes with Clean End: 1
-        Average edge occupancy for Some-key edges:    1.00
-        Average edge occupancy for None-key edges:    0.00
-        Total ranges in all HybridBitsets: 4
-
-      Grammar Token Edge Key Frequencies (Most Common First):
-        Token Name                ID    KeyUse   SumChild AvgChild   MedChild   AvgKeyToks SumToks      AvgToks    MedToks   
-        ------------------------- ----- -------- -------- ---------- ---------- ---------- ------------ ---------- ----------
-        A                             0        1        1       1.00       1.00       2.00            2       2.00       2.00
-        AB                            1        1        1       1.00       1.00       1.00            1       1.00       1.00
-        B_OR_C                        2        1        1       1.00       1.00       2.00            2       2.00       2.00
-        EOF                           3        1        1       1.00       1.00       1.00            1       1.00       1.00
-      ---------------------------------
-      Dumping Precomputed Trie Structure (showing original LLM Token IDs):
-      ===================================
-
-      --- Tokenizer State ID: 0 ---
-      -> Node 0x600003398510 (Data 0x600003398520, MaxDepth: 0)
-        Children:
-      Edge GrammarTokenID(Some(0)): LLM Tokens: HybridBitset { inner: 1..=2 } -> Child Arc Ptr: 0x6000033985c0
-          -> Node 0x6000033985b0 (Data 0x6000033985c0, MaxDepth: 1)
-            Children:
-          Edge GrammarTokenID(Some(2)): LLM Tokens: HybridBitset { inner: 1..=2 } -> Child Arc Ptr: 0x6000033981b0
-              -> Node 0x6000033981a0 (Data 0x6000033981b0, MaxDepth: 2)
-                End
-                (Leaf Node)
-      Edge GrammarTokenID(Some(1)): LLM Tokens: HybridBitset { inner: 1..=1 } -> Child Arc Ptr: 0x6000033981b0
-          -> Ref 0x6000033981b0 (already printed)
-      Edge GrammarTokenID(Some(3)): LLM Tokens: HybridBitset { inner: 0..=0 } -> Child Arc Ptr: 0x6000033981b0
-          -> Ref 0x6000033981b0 (already printed)
-
-      --- Tokenizer State ID: 1 ---
-      -> Ref 0x600003398520 (already printed)
-
-      --- Tokenizer State ID: 2 ---
-      -> Ref 0x600003398520 (already printed)
-
-      --- Tokenizer State ID: 3 ---
-      -> Ref 0x600003398520 (already printed)
-
-      --- Tokenizer State ID: 4 ---
-      -> Ref 0x600003398520 (already printed)
-
-      ===================================
-      Dump Complete.
-      [DEBUG 15:56:58.423 2] src/constraint.rs:841: Computing mask with 1 states: [0]
-      [DEBUG 15:56:58.423 2] src/constraint.rs:949: get_mask step() counts:
-        - 'A': 1
-        - 'AB': 1
-        - 'B_OR_C': 1
-        - 'EOF': 1
-      --- Profiler Summary ---
-
-      [Hierarchical Timings]
-            Hits      Total Time        Own Time     % of Parent  Name
-               1         0.000ms         0.025ms            0.0%  GrammarConstraintState::get_mask
-               1         0.000ms         0.125ms            0.0%    GrammarConstraintState::get_mask
-               4         0.007ms         0.007ms            0.0%      GLRParserState::log_gss
-               4         0.118ms         0.045ms            0.0%      GLRParserState::step
-               7         0.011ms         0.011ms            9.7%        GLRParserState::log_gss
-               4         0.062ms         0.030ms           52.5%        GSSNode::merge
-               4         0.032ms         0.021ms           51.2%          Acc::union_assign
-               4         0.011ms         0.011ms           33.3%            allowed_terminals_union_assign
-               3         0.017ms         0.009ms            0.0%      GSSNode::merge
-               1         0.008ms         0.005ms           45.3%        Acc::union_assign
-               1         0.002ms         0.002ms           30.6%          allowed_terminals_union_assign
-
-      --- End Profiler Summary ---
-      --- Profiler Summary (Flat) ---
-
-      [Flat Timings]
-            Hits      Total Time        Own Time  Name
-               4         0.118ms         0.045ms  GLRParserState::step
-               7         0.079ms         0.040ms  GSSNode::merge
-               5         0.040ms         0.027ms  Acc::union_assign
-              11         0.019ms         0.019ms  GLRParserState::log_gss
-               5         0.013ms         0.013ms  allowed_terminals_union_assign
-               2         0.000ms         0.149ms  GrammarConstraintState::get_mask
-
-      --- End Profiler Summary (Flat) ---
-      [DEBUG 15:56:58.423 2] src/constraint.rs:956: Done computing mask
-      Initial mask: HybridBitset { inner: 0..=1 }
-      [src/test_constraint_basic.rs:95:5] &constraint_state = GrammarConstraintState {
-          parent: GrammarConstraint {
-              tokenizer: Regex {
-                  dfa: DFA {
-                      states: [
-                          DFAState {
-                              transitions: TrieMap {
-                                  len: 4,
-                                  entries: {
-                                      '$': 4,
-                                      'a': 1,
-                                      'b': 3,
-                                      'c': 3,
-                                  },
-                              },
-                              finalizers: {},
-                              possible_future_group_ids: {
-                                  0,
-                                  1,
-                                  2,
-                                  3,
-                              },
-                              group_id_to_u8set: {
-                                  0: U8Set(['a'] len: 1),
-                                  1: U8Set(['a'] len: 1),
-                                  2: U8Set(['b', 'c'] len: 2),
-                                  3: U8Set(['$'] len: 1),
-                              },
-                          },
-                          DFAState {
-                              transitions: TrieMap {
-                                  len: 1,
-                                  entries: {
-                                      'b': 2,
-                                  },
-                              },
-                              finalizers: {
-                                  0,
-                              },
-                              possible_future_group_ids: {
-                                  1,
-                              },
-                              group_id_to_u8set: {
-                                  1: U8Set(['b'] len: 1),
-                              },
-                          },
-                          DFAState {
-                              transitions: TrieMap {
-                                  len: 0,
-                                  entries: {},
-                              },
-                              finalizers: {
-                                  1,
-                              },
-                              possible_future_group_ids: {},
-                              group_id_to_u8set: {},
-                          },
-                          DFAState {
-                              transitions: TrieMap {
-                                  len: 0,
-                                  entries: {},
-                              },
-                              finalizers: {
-                                  2,
-                              },
-                              possible_future_group_ids: {},
-                              group_id_to_u8set: {},
-                          },
-                          DFAState {
-                              transitions: TrieMap {
-                                  len: 0,
-                                  entries: {},
-                              },
-                              finalizers: {
-                                  3,
-                              },
-                              possible_future_group_ids: {},
-                              group_id_to_u8set: {},
-                          },
-                      ],
-                      start_state: 0,
-                      non_greedy_finalizers: {},
-                  },
-              },
-              parser: GLRParser {
-                  stage_7_table: {
-                      StateID(
-                          0,
-                      ): Stage7Row {
-                          shifts_and_reduces: {
-                              TerminalID(
-                                  0,
-                              ): Shift(
-                                  StateID(
-                                      3,
-                                  ),
-                              ),
-                              TerminalID(
-                                  1,
-                              ): Shift(
-                                  StateID(
-                                      5,
-                                  ),
-                              ),
-                          },
-                          gotos: {
-                              NonTerminalID(
-                                  0,
-                              ): Accept,
-                              NonTerminalID(
-                                  1,
-                              ): State(
-                                  StateID(
-                                      1,
-                                  ),
-                              ),
-                          },
-                      },
-                      StateID(
-                          1,
-                      ): Stage7Row {
-                          shifts_and_reduces: {
-                              TerminalID(
-                                  3,
-                              ): Shift(
-                                  StateID(
-                                      2,
-                                  ),
-                              ),
-                          },
-                          gotos: {},
-                      },
-                      StateID(
-                          2,
-                      ): Stage7Row {
-                          shifts_and_reduces: {},
-                          gotos: {},
-                      },
-                      StateID(
-                          3,
-                      ): Stage7Row {
-                          shifts_and_reduces: {
-                              TerminalID(
-                                  2,
-                              ): Shift(
-                                  StateID(
-                                      4,
-                                  ),
-                              ),
-                          },
-                          gotos: {},
-                      },
-                      StateID(
-                          4,
-                      ): Stage7Row {
-                          shifts_and_reduces: {
-                              TerminalID(
-                                  3,
-                              ): Reduce {
-                                  production_id: ProductionID(
-                                      1,
-                                  ),
-                                  nonterminal_id: NonTerminalID(
-                                      1,
-                                  ),
-                                  len: 2,
-                              },
-                          },
-                          gotos: {},
-                      },
-                      StateID(
-                          5,
-                      ): Stage7Row {
-                          shifts_and_reduces: {
-                              TerminalID(
-                                  3,
-                              ): Reduce {
-                                  production_id: ProductionID(
-                                      2,
-                                  ),
-                                  nonterminal_id: NonTerminalID(
-                                      1,
-                                  ),
-                                  len: 1,
-                              },
-                          },
-                          gotos: {},
-                      },
-                  },
-                  productions: [
-                      Production {
-                          lhs: NonTerminal(
-                              "S",
-                          ),
-                          rhs: [
-                              NonTerminal(
-                                  NonTerminal(
-                                      "X",
-                                  ),
-                              ),
-                              Terminal(
-                                  Terminal(
-                                      "EOF",
-                                  ),
-                              ),
-                          ],
-                      },
-                      Production {
-                          lhs: NonTerminal(
-                              "X",
-                          ),
-                          rhs: [
-                              Terminal(
-                                  Terminal(
-                                      "A",
-                                  ),
-                              ),
-                              Terminal(
-                                  Terminal(
-                                      "B_OR_C",
-                                  ),
-                              ),
-                          ],
-                      },
-                      Production {
-                          lhs: NonTerminal(
-                              "X",
-                          ),
-                          rhs: [
-                              Terminal(
-                                  Terminal(
-                                      "AB",
-                                  ),
-                              ),
-                          ],
-                      },
-                  ],
-                  terminal_map: {Terminal("A") <> TerminalID(0), Terminal("AB") <> TerminalID(1), Terminal("B_OR_C") <> TerminalID(2), Terminal("EOF") <> TerminalID(3)},
-                  non_terminal_map: {NonTerminal("S") <> NonTerminalID(0), NonTerminal("X") <> NonTerminalID(1)},
-                  item_set_map: {{Item { production: Production { lhs: NonTerminal("S"), rhs: [NonTerminal(NonTerminal("X")), Terminal(Terminal("EOF"))] }, dot_position: 0 }} <> StateID(0), {Item { production: Production { lhs: NonTerminal("S"), rhs: [NonTerminal(NonTerminal("X")), Terminal(Terminal("EOF"))] }, dot_position: 1 }} <> StateID(1), {Item { production: Production { lhs: NonTerminal("S"), rhs: [NonTerminal(NonTerminal("X")), Terminal(Terminal("EOF"))] }, dot_position: 2 }} <> StateID(2), {Item { production: Production { lhs: NonTerminal("X"), rhs: [Terminal(Terminal("A")), Terminal(Terminal("B_OR_C"))] }, dot_position: 1 }} <> StateID(3), {Item { production: Production { lhs: NonTerminal("X"), rhs: [Terminal(Terminal("A")), Terminal(Terminal("B_OR_C"))] }, dot_position: 2 }} <> StateID(4), {Item { production: Production { lhs: NonTerminal("X"), rhs: [Terminal(Terminal("AB"))] }, dot_position: 1 }} <> StateID(5)},
-                  start_state_id: StateID(
-                      0,
-                  ),
-              },
-              precomputed: {
-                  TokenizerStateID(
-                      0,
-                  ): Trie {
-                      value: PrecomputedNodeContents {
-                          end: false,
-                      },
-                      children: {
-                          Some(
-                              TerminalID(
-                                  0,
-                              ),
-                          ): {
-                              ArcPtrWrapper(
-                                  0x00006000033985b0,
-                              ): HybridBitset {
-                                  inner: 1..=2,
-                              },
-                          },
-                          Some(
-                              TerminalID(
-                                  1,
-                              ),
-                          ): {
-                              ArcPtrWrapper(
-                                  0x00006000033981a0,
-                              ): HybridBitset {
-                                  inner: 1..=1,
-                              },
-                          },
-                          Some(
-                              TerminalID(
-                                  3,
-                              ),
-                          ): {
-                              ArcPtrWrapper(
-                                  0x00006000033981a0,
-                              ): HybridBitset {
-                                  inner: 0..=0,
-                              },
-                          },
-                      },
-                      max_depth: 0,
-                  },
-                  TokenizerStateID(
-                      1,
-                  ): Trie {
-                      value: PrecomputedNodeContents {
-                          end: false,
-                      },
-                      children: {},
-                      max_depth: 0,
-                  },
-                  TokenizerStateID(
-                      2,
-                  ): Trie {
-                      value: PrecomputedNodeContents {
-                          end: false,
-                      },
-                      children: {},
-                      max_depth: 0,
-                  },
-                  TokenizerStateID(
-                      3,
-                  ): Trie {
-                      value: PrecomputedNodeContents {
-                          end: false,
-                      },
-                      children: {},
-                      max_depth: 0,
-                  },
-                  TokenizerStateID(
-                      4,
-                  ): Trie {
-                      value: PrecomputedNodeContents {
-                          end: false,
-                      },
-                      children: {},
-                      max_depth: 0,
-                  },
-              },
-              llm_token_map: {[36] <> LLMTokenID(2), [97, 98] <> LLMTokenID(0), [97, 99] <> LLMTokenID(1)},
-              token_name_map: {"A" <> 0, "AB" <> 1, "B_OR_C" <> 2, "EOF" <> 3},
-              max_original_llm_token_id: 3,
-              original_to_internal_id_bimap: {0 <> 1, 1 <> 2, 2 <> 0},
-              internal_max_llm_token: 2,
-              possible_matches: {
-                  TokenizerStateID(
-                      0,
-                  ): {
-                      TerminalID(
-                          0,
-                      ): HybridBitset {
-                          inner: 1..=2,
-                      },
-                      TerminalID(
-                          1,
-                      ): HybridBitset {
-                          inner: 1..=1,
-                      },
-                      TerminalID(
-                          3,
-                      ): HybridBitset {
-                          inner: 0..=0,
-                      },
-                  },
-                  TokenizerStateID(
-                      1,
-                  ): {},
-                  TokenizerStateID(
-                      2,
-                  ): {},
-                  TokenizerStateID(
-                      3,
-                  ): {},
-                  TokenizerStateID(
-                      4,
-                  ): {},
-              },
-          },
-          state: {
-              TokenizerStateID(
-                  0,
-              ): GLRParserState {
-                  parser: GLRParser {
-                      stage_7_table: {
-                          StateID(
-                              0,
-                          ): Stage7Row {
-                              shifts_and_reduces: {
-                                  TerminalID(
-                                      0,
-                                  ): Shift(
-                                      StateID(
-                                          3,
-                                      ),
-                                  ),
-                                  TerminalID(
-                                      1,
-                                  ): Shift(
-                                      StateID(
-                                          5,
-                                      ),
-                                  ),
-                              },
-                              gotos: {
-                                  NonTerminalID(
-                                      0,
-                                  ): Accept,
-                                  NonTerminalID(
-                                      1,
-                                  ): State(
-                                      StateID(
-                                          1,
-                                      ),
-                                  ),
-                              },
-                          },
-                          StateID(
-                              1,
-                          ): Stage7Row {
-                              shifts_and_reduces: {
-                                  TerminalID(
-                                      3,
-                                  ): Shift(
-                                      StateID(
-                                          2,
-                                      ),
-                                  ),
-                              },
-                              gotos: {},
-                          },
-                          StateID(
-                              2,
-                          ): Stage7Row {
-                              shifts_and_reduces: {},
-                              gotos: {},
-                          },
-                          StateID(
-                              3,
-                          ): Stage7Row {
-                              shifts_and_reduces: {
-                                  TerminalID(
-                                      2,
-                                  ): Shift(
-                                      StateID(
-                                          4,
-                                      ),
-                                  ),
-                              },
-                              gotos: {},
-                          },
-                          StateID(
-                              4,
-                          ): Stage7Row {
-                              shifts_and_reduces: {
-                                  TerminalID(
-                                      3,
-                                  ): Reduce {
-                                      production_id: ProductionID(
-                                          1,
-                                      ),
-                                      nonterminal_id: NonTerminalID(
-                                          1,
-                                      ),
-                                      len: 2,
-                                  },
-                              },
-                              gotos: {},
-                          },
-                          StateID(
-                              5,
-                          ): Stage7Row {
-                              shifts_and_reduces: {
-                                  TerminalID(
-                                      3,
-                                  ): Reduce {
-                                      production_id: ProductionID(
-                                          2,
-                                      ),
-                                      nonterminal_id: NonTerminalID(
-                                          1,
-                                      ),
-                                      len: 1,
-                                  },
-                              },
-                              gotos: {},
-                          },
-                      },
-                      productions: [
-                          Production {
-                              lhs: NonTerminal(
-                                  "S",
-                              ),
-                              rhs: [
-                                  NonTerminal(
-                                      NonTerminal(
-                                          "X",
-                                      ),
-                                  ),
-                                  Terminal(
-                                      Terminal(
-                                          "EOF",
-                                      ),
-                                  ),
-                              ],
-                          },
-                          Production {
-                              lhs: NonTerminal(
-                                  "X",
-                              ),
-                              rhs: [
-                                  Terminal(
-                                      Terminal(
-                                          "A",
-                                      ),
-                                  ),
-                                  Terminal(
-                                      Terminal(
-                                          "B_OR_C",
-                                      ),
-                                  ),
-                              ],
-                          },
-                          Production {
-                              lhs: NonTerminal(
-                                  "X",
-                              ),
-                              rhs: [
-                                  Terminal(
-                                      Terminal(
-                                          "AB",
-                                      ),
-                                  ),
-                              ],
-                          },
-                      ],
-                      terminal_map: {Terminal("A") <> TerminalID(0), Terminal("AB") <> TerminalID(1), Terminal("B_OR_C") <> TerminalID(2), Terminal("EOF") <> TerminalID(3)},
-                      non_terminal_map: {NonTerminal("S") <> NonTerminalID(0), NonTerminal("X") <> NonTerminalID(1)},
-                      item_set_map: {{Item { production: Production { lhs: NonTerminal("S"), rhs: [NonTerminal(NonTerminal("X")), Terminal(Terminal("EOF"))] }, dot_position: 0 }} <> StateID(0), {Item { production: Production { lhs: NonTerminal("S"), rhs: [NonTerminal(NonTerminal("X")), Terminal(Terminal("EOF"))] }, dot_position: 1 }} <> StateID(1), {Item { production: Production { lhs: NonTerminal("S"), rhs: [NonTerminal(NonTerminal("X")), Terminal(Terminal("EOF"))] }, dot_position: 2 }} <> StateID(2), {Item { production: Production { lhs: NonTerminal("X"), rhs: [Terminal(Terminal("A")), Terminal(Terminal("B_OR_C"))] }, dot_position: 1 }} <> StateID(3), {Item { production: Production { lhs: NonTerminal("X"), rhs: [Terminal(Terminal("A")), Terminal(Terminal("B_OR_C"))] }, dot_position: 2 }} <> StateID(4), {Item { production: Production { lhs: NonTerminal("X"), rhs: [Terminal(Terminal("AB"))] }, dot_position: 1 }} <> StateID(5)},
-                      start_state_id: StateID(
-                          0,
-                      ),
-                  },
-                  active_state: ParseState {
-                      stack: GSSNode {
-                          acc: Acc {
-                              acc: None,
-                              allowed_terminals: {},
-                          },
-                          predecessors: {
-                              0: {
-                                  ParseStateEdgeContent {
-                                      state_id: StateID(
-                                          0,
-                                      ),
-                                  }: GSSNode {
-                                      acc: Acc {
-                                          acc: None,
-                                          allowed_terminals: {},
-                                      },
-                                      predecessors: {},
-                                      hash_key_cache: 15130871412783076140,
-                                      max_depth: 0,
-                                  },
-                              },
-                          },
-                          hash_key_cache: 2185910477426134919,
-                          max_depth: 1,
-                      },
-                  },
-                  action_not_found_states: ParseState {
-                      stack: GSSNode {
-                          acc: Acc {
-                              acc: Some(
-                                  HybridBitset {
-                                      inner: ,
-                                  },
-                              ),
-                              allowed_terminals: {},
-                          },
-                          predecessors: {},
-                          hash_key_cache: 15130871412783076140,
-                          max_depth: 0,
-                      },
-                  },
-                  cycled_states: ParseState {
-                      stack: GSSNode {
-                          acc: Acc {
-                              acc: Some(
-                                  HybridBitset {
-                                      inner: ,
-                                  },
-                              ),
-                              allowed_terminals: {},
-                          },
-                          predecessors: {},
-                          hash_key_cache: 15130871412783076140,
-                          max_depth: 0,
-                      },
-                  },
-              },
-          },
-      }
-      [DEBUG 15:56:58.423 2] src/constraint.rs:971: Committing bytes: "ab"
-      [DEBUG 15:56:58.423 3] src/constraint.rs:1014: Processing offset 0 with states [0].
-      [DEBUG 15:56:58.424 3] src/constraint.rs:1014: Processing offset 1 with states [0].
-      [DEBUG 15:56:58.424 2] src/constraint.rs:1073: State after committing text (bytes [97, 98]): 1 active tokenizer states.
-      [DEBUG 15:56:58.424 2] src/constraint.rs:841: Computing mask with 1 states: [0]
-      [DEBUG 15:56:58.424 2] src/constraint.rs:949: get_mask step() counts:
-        - 'A': 1
-        - 'AB': 1
-        - 'EOF': 1
-      --- Profiler Summary ---
-
-      [Hierarchical Timings]
-            Hits      Total Time        Own Time     % of Parent  Name
-               3         0.060ms         0.025ms           82.8%  GLRParserState::step
-               6         0.006ms         0.006ms           10.6%    GLRParserState::log_gss
-               3         0.029ms         0.010ms           47.2%    GSSNode::merge
-               3         0.018ms         0.013ms           64.9%      Acc::union_assign
-               3         0.006ms         0.006ms           31.8%        allowed_terminals_union_assign
-               3         0.010ms         0.005ms           13.8%  GSSNode::merge
-               1         0.005ms         0.003ms           49.8%    Acc::union_assign
-               1         0.002ms         0.002ms           34.2%      allowed_terminals_union_assign
-               1         0.000ms         0.002ms            0.0%  GrammarConstraintState::get_mask
-               1         0.000ms         0.056ms            0.0%    GrammarConstraintState::get_mask
-               3         0.005ms         0.005ms            0.0%      GLRParserState::log_gss
-               3         0.316ms         0.048ms            0.0%      GLRParserState::step
-               4         0.007ms         0.007ms            2.1%        GLRParserState::log_gss
-               2         0.129ms         0.027ms           40.9%        GLRParserState::reduce_and_goto
-               2         0.016ms         0.011ms           12.3%          Acc::intersect_assign
-               2         0.005ms         0.005ms           33.5%            allowed_terminals_intersect_assign
-               2         0.028ms         0.011ms           21.4%          GSSNode::merge
-               2         0.017ms         0.011ms           61.4%            Acc::union_assign
-               2         0.006ms         0.006ms           33.8%              allowed_terminals_union_assign
-               1         0.058ms         0.007ms           45.2%          GSSNode::popn
-               1         0.049ms         0.021ms           83.1%            GSSNode::pop
-               2         0.018ms         0.011ms           36.4%              Acc::intersect_assign
-               2         0.006ms         0.006ms           36.1%                allowed_terminals_intersect_assign
-               1         0.009ms         0.006ms           19.5%              Acc::union_assign
-               1         0.003ms         0.003ms           34.8%                allowed_terminals_union_assign
-               1         0.003ms         0.003ms            4.7%            GSSNode::popn
-               6         0.132ms         0.033ms           41.8%        GSSNode::merge
-               6         0.045ms         0.029ms           34.4%          Acc::union_assign
-               6         0.016ms         0.016ms           36.3%            allowed_terminals_union_assign
-               1         0.054ms         0.009ms           40.6%          GSSNode::merge
-               1         0.009ms         0.006ms           16.3%            Acc::union_assign
-               1         0.003ms         0.003ms           35.7%              allowed_terminals_union_assign
-               1         0.036ms         0.009ms           67.2%            GSSNode::merge
-               1         0.010ms         0.006ms           26.5%              Acc::union_assign
-               1         0.003ms         0.003ms           34.9%                allowed_terminals_union_assign
-               1         0.017ms         0.006ms           48.0%              GSSNode::merge
-               1         0.012ms         0.007ms           67.0%                Acc::union_assign
-               1         0.004ms         0.004ms           35.6%                  allowed_terminals_union_assign
-               3         0.002ms         0.002ms            3.4%  allowed_terminals_intersect_assign
-
-      --- End Profiler Summary ---
-      --- Profiler Summary (Flat) ---
-
-      [Flat Timings]
-            Hits      Total Time        Own Time  Name
-               6         0.376ms         0.073ms  GLRParserState::step
-              17         0.305ms         0.083ms  GSSNode::merge
-               2         0.129ms         0.027ms  GLRParserState::reduce_and_goto
-              16         0.125ms         0.082ms  Acc::union_assign
-               2         0.061ms         0.010ms  GSSNode::popn
-               1         0.049ms         0.021ms  GSSNode::pop
-              16         0.044ms         0.044ms  allowed_terminals_union_assign
-               4         0.034ms         0.022ms  Acc::intersect_assign
-              13         0.019ms         0.019ms  GLRParserState::log_gss
-               7         0.014ms         0.014ms  allowed_terminals_intersect_assign
-               2         0.000ms         0.059ms  GrammarConstraintState::get_mask
-
-      --- End Profiler Summary (Flat) ---
-      [DEBUG 15:56:58.424 2] src/constraint.rs:956: Done computing mask
-      [DEBUG 15:56:58.425 2] src/constraint.rs:841: Computing mask with 1 states: [0]
-      [DEBUG 15:56:58.425 2] src/constraint.rs:949: get_mask step() counts:
-        - 'A': 1
-        - 'AB': 1
-        - 'B_OR_C': 1
-        - 'EOF': 1
-      --- Profiler Summary ---
-
-      [Hierarchical Timings]
-            Hits      Total Time        Own Time     % of Parent  Name
-               1         0.000ms         0.002ms            0.0%  GrammarConstraintState::get_mask
-               1         0.000ms         0.093ms            0.0%    GrammarConstraintState::get_mask
-               4         0.010ms         0.010ms            0.0%      GLRParserState::log_gss
-               4         0.145ms         0.059ms            0.0%      GLRParserState::step
-               7         0.016ms         0.016ms           11.2%        GLRParserState::log_gss
-               4         0.069ms         0.027ms           47.8%        GSSNode::merge
-               4         0.043ms         0.029ms           61.8%          Acc::union_assign
-               4         0.014ms         0.014ms           33.6%            allowed_terminals_union_assign
-               3         0.022ms         0.011ms            0.0%      GSSNode::merge
-               1         0.011ms         0.008ms           50.8%        Acc::union_assign
-               1         0.004ms         0.004ms           31.7%          allowed_terminals_union_assign
-
-      --- End Profiler Summary ---
-      --- Profiler Summary (Flat) ---
-
-      [Flat Timings]
-            Hits      Total Time        Own Time  Name
-               4         0.145ms         0.059ms  GLRParserState::step
-               7         0.091ms         0.037ms  GSSNode::merge
-               5         0.054ms         0.036ms  Acc::union_assign
-              11         0.026ms         0.026ms  GLRParserState::log_gss
-               5         0.018ms         0.018ms  allowed_terminals_union_assign
-               2         0.000ms         0.095ms  GrammarConstraintState::get_mask
-
-      --- End Profiler Summary (Flat) ---
-      [DEBUG 15:56:58.425 2] src/constraint.rs:956: Done computing mask
-      [DEBUG 15:56:58.425 2] src/constraint.rs:971: Committing bytes: "ab"
-      [DEBUG 15:56:58.425 3] src/constraint.rs:1014: Processing offset 0 with states [0].
-      [DEBUG 15:56:58.425 3] src/constraint.rs:1014: Processing offset 1 with states [0].
-      [DEBUG 15:56:58.425 2] src/constraint.rs:1073: State after committing text (bytes [97, 98]): 1 active tokenizer states.
-
-      ```
-
-      `````
-
-      I can't figure out what's going here with the node counts.
-      When I do a search in the output for `Node 0x`, I get three results. I woulda thought this means there are three unique nodes. But then the precompute stats report there are 7 unique nodes. So what gives?
+  - user: Modify `src/constraint_extra.rs` so it doesn't have anything to do with
+      `*const Mutex<PrecomputeNode>` at all, or pointers to the mutex. Instead, it
+      should be dealing with `*const PrecomputeNode`. This includes in print statements.
+      Never print or otherwise deal with a pointer to a mutex.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your code. It looks like you're running into a classic case of "what you see isn't what you get" between your debug dump and your statistics, which can be very confusing. Let's get it sorted out.
+      Hello! As a helpful assistant, I'm here to help you with your code. Dealing with concurrency primitives like `Mutex` and raw pointers can be tricky. Using pointers to the data within the `Mutex` rather than to the `Mutex` itself is a good practice for ensuring correctness and avoiding deadlocks, especially in recursive or graph-traversal scenarios.
 
-      The core of the issue lies in two places:
-      1.  **How Nodes are Counted:** Your statistics correctly identify 7 unique nodes because the `merge_nodes()` function, which would normally deduplicate identical graph structures, is currently commented out in `src/constraint.rs`. This results in 5 distinct root nodes (one for each tokenizer state), and the root for state 0 has 2 unique descendants, giving a total of 3 + 4 = 7 unique `Arc` instances in the graph.
-      2.  **How Nodes are Dumped:** Your `dump_precompute_trie_recursive` function was tracking visited nodes by their *data pointer* instead of their *Arc pointer*. This caused it to mistakenly believe that all 5 root nodes were the same, leading to an incomplete and misleading dump.
-
-      I'll provide a patch for `src/constraint_extra.rs` that fixes the dumping logic to be consistent with the statistics calculation. This will make the dump correctly show all 7 unique nodes, resolving the discrepancy.
-
-      Here are the patches for the modified files:
+      Here are the suggested changes for `src/constraint_extra.rs` to align with this principle.
 
       ### `src/constraint_extra.rs`
 
-      I've updated `dump_precompute_trie_recursive` to track visited nodes by their `Arc` pointer, matching how the statistics are calculated. I also cleaned up the `dump_precomputed` function and the log message for child pointers to make them clearer.
+      I've updated `dump_precompute_trie_recursive` and `calculate_final_stats` to use `*const PrecomputeNode` for identifying unique nodes, and I've refactored the recursive dump to avoid holding a mutex lock during recursive calls.
 
       ```diff
       --- a/src/constraint_extra.rs
       +++ b/src/constraint_extra.rs
-      @@ -26,16 +26,16 @@
+      @@ -1,5 +1,5 @@
+       use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode, PrecomputedNodeContents, LLMTokenBV};
+       use crate::types::{TerminalID as GrammarTokenID};
+      -use crate::datastructures::trie::{Trie, node_ptr};
+      +use crate::datastructures::trie::Trie;
+       use crate::tokenizer::{TokenizerStateID, LLMTokenID};
+       use std::collections::{HashSet, VecDeque, BTreeMap, BTreeSet};
+       use std::sync::{Arc, Mutex};
+      @@ -32,43 +32,49 @@
+       
+       /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
        pub fn dump_precompute_trie_recursive(
            node_arc: &Arc<Mutex<PrecomputeNode>>,
            indent: String,
-      -    visited: &mut HashSet<*const PrecomputeNode>, // Changed to *const PrecomputeNode
-      +    visited: &mut HashSet<*const Mutex<PrecomputeNode>>,
+      -    visited: &mut HashSet<*const Mutex<PrecomputeNode>>,
+      +    visited: &mut HashSet<*const PrecomputeNode>,
            original_internal_bimap: Option<&BiBTreeMap<usize, usize>>
        ) {
-      -    let node_ptr_val = node_ptr(node_arc);
-      -    if !visited.insert(node_ptr_val) {
-      -        println!("{}-> Ref {:p} (already printed)", indent, node_ptr_val);
-      +    let arc_ptr = Arc::as_ptr(node_arc);
-      +    if !visited.insert(arc_ptr) {
-      +        println!("{}-> Ref to Arc {:p} (already printed)", indent, arc_ptr);
-               return;
-           }
-       
-       
-           let node = node_arc.lock().expect("Mutex poisoned during dump");
-       
-           println!("{}-> Node {:p} (Data {:p}, MaxDepth: {})", indent, Arc::as_ptr(node_arc), &*node, node.max_depth);
-      @@ -54,11 +54,11 @@
-               for (edge_key, children_vec) in node.children() {
-                   for (child_wrapper_arc, edge_val_bv) in children_vec {
-                        println!(
-      -                    "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Arc Ptr: {:p}", // Changed to Child Arc Ptr
-      +                    "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Arc Ptr: {:p}",
-                           indent,
-                           edge_key.map(|grammar_token_id| grammar_token_id.0),
-                           format_bv_indices(edge_val_bv, original_internal_bimap), // Pass original_internal_bimap
-      -                    node_ptr(child_wrapper_arc.as_arc()) // Use as_arc() to get the Arc
-      +                    Arc::as_ptr(child_wrapper_arc.as_arc())
-                       );
-                       // Recurse
-                       dump_precompute_trie_recursive(child_wrapper_arc.as_arc(), new_indent.clone(), visited, original_internal_bimap); // Pass original_internal_bimap
-      @@ -72,16 +72,9 @@
-               println!("Dumping Precomputed Trie Structure (showing original LLM Token IDs):");
-               println!("===================================");
-       
-      -        let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
-      +        let mut visited: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
-               for (tokenizer_state_id, root_node_trie) in &self.precomputed {
-                   println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
+      -    let arc_ptr = Arc::as_ptr(node_arc);
+      -    if !visited.insert(arc_ptr) {
+      -        println!("{}-> Ref to Arc {:p} (already printed)", indent, arc_ptr);
+      -        return;
+      -    }
       -
-      -            // Need to wrap the root_node_trie (which is a Trie, not an Arc<Mutex<Trie>>)
-      -            // in an Arc<Mutex<>> to match the recursive function's expectation.
-      -            // This is slightly awkward but necessary for the shared recursive logic.
-      -            let root_node_arc = Arc::new(Mutex::new(root_node_trie.clone()));
       -
-      -            // Pass the bimap
-      -            dump_precompute_trie_recursive(&root_node_arc.as_ref().lock().unwrap(), "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap));
+      -    let node = node_arc.lock().expect("Mutex poisoned during dump");
+      -
+      -    println!("{}-> Node {:p} (Data {:p}, MaxDepth: {})", indent, Arc::as_ptr(node_arc), &*node, node.max_depth);
+      -
+      -    // if let Some(clean_end) = &node.value.clean_end { // clean_end stores internal IDs
+      -    //     println!("{}  Clean End LLM Tokens: {}", indent, format_bv_indices(clean_end, original_internal_bimap)); // Pass original_internal_bimap
+      -    // }
+      -    if node.value.end {
+      -        println!("{}  End", indent);
+      -    }
+      -
+      -    // Print Children (Edges)
+      -    if node.children().is_empty() {
+      -        println!("{}  (Leaf Node)", indent);
+      -    } else {
+      -        println!("{}  Children:", indent);
+      -        let new_indent = format!("{}    ", indent);
+      -        for (edge_key, children_vec) in node.children() {
+      -            for (child_wrapper_arc, edge_val_bv) in children_vec {
+      -                 println!(
+      -                    "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Arc Ptr: {:p}",
+      -                    indent,
+      -                    edge_key.map(|grammar_token_id| grammar_token_id.0),
+      -                    format_bv_indices(edge_val_bv, original_internal_bimap), // Pass original_internal_bimap
+      -                    Arc::as_ptr(child_wrapper_arc.as_arc())
+      -                );
+      -                // Recurse
+      -                dump_precompute_trie_recursive(child_wrapper_arc.as_arc(), new_indent.clone(), visited, original_internal_bimap); // Pass original_internal_bimap
+      -            }
+      +    let node_ptr;
+      +    let children_to_visit;
+      +    let is_leaf;
+      +
+      +    {
+      +        let node = node_arc.lock().expect("Mutex poisoned during dump");
+      +        node_ptr = &*node as *const PrecomputeNode;
+      +
+      +        if !visited.insert(node_ptr) {
+      +            println!("{}-> Ref to Node {:p} (already printed)", indent, node_ptr);
+      +            return;
+      +        }
+      +
+      +        println!("{}-> Node {:p} (MaxDepth: {})", indent, node_ptr, node.max_depth);
+      +
+      +        if node.value.end {
+      +            println!("{}  End", indent);
+      +        }
+      +
+      +        is_leaf = node.children().is_empty();
+      +        if is_leaf {
+      +            println!("{}  (Leaf Node)", indent);
+      +            return;
+      +        }
+      +
+      +        println!("{}  Children:", indent);
+      +        children_to_visit = node.children().iter().flat_map(|(edge_key, dest_map)| {
+      +            dest_map.iter().map(move |(child_wrapper, edge_val)| {
+      +                (edge_key.clone(), edge_val.clone(), child_wrapper.as_arc().clone())
+      +            })
+      +        }).collect::<Vec<_>>();
+      +    }
+      +
+      +    let new_indent = format!("{}    ", indent);
+      +    for (edge_key, edge_val_bv, child_arc) in children_to_visit {
+      +        let child_node_ptr = {
+      +            let child_node_guard = child_arc.lock().expect("Mutex poisoned");
+      +            &*child_node_guard as *const PrecomputeNode
+      +        };
+      +        println!(
+      +            "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Node Ptr: {:p}",
+      +            indent,
+      +            edge_key.map(|grammar_token_id| grammar_token_id.0),
+      +            format_bv_indices(&edge_val_bv, original_internal_bimap),
+      +            child_node_ptr
+      +        );
+      +        dump_precompute_trie_recursive(&child_arc, new_indent.clone(), visited, original_internal_bimap);
+      +    }
+      +}
+      +
+      +impl GrammarConstraint { // This is in constraint_extra.rs
+      +    /// Dumps the structure of the precomputed Trie map for visualization.
+      +    pub fn dump_precomputed(&self) {
+      +        println!("Dumping Precomputed Trie Structure (showing original LLM Token IDs):");
+      +        println!("===================================");
+      +
+      +        let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
+      +        for (tokenizer_state_id, root_node_trie) in &self.precomputed {
+      +            println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
       +            dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap));
                }
+      -    }
+      -}
+      -
+      -impl GrammarConstraint { // This is in constraint_extra.rs
+      -    /// Dumps the structure of the precomputed Trie map for visualization.
+      -    pub fn dump_precomputed(&self) {
+      -        println!("Dumping Precomputed Trie Structure (showing original LLM Token IDs):");
+      -        println!("===================================");
+      -
+      -        let mut visited: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
+      -        for (tokenizer_state_id, root_node_trie) in &self.precomputed {
+      -            println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
+      -            dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap));
+      -        }
                println!("\n===================================");
                println!("Dump Complete.");
+           }
+       }
+      @@ -213,31 +219,48 @@
+           stats: &mut PrecomputeStats,
+       ) {
+           crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
+      -    let mut all_reachable_nodes_for_final_stats: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = HashSet::new();
+      -    for root_arc_mutex_node in precomputed_roots.values() {
+      -        // Assuming PrecomputeNode::all_nodes is accessible and returns Vec<Arc<Mutex<PrecomputeNode>>>
+      -        // If PrecomputeNode is crate::constraint::PrecomputeNode, it should be.
+      -        let nodes_from_this_root = crate::constraint::PrecomputeNode::all_nodes(root_arc_mutex_node.clone());
+      -        for node_arc in nodes_from_this_root {
+      -            all_reachable_nodes_for_final_stats.insert(ArcPtrWrapper::new(node_arc));
+      +
+      +    // Custom implementation of all_nodes using *const PrecomputeNode for visited set
+      +    let mut all_reachable_nodes: HashMap<*const PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = HashMap::new();
+      +    let mut queue: VecDeque<Arc<Mutex<PrecomputeNode>>> = precomputed_roots.values().cloned().collect();
+      +    let mut visited_data_ptrs: HashSet<*const PrecomputeNode> = HashSet::new();
+      +
+      +    while let Some(node_arc) = queue.pop_front() {
+      +        let (children_to_queue, node_ptr) = {
+      +            let node_guard = node_arc.lock().unwrap();
+      +            let ptr = &*node_guard as *const PrecomputeNode;
+      +            let children = node_guard.children()
+      +                .values()
+      +                .flat_map(|dest_map| dest_map.keys().map(|wrapper| wrapper.as_arc().clone()))
+      +                .collect::<Vec<_>>();
+      +            (children, ptr)
+      +        };
+      +
+      +        if visited_data_ptrs.insert(node_ptr) {
+      +            all_reachable_nodes.insert(node_ptr, node_arc.clone());
+      +            for child_arc in children_to_queue {
+      +                queue.push_back(child_arc);
+      +            }
+               }
+           }
+      -    stats.final_unique_nodes_count = all_reachable_nodes_for_final_stats.len();
+      -    stats.final_root_nodes_count = precomputed_roots.iter().map(|(_, node)| Arc::as_ptr(node)).collect::<BTreeSet<_>>().len(); // Calculate root count
+      -
+      -    // Create a set of root node wrappers for efficient lookup
+      -    let root_node_wrappers: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = precomputed_roots
+      +
+      +    stats.final_unique_nodes_count = all_reachable_nodes.len();
+      +
+      +    let root_node_pointers: HashSet<*const PrecomputeNode> = precomputed_roots
+               .values()
+      -        .map(|arc_mutex_node| ArcPtrWrapper::new(arc_mutex_node.clone()))
+      +        .map(|arc| {
+      +            let guard = arc.lock().unwrap();
+      +            &*guard as *const PrecomputeNode
+      +        })
+               .collect();
+      +    stats.final_root_nodes_count = root_node_pointers.len();
+       
+           // Initialize stats fields
+           stats.final_total_occupancy_sum_for_some_keys = 0;
+      @@ -258,13 +281,12 @@
+           stats.edges_pruned_by_terminal_sequence = 0;
+           stats.final_total_ranges_in_bvs = 0;
+       
+      -
+      -    for comp_arc_node in &all_reachable_nodes_for_final_stats {
+      -        let node_arc = comp_arc_node.as_arc();
+      +    for (node_ptr, node_arc) in &all_reachable_nodes {
+               let node_guard = node_arc.lock().expect("Mutex poisoned during final stats calculation");
+       
+               // New logic for non-root internal and leaf nodes
+      -        if !root_node_wrappers.contains(comp_arc_node) {
+      +        if !root_node_pointers.contains(node_ptr) {
+                   if node_guard.children().is_empty() {
+                       stats.final_leaf_nodes_count += 1;
+                   } else {
 
       ```
 
-      These changes should make your debug output consistent with the statistics and clarify what's happening in the precomputation graph. Let me know if you have any other questions
+      These changes should resolve the issue by correctly handling node identity and preventing potential deadlocks. Let me know if you have any other questions
     metadata:
   - user: |
       Git apply result:
