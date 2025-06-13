@@ -611,6 +611,9 @@ impl GSSNode {
         for pred_arc in self.predecessors.values().flat_map(|m| m.values()) {
             // The acc of the path *through* self to pred_arc is self.acc intersected with pred_arc.acc
             let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
+            if path_acc.is_dead() {
+                continue;
+            }
             result_acc.union_assign(path_acc.clone()); // Union accs of all popped paths
 
             // Merge predecessors of pred_arc into result_predecessors
@@ -620,6 +623,9 @@ impl GSSNode {
                 for (inner_edge, inner_pred_arc) in inner_preds_for_depth {
                     let mut new_inner_pred_node_data = (**inner_pred_arc).clone();
                     new_inner_pred_node_data.acc = path_acc.clone().intersect(inner_pred_arc.acc.clone());
+                    if new_inner_pred_node_data.acc.is_dead() {
+                        continue;
+                    }
 
                     match result_preds_for_depth.entry(inner_edge.clone()) {
                         std::collections::btree_map::Entry::Vacant(entry) => {
@@ -647,13 +653,17 @@ impl GSSNode {
 
     #[time_it("GSSNode::pop_iter")]
     pub fn pop_iter(&self) -> Vec<(ParseStateEdgeContent, Arc<Self>)> {
-        self.predecessors.values().flat_map(|m| m.iter()).map(|(edge_val, pred_arc)| {
+        self.predecessors.values().flat_map(|m| m.iter()).filter_map(|(edge_val, pred_arc)| {
             let mut pred_arc = pred_arc.clone();
             // The acc for the path ending at pred_arc (after popping self)
             // is self.acc intersected with pred_arc's original acc.
             let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
-            pred_arc = Arc::new(pred_arc.as_ref().clone().with_acc(path_acc));
-            (edge_val.clone(), pred_arc)
+            if path_acc.is_alive() {
+                pred_arc = Arc::new(pred_arc.as_ref().clone().with_acc(path_acc));
+                Some((edge_val.clone(), pred_arc))
+            } else {
+                None
+            }
         }).collect()
     }
 
