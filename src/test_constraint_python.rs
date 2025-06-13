@@ -619,8 +619,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         }
     }
 
-    // // Remove tokens longer than length
-    // // llm_token_map.retain(|v, _| v.len() <= 3);
+    // Remove tokens longer than length
+    llm_token_map.retain(|v, _| v.len() <= 3);
     //
     // // Keep tokens that are either given length or of the form ' Ax' where x is a letter
     // llm_token_map.retain(|v, _| {
