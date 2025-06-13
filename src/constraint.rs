@@ -902,6 +902,7 @@ impl<'a> GrammarConstraintState<'a> {
                         *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
                         glr_s.step(*gtid);
                     }
+                    glr_s.log_gss("After stepping", grammar_token_opt.unwrap_or(TerminalID(0)));
     
                     if glr_s.is_ok() {
                         Some(glr_s)
