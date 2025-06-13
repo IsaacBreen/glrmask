@@ -980,13 +980,13 @@ mod tests {
         ];
 
         let compiled_grammar = CompiledGrammar::from_exprs(exprs.clone()).expect("Failed to compile");
-        // dbg!(&compiled_grammar);
 
         let llm_tokens: Vec<Vec<u8>> = vec![b"a".to_vec(), b"b".to_vec()];
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let eof_llm_token_id = llm_tokens.len();
         let max_llm_token_id = llm_tokens.len();
         let grammar_constraint = GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
+        grammar_constraint.dump_precomputed();
         let mut grammar_constraint_state = grammar_constraint.init();
 
         macro_rules! llm_token_vec {
@@ -1020,13 +1020,13 @@ mod tests {
         ];
 
         let compiled_grammar = CompiledGrammar::from_exprs(exprs.clone()).expect("Failed to compile");
-        // dbg!(&compiled_grammar);
 
         let llm_tokens: Vec<Vec<u8>> = vec![b"a".to_vec()];
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let eof_llm_token_id = llm_tokens.len();
         let max_llm_token_id = llm_tokens.len();
         let grammar_constraint = GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
+        grammar_constraint.dump_precomputed();
         let mut grammar_constraint_state = grammar_constraint.init();
 
         macro_rules! llm_token_vec {
