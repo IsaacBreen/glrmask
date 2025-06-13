@@ -895,15 +895,17 @@ impl<'a> GrammarConstraintState<'a> {
                 // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
                 |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
                     let mut glr_s = glr_s.clone();
-                    // crate::debug!(4, "Stepping with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
                     // glr_s.log_gss("Stepping with edge_llm_tokens_bv", grammar_token_opt.unwrap_or(TerminalID(0)));
+                    crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
                     intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
                     // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
-    
+
+                    crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
                     if let Some(gtid) = grammar_token_opt {
                         *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
                         glr_s.step(*gtid);
                     }
+                    crate::debug!(4, "After stepping with grammar_token_opt: {:?}", glr_s.is_ok());
                     // glr_s.log_gss("After stepping", grammar_token_opt.unwrap_or(TerminalID(0)));
     
                     if glr_s.is_ok() {
