@@ -972,8 +972,8 @@ fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>
     //     let s = c.to_string();
     //     gpt2_raw_vocab.insert(s, i as usize);
     // }
-    // gpt2_raw_vocab.insert("import".to_string(), 1000);
-    // gpt2_raw_vocab.insert(" typing".to_string(), 1001);
+    gpt2_raw_vocab.insert("import".to_string(), gpt2_raw_vocab.len() as u32);
+    gpt2_raw_vocab.insert(" typing".to_string(), gpt2_raw_vocab.len() as u32);
     // let gpt2_raw_vocab = BTreeMap::from([("from", 0), (" typing", 1)]);
     gpt2_raw_vocab.retain(|k, _| [b"from".as_ref(), b" typing"].contains(&k.as_ref()) || k.len() <= 1);
 
