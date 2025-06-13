@@ -267,6 +267,21 @@ where
     }
 }
 
+impl<T> JSONConvertible for Arc<Mutex<T>>
+where
+    T: JSONConvertible,
+{
+    fn to_json(&self) -> JSONNode {
+        self.lock()
+            .expect("Mutex poisoned during JSON serialization")
+            .to_json()
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        T::from_json(node).map(|val| Arc::new(Mutex::new(val)))
+    }
+}
+
 
 // Implementation block for core Trie functionality
 // Added Clone bound for EK needed in try_insert_or_merge_edge and others

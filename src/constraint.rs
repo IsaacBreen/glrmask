@@ -79,9 +79,9 @@ impl PrecomputedNodeContents {
 pub type PrecomputeNode =
     Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 
-pub type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode>;
+pub type Precomputed = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct GrammarConstraint {
     pub(crate) tokenizer:        Regex,
     pub(crate) parser:           GLRParser,
@@ -98,7 +98,13 @@ impl GrammarConstraint {
     pub fn assert_eq(&self, other: &Self) {
         assert_eq!(self.tokenizer, other.tokenizer);
         assert_eq!(self.parser, other.parser);
-        assert_eq!(self.precomputed, other.precomputed);
+        assert_eq!(self.precomputed.len(), other.precomputed.len());
+        for ((sid1, arc1), (sid2, arc2)) in self.precomputed.iter().zip(other.precomputed.iter()) {
+            assert_eq!(sid1, sid2);
+            let node1 = arc1.lock().unwrap();
+            let node2 = arc2.lock().unwrap();
+            assert_eq!(*node1, *node2);
+        }
         assert_eq!(self.llm_token_map, other.llm_token_map);
         assert_eq!(self.token_name_map, other.token_name_map);
         assert_eq!(self.max_original_llm_token_id, other.max_original_llm_token_id);
@@ -304,7 +310,7 @@ impl GrammarConstraint {
         internal_max_llm_token: usize,
         terminal_follow_map_ids: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-    ) -> BTreeMap<TokenizerStateID, PrecomputeNode> {
+    ) -> BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>> {
         let mut helper = Precomputer::new(
             tokenizer,
             internal_llm_token_map,    
@@ -315,7 +321,7 @@ impl GrammarConstraint {
 
         helper.run_dfs();
         // helper.prune_precomputed_graph();
-        // helper.prune_terminal_sequences(); // New pruning pass << ADD THIS LINE HERE
+        helper.prune_terminal_sequences();
         // helper.merge_nodes();
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
@@ -655,35 +661,12 @@ impl<'r> Precomputer<'r> {
         token_name_map: &BiBTreeMap<String, usize>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
         internal_max_llm_token: usize,
-    ) -> BTreeMap<TokenizerStateID, PrecomputeNode> {
+    ) -> BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>> {
 
         calculate_final_stats(&self.roots, &mut self.stats);
         print_precompute_stats(&self.stats, token_name_map);
 
-        let mut out = Precomputed::new();
-        let mut clones = 0;
-
-        for (sid, arc_val) in self.roots { // Renamed arc to arc_val
-            match Arc::try_unwrap(arc_val.clone()) { // Clone arc_val for try_unwrap
-                Ok(mutex) => out.insert(
-                    sid,
-                    mutex.into_inner().expect("Mutex poisoned during unwrap"),
-                ),
-                Err(_) => { // Original arc_val is used if try_unwrap fails
-                    clones += 1;
-                    out.insert(sid, arc_val.lock().unwrap().clone()) 
-                }
-            };
-        }
-
-        if clones > 0 {
-            crate::debug!(
-                4,
-                "Warning: {} precomputed root(s) had multiple owners; cloned.",
-                clones
-            );
-        }
-        out
+        self.roots
     }
 
     fn dfs(
@@ -854,7 +837,7 @@ impl<'a> GrammarConstraintState<'a> {
                 if glr_state.active_state.stack.is_empty() {
                     continue;
                 }
-                if let Some(precomputed_trie_root_data) = self.parent.precomputed.get(tokenizer_state_id) {
+                if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
                     let mut forbidden_llm_tokens = LLMTokenBV::zeros();
                     forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.internal_max_llm_token + 1);
                     let allowed_terminals_for_gss = glr_state.active_state.stack.acc2().allowed_terminals();
@@ -876,8 +859,7 @@ impl<'a> GrammarConstraintState<'a> {
                         subtract_llm_tokens_and_prune_arc(&mut glr_state.active_state.stack, &forbidden_llm_tokens, &mut HashMap::new());
                         // glr_state.log_gss("Done subtracting forbidden LLM tokens.", TerminalID(0));
                     }
-                    let precomputed_trie_arc = Arc::new(Mutex::new(precomputed_trie_root_data.clone()));
-                    initial_values_for_map.push((precomputed_trie_arc, glr_state));
+                    initial_values_for_map.push((precomputed_trie_root_arc.clone(), glr_state));
                 } else {
                     panic!("No precomputed trie found for tokenizer state {:?}.", tokenizer_state_id);
                 }
