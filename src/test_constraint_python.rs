@@ -974,7 +974,7 @@ fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>
     }
     gpt2_raw_vocab.insert("import".to_string(), 1000);
     gpt2_raw_vocab.insert(" typing".to_string(), 1001);
-    // let gpt2_raw_vocab = BTreeMap::from([("from", 0), (" typing", 1)]);
+    let gpt2_raw_vocab = BTreeMap::from([("from", 0), (" typing", 1)]);
     
     let mut llm_token_map = LLMTokenMap::new();
     for (token_str, id_val_u32) in gpt2_raw_vocab {
@@ -982,8 +982,11 @@ fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>
         llm_token_map.insert(token_str.into_bytes(), LLMTokenID(id_val_u32 as usize));
     }
     // Ensure the specific tokens we need for the test are present
-    if llm_token_map.get_by_left(b"from".as_ref()).is_none() || llm_token_map.get_by_left(b" typing".as_ref()).is_none() {
-        panic!("The required tokens 'import' and ' typing' are not in the loaded vocabulary. Cannot run the mask bug minimizer.");
+    if !llm_token_map.contains_left(b"from".as_ref()) {
+        panic!("The required token 'from' is not in the loaded vocabulary. Cannot run the mask bug minimizer.");
+    }
+    if !llm_token_map.contains_left(b" typing".as_ref()) {
+        panic!("The required token ' typing' is not in the loaded vocabulary. Cannot run the mask bug minimizer.");
     }
     println!("[Minimizer] Vocabulary loaded.");
 
