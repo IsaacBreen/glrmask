@@ -41,7 +41,7 @@ fn format_bv_indices(
 }
 
 /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
-fn dump_precompute_trie_recursive(
+pub fn dump_precompute_trie_recursive(
     node_arc: &Arc<Mutex<PrecomputeNode>>,
     indent: String,
     visited: &mut HashSet<*const PrecomputeNode>, // Changed to *const PrecomputeNode
