@@ -36,7 +36,7 @@ use crate::glr::analyze::{compute_nullable_nonterminals, compute_terminal_follow
 pub type LLMTokenBV = HybridBitset;
 pub type TerminalBV = HybridBitset;
 
-const MERGE_THRESHOLD: usize = 100000000000;
+const MERGE_THRESHOLD: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrecomputedNodeContents {
