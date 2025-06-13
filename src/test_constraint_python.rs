@@ -819,7 +819,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     println!("\nInitial mask obtained ({} allowed LLM tokens).", initial_mask.iter_bits().count());
     let all_code_lines: Vec<&str> = full_text_to_tokenize.lines().collect();
     let mut current_text_byte_offset = 0;
-    return Ok(());
+    // return Ok(());
 
     println!("\nStepping through the token sequence with GrammarConstraint:");
     for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
