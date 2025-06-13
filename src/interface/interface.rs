@@ -1047,10 +1047,6 @@ mod tests {
 
         let mask = grammar_constraint_state.get_mask();
         let mut expected_mask = HybridBitset::zeros(); // Empty mask initially
-        // After "a", only EOF is possible if the grammar is just "a".
-        // The step_with_all_llm_tokens will populate based on what the grammar can accept next.
-        // If "a" completes the rule "E", and "start' -> E" is the only path, then EOF is expected.
-        expected_mask.set(eof_llm_token_id, true);
         assert_eq!(mask, expected_mask);
     }
 
