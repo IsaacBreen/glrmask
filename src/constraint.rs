@@ -700,24 +700,6 @@ impl<'r> Precomputer<'r> {
     ) {
         self.pb.inc(1);
 
-        let llm_token_id = vocab_node.token_id();
-        let mut edge_bv = HybridBitset::zeros();
-        edge_bv.insert(llm_token_id);
-        for nodes in assoc_by_state.values() {
-            for node_wrapper in nodes {
-                if no_go.get(node_wrapper).map_or(false, |b| b.contains(llm_token_id)) {
-                    continue;
-                }
-                let inserter = EdgeInserter::new(
-                    node_wrapper.as_arc().clone(),
-                    None,
-                    edge_bv.clone(),
-                    |e, n| *e |= n,
-                );
-                inserter.try_destination(self.end_node.as_arc().clone());
-            }
-        }
-
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let mut work_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>>> = BTreeMap::new();
             work_queue.insert(0, assoc_by_state.clone());
