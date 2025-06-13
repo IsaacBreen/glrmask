@@ -1009,7 +1009,7 @@ fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>
             Err(_) => return false,
         };
 
-        let max_id = llm_token_map.values().map(|id| id.0).max().unwrap_or(0);
+        let max_id = llm_token_map.right_values().map(|id| id.0).max().unwrap_or(0);
         let constraint = match panic::catch_unwind(AssertUnwindSafe(|| {
             GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), LLMTokenID(0), max_id)
         })) {
