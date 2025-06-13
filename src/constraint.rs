@@ -887,16 +887,16 @@ impl<'a> GrammarConstraintState<'a> {
     
             let step_counts_clone1 = Arc::clone(&step_counts);
             let step_counts_clone2 = Arc::clone(&step_counts);
-    
+
             Trie::special_map(
                 initial_values_for_map,
                 // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
                 |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
                     let mut glr_s = glr_s.clone();
                     // crate::debug!(4, "Stepping with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
-                    // glr_s.log_gss("Stepping with edge_llm_tokens_bv", grammar_token_opt.unwrap_or(TerminalID(0)));
+                    glr_s.log_gss("Stepping with edge_llm_tokens_bv", grammar_token_opt.unwrap_or(TerminalID(0)));
                     intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
-                    // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
+                    glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
     
                     if let Some(gtid) = grammar_token_opt {
                         *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
