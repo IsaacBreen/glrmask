@@ -667,7 +667,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let grammar_constraint = GrammarConstraint::from_compiled_grammar(
         compiled_grammar.clone(),
         llm_token_map.clone(),
-        dummy_eof_placeholder,
+        LLMTokenID(dummy_eof_placeholder),
         max_original_llm_token_id_val
     );
     grammar_constraint.dump_precomputed();
@@ -948,7 +948,293 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     Ok(())
 }
 
+#[test]
+fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>> {
+    // --- Initial Setup ---
+    let serialized_definition_path = "src/serialized_grammar_definition.json";
+    println!("[Minimizer] Loading base GrammarDefinition from: {}", serialized_definition_path);
+    let json_string = fs::read_to_string(serialized_definition_path)?;
+    let json_node = JSONNode::from_json_string(&json_string)?;
+    let grammar_definition = Arc::new(GrammarDefinition::from_json(json_node)?);
+    println!("[Minimizer] Successfully loaded GrammarDefinition.");
+
+    // Load a vocabulary
+    println!("[Minimizer] Loading GPT-2 vocabulary for mask testing...");
+    let cache_dir = Path::new(".cache/test_vocabs");
+    let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
+    let vocab_file_name = "gpt2_vocab.json";
+    let gpt2_raw_vocab = load_or_download_gpt2_vocab(cache_dir, vocab_file_name, vocab_url)?;
+    
+    let mut llm_token_map = LLMTokenMap::new();
+    for (token_str, id_val_u32) in gpt2_raw_vocab {
+        let token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+        llm_token_map.insert(token_str.into_bytes(), LLMTokenID(id_val_u32 as usize));
+    }
+    // Ensure the specific tokens we need for the test are present
+    if llm_token_map.get_by_left(b"import".as_ref()).is_none() || llm_token_map.get_by_left(b" typing".as_ref()).is_none() {
+        panic!("The required tokens 'import' and ' typing' are not in the loaded vocabulary. Cannot run the mask bug minimizer.");
+    }
+    println!("[Minimizer] Vocabulary loaded.");
+
+    let initial_productions = grammar_definition.productions.clone();
+    let augmented_start_rule_lhs = initial_productions[grammar_definition.start_production_id].lhs.clone();
+
+    // --- Define the Predicate for the Mask Bug ---
+    let predicate = |prods: &[Production], start_lhs: &NonTerminal| -> bool {
+        let mut new_def = (*grammar_definition).clone();
+        new_def.productions = prods.to_vec();
+
+        let start_prod_id = match new_def.productions.iter().position(|p| p.lhs == *start_lhs) {
+            Some(id) => id,
+            None => return false,
+        };
+        new_def.start_production_id = start_prod_id;
+
+        let (prods_after_cleanup, _) = remove_productions_with_undefined_nonterminals(&new_def.productions);
+        if prods_after_cleanup.is_empty() { return false; }
+        let (prods_after_cleanup, _) = filter_productions_by_reachability(&prods_after_cleanup, start_lhs);
+        if prods_after_cleanup.is_empty() { return false; }
+        new_def.productions = prods_after_cleanup;
+
+        let start_prod_id = match new_def.productions.iter().position(|p| p.lhs == *start_lhs) {
+            Some(id) => id,
+            None => return false,
+        };
+        new_def.start_production_id = start_prod_id;
+
+        let compiled_grammar = match panic::catch_unwind(AssertUnwindSafe(|| {
+            CompiledGrammar::from_definition(Arc::new(new_def))
+        })) {
+            Ok(cg) => cg,
+            Err(_) => return false,
+        };
+
+        let max_id = llm_token_map.values().map(|id| id.0).max().unwrap_or(0);
+        let constraint = match panic::catch_unwind(AssertUnwindSafe(|| {
+            GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), LLMTokenID(0), max_id)
+        })) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        // The actual test logic
+        let bug_found = panic::catch_unwind(AssertUnwindSafe(|| {
+            let mut constraint_state = constraint.init();
+            let import_token_id = llm_token_map.get_by_left(b"import".as_ref()).unwrap();
+            let initial_mask = constraint_state.get_mask();
+
+            if !initial_mask.contains(import_token_id.0) {
+                return true; // BUG: "import" should be allowed initially.
+            }
+
+            constraint_state.commit(*import_token_id);
+            if !constraint_state.is_active() {
+                return true; // BUG: State should be active after a valid token.
+            }
+
+            let typing_token_id = llm_token_map.get_by_left(b" typing".as_ref()).unwrap();
+            let next_mask = constraint_state.get_mask();
+
+            if !next_mask.contains(typing_token_id.0) {
+                return true; // BUG: " typing" should be allowed after "import".
+            }
+            
+            false // No bug found
+        }));
+
+        match bug_found {
+            Ok(found) => found,
+            Err(_) => true, // A panic during constraint interaction is also a bug.
+        }
+    };
+
+    minimize_grammar_and_assert(
+        "mask_bug",
+        initial_productions,
+        augmented_start_rule_lhs,
+        predicate,
+    )
+}
+
 const PANIC_SUBSTRING_TO_FIND: &str = "not found in gotos for";
+
+/// Generic grammar minimization tool.
+/// It repeatedly tries to remove productions and symbols from a grammar,
+/// keeping any change that still causes a given `predicate` to return true.
+fn minimize_grammar_and_assert<F>(
+    test_name: &str,
+    initial_productions: Vec<Production>,
+    augmented_start_rule_lhs: NonTerminal,
+    predicate: F,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: Fn(&[Production], &NonTerminal) -> bool,
+{
+    println!("[Minimizer] Running for test: {}", test_name);
+    println!("[Minimizer] Initial number of productions: {}", initial_productions.len());
+    println!("[Minimizer] Augmented start LHS: {}", augmented_start_rule_lhs.0);
+
+    let mut current_productions = initial_productions;
+
+    if !predicate(&current_productions, &augmented_start_rule_lhs) {
+        eprintln!("[Minimizer] Initial grammar does not trigger the bug predicate. Cannot proceed.");
+        assert!(false, "Initial grammar does not trigger the bug predicate for test '{}'.", test_name);
+        return Ok(());
+    }
+    println!("[Minimizer] Confirmed: Initial grammar triggers the bug predicate.");
+
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut pass_num = 0;
+
+    const ATTEMPTS_PER_STRATEGY_PASS: usize = 100;
+    const MAX_PRODUCTIONS_TO_REMOVE_IN_CHUNK: usize = 3;
+    const MAX_SYMBOLS_TO_REMOVE_IN_CHUNK: usize = 5;
+
+    'pass_loop: loop {
+        pass_num += 1;
+        println!(
+            "\n[Minimizer] Starting Pass {}. Current productions: {}",
+            pass_num,
+            current_productions.len()
+        );
+        std::io::stdout().flush().unwrap();
+        let mut made_change_in_this_pass = false;
+
+        // --- Strategy 1: Try removing chunks of productions ---
+        if current_productions.len() > 1 {
+            print!("[Minimizer] Pass {}: Trying production chunk removal ({} attempts)...", pass_num, ATTEMPTS_PER_STRATEGY_PASS);
+            std::io::stdout().flush().unwrap();
+            for attempt in 0..ATTEMPTS_PER_STRATEGY_PASS {
+                let eligible_prod_indices: Vec<usize> = (0..current_productions.len())
+                    .filter(|&idx| current_productions[idx].lhs != augmented_start_rule_lhs)
+                    .collect();
+
+                if eligible_prod_indices.is_empty() { break; }
+
+                let chunk_size = rng.gen_range(1..=std::cmp::min(MAX_PRODUCTIONS_TO_REMOVE_IN_CHUNK, eligible_prod_indices.len()));
+
+                let chosen_indices_to_remove: Vec<usize> = eligible_prod_indices
+                    .choose_multiple(&mut rng, chunk_size)
+                    .cloned()
+                    .collect();
+
+                if chosen_indices_to_remove.is_empty() { continue; }
+
+                let mut temp_productions = current_productions.clone();
+                let mut sorted_indices = chosen_indices_to_remove;
+                sorted_indices.sort_unstable_by(|a, b| b.cmp(a));
+                for &idx_to_remove in &sorted_indices {
+                    temp_productions.remove(idx_to_remove);
+                }
+
+                if temp_productions.is_empty() || !temp_productions.iter().any(|p| p.lhs == augmented_start_rule_lhs) {
+                    continue;
+                }
+
+                if predicate(&temp_productions, &augmented_start_rule_lhs) {
+                    if attempt % (ATTEMPTS_PER_STRATEGY_PASS / 10 + 1) == 0 { print!("#"); std::io::stdout().flush().unwrap(); }
+                    current_productions = temp_productions;
+                    made_change_in_this_pass = true;
+                    println!("\n[Minimizer] Reduced by production chunk ({} removed). New count: {}", chunk_size, current_productions.len());
+                    continue 'pass_loop;
+                }
+            }
+            println!();
+        }
+
+        // --- Strategy 2: Try removing chunks of symbols ---
+        let mut all_symbol_locations: Vec<(usize, usize)> = Vec::new();
+        for (prod_idx, prod) in current_productions.iter().enumerate() {
+            for symbol_idx in 0..prod.rhs.len() {
+                all_symbol_locations.push((prod_idx, symbol_idx));
+            }
+        }
+
+        if !all_symbol_locations.is_empty() {
+            print!("[Minimizer] Pass {}: Trying symbol chunk removal ({} attempts)...", pass_num, ATTEMPTS_PER_STRATEGY_PASS);
+            std::io::stdout().flush().unwrap();
+            for attempt in 0..ATTEMPTS_PER_STRATEGY_PASS {
+                let chunk_size = rng.gen_range(1..=std::cmp::min(MAX_SYMBOLS_TO_REMOVE_IN_CHUNK, all_symbol_locations.len()));
+                let locations_to_remove: Vec<(usize, usize)> = all_symbol_locations
+                    .choose_multiple(&mut rng, chunk_size)
+                    .cloned()
+                    .collect();
+
+                if locations_to_remove.is_empty() { continue; }
+
+                let mut temp_productions = current_productions.clone();
+                remove_symbols_at_locations_destructive(&mut temp_productions, &locations_to_remove);
+
+                if temp_productions.is_empty() || !temp_productions.iter().any(|p| p.lhs == augmented_start_rule_lhs) {
+                     continue;
+                }
+
+                if predicate(&temp_productions, &augmented_start_rule_lhs) {
+                    if attempt % (ATTEMPTS_PER_STRATEGY_PASS / 10 + 1) == 0 { print!("*"); std::io::stdout().flush().unwrap(); }
+                    current_productions = temp_productions;
+                    made_change_in_this_pass = true;
+                    println!("\n[Minimizer] Reduced by symbol chunk ({} removed). New count: {}", chunk_size, current_productions.len());
+                    continue 'pass_loop;
+                }
+            }
+            println!();
+        }
+
+        if !made_change_in_this_pass {
+            println!("[Minimizer] Pass {}: No further reductions found in this stochastic pass.", pass_num);
+            break 'pass_loop;
+        }
+    }
+
+    println!("\n[Minimizer] Stochastic minimization phase complete.");
+    println!("[Minimizer] Productions after stochastic phase: {}", current_productions.len());
+
+    // --- Final Simplification Pass: Inline A -> B rules ---
+    println!("\n[Minimizer] Deterministic simplification phase starting.");
+    loop {
+        let productions_at_start_of_deterministic_iter = current_productions.clone();
+
+        // Apply A -> B inlining (iterates to fixed point internally)
+        let prev_len_unit_inline = current_productions.len();
+        current_productions = simplify_and_inline_unit_nonterminal_rules(
+            current_productions, // Takes ownership
+            &augmented_start_rule_lhs,
+            &predicate,
+        );
+        if current_productions.len() != prev_len_unit_inline {
+             println!("[Minimizer-Determ] simplify_and_inline_unit_nonterminal_rules changed productions: {} -> {}", prev_len_unit_inline, current_productions.len());
+        }
+
+        // Apply A -> alpha (sole production) inlining (iterates to fixed point internally)
+        let prev_len_sole_inline = current_productions.len();
+        let (next_prods_after_sole_inline, _sole_inlined_overall) = inline_sole_productions_pass(
+            current_productions, // Takes ownership
+            &augmented_start_rule_lhs,
+            &predicate,
+        );
+        current_productions = next_prods_after_sole_inline;
+        if current_productions.len() != prev_len_sole_inline {
+            println!("[Minimizer-Determ] inline_sole_productions_pass changed productions: {} -> {}", prev_len_sole_inline, current_productions.len());
+        }
+
+        // Check for convergence by comparing the entire set of productions
+        if current_productions == productions_at_start_of_deterministic_iter {
+            println!("[Minimizer] Deterministic simplification phase converged. Final production count: {}", current_productions.len());
+            break;
+        }
+        println!("[Minimizer] Deterministic iteration made changes. Productions count: {} -> {}. Repeating deterministic loop.", productions_at_start_of_deterministic_iter.len(), current_productions.len());
+    }
+
+    // --- Output Final Minimized Grammar ---
+    println!("\n[Minimizer] Final number of productions after all simplifications: {}", current_productions.len());
+    println!("[Minimizer] Minimized Grammar Productions (Augmented Start LHS: {}):", augmented_start_rule_lhs.0);
+    for (idx, prod) in current_productions.iter().enumerate() {
+        println!("  P{}: {}", idx, prod);
+    }
+
+    assert!(false, "[Minimizer] Minimization for '{}' finished. Review the MRE printed above and address the underlying bug.", test_name);
+    Ok(())
+}
 
 fn causes_specific_panic(
     productions_to_test: &[Production],
@@ -1075,12 +1361,14 @@ fn get_all_nonterminals_in_grammar(productions: &[Production]) -> BTreeSet<NonTe
 
 /// Final simplification pass: Inlines rules of the form A -> B (single non-terminal RHS)
 /// if the inlining preserves the target panic.
-fn simplify_and_inline_unit_nonterminal_rules(
+fn simplify_and_inline_unit_nonterminal_rules<F>(
     mut productions: Vec<Production>, // Takes ownership, returns new Vec
     augmented_start_rule_lhs: &NonTerminal,
-    sequence_to_test_names: &[&str],
-    panic_substring: &str,
-) -> Vec<Production> {
+    predicate: &F,
+) -> Vec<Production>
+where
+    F: Fn(&[Production], &NonTerminal) -> bool,
+{
     println!("\n[Simplifier] Starting final unit non-terminal inlining pass...");
     let mut iteration = 0;
     loop {
@@ -1146,12 +1434,7 @@ fn simplify_and_inline_unit_nonterminal_rules(
                !temp_productions_after_inlining.iter().any(|p| p.lhs == *augmented_start_rule_lhs) {
                 println!("[Simplifier] Inlining {} would remove the augmented start rule or empty the grammar. Reverting.",
                          a_nt_to_inline.0);
-            } else if causes_specific_panic(
-                &temp_productions_after_inlining,
-                augmented_start_rule_lhs,
-                sequence_to_test_names,
-                panic_substring,
-            ) {
+            } else if predicate(&temp_productions_after_inlining, augmented_start_rule_lhs) {
                 println!("[Simplifier] Successfully inlined {} -> {}. Productions count: {} -> {}",
                          a_nt_to_inline.0, b_nt_replacement.0,
                          productions.len(), temp_productions_after_inlining.len());
@@ -1175,12 +1458,14 @@ fn simplify_and_inline_unit_nonterminal_rules(
     productions
 }
 
-fn inline_sole_productions_pass(
+fn inline_sole_productions_pass<F>(
     mut productions: Vec<Production>, // Takes ownership
     augmented_start_rule_lhs: &NonTerminal,
-    sequence_to_test_names: &[&str],
-    panic_substring: &str,
-) -> (Vec<Production>, bool) { // Returns new productions and bool indicating if a change was made
+    predicate: &F,
+) -> (Vec<Production>, bool) 
+where
+    F: Fn(&[Production], &NonTerminal) -> bool,
+{ // Returns new productions and bool indicating if a change was made
     let mut made_change_this_outer_iteration = false;
     loop { // Keep iterating until a full pass makes no changes
         let mut changed_in_current_scan = false;
@@ -1258,12 +1543,7 @@ fn inline_sole_productions_pass(
             if temp_productions_after_inlining.is_empty() ||
                !temp_productions_after_inlining.iter().any(|p| p.lhs == *augmented_start_rule_lhs) {
                 println!("[Simplifier-Sole] Inlining {} would remove augmented start or empty grammar. Skipping this specific inlining.", nt_to_inline.0);
-            } else if causes_specific_panic(
-                &temp_productions_after_inlining,
-                augmented_start_rule_lhs,
-                sequence_to_test_names,
-                panic_substring,
-            ) {
+            } else if predicate(&temp_productions_after_inlining, augmented_start_rule_lhs) {
                 println!("[Simplifier-Sole] Successfully inlined {}. Productions count: {} -> {}",
                          nt_to_inline.0, productions.len(), temp_productions_after_inlining.len());
                 productions = temp_productions_after_inlining;
@@ -1283,216 +1563,38 @@ fn inline_sole_productions_pass(
     (productions, made_change_this_outer_iteration)
 }
 
-#[ignore]
+// #[ignore]
 #[test]
 fn test_minimize_grammar_for_goto_panic() -> Result<(), Box<dyn std::error::Error>> {
-    // --- Initial Setup (same as before) ---
+    // --- Initial Setup ---
     let serialized_definition_path = "src/serialized_grammar_definition.json";
-    println!("[Minimizer] Loading base GrammarDefinition from: {}", serialized_definition_path);
     let json_string = match fs::read_to_string(serialized_definition_path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[Minimizer] Failed to read serialized grammar definition file '{}': {}", serialized_definition_path, e);
-            return Err(Box::new(e));
+            eprintln!("[Minimizer] Failed to read file '{}': {}. Skipping test.", serialized_definition_path, e);
+            return Ok(());
         }
     };
     let json_node = JSONNode::from_json_string(&json_string)?;
     let grammar_definition = GrammarDefinition::from_json(json_node)?;
-    println!("[Minimizer] Successfully loaded GrammarDefinition.");
-
-    println!("[Minimizer] Compiling GrammarDefinition into CompiledGrammar...");
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
-    println!("[Minimizer] Successfully compiled GrammarDefinition into CompiledGrammar.");
 
     let initial_productions = compiled_grammar.definition.productions.clone();
     let augmented_start_rule_lhs = compiled_grammar.definition.productions
         [compiled_grammar.definition.start_production_id].lhs.clone();
-    // let sequence_to_test_names = ["\"...\"", "\";\"", "\"elif\""];
-    // let sequence_to_test_names = ["\"yield\"", "IGNORE[0][0]", "NEWLINE[0]", "\"-\""];
+    
     let sequence_to_test_names = ["\"return\"", "\";\"", "IGNORE[0][0]", "\"[\"[0]"];
 
-    println!("[Minimizer] Starting stochastic minimization for panic substring: '{}'", PANIC_SUBSTRING_TO_FIND);
-    println!("[Minimizer] Initial number of productions: {}", initial_productions.len());
-    println!("[Minimizer] Test sequence: {:?}", sequence_to_test_names);
-    println!("[Minimizer] Augmented start LHS: {}", augmented_start_rule_lhs.0);
+    let predicate = |prods: &[Production], start_lhs: &NonTerminal| -> bool {
+        causes_specific_panic(prods, start_lhs, &sequence_to_test_names, PANIC_SUBSTRING_TO_FIND)
+    };
 
-    let mut current_productions = initial_productions;
-
-    if !causes_specific_panic(
-        &current_productions,
-        &augmented_start_rule_lhs,
-        &sequence_to_test_names,
-        PANIC_SUBSTRING_TO_FIND,
-    ) {
-        eprintln!("[Minimizer] Initial grammar does not cause the specific panic. Cannot proceed.");
-        assert!(false, "Initial grammar does not cause the specific panic.");
-        return Ok(());
-    }
-    println!("[Minimizer] Confirmed: Initial grammar causes the specific panic.");
-
-    let mut rng = StdRng::seed_from_u64(42);
-    let mut pass_num = 0;
-
-    const ATTEMPTS_PER_STRATEGY_PASS: usize = 100;
-    const MAX_PRODUCTIONS_TO_REMOVE_IN_CHUNK: usize = 3;
-    const MAX_SYMBOLS_TO_REMOVE_IN_CHUNK: usize = 5; // Increased slightly
-
-    'pass_loop: loop {
-        pass_num += 1;
-        println!(
-            "\n[Minimizer] Starting Pass {}. Current productions: {}",
-            pass_num,
-            current_productions.len()
-        );
-        std::io::stdout().flush().unwrap();
-        let mut made_change_in_this_pass = false;
-
-        // --- Strategy 1: Try removing chunks of productions ---
-        if current_productions.len() > 1 {
-            print!("[Minimizer] Pass {}: Trying production chunk removal ({} attempts)...", pass_num, ATTEMPTS_PER_STRATEGY_PASS);
-            std::io::stdout().flush().unwrap();
-            for attempt in 0..ATTEMPTS_PER_STRATEGY_PASS {
-                let eligible_prod_indices: Vec<usize> = (0..current_productions.len())
-                    .filter(|&idx| current_productions[idx].lhs != augmented_start_rule_lhs)
-                    .collect();
-
-                if eligible_prod_indices.is_empty() { break; }
-
-                let chunk_size = rng.gen_range(1..=std::cmp::min(MAX_PRODUCTIONS_TO_REMOVE_IN_CHUNK, eligible_prod_indices.len()));
-
-                let chosen_indices_to_remove: Vec<usize> = eligible_prod_indices
-                    .choose_multiple(&mut rng, chunk_size)
-                    .cloned()
-                    .collect();
-
-                if chosen_indices_to_remove.is_empty() { continue; }
-
-                let mut temp_productions = current_productions.clone();
-                let mut sorted_indices = chosen_indices_to_remove;
-                sorted_indices.sort_unstable_by(|a, b| b.cmp(a));
-                for &idx_to_remove in &sorted_indices {
-                    temp_productions.remove(idx_to_remove);
-                }
-
-                if temp_productions.is_empty() || !temp_productions.iter().any(|p| p.lhs == augmented_start_rule_lhs) {
-                    continue;
-                }
-
-                if causes_specific_panic(
-                    &temp_productions,
-                    &augmented_start_rule_lhs,
-                    &sequence_to_test_names,
-                    PANIC_SUBSTRING_TO_FIND,
-                ) {
-                    if attempt % (ATTEMPTS_PER_STRATEGY_PASS / 10 + 1) == 0 { print!("#"); std::io::stdout().flush().unwrap(); }
-                    current_productions = temp_productions;
-                    made_change_in_this_pass = true;
-                    println!("\n[Minimizer] Reduced by production chunk ({} removed). New count: {}", chunk_size, current_productions.len());
-                    continue 'pass_loop;
-                }
-            }
-            println!();
-        }
-
-        // --- Strategy 2: Try removing chunks of symbols ---
-        let mut all_symbol_locations: Vec<(usize, usize)> = Vec::new();
-        for (prod_idx, prod) in current_productions.iter().enumerate() {
-            for symbol_idx in 0..prod.rhs.len() {
-                all_symbol_locations.push((prod_idx, symbol_idx));
-            }
-        }
-
-        if !all_symbol_locations.is_empty() {
-            print!("[Minimizer] Pass {}: Trying symbol chunk removal ({} attempts)...", pass_num, ATTEMPTS_PER_STRATEGY_PASS);
-            std::io::stdout().flush().unwrap();
-            for attempt in 0..ATTEMPTS_PER_STRATEGY_PASS {
-                let chunk_size = rng.gen_range(1..=std::cmp::min(MAX_SYMBOLS_TO_REMOVE_IN_CHUNK, all_symbol_locations.len()));
-                let locations_to_remove: Vec<(usize, usize)> = all_symbol_locations
-                    .choose_multiple(&mut rng, chunk_size)
-                    .cloned()
-                    .collect();
-
-                if locations_to_remove.is_empty() { continue; }
-
-                let mut temp_productions = current_productions.clone();
-                remove_symbols_at_locations_destructive(&mut temp_productions, &locations_to_remove);
-
-                if temp_productions.is_empty() || !temp_productions.iter().any(|p| p.lhs == augmented_start_rule_lhs) {
-                     continue;
-                }
-
-                if causes_specific_panic(
-                    &temp_productions,
-                    &augmented_start_rule_lhs,
-                    &sequence_to_test_names,
-                    PANIC_SUBSTRING_TO_FIND,
-                ) {
-                    if attempt % (ATTEMPTS_PER_STRATEGY_PASS / 10 + 1) == 0 { print!("*"); std::io::stdout().flush().unwrap(); }
-                    current_productions = temp_productions;
-                    made_change_in_this_pass = true;
-                    println!("\n[Minimizer] Reduced by symbol chunk ({} removed). New count: {}", chunk_size, current_productions.len());
-                    continue 'pass_loop;
-                }
-            }
-            println!();
-        }
-
-        if !made_change_in_this_pass {
-            println!("[Minimizer] Pass {}: No further reductions found in this stochastic pass.", pass_num);
-            break 'pass_loop;
-        }
-    }
-
-    println!("\n[Minimizer] Stochastic minimization phase complete.");
-    println!("[Minimizer] Productions after stochastic phase: {}", current_productions.len());
-
-    // --- Final Simplification Pass: Inline A -> B rules ---
-    println!("\n[Minimizer] Deterministic simplification phase starting.");
-    loop {
-        let productions_at_start_of_deterministic_iter = current_productions.clone();
-
-        // Apply A -> B inlining (iterates to fixed point internally)
-        let prev_len_unit_inline = current_productions.len();
-        current_productions = simplify_and_inline_unit_nonterminal_rules(
-            current_productions, // Takes ownership
-            &augmented_start_rule_lhs,
-            &sequence_to_test_names,
-            PANIC_SUBSTRING_TO_FIND,
-        );
-        if current_productions.len() != prev_len_unit_inline {
-             println!("[Minimizer-Determ] simplify_and_inline_unit_nonterminal_rules changed productions: {} -> {}", prev_len_unit_inline, current_productions.len());
-        }
-
-        // Apply A -> alpha (sole production) inlining (iterates to fixed point internally)
-        let prev_len_sole_inline = current_productions.len();
-        let (next_prods_after_sole_inline, _sole_inlined_overall) = inline_sole_productions_pass( // We don't strictly need sole_inlined_overall for this new check
-            current_productions, // Takes ownership
-            &augmented_start_rule_lhs,
-            &sequence_to_test_names,
-            PANIC_SUBSTRING_TO_FIND,
-        );
-        current_productions = next_prods_after_sole_inline;
-        if current_productions.len() != prev_len_sole_inline {
-            println!("[Minimizer-Determ] inline_sole_productions_pass changed productions: {} -> {}", prev_len_sole_inline, current_productions.len());
-        }
-
-        // Check for convergence by comparing the entire set of productions
-        if current_productions == productions_at_start_of_deterministic_iter {
-            println!("[Minimizer] Deterministic simplification phase converged. Final production count: {}", current_productions.len());
-            break;
-        }
-        println!("[Minimizer] Deterministic iteration made changes. Productions count: {} -> {}. Repeating deterministic loop.", productions_at_start_of_deterministic_iter.len(), current_productions.len());
-    }
-
-    // --- Output Final Minimized Grammar ---
-    println!("\n[Minimizer] Final number of productions after all simplifications: {}", current_productions.len());
-    println!("[Minimizer] Minimized Grammar Productions (Augmented Start LHS: {}):", augmented_start_rule_lhs.0);
-    for (idx, prod) in current_productions.iter().enumerate() {
-        println!("  P{}: {}", idx, prod);
-    }
-
-    assert!(false, "[Minimizer] Minimization finished. Review the MRE printed above and address the underlying panic.");
-    Ok(())
+    minimize_grammar_and_assert(
+        "goto_panic",
+        initial_productions,
+        augmented_start_rule_lhs,
+        predicate,
+    )
 }
 
 #[ignore]

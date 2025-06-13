@@ -33,6 +33,7 @@ use std::collections::BTreeMap as StdMap;
 use profiler_macro::time_it;
 use crate::datastructures::gss::acc_mod::Acc;
 use crate::glr::analyze::{compute_nullable_nonterminals, compute_terminal_follow_sets};
+use crate::interface::CompiledGrammar;
 
 pub type LLMTokenBV = HybridBitset;
 pub type TerminalBV = HybridBitset;
@@ -170,6 +171,23 @@ impl JSONConvertible for GrammarConstraint {
 
 
 impl GrammarConstraint {
+    pub fn from_compiled_grammar(
+        compiled_grammar: CompiledGrammar,
+        llm_token_map: LLMTokenMap,
+        _eof_token_id: LLMTokenID,
+        max_original_llm_token_id: usize,
+    ) -> Self {
+        let token_name_map = compiled_grammar.definition.terminal_name_to_group_id.clone();
+
+        Self::new(
+            compiled_grammar.tokenizer,
+            compiled_grammar.glr_parser,
+            llm_token_map,
+            token_name_map,
+            max_original_llm_token_id,
+        )
+    }
+
     pub(crate) fn setup_llm_token_mappings(
         original_llm_token_map: &LLMTokenMap,
     ) -> BiBTreeMap<usize, usize>
@@ -1071,4 +1089,3 @@ impl<'a> GrammarConstraintState<'a> {
         &self.state
     }
 }
-
