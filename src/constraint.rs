@@ -736,6 +736,7 @@ impl<'r> Precomputer<'r> {
                                     |e, n| *e |= n,
                                 );
                                 // Print the source node.
+                                println!("Dumping Precompute Trie for {}", llm_token_id);
                                 dump_precompute_trie_recursive(src_node_wrapper, String::new(), &mut HashSet::new(), None);
                                 inserter.try_destination(self.end_node.as_arc().clone()).unwrap();
                             }
