@@ -51,56 +51,56 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 if self_bv.inner() == other_bv.inner() {
                     return;
                 }
-                // let BIG_RANGE_LEN = 1;
-                // if other_bv.inner().ranges_len() > BIG_RANGE_LEN && self_bv.inner().ranges_len() > BIG_RANGE_LEN {
-                //     println!("WARNING: union_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN && other_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
-                //     println!("self_bv: {:?}", &self_bv);
-                //     println!("other_bv: {:?}", &other_bv);
-                // }
-                //
-                // // Count number of 'holes' - gaps between ranges of size 1
-                // let BIG_HOLE_LEN = 3;
-                // let mut self_holes = 0;
-                // let mut right_holes = 0;
-                // let mut self_holes_pos = Vec::new();
-                // let mut right_holes_pos = Vec::new();
-                // let mut ranges = self_bv.inner().ranges();
-                // let mut prev_range_end;
-                // if let Some(start_range) = ranges.next() {
-                //     prev_range_end = *start_range.end();
-                //     for range in ranges {
-                //         let gap = range.start() - prev_range_end;
-                //         if gap == 2 {
-                //             self_holes += 1;
-                //             self_holes_pos.push(range.start() - 1);
-                //         }
-                //         prev_range_end = *range.end();
-                //     }
-                // }
-                // let mut ranges = other_bv.inner().ranges();
-                // let mut prev_range_end;
-                // if let Some(start_range) = ranges.next() {
-                //     prev_range_end = *start_range.end();
-                //     for range in ranges {
-                //         let gap = range.start() - prev_range_end;
-                //         if gap == 2 {
-                //             right_holes += 1;
-                //             right_holes_pos.push(range.start() - 1);
-                //         }
-                //         prev_range_end = *range.end();
-                //     }
-                // }
-                // let min_hole_pos = 0;
-                // let max_hole_pos = 2000;
-                // let is_eligible = self_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos) || right_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos);
-                // if (self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN) && is_eligible {
-                //     eprintln!("WARNING: union_assign: self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
-                //     eprintln!("self_bv: {:?}", &self_bv);
-                //     eprintln!("other_bv: {:?}", &other_bv);
-                //     eprintln!("self_holes_pos: {:?}", &self_holes_pos);
-                //     eprintln!("right_holes_pos: {:?}", &right_holes_pos);
-                //     // panic!("union_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
-                // }
+                let BIG_RANGE_LEN = 1;
+                if other_bv.inner().ranges_len() > BIG_RANGE_LEN && self_bv.inner().ranges_len() > BIG_RANGE_LEN {
+                    println!("WARNING: union_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN && other_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
+                    println!("self_bv: {:?}", &self_bv);
+                    println!("other_bv: {:?}", &other_bv);
+                }
+
+                // Count number of 'holes' - gaps between ranges of size 1
+                let BIG_HOLE_LEN = 10;
+                let mut self_holes = 0;
+                let mut right_holes = 0;
+                let mut self_holes_pos = Vec::new();
+                let mut right_holes_pos = Vec::new();
+                let mut ranges = self_bv.inner().ranges();
+                let mut prev_range_end;
+                if let Some(start_range) = ranges.next() {
+                    prev_range_end = *start_range.end();
+                    for range in ranges {
+                        let gap = range.start() - prev_range_end;
+                        if gap == 2 {
+                            self_holes += 1;
+                            self_holes_pos.push(range.start() - 1);
+                        }
+                        prev_range_end = *range.end();
+                    }
+                }
+                let mut ranges = other_bv.inner().ranges();
+                let mut prev_range_end;
+                if let Some(start_range) = ranges.next() {
+                    prev_range_end = *start_range.end();
+                    for range in ranges {
+                        let gap = range.start() - prev_range_end;
+                        if gap == 2 {
+                            right_holes += 1;
+                            right_holes_pos.push(range.start() - 1);
+                        }
+                        prev_range_end = *range.end();
+                    }
+                }
+                let min_hole_pos = 0;
+                let max_hole_pos = 200000;
+                let is_eligible = self_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos) || right_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos);
+                if (self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN) && is_eligible {
+                    eprintln!("WARNING: union_assign: self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
+                    eprintln!("self_bv: {:?}", &self_bv);
+                    eprintln!("other_bv: {:?}", &other_bv);
+                    eprintln!("self_holes_pos: {:?}", &self_holes_pos);
+                    eprintln!("right_holes_pos: {:?}", &right_holes_pos);
+                    // panic!("union_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
+                }
                 //
                 // let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
 
@@ -145,56 +145,56 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 if self_bv.inner() == right_bv.inner() {
                     return;
                 }
-                // // let BIG_RANGE_LEN = 1;
-                // // if right_bv.inner().ranges_len() > BIG_RANGE_LEN && self_bv.inner().ranges_len() > BIG_RANGE_LEN {
-                // //     println!("WARNING: intersection_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN && right_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, right_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), right_bv.inner().ranges_len());
-                // //     println!("self_bv: {:?}", &self_bv);
-                // //     println!("right_bv: {:?}", &right_bv);
-                // // }
-                //
-                // // Count number of 'holes' - gaps between ranges of size 1
-                // let BIG_HOLE_LEN = 3;
-                // let mut self_holes = 0;
-                // let mut right_holes = 0;
-                // let mut self_holes_pos = Vec::new();
-                // let mut right_holes_pos = Vec::new();
-                // let mut ranges = self_bv.inner().ranges();
-                // let mut prev_range_end;
-                // if let Some(start_range) = ranges.next() {
-                //     prev_range_end = *start_range.end();
-                //     for range in ranges {
-                //         let gap = range.start() - prev_range_end;
-                //         if gap == 2 {
-                //             self_holes += 1;
-                //             self_holes_pos.push(range.start() - 1);
-                //         }
-                //         prev_range_end = *range.end();
-                //     }
+                // let BIG_RANGE_LEN = 1;
+                // if right_bv.inner().ranges_len() > BIG_RANGE_LEN && self_bv.inner().ranges_len() > BIG_RANGE_LEN {
+                //     println!("WARNING: intersection_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN && right_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, right_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), right_bv.inner().ranges_len());
+                //     println!("self_bv: {:?}", &self_bv);
+                //     println!("right_bv: {:?}", &right_bv);
                 // }
-                // let mut ranges = right_bv.inner().ranges();
-                // let mut prev_range_end;
-                // if let Some(start_range) = ranges.next() {
-                //     prev_range_end = *start_range.end();
-                //     for range in ranges {
-                //         let gap = range.start() - prev_range_end;
-                //         if gap == 2 {
-                //             right_holes += 1;
-                //             right_holes_pos.push(range.start() - 1);
-                //         }
-                //         prev_range_end = *range.end();
-                //     }
-                // }
-                // let min_hole_pos = 0;
-                // let max_hole_pos = 2000;
-                // let is_eligible = self_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos) || right_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos);
-                // if (self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN) && is_eligible {
-                //     eprintln!("WARNING: intersection_assign: self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
-                //     eprintln!("self_bv: {:?}", &self_bv);
-                //     eprintln!("right_bv: {:?}", &right_bv);
-                //     eprintln!("self_holes_pos: {:?}", &self_holes_pos);
-                //     eprintln!("right_holes_pos: {:?}", &right_holes_pos);
-                //     // panic!("intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
-                // }
+
+                // Count number of 'holes' - gaps between ranges of size 1
+                let BIG_HOLE_LEN = 10;
+                let mut self_holes = 0;
+                let mut right_holes = 0;
+                let mut self_holes_pos = Vec::new();
+                let mut right_holes_pos = Vec::new();
+                let mut ranges = self_bv.inner().ranges();
+                let mut prev_range_end;
+                if let Some(start_range) = ranges.next() {
+                    prev_range_end = *start_range.end();
+                    for range in ranges {
+                        let gap = range.start() - prev_range_end;
+                        if gap == 2 {
+                            self_holes += 1;
+                            self_holes_pos.push(range.start() - 1);
+                        }
+                        prev_range_end = *range.end();
+                    }
+                }
+                let mut ranges = right_bv.inner().ranges();
+                let mut prev_range_end;
+                if let Some(start_range) = ranges.next() {
+                    prev_range_end = *start_range.end();
+                    for range in ranges {
+                        let gap = range.start() - prev_range_end;
+                        if gap == 2 {
+                            right_holes += 1;
+                            right_holes_pos.push(range.start() - 1);
+                        }
+                        prev_range_end = *range.end();
+                    }
+                }
+                let min_hole_pos = 0;
+                let max_hole_pos = 200000;
+                let is_eligible = self_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos) || right_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos);
+                if (self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN) && is_eligible {
+                    eprintln!("WARNING: intersection_assign: self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
+                    eprintln!("self_bv: {:?}", &self_bv);
+                    eprintln!("right_bv: {:?}", &right_bv);
+                    eprintln!("self_holes_pos: {:?}", &self_holes_pos);
+                    eprintln!("right_holes_pos: {:?}", &right_holes_pos);
+                    // panic!("intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
+                }
                 //
                 // // let time_str = format!("intersection_assign: self_bv.inner().ranges_len(): {}, right_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), right_bv.inner().ranges_len());
                 //
