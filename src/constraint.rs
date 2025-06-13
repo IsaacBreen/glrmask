@@ -742,7 +742,9 @@ impl<'r> Precomputer<'r> {
                             }
 
                             let mut edge_bv = child_vocab_node.reachable_token_ids().clone();
-                            edge_bv.set(child_vocab_node.token_id(), false);
+                            if next_pos == segment_bytes.len() {
+                                edge_bv.set(child_vocab_node.token_id(), false);
+                            }
                             if let Some(matches_for_terminal) = possible_matches_at_end.get(&terminal_id) {
                                 edge_bv -= matches_for_terminal;
                             }
