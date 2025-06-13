@@ -619,35 +619,35 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         }
     }
 
-    // Remove tokens longer than length
-    // llm_token_map.retain(|v, _| v.len() <= 3);
-
-    // Keep tokens that are either given length or of the form ' Ax' where x is a letter
-    llm_token_map.retain(|v, _| {
-        // v.len() <= 1 || v.starts_with(b" A") && v.len() <= 3
-        // v.len() <= 1 || (v.starts_with(b" A")) && v.len() <= 3
-        v.len() <= 2
-    });
-    // Remove tokens that contain non-space non-alph, non-upper-case characters
+    // // Remove tokens longer than length
+    // // llm_token_map.retain(|v, _| v.len() <= 3);
+    //
+    // // Keep tokens that are either given length or of the form ' Ax' where x is a letter
+    // llm_token_map.retain(|v, _| {
+    //     // v.len() <= 1 || v.starts_with(b" A") && v.len() <= 3
+    //     // v.len() <= 1 || (v.starts_with(b" A")) && v.len() <= 3
+    //     v.len() <= 2
+    // });
+    // // Remove tokens that contain non-space non-alph, non-upper-case characters
+    // // llm_token_map.retain(|v, _| v.len() == 1 ||
+    // //     v.starts_with(b" A") &&
+    // //     v.iter().all(|c| c == &b' ' || c.is_ascii_alphabetic() || c.is_ascii_uppercase()));
+    // // Remove tokens that contain capital letters
     // llm_token_map.retain(|v, _| v.len() == 1 ||
-    //     v.starts_with(b" A") &&
-    //     v.iter().all(|c| c == &b' ' || c.is_ascii_alphabetic() || c.is_ascii_uppercase()));
-    // Remove tokens that contain capital letters
-    llm_token_map.retain(|v, _| v.len() == 1 ||
-        v.iter().all(|c| !c.is_ascii_alphabetic() || c.is_ascii_lowercase()));
-    // Remove tokens that contain any of the first x of the capital letters in the alphabet
-    llm_token_map.retain(|v, _| v.len() == 1 ||
-        v.iter().all(|c| !c.is_ascii_alphabetic() || c <= &b'c'));
-    // // Remove tokens that contain letters
+    //     v.iter().all(|c| !c.is_ascii_alphabetic() || c.is_ascii_lowercase()));
+    // // Remove tokens that contain any of the first x of the capital letters in the alphabet
     // llm_token_map.retain(|v, _| v.len() == 1 ||
-    //     v.iter().all(|c| c.is_ascii_alphabetic()));
-
-    // Remove tokens that contain more than two different digits
-    llm_token_map.retain(|v, _| v.len() == 1 ||
-        v.iter().filter(|c| c.is_ascii_digit()).collect::<BTreeSet<_>>().len() <= 1);
-
-    // Keep only "1" and "11"
-    // llm_token_map.retain(|v, _| v.len() == 1 || v == b"1" || v == b"11");
+    //     v.iter().all(|c| !c.is_ascii_alphabetic() || c <= &b'c'));
+    // // // Remove tokens that contain letters
+    // // llm_token_map.retain(|v, _| v.len() == 1 ||
+    // //     v.iter().all(|c| c.is_ascii_alphabetic()));
+    //
+    // // Remove tokens that contain more than two different digits
+    // llm_token_map.retain(|v, _| v.len() == 1 ||
+    //     v.iter().filter(|c| c.is_ascii_digit()).collect::<BTreeSet<_>>().len() <= 1);
+    //
+    // // Keep only "1" and "11"
+    // // llm_token_map.retain(|v, _| v.len() == 1 || v == b"1" || v == b"11");
     // llm_token_map.retain(|v, _| v == b"1" || v == b"11");
 
     // Print the vocab
