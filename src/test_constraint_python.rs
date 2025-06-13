@@ -1046,7 +1046,7 @@ fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>
 
         match bug_found {
             Ok(found) => found,
-            Err(_) => true, // A panic during constraint interaction is also a bug.
+            Err(_) => false, // A panic during constraint interaction is also a bug, but not a bug we want to zero in on.
         }
     };
 
