@@ -684,7 +684,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     {
         // 1. Get the root precompute node for tokenizer state 0.
         let precompute_root_node = grammar_constraint.precomputed.get(&TokenizerStateID(0))
-            .expect("Precomputed data for tokenizer state 0 should exist.");
+            .expect("Precomputed data for tokenizer state 0 should exist.").lock().unwrap();
 
         // 2. Get the TerminalID for the terminal we are interested in.
         let newline_terminal_name = "IGNORE[0][0][1]".to_string();

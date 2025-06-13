@@ -103,7 +103,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
             let root_node_arc = Arc::new(Mutex::new(root_node_trie.clone()));
 
             // Pass the bimap
-            dump_precompute_trie_recursive(&root_node_arc, "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap));
+            dump_precompute_trie_recursive(&root_node_arc.as_ref().lock().unwrap(), "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap));
         }
         println!("\n===================================");
         println!("Dump Complete.");

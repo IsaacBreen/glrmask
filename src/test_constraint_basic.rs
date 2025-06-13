@@ -670,7 +670,7 @@ fn test_precompute_a_plus_tokenizer() {
     // --- Verification ---
     // assert_eq!(constraint.precomputed.len(), 1, "Expected precomputed trie for only one tokenizer state");
     let initial_state_id = tokenizer.initial_state_id();
-    let root_node = constraint.precomputed.get(&initial_state_id).expect("No precomputed trie for initial state");
+    let root_node = constraint.precomputed.get(&initial_state_id).expect("No precomputed trie for initial state").lock().unwrap();
 
     // 1. Check root node's clean_end
     let root_value = &root_node.value;
