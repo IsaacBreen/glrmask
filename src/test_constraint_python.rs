@@ -34,7 +34,7 @@ use std::panic::{self, AssertUnwindSafe}; // Added for panic catching
 use std::collections::HashMap;
 use crate::datastructures::gss::{gather_gss_stats, reset_llm_tokens};
 use crate::datastructures::gss::acc_mod::Acc;
-// For the symbol removal helper
+// For the symbol removal
 
 
 // Use concrete types for merge tests
@@ -629,7 +629,6 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // llm_token_map.retain(|v, _| v.len() <= 2);
     // // Remove tokens that contain non-space non-alph, non-upper-case characters
     // // llm_token_map.retain(|v, _| v.len() == 1 ||
-    // //     v.starts_with(b" A") &&
     // //     v.iter().all(|c| c.is_ascii_alphabetic() || c.is_ascii_uppercase()));
     // // Remove tokens that contain capital letters
     // // llm_token_map.retain(|v, _| v.len() == 1 ||
@@ -905,11 +904,11 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let grammar_tokenss_for_comp = vec![vec!["\"from\"", "NAME[0]"]];
     let llm_token_ids_for_comp = llm_tokens_for_comp.iter().map(|llm_token| llm_token_map.get_by_left(*llm_token).expect(format!("LLM token '{}' not found in llm_token_map", String::from_utf8_lossy(*llm_token)).as_str())).collect::<Vec<_>>();
 
-    let mut parser_state_for_comp = grammar_constraint.parser.init_glr_parser();
+    let mut parser_state_for_comp = compiled_grammar.glr_parser.init_glr_parser();
     for grammar_tokens in grammar_tokenss_for_comp {
-        let mut this_parser_state = grammar_constraint.parser.init_glr_parser();
+        let mut this_parser_state = compiled_grammar.glr_parser.init_glr_parser();
         for grammar_token in &grammar_tokens {
-            let grammar_token_id = grammar_constraint.parser.terminal_map.get_by_left(&Terminal(grammar_token.to_string())).unwrap();
+            let grammar_token_id = compiled_grammar.glr_parser.terminal_map.get_by_left(&Terminal(grammar_token.to_string())).unwrap();
             this_parser_state.step(*grammar_token_id);
             assert!(this_parser_state.is_ok(), "Parser failed to step with token {:?} in sequence {:?}", grammar_token, grammar_tokens);
         }
@@ -1097,11 +1096,10 @@ where
 
         // --- Production removal phase ---
         println!("[Minimizer] Pass {}: Trying to remove productions.", pass_num);
-        let mut n_prods;
         let mut removable_indices: Vec<usize> = (0..current_productions.len())
             .filter(|&idx| current_productions[idx].lhs != augmented_start_rule_lhs)
             .collect();
-        n_prods = removable_indices.len() / 2;
+        let mut n_prods = removable_indices.len() / 2;
 
         while n_prods > 0 {
             let mut current_n = n_prods;
@@ -1221,7 +1219,7 @@ where
             &predicate,
         );
         if current_productions.len() != prev_len_unit_inline {
-             println!("[Minimizer-Determ] simplify_and_inline_unit_nonterminal_rules changed productions: {} -> {}", prev_len_unit_inline, current_productions.len());
+             println!("[Simplifier-Determ] simplify_and_inline_unit_nonterminal_rules changed productions: {} -> {}", prev_len_unit_inline, current_productions.len());
         }
 
         // Apply A -> alpha (sole production) inlining (iterates to fixed point internally)
@@ -1233,7 +1231,7 @@ where
         );
         current_productions = next_prods_after_sole_inline;
         if current_productions.len() != prev_len_sole_inline {
-            println!("[Minimizer-Determ] inline_sole_productions_pass changed productions: {} -> {}", prev_len_sole_inline, current_productions.len());
+            println!("[Simplifier-Determ] inline_sole_productions_pass changed productions: {} -> {}", prev_len_sole_inline, current_productions.len());
         }
 
         // Check for convergence by comparing the entire set of productions
