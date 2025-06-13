@@ -463,7 +463,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         // Initialize GLRParserState with a dummy accumulator.
         // For this test, we are focused on the GLR parser's grammar rule processing,
         // not LLM token constraints, so the accumulator's content is not critical.
-        let mut glr_state = compiled_grammar.glr_parser.init_glr_parser_with_acc(Acc::default());
+        let mut glr_state = compiled_grammar.glr_parser.init_glr_parser();
 
         let seq_names_display = seq_terminal_names.join(" → ");
         print!(
@@ -521,7 +521,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             if i % 100 == 0 { // Log progress
                 println!("  Fuzz test iteration {}/{}", i, num_fuzz_iterations);
             }
-            let mut glr_state = compiled_grammar.glr_parser.init_glr_parser_with_acc(Acc::default());
+            let mut glr_state = compiled_grammar.glr_parser.init_glr_parser();
 
             let num_tokens_this_attempt = rng.gen_range(0..=max_tokens_per_fuzz_attempt);
             let mut current_fuzz_sequence_names: Vec<String> = Vec::new();

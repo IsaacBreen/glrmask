@@ -167,13 +167,12 @@ impl GrammarConstraint {
         original_llm_token_map: &LLMTokenMap,
     ) -> BiBTreeMap<usize, usize>
     {
-        // TODO: delete this
-        let mut original_to_internal_id_bimap = BiBTreeMap::new();
-        for (_, id) in original_llm_token_map.iter() {
-            original_to_internal_id_bimap.insert(id.0, id.0);
-        }
-        return original_to_internal_id_bimap;
-
+        // // TODO: delete this
+        // let mut original_to_internal_id_bimap = BiBTreeMap::new();
+        // for (_, id) in original_llm_token_map.iter() {
+        //     original_to_internal_id_bimap.insert(id.0, id.0);
+        // }
+        // return original_to_internal_id_bimap;
 
         let mut sorted_tokens_with_original_ids: Vec<(Vec<u8>, LLMTokenID)> = original_llm_token_map
             .iter()
