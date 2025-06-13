@@ -61,6 +61,9 @@ fn dump_precompute_trie_recursive(
     // if let Some(clean_end) = &node.value.clean_end { // clean_end stores internal IDs
     //     println!("{}  Clean End LLM Tokens: {}", indent, format_bv_indices(clean_end, original_internal_bimap)); // Pass original_internal_bimap
     // }
+    if node.value.end {
+        println!("{}  End", indent);
+    }
 
     // Print Children (Edges)
     if node.children().is_empty() {
@@ -337,6 +340,9 @@ pub fn calculate_final_stats(
         //     stats.final_nodes_with_clean_end += 1;
         //     stats.final_total_ranges_in_bvs += clean_end_bv.inner().ranges_len();
         // }
+        if node_guard.value.end {
+            stats.final_nodes_with_clean_end += 1;
+        }
     }
     crate::debug!(2, "Finished calculating final precompute statistics (within constraint_extra).");
 }
