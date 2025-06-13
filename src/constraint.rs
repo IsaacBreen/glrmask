@@ -15,7 +15,7 @@ use bimap::BiBTreeMap;
 use bitvec::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
-use crate::constraint_extra::{calculate_final_stats, print_precompute_stats, PrecomputeStats};
+use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
 use crate::datastructures::charmap::TrieMap;
 use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, intersect_allowed_terminals_and_prune_arc, TerminalInfo, prune_disallowed_terminals};
 use crate::datastructures::hybrid_bitset::HybridBitset;
@@ -735,6 +735,8 @@ impl<'r> Precomputer<'r> {
                                     edge_bv,
                                     |e, n| *e |= n,
                                 );
+                                // Print the source node.
+                                dump_precompute_trie_recursive(src_node_wrapper, String::new(), &mut HashSet::new(), None);
                                 inserter.try_destination(self.end_node.as_arc().clone()).unwrap();
                             }
 
