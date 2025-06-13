@@ -51,7 +51,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 if self_bv.inner() == other_bv.inner() {
                     return;
                 }
-                if false {
+                if true {
                     // let BIG_RANGE_LEN = 1;
                     // if other_bv.inner().ranges_len() > BIG_RANGE_LEN && self_bv.inner().ranges_len() > BIG_RANGE_LEN {
                     //     println!("WARNING: union_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN && other_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
@@ -60,7 +60,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                     // }
 
                     // Count number of 'holes' - gaps between ranges of size 1
-                    let BIG_HOLE_LEN = 10;
+                    let BIG_HOLE_LEN = 20;
                     let mut self_holes = 0;
                     let mut right_holes = 0;
                     let mut self_holes_pos = Vec::new();
@@ -91,8 +91,10 @@ impl PathAccumulator for Option<LLMTokenBV> {
                             prev_range_end = *range.end();
                         }
                     }
-                    let min_hole_pos = 2560;
-                    let max_hole_pos = 4343;
+                    // let min_hole_pos = 2560;
+                    // let max_hole_pos = 4343;
+                    let min_hole_pos = 0;
+                    let max_hole_pos = 1000000;
                     let is_eligible = self_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos) || right_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos);
                     if (self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN) && is_eligible {
                         eprintln!("WARNING: union_assign: self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
