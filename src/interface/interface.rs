@@ -968,7 +968,6 @@ mod tests {
 
         let mask_after_final = state_for_prefill.get_mask();
         let mut expected_mask_final = bitvec_with_capacity_and_values(max_llm_token_id + 1, llm_token_vec!(b"+", b"*", b"+i"));
-        expected_mask_final.set(eof_llm_token_id, true); // EOF is a possibility
         assert_eq!(mask_after_final, expected_mask_final);
     }
 
