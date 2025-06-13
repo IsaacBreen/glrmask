@@ -449,7 +449,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     #[time_it("GLRParserState::step")]
     pub fn step(&mut self, token_id: TerminalID) {
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
-        // self.log_gss("Step-start", token_id);
+        self.log_gss("Step-start", token_id);
         self.cycled_states = ParseState::new();
 
         let mut todo: Vec<ParseState> = Vec::new();
