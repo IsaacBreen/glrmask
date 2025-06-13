@@ -990,9 +990,9 @@ fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>
         };
         new_def.start_production_id = start_prod_id;
 
-        let (prods_after_cleanup, _) = remove_productions_with_undefined_nonterminals(&new_def.productions);
+        let prods_after_cleanup = remove_productions_with_undefined_nonterminals(&new_def.productions, &[]);
         if prods_after_cleanup.is_empty() { return false; }
-        let (prods_after_cleanup, _) = filter_productions_by_reachability(&prods_after_cleanup, start_lhs);
+        let prods_after_cleanup = filter_productions_by_reachability(&prods_after_cleanup, &BTreeSet::from([Symbol::NonTerminal(start_lhs.clone())]));
         if prods_after_cleanup.is_empty() { return false; }
         new_def.productions = prods_after_cleanup;
 
