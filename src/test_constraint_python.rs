@@ -922,7 +922,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         // Ensure token is allowed before committing
         let llm_token_id_for_comp = llm_token_map.get_by_left(llm_token_for_comp).unwrap();
         let mask_before_commit = constraint_state_for_comp.get_mask();
-        assert!(mask_before_commit.contains(llm_token_id_for_comp.0), "Token {:?} (ID {}) not found in mask during comparison setup. Mask: {:?}", String::from_utf8_lossy(llm_token_for_comp), llm_token_id_for_comp.0, mask_before_commit.iter_bits().collect::<Vec<_>>());
+        assert!(mask_before_commit.contains(llm_token_id_for_comp.0), "Token {:?} (ID {}) not found in mask during comparison setup. Mask: {:?}", String::from_utf8_lossy(llm_token_for_comp), llm_token_id_for_comp.0, mask_before_commit);
         constraint_state_for_comp.commit(*llm_token_id_for_comp);
     }
 
@@ -983,18 +983,6 @@ fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>
     let predicate = |prods: &[Production], start_lhs: &NonTerminal| -> bool {
         let mut new_def = (*grammar_definition).clone();
         new_def.productions = prods.to_vec();
-
-        let start_prod_id = match new_def.productions.iter().position(|p| p.lhs == *start_lhs) {
-            Some(id) => id,
-            None => return false,
-        };
-        new_def.start_production_id = start_prod_id;
-
-        let prods_after_cleanup = remove_productions_with_undefined_nonterminals(&new_def.productions, &[]);
-        if prods_after_cleanup.is_empty() { return false; }
-        let prods_after_cleanup = filter_productions_by_reachability(&prods_after_cleanup, &BTreeSet::from([Symbol::NonTerminal(start_lhs.clone())]));
-        if prods_after_cleanup.is_empty() { return false; }
-        new_def.productions = prods_after_cleanup;
 
         let start_prod_id = match new_def.productions.iter().position(|p| p.lhs == *start_lhs) {
             Some(id) => id,

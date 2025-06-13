@@ -31,14 +31,13 @@ fn format_bv_indices(
             internal_id_val.to_string() // No map provided, print the internal ID
         }
     }).collect();
-    // if indices.len() > 10 {
-    //     format!("[{} indices starting with {}...]", indices.len(), indices[0..5].join(", "))
-    // } else if indices.is_empty() {
-    //     "[]".to_string()
-    // } else {
-    //     format!("[{}]", indices.join(", "))
-    // }
-    format!("{:?}", bv)
+    if indices.len() > 10 {
+        format!("[{} indices starting with {}...]", indices.len(), indices[0..5].join(", "))
+    } else if indices.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[{}]", indices.join(", "))
+    }
 }
 
 /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
@@ -490,7 +489,7 @@ mod tests {
     #[test]
     fn test_format_bv_indices_empty() {
         let bv = HybridBitset::zeros();
-        assert_eq!(format_bv_indices(&bv, None), "[]");
+        assert_eq!(format_bv_indices(&bv, None), "[]".to_string());
 
         // let bv = HybridBitset::new(); // Duplicate test removed
         // assert_eq!(format_bv_indices(&bv, None), "[]");
@@ -499,19 +498,19 @@ mod tests {
     #[test]
     fn test_format_bv_indices_single() {
         let bv = HybridBitset::from_iter(vec![3]);
-        assert_eq!(format_bv_indices(&bv, None), "[3]");
+        assert_eq!(format_bv_indices(&bv, None), "[3]".to_string());
     }
 
     #[test]
     fn test_format_bv_indices_multiple_few() {
         let bv = HybridBitset::from_iter(vec![1, 5, 8]);
-        assert_eq!(format_bv_indices(&bv, None), "[1, 5, 8]");
+        assert_eq!(format_bv_indices(&bv, None), "[1, 5, 8]".to_string());
     }
 
     #[test]
     fn test_format_bv_indices_multiple_many() {
         let bv = HybridBitset::from_iter(0..15);
-        assert_eq!(format_bv_indices(&bv, None), "[15 indices starting with 0, 1, 2, 3, 4...]");
+        assert_eq!(format_bv_indices(&bv, None), "[15 indices starting with 0, 1, 2, 3, 4...]".to_string());
     }
 
     #[test]
@@ -522,7 +521,7 @@ mod tests {
         let mut mapping = BiBTreeMap::new();
         mapping.insert(100, 0); // original 100 -> internal 0
         mapping.insert(200, 1); // original 200 -> internal 1
-        assert_eq!(format_bv_indices(&bv, Some(&mapping)), "[100, 200]");
+        assert_eq!(format_bv_indices(&bv, Some(&mapping)), "[100, 200]".to_string());
     }
 
 
