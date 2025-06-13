@@ -44,12 +44,12 @@ fn format_bv_indices(
 pub fn dump_precompute_trie_recursive(
     node_arc: &Arc<Mutex<PrecomputeNode>>,
     indent: String,
-    visited: &mut HashSet<*const PrecomputeNode>, // Changed to *const PrecomputeNode
+    visited: &mut HashSet<*const Mutex<PrecomputeNode>>,
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>
 ) {
-    let node_ptr_val = node_ptr(node_arc);
-    if !visited.insert(node_ptr_val) {
-        println!("{}-> Ref {:p} (already printed)", indent, node_ptr_val);
+    let arc_ptr = Arc::as_ptr(node_arc);
+    if !visited.insert(arc_ptr) {
+        println!("{}-> Ref to Arc {:p} (already printed)", indent, arc_ptr);
         return;
     }
 
@@ -74,11 +74,11 @@ pub fn dump_precompute_trie_recursive(
         for (edge_key, children_vec) in node.children() {
             for (child_wrapper_arc, edge_val_bv) in children_vec {
                  println!(
-                    "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Arc Ptr: {:p}", // Changed to Child Arc Ptr
+                    "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Arc Ptr: {:p}",
                     indent,
                     edge_key.map(|grammar_token_id| grammar_token_id.0),
                     format_bv_indices(edge_val_bv, original_internal_bimap), // Pass original_internal_bimap
-                    node_ptr(child_wrapper_arc.as_arc()) // Use as_arc() to get the Arc
+                    Arc::as_ptr(child_wrapper_arc.as_arc())
                 );
                 // Recurse
                 dump_precompute_trie_recursive(child_wrapper_arc.as_arc(), new_indent.clone(), visited, original_internal_bimap); // Pass original_internal_bimap
@@ -93,17 +93,10 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         println!("Dumping Precomputed Trie Structure (showing original LLM Token IDs):");
         println!("===================================");
 
-        let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
+        let mut visited: HashSet<*const Mutex<PrecomputeNode>> = HashSet::new();
         for (tokenizer_state_id, root_node_trie) in &self.precomputed {
             println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
-
-            // Need to wrap the root_node_trie (which is a Trie, not an Arc<Mutex<Trie>>)
-            // in an Arc<Mutex<>> to match the recursive function's expectation.
-            // This is slightly awkward but necessary for the shared recursive logic.
-            let root_node_arc = Arc::new(Mutex::new(root_node_trie.clone()));
-
-            // Pass the bimap
-            dump_precompute_trie_recursive(&root_node_arc.as_ref().lock().unwrap(), "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap));
+            dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap));
         }
         println!("\n===================================");
         println!("Dump Complete.");
