@@ -30,6 +30,7 @@ use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateI
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
+use profiler_macro::time_it;
 use crate::datastructures::gss::acc_mod::Acc;
 use crate::glr::analyze::{compute_nullable_nonterminals, compute_terminal_follow_sets};
 
@@ -834,6 +835,7 @@ pub struct GrammarConstraintState<'a> {
 }
 
 impl<'a> GrammarConstraintState<'a> {
+    #[time_it("GrammarConstraintState::get_mask")]
     pub fn get_mask(&self) -> LLMTokenBV {
         crate::time!("GrammarConstraintState::get_mask", {
             crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
