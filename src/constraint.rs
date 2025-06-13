@@ -896,15 +896,15 @@ impl<'a> GrammarConstraintState<'a> {
                 |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
                     let mut glr_s = glr_s.clone();
                     // crate::debug!(4, "Stepping with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
-                    glr_s.log_gss("Stepping with edge_llm_tokens_bv", grammar_token_opt.unwrap_or(TerminalID(0)));
+                    // glr_s.log_gss("Stepping with edge_llm_tokens_bv", grammar_token_opt.unwrap_or(TerminalID(0)));
                     intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
-                    glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
+                    // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
     
                     if let Some(gtid) = grammar_token_opt {
                         *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
                         glr_s.step(*gtid);
                     }
-                    glr_s.log_gss("After stepping", grammar_token_opt.unwrap_or(TerminalID(0)));
+                    // glr_s.log_gss("After stepping", grammar_token_opt.unwrap_or(TerminalID(0)));
     
                     if glr_s.is_ok() {
                         Some(glr_s)
@@ -1069,10 +1069,10 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(2, "State after committing text (bytes {:?}): {} active tokenizer states.", llm_token_bytes, self.state.len());
         for (tokenizer_id, glr_state) in &self.state {
             if !glr_state.active_state.stack.is_empty() { // Log only for non-empty GSS
-                glr_state.log_gss(
-                    &format!("GSS for tokenizer state {} after commit of text", tokenizer_id.0),
-                    TerminalID(0)
-                );
+                // glr_state.log_gss(
+                //     &format!("GSS for tokenizer state {} after commit of text", tokenizer_id.0),
+                //     TerminalID(0)
+                // );
             }
         }
     }
