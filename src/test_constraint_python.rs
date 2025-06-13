@@ -1022,6 +1022,7 @@ fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>
             let mut constraint_state = constraint.init();
             let import_token_id = llm_token_map.get_by_left(b"import".as_ref()).unwrap();
             let initial_mask = constraint_state.get_mask();
+            dbg!(&initial_mask);
 
             if !initial_mask.contains(import_token_id.0) {
                 return true; // BUG: "import" should be allowed initially.
@@ -1034,6 +1035,7 @@ fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>
 
             let typing_token_id = llm_token_map.get_by_left(b" typing".as_ref()).unwrap();
             let next_mask = constraint_state.get_mask();
+            dbg!(&next_mask);
 
             if !next_mask.contains(typing_token_id.0) {
                 return true; // BUG: " typing" should be allowed after "import".
