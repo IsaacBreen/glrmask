@@ -975,13 +975,14 @@ fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>
     // gpt2_raw_vocab.insert("import".to_string(), 1000);
     // gpt2_raw_vocab.insert(" typing".to_string(), 1001);
     // let gpt2_raw_vocab = BTreeMap::from([("from", 0), (" typing", 1)]);
-    gpt2_raw_vocab.retain(|k, _| [b"from".as_ref(), b" typing"].contains(&k.as_ref()) || k.len() == 3);
+    gpt2_raw_vocab.retain(|k, _| [b"from".as_ref(), b" typing"].contains(&k.as_ref()) || k.len() <= 1);
 
     let mut llm_token_map = LLMTokenMap::new();
     for (token_str, id_val_u32) in gpt2_raw_vocab {
         let token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
         llm_token_map.insert(token_str.into_bytes(), LLMTokenID(id_val_u32 as usize));
     }
+    dbg!(&llm_token_map);
     // Ensure the specific tokens we need for the test are present
     if !llm_token_map.contains_left(b"from".as_ref()) {
         panic!("The required token 'from' is not in the loaded vocabulary. Cannot run the mask bug minimizer.");
