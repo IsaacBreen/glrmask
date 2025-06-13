@@ -736,7 +736,7 @@ impl<'r> Precomputer<'r> {
                                     |e, n| *e |= n,
                                 );
                                 // Print the source node.
-                                dump_precompute_trie_recursive(src_node_wrapper, String::new(), &mut HashSet::new(), None);
+                                // dump_precompute_trie_recursive(src_node_wrapper, String::new(), &mut HashSet::new(), None);
                                 inserter.try_destination(self.end_node.as_arc().clone()).unwrap();
                             }
 
