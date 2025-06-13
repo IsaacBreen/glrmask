@@ -100,7 +100,7 @@ pub struct ParseState { // No longer generic
 
 impl ParseState {
     pub fn new() -> Self {
-        ParseState { stack: Arc::new(GSSNode::new(Acc::default())) }
+        ParseState { stack: Arc::new(GSSNode::new(Acc::new_for_merging())) }
     }
 }
 
@@ -238,7 +238,7 @@ impl GLRParser {
     }
 
     pub fn init_glr_parser(&self) -> GLRParserState { // No longer generic
-        self.init_glr_parser_with_acc(Acc::default())
+        self.init_glr_parser_with_acc(Acc::new_fresh())
     }
 
     pub fn init_glr_parser_null(&self) -> GLRParserState { // No longer generic
@@ -269,7 +269,7 @@ impl GLRParser {
     }
 
     pub fn init_parse_state(&self) -> ParseState { // No longer generic
-        self.init_parse_state_with_acc(Acc::default())
+        self.init_parse_state_with_acc(Acc::new_fresh())
     }
 
     pub fn init_parse_state_with_acc(&self, initial_acc: Acc) -> ParseState { // No longer generic

@@ -374,6 +374,10 @@ pub mod acc_mod {
             Self { acc, allowed_terminals }
         }
 
+        pub fn new_fresh() -> Self {
+            Self { acc: None, allowed_terminals: BTreeMap::new() }
+        }
+
         pub fn new_for_merging() -> Self {
             Self { acc: Some(LLMTokenBV::zeros()), allowed_terminals: BTreeMap::new() }
         }
@@ -434,12 +438,6 @@ pub mod acc_mod {
         // #[time_it("Acc::intersect_has_effect")]
         fn intersect_has_effect(&self, right: &Self) -> bool {
             self.acc.intersect_has_effect(&right.acc)
-        }
-    }
-
-    impl Default for Acc {
-        fn default() -> Self {
-            Self::new(None, BTreeMap::new())
         }
     }
 }

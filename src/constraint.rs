@@ -321,12 +321,10 @@ impl GrammarConstraint {
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
-        let base_set_for_info = HybridBitset::ones(self.internal_max_llm_token + 1);
-        let initial_llm_token_acc: Acc = Acc::default();
         let mut state = BTreeMap::new();
         state.insert(
             self.tokenizer.initial_state_id(),
-            self.parser.init_glr_parser_with_acc(initial_llm_token_acc),
+            self.parser.init_glr_parser(),
         );
 
         GrammarConstraintState { parent: self, state }
