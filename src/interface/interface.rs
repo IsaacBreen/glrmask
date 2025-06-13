@@ -5,7 +5,6 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
-use crate::tokenizer::LLMTokenID;
 use crate::types::TerminalID as GrammarTokenID; // May not be used directly here anymore
 use bimap::BiBTreeMap;
 use kdam::tqdm;
@@ -798,25 +797,9 @@ impl Display for CompiledGrammar {
     }
 }
 
-// --- GrammarConstraint ---
-impl GrammarConstraint {
-    pub fn from_compiled_grammar(grammar: CompiledGrammar, llm_tokens: LLMTokenMap, _eof_llm_token_id: usize, max_llm_token_id: usize) -> Self {
-        // _eof_llm_token_id is not directly used by GrammarConstraint::new, but was part of the old signature.
-        // It's used by GrammarConstraintState for EOF handling.
-        // The terminal_name_to_group_id is cloned from the Arc'd definition.
-        GrammarConstraint::new(
-            grammar.tokenizer, // Cloned if grammar is passed by value, or if Regex is Clone
-            grammar.glr_parser, // Cloned if grammar is passed by value, or if GLRParser is Clone
-            llm_tokens,
-            grammar.definition.terminal_name_to_group_id.clone(),
-            max_llm_token_id
-        )
-    }
-}
-
 // --- Incremental Parser ---
 use crate::glr::parser::GLRParserState;
-use crate::tokenizer::{ExecuteResult, TokenizerStateID};
+use crate::tokenizer::{ExecuteResult, LLMTokenID, TokenizerStateID};
 
 #[derive(Clone)]
 pub struct IncrementalParser<'a> {
@@ -933,7 +916,7 @@ mod tests {
         let eof_llm_token_id = llm_tokens.len();
         let max_llm_token_id = llm_tokens.len(); // For HybridBitset capacity
 
-        let grammar_constraint = GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
+        let grammar_constraint = GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), LLMTokenID(eof_llm_token_id), max_llm_token_id);
         let mut grammar_constraint_state = grammar_constraint.init();
 
         macro_rules! llm_token_vec {
@@ -984,7 +967,7 @@ mod tests {
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let eof_llm_token_id = llm_tokens.len();
         let max_llm_token_id = llm_tokens.len();
-        let grammar_constraint = GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
+        let grammar_constraint = GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), LLMTokenID(eof_llm_token_id), max_llm_token_id);
         grammar_constraint.dump_precomputed();
         let mut grammar_constraint_state = grammar_constraint.init();
 
@@ -1024,7 +1007,7 @@ mod tests {
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let eof_llm_token_id = llm_tokens.len();
         let max_llm_token_id = llm_tokens.len();
-        let grammar_constraint = GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), eof_llm_token_id, max_llm_token_id);
+        let grammar_constraint = GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), LLMTokenID(eof_llm_token_id), max_llm_token_id);
         grammar_constraint.dump_precomputed();
         let mut grammar_constraint_state = grammar_constraint.init();
 
