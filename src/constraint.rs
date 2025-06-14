@@ -923,7 +923,7 @@ pub struct GrammarConstraintState<'a> {
 }
 
 impl<'a> GrammarConstraintState<'a> {
-    #[time_it("GrammarConstraintState::get_mask")]
+    #[time_it]
     pub fn get_mask(&self) -> LLMTokenBV {
         crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
         let final_mask_internal = RefCell::new(HybridBitset::zeros());
