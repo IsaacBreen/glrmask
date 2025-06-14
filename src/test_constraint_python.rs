@@ -683,7 +683,6 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         b" ^",
         b" _",
         b" `",
-        b" x",
         b" {",
         b" |",
         b" }",
@@ -767,6 +766,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         b"):",
         b");",
         b")=",
+        b" x",
         b"from",
     ];
     // llm_token_map.retain(|v, _| to_keep.contains(&v.as_ref()));
