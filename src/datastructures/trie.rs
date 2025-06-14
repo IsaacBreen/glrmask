@@ -398,7 +398,7 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
     /// Returns `true` if `target_ptr` (pointer to the Trie data) is reachable from `start_arc`.
     /// This function handles the case where `target_ptr` points to a node that is currently locked
     /// by the calling thread (e.g., `self` in `try_insert`).
-    fn detect_cycle(
+    pub fn detect_cycle(
         target_ptr: *const Trie<EK, EV, T>,
         start_arc: &Arc<Mutex<Trie<EK, EV, T>>>,
     ) -> bool {
