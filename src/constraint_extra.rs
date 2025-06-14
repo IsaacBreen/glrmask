@@ -13,31 +13,38 @@ use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
 
 
-/// Helper function to print the indices of set bits in a HybridBitset, optionally mapping them.
-fn format_bv_indices(
+/// Helper function to format a HybridBitset for display, showing its debug representation
+/// and a sample of the corresponding LLM tokens.
+fn format_bv_with_tokens(
     bv: &LLMTokenBV,
-    // This bimap maps: OriginalTokenID.0 (left) <-> InternalTokenID.0 (right)
-    original_internal_bimap: Option<&BiBTreeMap<usize, usize>>
+    original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+    llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+    limit: usize,
 ) -> String {
-    let indices: Vec<String> = bv.iter().map(|internal_id_val| {
-        if let Some(bimap) = original_internal_bimap {
-            // We have an internal_id_val (which is a right-side value in the bimap),
-            // and we want to find its corresponding original_id_val (left-side value).
-            bimap.get_by_right(&internal_id_val).map_or_else(
-                || format!("{} (unmapped internal)", internal_id_val),
-                |original_id_val| original_id_val.to_string()
-            )
-        } else {
-            internal_id_val.to_string() // No map provided, print the internal ID
+    let bv_debug_str = format!("{:?}", bv);
+
+    let (bimap, token_map) = match (original_internal_bimap, llm_token_map) {
+        (Some(b), Some(t)) => (b, t),
+        _ => return bv_debug_str, // If we don't have maps, just return the debug string.
+    };
+
+    let mut token_samples = Vec::new();
+    for internal_id in bv.iter().take(limit) {
+        if let Some(original_id) = bimap.get_by_right(&internal_id) {
+            if let Some(token_bytes) = token_map.get_by_right(&LLMTokenID(*original_id)) {
+                token_samples.push(format!("{:?}", String::from_utf8_lossy(token_bytes)));
+            }
         }
-    }).collect();
-    if indices.len() > 10 {
-        format!("[{} indices starting with {}...]", indices.len(), indices[0..5].join(", "))
-    } else if indices.is_empty() {
-        "[]".to_string()
-    } else {
-        format!("[{}]", indices.join(", "))
     }
+
+    if token_samples.is_empty() {
+        return bv_debug_str;
+    }
+
+    let samples_str = token_samples.join(", ");
+    let ellipsis = if bv.len() > limit { ", ..." } else { "" };
+
+    format!("{} (e.g., [{}]{})", bv_debug_str, samples_str, ellipsis)
 }
 
 /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
@@ -47,12 +54,12 @@ pub fn dump_precompute_trie_recursive(
     visited: &mut HashSet<*const PrecomputeNode>,
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
     token_name_map: Option<&BiBTreeMap<String, usize>>,
+    llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
 ) {
     let children_to_visit;
 
     {
         let node = node_arc.lock().expect("Mutex poisoned during dump");
-        // Collect children information while holding the lock
         children_to_visit = node.children().iter().flat_map(|(edge_key, dest_map)| {
             dest_map.iter().map(move |(child_wrapper, edge_val)| {
                 (edge_key.clone(), edge_val.clone(), child_wrapper.as_arc().clone())
@@ -78,7 +85,7 @@ pub fn dump_precompute_trie_recursive(
             None => "ε".to_string(),
         };
 
-        let tokens_display = format_bv_indices(&edge_val_bv, original_internal_bimap);
+        let tokens_display = format_bv_with_tokens(&edge_val_bv, original_internal_bimap, llm_token_map, 5);
 
         let child_ptr;
         let child_info;
@@ -100,7 +107,7 @@ pub fn dump_precompute_trie_recursive(
             } else {
                 format!("{}│  ", prefix)
             };
-            dump_precompute_trie_recursive(child_arc, child_prefix, visited, original_internal_bimap, token_name_map);
+            dump_precompute_trie_recursive(child_arc, child_prefix, visited, original_internal_bimap, token_name_map, llm_token_map);
         }
     }
 }
@@ -128,7 +135,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
                 println!("  (Root already visited)");
             } else {
                 visited.insert(root_ptr);
-                dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap), Some(&self.token_name_map));
+                dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap), Some(&self.token_name_map), Some(&self.llm_token_map));
             }
         }
         println!("\n===================================");
@@ -510,41 +517,37 @@ mod tests {
     use crate::datastructures::hybrid_bitset::HybridBitset;
 
     #[test]
-    fn test_format_bv_indices_empty() {
-        let bv = HybridBitset::zeros();
-        assert_eq!(format_bv_indices(&bv, None), "[]");
-
-        // let bv = HybridBitset::new(); // Duplicate test removed
-        // assert_eq!(format_bv_indices(&bv, None), "[]");
+    fn test_format_bv_with_tokens_no_maps() {
+        let bv = HybridBitset::from_iter(vec![1, 2]);
+        assert_eq!(format_bv_with_tokens(&bv, None, None, 5), "HybridBitset { inner: 1..=2 }");
     }
 
     #[test]
-    fn test_format_bv_indices_single() {
-        let bv = HybridBitset::from_iter(vec![3]);
-        assert_eq!(format_bv_indices(&bv, None), "[3]");
+    fn test_format_bv_with_tokens_with_maps() {
+        let bv = HybridBitset::from_iter(vec![0, 1]); // internal IDs
+        let mut bimap = BiBTreeMap::new();
+        bimap.insert(10, 0); // original 10 -> internal 0
+        bimap.insert(20, 1); // original 20 -> internal 1
+        let mut llm_map = BiBTreeMap::new();
+        llm_map.insert(b"ten".to_vec(), LLMTokenID(10));
+        llm_map.insert(b"twenty".to_vec(), LLMTokenID(20));
+
+        let expected = "HybridBitset { inner: 0..=1 } (e.g., [\"ten\", \"twenty\"])";
+        assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 5), expected);
     }
 
     #[test]
-    fn test_format_bv_indices_multiple_few() {
-        let bv = HybridBitset::from_iter(vec![1, 5, 8]);
-        assert_eq!(format_bv_indices(&bv, None), "[1, 5, 8]");
-    }
+    fn test_format_bv_with_tokens_limit_and_ellipsis() {
+        let bv = HybridBitset::from_iter(0..10); // internal IDs 0-9
+        let mut bimap = BiBTreeMap::new();
+        let mut llm_map = BiBTreeMap::new();
+        for i in 0..10 {
+            bimap.insert(100 + i, i);
+            llm_map.insert(format!("{}", 100 + i).into_bytes(), LLMTokenID(100 + i));
+        }
 
-    #[test]
-    fn test_format_bv_indices_multiple_many() {
-        let bv = HybridBitset::from_iter(0..15);
-        assert_eq!(format_bv_indices(&bv, None), "[15 indices starting with 0, 1, 2, 3, 4...]");
-    }
-
-    #[test]
-    fn test_format_bv_indices_with_mapping() {
-        let mut bv = HybridBitset::zeros();
-        bv.insert(0); // internal ID 0
-        bv.insert(1); // internal ID 1
-        let mut mapping = BiBTreeMap::new();
-        mapping.insert(100, 0); // original 100 -> internal 0
-        mapping.insert(200, 1); // original 200 -> internal 1
-        assert_eq!(format_bv_indices(&bv, Some(&mapping)), "[100, 200]");
+        let expected = "HybridBitset { inner: 0..=9 } (e.g., [\"100\", \"101\", \"102\"], ...)";
+        assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 3), expected);
     }
 
 
