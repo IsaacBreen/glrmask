@@ -428,23 +428,35 @@ impl<'a> GLRParserState<'a> { // No longer generic
         nt: NonTerminalID,
         len: usize,
     ) -> Arc<GSSNode> {
-        let mut out = GSSNode::new(Acc::new_for_merging()); // Start with a default acc
         let popped = peek.popn(len);
         crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
+        // let mut out = GSSNode::new(Acc::new_for_merging()); // Start with a default acc
+        let mut out = Vec::new();
         for popped_peek in popped.peek_iter() { // Renamed predecessor to predecessor_arc
             let goto = self.parser.stage_7_table.get(&popped_peek.edge_value().state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", popped_peek.edge_value().state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor ??)", nt.0, popped_peek.edge_value().state_id)), |state_id| Ok(*state_id))).unwrap();
             match goto {
                 Goto::State(goto_state_id) => {
                     // crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
                     let new_gss_node = popped_peek.to_node().push_with_existing_acc(ParseStateEdgeContent { state_id: goto_state_id });
-                    out.merge(&Arc::new(new_gss_node));
+                    out.push(Arc::new(new_gss_node));
                 }
                 Goto::Accept => {
                     // No action needed for Accept
                 }
             }
         }
-        Arc::new(out)
+        if out.is_empty() {
+            return Arc::new(GSSNode::new(Acc::new_for_merging()));
+        } else if out.len() == 1 {
+            return out.into_iter().next().unwrap();
+        } else {
+            let mut out_iter = out.into_iter();
+            let mut out_node = out_iter.next().unwrap();
+            for next_node in out_iter {
+                out_node.merge(&next_node);
+            }
+            out_node
+        }
     }
 
     #[time_it("GLRParserState::step")]
