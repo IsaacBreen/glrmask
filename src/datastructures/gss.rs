@@ -627,7 +627,7 @@ impl GSSNode {
         Self::new_with_single_predecessor(Arc::new(self), edge_value, acc_for_new_node)
     }
 
-    // #[time_it("GSSNode::pop")]
+    #[time_it("GSSNode::pop")]
     pub fn pop(&self) -> Self {
         let mut result_acc = Acc::new_for_merging();
         let mut result_predecessors = NodeMap::new();
