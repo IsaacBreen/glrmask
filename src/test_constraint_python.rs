@@ -665,7 +665,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     fn vec_contains(vec: &[u8], other: &[u8]) -> bool {
         vec.windows(other.len()).any(|window| window == other)
     }
-    llm_token_map.retain(|v, _| v.len() == 1 || [b"-".as_ref(), b"*", b"..."].iter().any(|other| vec_contains(v.as_ref(), other)));
+    llm_token_map.retain(|v, _| v.len() == 1 || ![b"-".as_ref(), b"*", b"..."].iter().any(|other| vec_contains(v.as_ref(), other)));
 
 
     // Print the vocab
