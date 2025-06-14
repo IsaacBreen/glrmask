@@ -1026,11 +1026,13 @@ fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>
             dbg!(&initial_mask);
 
             if !initial_mask.contains(import_token_id.0) {
+                println!("BUG: \"from\" should be allowed initially.");
                 return true; // BUG: "from" should be allowed initially.
             }
 
             constraint_state.commit(*import_token_id);
             if !constraint_state.is_active() {
+                println!("BUG: State should be active after a valid token.");
                 return true; // BUG: State should be active after a valid token.
             }
 
@@ -1038,6 +1040,7 @@ fn test_minimize_grammar_for_mask_bug() -> Result<(), Box<dyn std::error::Error>
             let next_mask = constraint_state.get_mask();
 
             if !next_mask.contains(typing_token_id.0) {
+                println!("BUG: \" typing\" should be allowed after \"from\".");
                 return true; // BUG: " typing" should be allowed after "from".
             }
             
