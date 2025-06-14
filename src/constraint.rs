@@ -585,23 +585,27 @@ impl<'r> Precomputer<'r> {
         Trie::special_map(
             initial_nodes_and_values,
             // step: Propagate predecessor terminals.
-            |predecessors, edge_terminal_opt, _edge_bv, _child_node| {
-                if let Some(terminal_id) = edge_terminal_opt {
+            |predecessors, edge_terminal_opt, dest_map| {
+                let new_v = if let Some(terminal_id) = edge_terminal_opt {
                     // A new chain of terminals starts. The only predecessor that matters for the child
                     // is the terminal on this edge.
-                    Some(BTreeSet::from([*terminal_id]))
+                    BTreeSet::from([*terminal_id])
                 } else {
                     // No terminal on this edge, so the child inherits the same set of
                     // "most recent" predecessors from the parent.
-                    Some(predecessors.clone())
-                }
+                    predecessors.clone()
+                };
+                // Apply this new value to all children in the destination map.
+                dest_map.keys().map(|child_wrapper| {
+                    (child_wrapper.as_arc().clone(), new_v.clone())
+                }).collect::<Vec<_>>()
             },
             // merge: Union of predecessor sets from different paths.
             |existing_set, new_set| {
                 existing_set.extend(new_set);
             },
             // process: Prune outgoing edges based on allowed follows.
-            move |node, all_immediate_predecessors| {
+            |node, all_immediate_predecessors| {
                 // If there are no preceding terminals (e.g., root or only None-edges path from root),
                 // all outgoing terminals are considered valid.
                 if all_immediate_predecessors.is_empty() {

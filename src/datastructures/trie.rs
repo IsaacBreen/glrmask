@@ -1560,9 +1560,11 @@ mod tests {
         Trie::special_map(
             vec![(root.clone(), 100)],
             // step: add one, ignore edge info
-            |parent_val, ek, ev, _child_node| {
-                 edge_info_at_step.push((ek.clone(), ev.clone()));
-                 Some(parent_val + 1)
+            |parent_val, ek, dest_map| {
+                dest_map.iter().map(|(child_wrapper, ev)| {
+                    edge_info_at_step.push((*ek, *ev));
+                    (child_wrapper.as_arc().clone(), parent_val + 1)
+                }).collect::<Vec<_>>()
             },
             |current, new| *current = new, // merge: replace
             |node, computed_val| { // process: always continue
@@ -1641,9 +1643,11 @@ mod tests {
         Trie::special_map(
             vec![(root.clone(), 100)],
             // step: add one, record edge info
-            |parent_val, ek, ev, _child_node| {
-                edge_info_at_step.push((ek.clone(), ev.clone()));
-                Some(parent_val + 1)
+            |parent_val, ek, dest_map| {
+                dest_map.iter().map(|(child_wrapper, ev)| {
+                    edge_info_at_step.push((*ek, *ev));
+                    (child_wrapper.as_arc().clone(), parent_val + 1)
+                }).collect::<Vec<_>>()
             },
             // merge: replace
             |current, new| { *current = new; },
@@ -1760,7 +1764,11 @@ mod tests {
         Trie::special_map(
             vec![(root.clone(), 100)], // Start at root
             // step: increment value, ignore edges
-            |p_val, _ek, _ev, _child_node| Some(p_val + 1),
+            |p_val, _ek, dest_map| {
+                dest_map.keys().map(|child_wrapper| {
+                    (child_wrapper.as_arc().clone(), p_val + 1)
+                }).collect::<Vec<_>>()
+            },
             // merge: take max value
             |current_v, new_v| *current_v = (*current_v).max(new_v),
             { // process: always continue
@@ -1796,7 +1804,9 @@ mod tests {
         let mut processed = false;
         Trie::special_map(
             vec![(root.clone(), 100)],
-            |_p, _ek, _ev, _n| panic!("Step should not be called for leaf"),
+            |_p, _ek, _dest_map| {
+                panic!("Step should not be called for leaf")
+            },
             |_cur, _new| {},
             |node, v| { // process: always continue
                 assert_eq!(node.value, 42);
@@ -1953,7 +1963,11 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)], // Start at root
-            |p, _ek, _ev, _n| Some(p + 1), // Step: increment
+            |p, _ek, dest_map| { // Step: increment
+                dest_map.keys().map(|child_wrapper| {
+                    (child_wrapper.as_arc().clone(), p + 1)
+                }).collect::<Vec<_>>()
+            },
             |cur, new| *cur = (*cur).max(new), // Merge: max
             |node, v| { // process: always continue
                 processed_vals.push(node.value);
@@ -2007,7 +2021,11 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)],
-            |p_val, _ek, _ev, _child_node| Some(p_val + 1), // step: increment value
+            |p_val, _ek, dest_map| { // step: increment value
+                dest_map.keys().map(|child_wrapper| {
+                    (child_wrapper.as_arc().clone(), p_val + 1)
+                }).collect::<Vec<_>>()
+            },
             |current_v, new_v| *current_v = new_v, // merge: replace
             {
                 let processed_nodes = processed_nodes.clone();
@@ -2070,12 +2088,14 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)],
-            // step: increment value only if edge key is "keep"
-            |p_val, ek, _ev, _child_node| {
+            // step: increment value only if edge key is "keep", returning an iterator of new values
+            |p_val, ek, dest_map| {
                 if *ek == "keep" {
-                    Some(p_val + 1)
+                    dest_map.keys().map(|child_wrapper| {
+                        (child_wrapper.as_arc().clone(), p_val + 1)
+                    }).collect::<Vec<_>>()
                 } else {
-                    None // Skip this edge
+                    Vec::new() // Skip this edge key by returning an empty iterator
                 }
             },
             |current_v, new_v| *current_v = new_v, // merge: replace
