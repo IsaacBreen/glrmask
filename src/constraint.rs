@@ -989,14 +989,14 @@ impl<'a> GrammarConstraintState<'a> {
             |glr_s, grammar_token_opt, dest_map| {
                 timeit!("get_mask step_fn", {
                     let mut results = Vec::new();
-                    // let mut glr_s = glr_s.clone();
+                    let mut glr_s = glr_s.clone();
                     // glr_s.log_gss("After stepping", grammar_token_opt.unwrap_or(TerminalID(0)));
+                    subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
 
                     crate::debug!(4, "After stepping with grammar_token_opt: {:?}", glr_s.is_ok());
                     for (child_node_trie_data, edge_llm_tokens_bv) in dest_map.iter() {
                         let mut glr_s = glr_s.clone();
                         intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
-                    subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
                         crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
                         glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
                         if let Some(gtid) = grammar_token_opt {
