@@ -637,14 +637,25 @@ impl<'r> Precomputer<'r> {
         let mut live_nodes_cache: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = HashSet::new();
         let mut visited_for_dfs: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = HashSet::new();
 
-        // A node is "live" if it can reach a node with `value.end == true`.
-        // We iterate through all roots. For each root, we do a post-order traversal (DFS).
-        // `is_live_and_prune` recursively determines if a node is live and prunes its dead children.
-        // `BTreeMap::retain` then removes any root that is not itself live.
-        self.roots.retain(|_sid, root_arc| {
+        // A node is "live" if it can reach a node with `value.end == true`. We do a post-order
+        // traversal (DFS) from each root. `is_live_and_prune` recursively determines if a node
+        // is live and prunes its dead children.
+        //
+        // We can't use `BTreeMap::retain` directly because its closure would borrow `self`
+        // immutably (to call `is_live_and_prune`) while `retain` itself holds a mutable borrow
+        // on `self.roots`. Instead, we collect the keys of roots to remove and then remove them.
+        let sids_to_remove: Vec<_> = self.roots.iter().filter_map(|(sid, root_arc)| {
             let root_wrapper = ArcPtrWrapper::new(root_arc.clone());
-            self.is_live_and_prune(root_wrapper, &mut live_nodes_cache, &mut visited_for_dfs)
-        });
+            if self.is_live_and_prune(root_wrapper, &mut live_nodes_cache, &mut visited_for_dfs) {
+                None // This root is live, keep it.
+            } else {
+                Some(*sid) // This root is not live, mark for removal.
+            }
+        }).collect();
+
+        for sid in sids_to_remove {
+            self.roots.remove(&sid);
+        }
 
         crate::debug!(2, "Finished pruning dead paths.");
     }
