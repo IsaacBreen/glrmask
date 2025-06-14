@@ -529,7 +529,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let mut productions = productions.to_vec();
     // crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
     crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
-    // println!("After direct right recursion:\n{}", display_productions(&productions));
+    println!("After direct right recursion:\n{}", display_productions(&productions));
 
     // After recursion resolution, new non-terminals may have been added.
     // We need to update the non_terminal_map.
