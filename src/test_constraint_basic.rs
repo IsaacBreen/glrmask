@@ -333,7 +333,6 @@ fn test_precompute_explosion() {
         &BTreeMap::new(), // empty terminal_follow_map
         &mut BTreeMap::new(),
     );
-    // print_precomputed(&_precomputed);
     println!("Done precomputing");
 }
 
