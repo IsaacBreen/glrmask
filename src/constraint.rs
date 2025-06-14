@@ -614,7 +614,7 @@ impl<'r> Precomputer<'r> {
     
                 // Compute the set of all allowed terminals that can follow any of the immediate predecessors.
                 let mut allowed_follow_terminals = BTreeSet::new();
-                for preceding_terminal in all_immediate_predecessors {
+                for preceding_terminal in all_immediate_predecessors.iter() {
                     if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
                         allowed_follow_terminals.extend(follow_set.iter().cloned());
                     }
