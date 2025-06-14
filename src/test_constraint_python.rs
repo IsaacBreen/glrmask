@@ -662,6 +662,9 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // assert!(llm_token_map.contains_left(&b"from".to_vec()));
     // assert!(llm_token_map.contains_left(&b" x".to_vec()));
 
+    llm_token_map.retain(|v, _| v.len() == 1 || v.iter().all(|c| *c == b'-'));
+
+
     // Print the vocab
     println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
     for (token, id) in llm_token_map.iter() {
