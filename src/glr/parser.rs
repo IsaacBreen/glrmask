@@ -461,7 +461,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     #[time_it("GLRParserState::step")]
     pub fn step(&mut self, token_id: TerminalID) {
-        timeit!(format!("GLRParserState::step({} ({:?})", token_id.0, self.parser.terminal_map.get_by_right(&token_id)), {
+        // timeit!(format!("GLRParserState::step({} ({:?})", token_id.0, self.parser.terminal_map.get_by_right(&token_id)), {
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
         self.log_gss("Step-start", token_id);
         self.cycled_states = ParseState::new();
@@ -540,7 +540,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // self.action_not_found_states = ParseState::new(); // Reset if not needed beyond the step
 
         crate::debug!(4, "----------------------------------------------------------------");
-        })
+        // })
     }
 
     pub fn parse(&mut self, input: &[TerminalID]) {
