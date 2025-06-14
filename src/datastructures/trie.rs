@@ -1804,7 +1804,7 @@ mod tests {
         let mut processed = false;
         Trie::special_map(
             vec![(root.clone(), 100)],
-            |_p, _ek, _dest_map| {
+            |_p, _ek, _dest_map| -> Vec<(TestNodeBasic, i32)> {
                 panic!("Step should not be called for leaf")
             },
             |_cur, _new| {},
