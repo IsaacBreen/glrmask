@@ -580,12 +580,12 @@ impl<'r> Precomputer<'r> {
             .map(|root_arc| (root_arc.clone(), BTreeSet::<GrammarTokenID>::new()))
             .collect();
     
-        let terminal_follow_map = &self.terminal_follow_map;
+        let terminal_follow_map = self.terminal_follow_map;
     
         Trie::special_map(
             initial_nodes_and_values,
-            // step: Propagate predecessor terminals.
-            |predecessors, edge_terminal_opt, _edge_bv, _child_node| {
+            // step_ek: Determine the set of predecessor terminals for children under this edge key.
+            |predecessors, edge_terminal_opt| {
                 if let Some(terminal_id) = edge_terminal_opt {
                     // A new chain of terminals starts. The only predecessor that matters for the child
                     // is the terminal on this edge.
@@ -595,6 +595,10 @@ impl<'r> Precomputer<'r> {
                     // "most recent" predecessors from the parent.
                     Some(predecessors.clone())
                 }
+            },
+            // step_ev: The value for the child is the intermediate set. It doesn't depend on EV or child T.
+            |intermediate_set, _edge_bv, _child_node| {
+                Some(intermediate_set.clone())
             },
             // merge: Union of predecessor sets from different paths.
             |existing_set, new_set| {
@@ -610,7 +614,7 @@ impl<'r> Precomputer<'r> {
     
                 // Compute the set of all allowed terminals that can follow any of the immediate predecessors.
                 let mut allowed_follow_terminals = BTreeSet::new();
-                for preceding_terminal in &*all_immediate_predecessors {
+                for preceding_terminal in all_immediate_predecessors {
                     if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
                         allowed_follow_terminals.extend(follow_set.iter().cloned());
                     }

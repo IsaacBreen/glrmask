@@ -1567,13 +1567,20 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)],
-            // step: add one, ignore edge info
-            |parent_val, ek, ev, _child_node| {
-                 edge_info_at_step.push((ek.clone(), ev.clone()));
-                 Some(parent_val + 1)
+            // step_ek: pass parent value and edge key to step_ev
+            |parent_val, ek| {
+                Some((*parent_val, *ek)) // VI is (i32, &'static str)
             },
-            |current, new| *current = new, // merge: replace
-            |node, computed_val| { // process: always continue
+            // step_ev: log edge info and compute new value
+            |intermediate, ev, _child_node| {
+                let (parent_val, ek) = *intermediate;
+                edge_info_at_step.push((ek, *ev));
+                Some(parent_val + 1)
+            },
+            // merge
+            |current, new| *current = new,
+            // process
+            |node, computed_val| {
                 processed_node_values.push(node.value);
                 computed_values.push(*computed_val);
                 true
@@ -1648,14 +1655,19 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)],
-            // step: add one, record edge info
-            |parent_val, ek, ev, _child_node| {
-                edge_info_at_step.push((ek.clone(), ev.clone()));
+            // step_ek
+            |parent_val, ek| {
+                Some((*parent_val, *ek))
+            },
+            // step_ev
+            |intermediate, ev, _child_node| {
+                let (parent_val, ek) = *intermediate;
+                edge_info_at_step.push((ek, *ev));
                 Some(parent_val + 1)
             },
-            // merge: replace
+            // merge
             |current, new| { *current = new; },
-            // process: always continue
+            // process
             |node, computed_val| {
                 processed_node_values.push(node.value);
                 computed_values.push(*computed_val);
@@ -1767,8 +1779,10 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)], // Start at root
-            // step: increment value, ignore edges
-            |p_val, _ek, _ev, _child_node| Some(p_val + 1),
+            // step_ek: pass parent value through
+            |p_val, _ek| Some(*p_val),
+            // step_ev: increment value
+            |intermediate_val, _ev, _child_node| Some(intermediate_val + 1),
             // merge: take max value
             |current_v, new_v| *current_v = (*current_v).max(new_v),
             { // process: always continue
@@ -1804,7 +1818,8 @@ mod tests {
         let mut processed = false;
         Trie::special_map(
             vec![(root.clone(), 100)],
-            |_p, _ek, _ev, _n| panic!("Step should not be called for leaf"),
+            |_p, _ek| -> Option<()> { panic!("Step_ek should not be called for leaf") },
+            |_intermediate, _ev, _n| -> Option<i32> { panic!("Step_ev should not be called for leaf") },
             |_cur, _new| {},
             |node, v| { // process: always continue
                 assert_eq!(node.value, 42);
@@ -1961,9 +1976,14 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)], // Start at root
-            |p, _ek, _ev, _n| Some(p + 1), // Step: increment
-            |cur, new| *cur = (*cur).max(new), // Merge: max
-            |node, v| { // process: always continue
+            // step_ek
+            |p, _ek| Some(*p),
+            // step_ev
+            |intermediate, _ev, _n| Some(intermediate + 1),
+            // merge
+            |cur, new| *cur = (*cur).max(new),
+            // process
+            |node, v| {
                 processed_vals.push(node.value);
                 computed_vals.push(*v);
                 true
@@ -2015,8 +2035,12 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)],
-            |p_val, _ek, _ev, _child_node| Some(p_val + 1), // step: increment value
-            |current_v, new_v| *current_v = new_v, // merge: replace
+            // step_ek
+            |p_val, _ek| Some(*p_val),
+            // step_ev
+            |intermediate, _ev, _child_node| Some(intermediate + 1),
+            // merge
+            |current_v, new_v| *current_v = new_v,
             {
                 let processed_nodes = processed_nodes.clone();
                 let computed_values = computed_values.clone();
@@ -2078,15 +2102,18 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)],
-            // step: increment value only if edge key is "keep"
-            |p_val, ek, _ev, _child_node| {
+            // step_ek: check edge key and pass parent value
+            |p_val, ek| {
                 if *ek == "keep" {
-                    Some(p_val + 1)
+                    Some(*p_val)
                 } else {
-                    None // Skip this edge
+                    None // Skip this edge and all its children
                 }
             },
-            |current_v, new_v| *current_v = new_v, // merge: replace
+            // step_ev: increment value
+            |intermediate, _ev, _child_node| Some(intermediate + 1),
+            // merge
+            |current_v, new_v| *current_v = new_v,
             {
                 let processed_nodes = processed_nodes.clone();
                 let computed_values = computed_values.clone();
