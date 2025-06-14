@@ -954,7 +954,8 @@ pub fn subtract_llm_tokens_and_prune_arc(
             new_acc = Acc::new(Some(LLMTokenBV::max_ones() - llm_tokens.clone()), current_acc.allowed_terminals().clone());
         }
         if new_acc.is_alive() {
-            Some((new_acc, false))
+            let continue_recursion = &new_acc != current_acc;
+            Some((new_acc, continue_recursion))
         } else {
             None // Prune this node
         }
