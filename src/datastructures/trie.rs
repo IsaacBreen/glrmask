@@ -235,9 +235,9 @@ where
                                                                     destinations_for_this_ek.insert(ArcPtrWrapper::new(child_arc), edge_value);
                                                                 }
                                                                 _ => return Err(format!("Invalid child_idx-EV pair format for node {} under edge key {:?}", i, edge_key)),
-                                                            }
-                                                        }
-                                                    }
+        }
+    }
+}
                                                     _ => return Err(format!("Children destination map for node {} under edge key {:?} is not an array", i, edge_key)),
                                                 }
                                                 current_node_guard.children.insert(edge_key, destinations_for_this_ek);
@@ -845,12 +845,15 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     /// Performs a specialized breadth-first traversal (related to Dijkstra/Bellman-Ford relaxation).
     /// (special_map implementation remains unchanged)
     #[time_it]
-    pub fn special_map<V: Clone>(
+    pub fn special_map<V: Clone, I>(
         initial_nodes_and_values: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
-        mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // Changed Trie<...> to &Trie<...>
+        mut step: impl FnMut(
+            &V, &EK, &OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>
+        ) -> I,
         mut merge: impl FnMut(&mut V, V),
         mut process: impl FnMut(&mut Trie<EK, EV, T>, &mut V) -> bool,
-    ) {
+    ) where
+        I: IntoIterator<Item = (Arc<Mutex<Trie<EK, EV, T>>>, V)>, {
         // ------------------------------------------------------------------
         //  Simple depth-driven scheduler.
         //
@@ -902,32 +905,24 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 if !proceed { continue; }                           // user stopped traversal at this node
 
                 // ---------- propagate to children -------------
-                // We read children once, outside any long-lived locks
-                let edges: Vec<(EK, EV, Arc<Mutex<Self>>)> = {
+                let children_by_key: BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<Mutex<Self>>, EV>> = {
                     let guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
-                    guard.children
-                        .iter()
-                        .flat_map(|(ek, dst_map)| {
-                            dst_map.iter().map(move |(wrap, ev)| (ek.clone(), ev.clone(), wrap.as_arc().clone()))
-                        })
-                        .collect()
+                    guard.children.clone()
                 };
 
-                for (ek, ev, child_arc) in edges {
-                    let child_ptr = Arc::as_ptr(&child_arc);
+                for (ek, dst_map) in &children_by_key {
+                    // The `step` closure is now responsible for iterating through destinations for a given edge key.
+                    // It returns an iterator of (child_arc, new_value) pairs.
+                    let new_values_for_children = step(&agg_v, ek, dst_map);
 
-                    // user ‘step’ callback
-                    let maybe_v = {
-                        let child_guard = child_arc.lock().expect("poison");
-                        step(&agg_v, &ek, &ev, &child_guard) // Pass &child_guard
-                    };
-                    if let Some(new_v) = maybe_v {
+                    for (child_arc, new_v) in new_values_for_children {
+                        let child_ptr = Arc::as_ptr(&child_arc);
                         values
                             .entry(child_ptr)
                             .and_modify(|old| merge(old, new_v.clone()))
                             .or_insert(new_v);
 
-                        // Queue child by its declared depth
+                        // Queue child for processing
                         let child_depth = child_arc.lock().expect("poison").max_depth;
                         todo.entry(child_depth).or_default().insert(ArcPtrWrapper::new(child_arc));
                     }
