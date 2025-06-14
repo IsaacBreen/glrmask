@@ -977,6 +977,9 @@ impl<'a> GrammarConstraintState<'a> {
              return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
         }
 
+        let t1 = std::time::Instant::now();
+        println!("after initial_values_for_map: {:?}", t1.duration_since(t0));
+
         let step_counts_clone1 = Arc::clone(&step_counts);
         let step_counts_clone2 = Arc::clone(&step_counts);
 
@@ -1031,6 +1034,11 @@ impl<'a> GrammarConstraintState<'a> {
                 }
             },
         );
+
+        crate::debug!(2, "Done main part of get_mask");
+        let t1 = std::time::Instant::now();
+        println!("after special_map: {:?}", t1.duration_since(t0));
+
 
         let counts = step_counts.lock().unwrap();
         if !counts.is_empty() {
