@@ -135,7 +135,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                     // );
                 }
                 // timeit!(time_str,
-                    *self_bv |= &other_bv
+                    *self_bv |= other_bv
                 // );
                 // An empty bitset resulting from a union is still Some(empty_bv), not None.
             }
@@ -239,7 +239,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
                     // // );
                 }
                 // // timeit!(time_str,
-                *self_bv &= &right_bv
+                *self_bv &= right_bv
                 // );
             }
             (None, Some(right_bv)) => {
