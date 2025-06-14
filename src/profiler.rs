@@ -60,6 +60,12 @@ fn print_node_recursive(
     let total_ms = node.total_time.as_secs_f64() * 1000.0;
     let own_ms = node.own_time.as_secs_f64() * 1000.0;
 
+    let (total_per_hit_ms, own_per_hit_ms) = if node.hits > 0 {
+        (total_ms / node.hits as f64, own_ms / node.hits as f64)
+    } else {
+        (0.0, 0.0)
+    };
+
     let percentage = if !parent_total_time.is_zero() {
         (node.total_time.as_secs_f64() / parent_total_time.as_secs_f64()) * 100.0
     } else {
@@ -68,11 +74,19 @@ fn print_node_recursive(
 
     let total_str = format!("{:.3}ms", total_ms);
     let own_str = format!("{:.3}ms", own_ms);
+    let total_per_hit_str = format!("{:.3}ms", total_per_hit_ms);
+    let own_per_hit_str = format!("{:.3}ms", own_per_hit_ms);
     let percentage_str = format!("{:.1}%", percentage);
 
     println!(
-        "{:>10} {:>15} {:>15} {:>15}  {}",
-        node.hits, total_str, own_str, percentage_str, name_with_indent
+        "{:>10} {:>15} {:>15} {:>15} {:>15} {:>15}  {}",
+        node.hits,
+        total_str,
+        total_per_hit_str,
+        own_str,
+        own_per_hit_str,
+        percentage_str,
+        name_with_indent
     );
 
     let mut sorted_children: Vec<_> = node.children.iter().collect();
@@ -100,8 +114,8 @@ pub fn print_summary() {
     if !no_timing_data {
         println!("\n[Hierarchical Timings]");
         println!(
-            "{:>10} {:>15} {:>15} {:>15}  {}",
-            "Hits", "Total Time", "Own Time", "% of Parent", "Name"
+            "{:>10} {:>15} {:>15} {:>15} {:>15} {:>15}  {}",
+            "Hits", "Total Time", "Total/Hit", "Own Time", "Own/Hit", "% of Parent", "Name"
         );
 
         let root_total_time: Duration = data
@@ -167,8 +181,8 @@ pub fn print_summary_flat() {
 
         println!("\n[Flat Timings]");
         println!(
-            "{:>10} {:>15} {:>15}  {}",
-            "Hits", "Total Time", "Own Time", "Name"
+            "{:>10} {:>15} {:>15} {:>15} {:>15}  {}",
+            "Hits", "Total Time", "Total/Hit", "Own Time", "Own/Hit", "Name"
         );
 
         let mut sorted_list: Vec<_> = flat_map.iter().collect();
@@ -177,12 +191,21 @@ pub fn print_summary_flat() {
         for (name, node) in sorted_list {
             let total_ms = node.total_time.as_secs_f64() * 1000.0;
             let own_ms = node.own_time.as_secs_f64() * 1000.0;
+
+            let (total_per_hit_ms, own_per_hit_ms) = if node.hits > 0 {
+                (total_ms / node.hits as f64, own_ms / node.hits as f64)
+            } else {
+                (0.0, 0.0)
+            };
+
             let total_str = format!("{:.3}ms", total_ms);
             let own_str = format!("{:.3}ms", own_ms);
+            let total_per_hit_str = format!("{:.3}ms", total_per_hit_ms);
+            let own_per_hit_str = format!("{:.3}ms", own_per_hit_ms);
 
             println!(
-                "{:>10} {:>15} {:>15}  {}",
-                node.hits, total_str, own_str, name
+                "{:>10} {:>15} {:>15} {:>15} {:>15}  {}",
+                node.hits, total_str, total_per_hit_str, own_str, own_per_hit_str, name
             );
         }
     }
