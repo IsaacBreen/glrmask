@@ -506,15 +506,16 @@ impl SubAssign for HybridBitset {
 
 impl BitAndAssign<&HybridBitset> for HybridBitset {
     fn bitand_assign(&mut self, rhs: &HybridBitset) {
-        let start_time = std::time::Instant::now();
-        self.inner = &self.inner & &rhs.inner;
-        let duration = start_time.elapsed();
-        if duration.as_millis() > 100 {
-            println!(
-                "HybridBitset::bitand_assign (ref) took {}ms",
-                duration.as_millis()
-            );
-        }
+        // let start_time = std::time::Instant::now();
+        // self.inner = &self.inner & &rhs.inner;
+        // let duration = start_time.elapsed();
+        // if duration.as_millis() > 100 {
+        //     println!(
+        //         "HybridBitset::bitand_assign (ref) took {}ms",
+        //         duration.as_millis()
+        //     );
+        // }
+        self.inner = std::mem::take(&mut self.inner) & rhs.inner.clone();
     }
 }
 
