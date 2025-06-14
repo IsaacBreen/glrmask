@@ -913,7 +913,7 @@ fn prune_and_transform_recursive(
     }
 }
 
-// #[time_it]
+#[time_it]
 pub fn intersect_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>, 
     tokens_to_intersect: &LLMTokenBV,
@@ -943,7 +943,7 @@ pub fn intersect_llm_tokens_and_prune_arc(
     }
 }
 
-// #[time_it]
+#[time_it]
 pub fn subtract_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     llm_tokens: &LLMTokenBV,
