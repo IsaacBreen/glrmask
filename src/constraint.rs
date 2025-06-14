@@ -1,6 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
+use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, subtract_llm_tokens_and_prune_arc};
 use ordered_hash_map::OrderedHashMap;
 use ordered_hash_map::OrderedHashSet;
@@ -682,7 +683,7 @@ impl<'r> Precomputer<'r> {
         // We must collect children before recursing to avoid holding the lock.
         let children_to_check: Vec<ArcPtrWrapper<Mutex<PrecomputeNode>>> = {
             let node_guard = node_arc.lock().unwrap();
-            node_guard.children.values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
+            node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
         };
 
         let mut live_children_for_this_node = HashSet::new();
