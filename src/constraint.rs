@@ -340,7 +340,7 @@ impl GrammarConstraint {
         helper.run_dfs();
         // helper.prune_precomputed_graph();
         // helper.prune_terminal_sequences();
-        // helper.merge_nodes();
+        helper.merge_nodes();
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
 
@@ -600,80 +600,6 @@ impl<'r> Precomputer<'r> {
         }
     }
 
-    fn prune_terminal_sequences(&mut self) {
-        crate::debug!(2, "Starting terminal sequence pruning.");
-        let mut visited_contexts = HashSet::new(); // To avoid redundant work on same node from same context
-        for root_arc in self.roots.clone().values() {
-            // For roots, there's no "previous terminal", so pass None.
-            self.prune_terminal_sequences_recursive(&root_arc, None, &mut visited_contexts);
-        }
-        crate::debug!(2, "Finished terminal sequence pruning. Edges pruned: {}", self.stats.edges_pruned_by_terminal_sequence);
-    }
-
-    fn prune_terminal_sequences_recursive(
-        &mut self,
-        node_arc: &Arc<Mutex<PrecomputeNode>>,
-        prev_edge_terminal_opt: Option<GrammarTokenID>,
-        visited_contexts: &mut HashSet<(*const Mutex<PrecomputeNode>, Option<GrammarTokenID>)>,
-    ) {
-        let node_ptr = Arc::as_ptr(node_arc);
-        if !visited_contexts.insert((node_ptr, prev_edge_terminal_opt)) {
-            return; // Already processed this node from this incoming terminal context
-        }
-
-        let mut children_to_recurse: Vec<(Arc<Mutex<PrecomputeNode>>, Option<GrammarTokenID>)> = Vec::new();
-        let mut edges_before_pruning = 0;
-        let mut edges_after_pruning = 0;
-
-        { // Scoped lock for node_arc
-            let mut node_guard = node_arc.lock().expect("Mutex poisoned: prune_terminal_sequences_recursive");
-
-            let allowed_next_terminals: Option<&BTreeSet<GrammarTokenID>> =
-                prev_edge_terminal_opt.and_then(|prev_term| self.terminal_follow_map.get(&prev_term));
-
-            // Collect children before modifying map to avoid issues with iterator invalidation if retaining in place
-            let original_children_keys: Vec<Option<GrammarTokenID>> = node_guard.children().keys().cloned().collect();
-            
-            for key_k_opt_t2 in original_children_keys { // key_k_opt_t2 is the Option<GrammarTokenID> for the outgoing edge
-                if let Some(destinations_map) = node_guard.children().get(&key_k_opt_t2) {
-                     edges_before_pruning += destinations_map.len();
-                }
-
-                let mut keep_edge = true;
-                if let Some(allowed_set) = allowed_next_terminals {
-                    // Pruning applies if prev_edge_terminal_opt was Some, and thus allowed_set is Some.
-                    if let Some(t2_terminal) = key_k_opt_t2 {
-                        if !allowed_set.contains(&t2_terminal) {
-                            keep_edge = false;
-                        }
-                    }
-                    // If key_k_opt_t2 is None, it's not a terminal-terminal sequence, so keep_edge remains true.
-                }
-                // If allowed_next_terminals is None (e.g. prev_edge_terminal_opt was None, or prev_term had no followers),
-                // then keep_edge remains true (no restrictions from previous terminal).
-
-                if keep_edge {
-                    if let Some(destinations_map) = node_guard.children().get(&key_k_opt_t2) {
-                        edges_after_pruning += destinations_map.len();
-                        for child_arc_wrapper in destinations_map.keys() {
-                            children_to_recurse.push((child_arc_wrapper.as_arc().clone(), key_k_opt_t2.clone()));
-                        }
-                    }
-                } else {
-                    // Edge is pruned
-                    node_guard.children_mut().remove(&key_k_opt_t2);
-                    // self.stats.edges_pruned_by_terminal_sequence is incremented outside based on total counts
-                }
-            }
-        } // node_guard lock released
-
-        self.stats.edges_pruned_by_terminal_sequence += edges_before_pruning.saturating_sub(edges_after_pruning);
-
-        for (child_arc, current_edge_terminal_opt) in children_to_recurse {
-            self.prune_terminal_sequences_recursive(&child_arc, current_edge_terminal_opt, visited_contexts);
-        }
-    }
-    
     fn finish(
         mut self,
         token_name_map: &BiBTreeMap<String, usize>,
