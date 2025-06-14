@@ -421,7 +421,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
-    // #[time_it("GLRParserState::reduce_and_goto")]
+    #[time_it("GLRParserState::reduce_and_goto")]
     fn reduce_and_goto(
         &self,
         peek: &GSSPeek,
