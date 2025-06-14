@@ -45,6 +45,7 @@ impl PathAccumulator for () {
 }
 
 impl PathAccumulator for Option<LLMTokenBV> {
+    #[time_it]
     fn union_assign(&mut self, other: Self) {
         match (self.as_mut(), other) {
             (Some(self_bv), Some(other_bv)) => {
@@ -150,6 +151,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
         }
     }
 
+    #[time_it]
     fn intersect_assign(&mut self, right: Self) {
         match (self.as_mut(), right) {
             (Some(self_bv), Some(right_bv)) => {
