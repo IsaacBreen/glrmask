@@ -334,12 +334,12 @@ impl GrammarConstraint {
             internal_llm_token_map,    
             internal_max_llm_token, 
             MERGE_THRESHOLD,
-            terminal_follow_map_ids, // Pass to Precomputer::new
+            terminal_follow_map_ids,
         );
 
         helper.run_dfs();
-        // helper.prune_on_no_terminal_follow();
-        // helper.prune_dead_paths();
+        helper.prune_on_no_terminal_follow();
+        helper.prune_dead_paths();
         helper.merge_nodes();
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
@@ -401,13 +401,12 @@ impl GrammarConstraint {
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
 
         for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
-            let child_vocab_node_ref = child_vocab_arc; // Get &VocabPrefixTreeNode
             let exec_result = tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
 
             for token_match in &exec_result.matches {
                 let grammar_token_id = GrammarTokenID(token_match.id);
                 // LLM tokens reachable under child_vocab_node_ref are those that start with segment_bytes
-                let applicable_tokens = child_vocab_node_ref.reachable_token_ids();
+                let applicable_tokens = child_vocab_arc.reachable_token_ids();
                 *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
             }
 
@@ -615,6 +614,131 @@ impl<'r> Precomputer<'r> {
         print_precompute_stats(&self.stats, token_name_map);
 
         self.roots
+    }
+
+    fn prune_on_no_terminal_follow(&mut self) {
+        crate::debug!(2, "Pruning precompute trie based on terminal follow sets.");
+        type V = TerminalBV;
+
+        let mut initial_nodes_and_values = Vec::new();
+        for root_arc in self.roots.values() {
+            // For roots, there are no preceding terminals.
+            let initial_v = TerminalBV::zeros();
+            initial_nodes_and_values.push((root_arc.clone(), initial_v));
+        }
+
+        let terminal_follow_map = self.terminal_follow_map;
+
+        Trie::special_map(
+            initial_nodes_and_values,
+            // step
+            |parent_preceding_terminals, edge_key, _edge_value, _child_node| {
+                if let Some(terminal_id) = edge_key {
+                    let mut new_v = TerminalBV::zeros();
+                    new_v.insert(terminal_id.0);
+                    Some(new_v)
+                } else {
+                    // This is a None edge from merging. Propagate the parent's preceding terminals.
+                    Some(parent_preceding_terminals.clone())
+                }
+            },
+            // merge
+            |child_v: &mut V, from_parent_v: V| {
+                *child_v |= from_parent_v;
+            },
+            // process
+            move |node: &mut PrecomputeNode, preceding_terminals: &mut V| {
+                if preceding_terminals.is_empty() {
+                    // This is a root node (or reached only via None-edges from roots).
+                    // No constraints on its children.
+                    return true;
+                }
+
+                let mut allowed_outgoing_terminals = TerminalBV::zeros();
+                for terminal_id_val in preceding_terminals.iter() {
+                    let terminal_id = GrammarTokenID(terminal_id_val);
+                    if let Some(follow_set) = terminal_follow_map.get(&terminal_id) {
+                        for followed_terminal_id in follow_set {
+                            allowed_outgoing_terminals.insert(followed_terminal_id.0);
+                        }
+                    }
+                }
+
+                node.children_mut().retain(|edge_key_opt, _dest_map| {
+                    if let Some(edge_key) = edge_key_opt {
+                        allowed_outgoing_terminals.contains(edge_key.0)
+                    } else {
+                        // Keep None edges. Their paths are ambiguous but might be valid.
+                        true
+                    }
+                });
+
+                true // continue traversal
+            },
+        );
+        crate::debug!(2, "Finished pruning based on terminal follow sets.");
+    }
+
+    fn prune_dead_paths(&mut self) {
+        crate::debug!(2, "Pruning dead paths from precompute trie.");
+        let mut all_nodes_set: OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> =
+            OrderedHashSet::new();
+        for root in self.roots.values() {
+            for node in Trie::all_nodes(root.clone()) {
+                all_nodes_set.insert(ArcPtrWrapper::new(node));
+            }
+        }
+
+        let mut parent_map: HashMap<ArcPtrWrapper<_>, Vec<ArcPtrWrapper<_>>> = HashMap::new();
+        let mut end_nodes = Vec::new();
+
+        for node_wrapper in &all_nodes_set {
+            let node_arc = node_wrapper.as_arc();
+            let node_guard = node_arc.lock().unwrap();
+            if node_guard.value.end {
+                end_nodes.push(node_wrapper.clone());
+            }
+            for dest_map in node_guard.children().values() {
+                for child_wrapper in dest_map.keys() {
+                    parent_map
+                        .entry(child_wrapper.clone())
+                        .or_default()
+                        .push(node_wrapper.clone());
+                }
+            }
+        }
+
+        let mut live_nodes: HashSet<ArcPtrWrapper<_>> = HashSet::new();
+        let mut queue: VecDeque<ArcPtrWrapper<_>> = end_nodes.into();
+
+        while let Some(node_wrapper) = queue.pop_front() {
+            if live_nodes.insert(node_wrapper.clone()) {
+                if let Some(parents) = parent_map.get(&node_wrapper) {
+                    for parent_wrapper in parents {
+                        queue.push_back(parent_wrapper.clone());
+                    }
+                }
+            }
+        }
+
+        // Now prune
+        for node_wrapper in &all_nodes_set {
+            if live_nodes.contains(node_wrapper) {
+                // This node is live. Prune its children that are not live.
+                let mut node_guard = node_wrapper.as_arc().lock().unwrap();
+                node_guard.children_mut().values_mut().for_each(|dest_map| {
+                    dest_map.retain(|child_wrapper, _| live_nodes.contains(child_wrapper));
+                });
+                node_guard
+                    .children_mut()
+                    .retain(|_, dest_map| !dest_map.is_empty());
+            }
+        }
+
+        // Also need to prune roots if they are not live.
+        self.roots
+            .retain(|_, root_arc| live_nodes.contains(&ArcPtrWrapper::new(root_arc.clone())));
+        crate::debug!(2, "Finished pruning dead paths.");
     }
 
     fn dfs(
