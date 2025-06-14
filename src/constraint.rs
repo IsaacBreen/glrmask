@@ -989,41 +989,33 @@ impl<'a> GrammarConstraintState<'a> {
             |glr_s, grammar_token_opt, dest_map| {
                 timeit!("get_mask step_fn", {
                     let mut results = Vec::new();
-
-                    let mut glr_s_after_step = glr_s.clone();
-                    subtract_llm_tokens_and_prune_arc(&mut glr_s_after_step.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
-
-                    glr_s_after_step.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
-                    if let Some(gtid) = grammar_token_opt {
-                        *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
-                        glr_s_after_step.step(*gtid);
-                    }
-                    crate::debug!(4, "After stepping with grammar_token_opt: {:?}", glr_s_after_step.is_ok());
-
-                    if !glr_s_after_step.is_ok() {
-                        return results; // empty vec
-                    }
-
-                    for (child_wrapper, edge_llm_tokens_bv) in dest_map {
-                        let child_arc = child_wrapper.as_arc();
-                        let child_node_trie_data = child_arc.lock().unwrap();
-
-                        let mut new_glr_s = glr_s_after_step.clone();
-
+                    for (child_node_trie_data, edge_llm_tokens_bv) in dest_map.iter() {
+                        let mut glr_s = glr_s.clone();
                         crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
-                        intersect_llm_tokens_and_prune_arc(&mut new_glr_s.active_state.stack, edge_llm_tokens_bv, &mut HashMap::new());
+                        subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                        intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
+                        // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
 
-                        if new_glr_s.is_ok() {
-                            if child_node_trie_data.value.end {
-                                let glr_active_tokens = new_glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                        crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
+                        glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
+                        if let Some(gtid) = grammar_token_opt {
+                            *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
+                            glr_s.step(*gtid);
+                        }
+                        crate::debug!(4, "After stepping with grammar_token_opt: {:?}", glr_s.is_ok());
+                        // glr_s.log_gss("After stepping", grammar_token_opt.unwrap_or(TerminalID(0)));
+
+                        if glr_s.is_ok() {
+                            if child_node_trie_data.as_arc().lock().unwrap().value.end {
+                                let glr_active_tokens = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
                                 *final_mask_internal.borrow_mut() |= glr_active_tokens;
                             }
                         }
 
-                        subtract_llm_tokens_and_prune_arc(&mut new_glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                        subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
 
-                        if new_glr_s.is_ok() {
-                            results.push((child_arc.clone(), new_glr_s));
+                        if glr_s.is_ok() {
+                            results.push((child_node_trie_data.clone(), glr_s));
                         }
                     }
                     results

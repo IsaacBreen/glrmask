@@ -951,7 +951,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         S: FnMut(
             &V, &EK, &OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>
         ) -> I,
-        I: IntoIterator<Item = (Arc<Mutex<Trie<EK, EV, T>>>, V)>,
+        I: IntoIterator<Item = (ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, V)>,
     {
         // ------------------------------------------------------------------
         //  Simple depth-driven scheduler. (Same as special_map)
@@ -1002,7 +1002,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                         let child_ptr = Arc::as_ptr(&child_arc);
                         values.entry(child_ptr).and_modify(|old| merge(old, new_v.clone())).or_insert(new_v);
                         let child_depth = child_arc.lock().expect("poison").max_depth;
-                        todo.entry(child_depth).or_default().insert(ArcPtrWrapper::new(child_arc));
+                        todo.entry(child_depth).or_default().insert(child_arc);
                     }
                 }
             }
