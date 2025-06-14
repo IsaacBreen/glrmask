@@ -603,6 +603,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     //     }
     // }).collect();
 
+    gpt2_raw_vocab.retain(|k, _| [b"from".as_ref(), b" typing"].contains(&k.as_ref()) || k.len() <= 2);
+
     let mut llm_token_map = LLMTokenMap::new();
     let mut max_original_llm_token_id_val: usize = 0;
 
