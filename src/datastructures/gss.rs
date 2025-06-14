@@ -51,6 +51,13 @@ impl PathAccumulator for Option<LLMTokenBV> {
                 if self_bv.inner() == other_bv.inner() {
                     return;
                 }
+                if self_bv.is_empty() {
+                    *self_bv = other_bv;
+                    return;
+                }
+                if other_bv.is_empty() {
+                    return;
+                }
                 if false {
                     // let BIG_RANGE_LEN = 1;
                     // if other_bv.inner().ranges_len() > BIG_RANGE_LEN && self_bv.inner().ranges_len() > BIG_RANGE_LEN {
@@ -147,6 +154,13 @@ impl PathAccumulator for Option<LLMTokenBV> {
         match (self.as_mut(), right) {
             (Some(self_bv), Some(right_bv)) => {
                 if self_bv.inner() == right_bv.inner() {
+                    return;
+                }
+                if self_bv.is_empty() {
+                    return;
+                }
+                if right_bv.is_empty() {
+                    *self_bv = right_bv;
                     return;
                 }
                 // let BIG_RANGE_LEN = 1;
