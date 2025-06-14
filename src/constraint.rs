@@ -983,40 +983,59 @@ impl<'a> GrammarConstraintState<'a> {
         let step_counts_clone1 = Arc::clone(&step_counts);
         let step_counts_clone2 = Arc::clone(&step_counts);
 
+        let stepped_state_cache: RefCell<HashMap<(usize, TerminalID), GLRParserState<'a>>> = RefCell::new(HashMap::new());
+
         Trie::special_map(
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
             |glr_s, grammar_token_opt, edge_llm_tokens_bv, child_node_trie_data| {
                 timeit!("get_mask step_fn", {
-                let mut glr_s = glr_s.clone();
-                crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
-                subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
-                intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
-                // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
+                    // The optimization: step first (and cache it), then intersect.
+                    // This is correct because step() and intersect() should be commutative.
+                    // step() works on the grammar structure of the GSS.
+                    // intersect() works on the LLM token bitsets within the GSS.
+                    let mut stepped_s = if let Some(gtid) = grammar_token_opt {
+                        let cache_key = (Arc::as_ptr(&glr_s.active_state.stack) as usize, *gtid);
+                        let mut cache = stepped_state_cache.borrow_mut();
 
-                crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
-                glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
-                if let Some(gtid) = grammar_token_opt {
-                    *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
-                    glr_s.step(*gtid);
-                }
-                crate::debug!(4, "After stepping with grammar_token_opt: {:?}", glr_s.is_ok());
-                // glr_s.log_gss("After stepping", grammar_token_opt.unwrap_or(TerminalID(0)));
+                        if let Some(cached_s) = cache.get(&cache_key) {
+                            cached_s.clone()
+                        } else {
+                            let mut new_stepped_s = glr_s.clone();
+                            *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
+                            new_stepped_s.step(*gtid);
+                            cache.insert(cache_key, new_stepped_s.clone());
+                            new_stepped_s
+                        }
+                    } else {
+                        glr_s.clone()
+                    };
 
-                if glr_s.is_ok() {
+                    if !stepped_s.is_ok() {
+                        return None;
+                    }
+
+                    // Now, perform the operations that are specific to the edge value and child.
+                    subtract_llm_tokens_and_prune_arc(&mut stepped_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                    intersect_llm_tokens_and_prune_arc(&mut stepped_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
+
+                    if !stepped_s.is_ok() {
+                        return None;
+                    }
+
                     if child_node_trie_data.value.end {
-                        let glr_active_tokens = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                        let glr_active_tokens = stepped_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
                         *final_mask_internal.borrow_mut() |= glr_active_tokens;
                     }
-                }
 
-                subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                    // This final prune is important to reduce state size for subsequent steps.
+                    subtract_llm_tokens_and_prune_arc(&mut stepped_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
 
-                if glr_s.is_ok() {
-                    Some(glr_s)
-                } else {
-                    None
-                }
+                    if stepped_s.is_ok() {
+                        Some(stepped_s)
+                    } else {
+                        None
+                    }
                 })
             },
             // merge_fn
