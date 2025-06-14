@@ -446,16 +446,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
         }
         if out.is_empty() {
-            return Arc::new(GSSNode::new(Acc::new_for_merging()));
+            Arc::new(GSSNode::new(Acc::new_for_merging()))
         } else if out.len() == 1 {
-            return Arc::new(out.into_iter().next().unwrap());
+            Arc::new(out.into_iter().next().unwrap())
         } else {
             let mut out_iter = out.into_iter();
             let mut out_node = out_iter.next().unwrap();
             for next_node in out_iter {
                 out_node.merge(&next_node);
             }
-            return Arc::new(out_node);
+            Arc::new(out_node)
         }
     }
 
