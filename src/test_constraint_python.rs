@@ -651,6 +651,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     // gpt2_raw_vocab.retain(|k, _| [b"from".as_ref(), b" typing"].contains(&k.as_ref()) || k.len() <= 2);
     llm_token_map.retain(|v, _| [b"from".as_ref(), b" typing".as_ref()].contains(&v.as_ref()) || v.len() <= 2);
+    assert!(llm_token_map.contains_left(&b"from".to_vec()));
+    assert!(llm_token_map.contains_left(&b" typing".to_vec()));
 
     // Print the vocab
     println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
