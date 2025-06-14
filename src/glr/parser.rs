@@ -429,8 +429,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         len: usize,
     ) -> Arc<GSSNode> {
         let mut out = GSSNode::new(Acc::new_for_merging()); // Start with a default acc
-        // crate::debug!(4, "Popped with {} predecessors...", popped_node.num_predecessors());
-        for popped_peek in peek.popn(len).peek_iter() { // Renamed predecessor to predecessor_arc
+        let popped = peek.popn(len);
+        crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
+        for popped_peek in popped.peek_iter() { // Renamed predecessor to predecessor_arc
             let goto = self.parser.stage_7_table.get(&popped_peek.edge_value().state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", popped_peek.edge_value().state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor ??)", nt.0, popped_peek.edge_value().state_id)), |state_id| Ok(*state_id))).unwrap();
             match goto {
                 Goto::State(goto_state_id) => {
