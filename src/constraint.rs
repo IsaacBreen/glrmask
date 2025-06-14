@@ -578,6 +578,7 @@ impl<'r> Precomputer<'r> {
         for (_tokenizer_state_id, root_arc_ref) in &self.roots {
             crate::debug!(4, "Merging nodes: first collecting unique roots and their canonical Arcs: Root {:p}", root_arc_ref);
             let node_content = root_arc_ref.lock().unwrap().clone();
+            crate::debug!(4, "Merging nodes: first collecting unique roots and their canonical Arcs: Root {:p} lock acquired, content: {:?}", root_arc_ref, node_content);
             // This will associate node_content with root_arc_ref.clone().
             // If node_content was already in the map, its associated Arc gets updated to root_arc_ref.clone().
             // This implements a "last one wins" policy for which Arc becomes canonical for a given content.
