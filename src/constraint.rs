@@ -31,7 +31,7 @@ use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateI
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
-use profiler_macro::time_it;
+use profiler_macro::{time_it, timeit};
 use crate::datastructures::gss::acc_mod::Acc;
 use crate::glr::analyze::{compute_nullable_nonterminals, compute_terminal_follow_sets};
 use crate::interface::CompiledGrammar;
@@ -982,11 +982,12 @@ impl<'a> GrammarConstraintState<'a> {
 
         let step_counts_clone1 = Arc::clone(&step_counts);
         let step_counts_clone2 = Arc::clone(&step_counts);
-        
+
         Trie::special_map(
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
             |glr_s, grammar_token_opt, edge_llm_tokens_bv, child_node_trie_data| {
+                timeit!("get_mask step_fn", {
                 let mut glr_s = glr_s.clone();
                 crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
                 subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
@@ -1016,13 +1017,17 @@ impl<'a> GrammarConstraintState<'a> {
                 } else {
                     None
                 }
+                })
             },
             // merge_fn
             |glr_s1, glr_s2| {
+                timeit!("get_mask merge_fn", {
                 glr_s1.merge_with(glr_s2);
+                })
             },
             // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
             |precomputed_node_data, glr_s| {
+                timeit!("get_mask process_fn", {
                 if precomputed_node_data.value.end {
                     let glr_active_tokens = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
                     *final_mask_internal.borrow_mut() |= glr_active_tokens;
@@ -1031,6 +1036,7 @@ impl<'a> GrammarConstraintState<'a> {
                     subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
                     !glr_s.active_state.stack.is_empty()
                 }
+                })
             },
         );
 
