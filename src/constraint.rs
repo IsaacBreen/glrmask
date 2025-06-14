@@ -9,7 +9,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::BitOr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError, MutexGuard};
 use std::cell::RefCell;
 
 use bimap::BiBTreeMap;
@@ -535,7 +535,7 @@ impl<'r> Precomputer<'r> {
                 let matches_here: BTreeSet<_> = exec_result.matches.iter().map(|m| GrammarTokenID(m.id)).collect();
                 let possible_new_matches = &matches_possible_from_tokenizer_state - &matches_here;
                 if !possible_new_matches.is_empty() {
-                    let next_results = self.possible_matches(child_vocab_arc, TokenizerStateID(final_state_val));
+                    let next_results = Self::possible_matches(child_vocab_arc, TokenizerStateID(final_state_val));
                     for (token, bv) in next_results {
                         *result_map.entry(token).or_insert_with(LLMTokenBV::zeros) |= bv;
                     }
@@ -644,8 +644,8 @@ impl<'r> Precomputer<'r> {
         // We can't use `BTreeMap::retain` directly because its closure would borrow `self`
         // immutably (to call `is_live_and_prune`) while `retain` itself holds a mutable borrow
         // on `self.roots`. Instead, we collect the keys of roots to remove and then remove them.
-        let sids_to_remove: Vec<_> = self.roots.iter().filter_map(|(sid, root_arc)| {
-            let root_wrapper = ArcPtrWrapper::new(root_arc.clone());
+        let sids_to_remove: Vec<_> = self.roots.iter().filter_map(|(sid, root_arc_ref)| {
+            let root_wrapper = ArcPtrWrapper::new(root_arc_ref.clone());
             if self.is_live_and_prune(root_wrapper, &mut live_nodes_cache, &mut visited_for_dfs) {
                 None // This root is live, keep it.
             } else {
@@ -927,10 +927,10 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
         crate::time!("GrammarConstraintState::get_mask", {
             crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
-            let mut final_mask_internal = HybridBitset::zeros();
+            let final_mask_internal = Arc::new(Mutex::new(HybridBitset::zeros()));
     
             if self.state.is_empty() {
-                return self.parent.internal_bv_to_original(&final_mask_internal);
+                return self.parent.internal_bv_to_original(&final_mask_internal.lock().unwrap());
             }
     
             let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, usize>::new()));
@@ -973,19 +973,25 @@ impl<'a> GrammarConstraintState<'a> {
             if initial_values_for_map.is_empty() {
                  // This can happen if all GLR states had empty GSS stacks or no corresponding precomputed tries.
                  crate::debug!(2, "No valid initial states for get_mask's special_map traversal.");
-                 return self.parent.internal_bv_to_original(&final_mask_internal);
+                 return self.parent.internal_bv_to_original(&final_mask_internal.lock().unwrap());
             }
     
             let step_counts_clone1 = Arc::clone(&step_counts);
             let step_counts_clone2 = Arc::clone(&step_counts);
 
+            // ADD THESE TWO LINES:
+            let final_mask_for_step = Arc::clone(&final_mask_internal);
+            let final_mask_for_process = Arc::clone(&final_mask_internal);
+
             Trie::special_map(
                 initial_values_for_map,
                 // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
-                |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
+                move |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
                     let mut glr_s = glr_s.clone();
                     crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
-                    // subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal, &mut HashMap::new());
+                    let mask_guard = final_mask_for_step.lock().unwrap();
+                    subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &mask_guard, &mut HashMap::new());
+                    drop(mask_guard);
                     intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
                     // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
 
@@ -1009,8 +1015,11 @@ impl<'a> GrammarConstraintState<'a> {
                     glr_s1.merge_with(glr_s2);
                 },
                 // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
-                |precomputed_node_data, glr_s| {
-                    subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal, &mut HashMap::new());
+                move |precomputed_node_data, glr_s| {
+                    {
+                        let mask_guard = final_mask_for_process.lock().unwrap();
+                        subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &mask_guard, &mut HashMap::new());
+                    }
 
                     if glr_s.active_state.stack.is_empty() {
                         return false;
@@ -1018,7 +1027,8 @@ impl<'a> GrammarConstraintState<'a> {
 
                     if precomputed_node_data.value.end {
                         let glr_active_tokens = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
-                        final_mask_internal |= glr_active_tokens;
+                        let mut mask_guard = final_mask_for_process.lock().unwrap();
+                        *mask_guard |= glr_active_tokens;
                     }
                     true
                 },
@@ -1044,7 +1054,7 @@ impl<'a> GrammarConstraintState<'a> {
             crate::profiler::reset();
     
             crate::debug!(2, "Done computing mask");
-            self.parent.internal_bv_to_original(&final_mask_internal)
+            self.parent.internal_bv_to_original(&final_mask_internal.lock().unwrap())
         })
     }
 
