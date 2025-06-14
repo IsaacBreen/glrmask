@@ -9,9 +9,46 @@ use bitvec::prelude::BitVec;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use bimap::BiBTreeMap;
 use crate::datastructures::ArcPtrWrapper;
-use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
-use std::collections::BTreeMap as StdMap; // Added for derive macro pattern
+use crate::json_serialization::{JSONConvertible, JSONNode};
+use std::collections::BTreeMap as StdMap;
 
+/// Creates a neat string representation of a HybridBitset, showing values as ranges.
+fn format_hybrid_bitset_neatly(bv: &HybridBitset) -> String {
+    if bv.is_empty() {
+        return "[]".to_string();
+    }
+
+    let mut ranges = vec![];
+    let mut iter = bv.iter();
+
+    if let Some(mut start) = iter.next() {
+        let mut end = start;
+        for val in iter {
+            if val == end + 1 {
+                end = val;
+            } else {
+                if start == end {
+                    ranges.push(format!("{}", start));
+                } else {
+                    ranges.push(format!("{}..={}", start, end));
+                }
+                start = val;
+                end = val;
+            }
+        }
+        if start == end {
+            ranges.push(format!("{}", start));
+        } else {
+            ranges.push(format!("{}..={}", start, end));
+        }
+    }
+
+    const MAX_RANGES_TO_SHOW: usize = 5;
+    let ellipsis = if ranges.len() > MAX_RANGES_TO_SHOW { ", ..." } else { "" };
+    let ranges_to_show = ranges.iter().take(MAX_RANGES_TO_SHOW).cloned().collect::<Vec<_>>().join(", ");
+
+    format!("[{}{}]", ranges_to_show, ellipsis)
+}
 
 /// Helper function to format a HybridBitset for display, showing its debug representation
 /// and a sample of the corresponding LLM tokens.
@@ -21,11 +58,11 @@ fn format_bv_with_tokens(
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
     limit: usize,
 ) -> String {
-    let bv_debug_str = format!("{:?}", bv);
+    let bv_neat_str = format_hybrid_bitset_neatly(bv);
 
     let (bimap, token_map) = match (original_internal_bimap, llm_token_map) {
         (Some(b), Some(t)) => (b, t),
-        _ => return bv_debug_str, // If we don't have maps, just return the debug string.
+        _ => return bv_neat_str, // If we don't have maps, just return the neat string.
     };
 
     let mut token_samples = Vec::new();
@@ -38,13 +75,13 @@ fn format_bv_with_tokens(
     }
 
     if token_samples.is_empty() {
-        return bv_debug_str;
+        return bv_neat_str;
     }
 
     let samples_str = token_samples.join(", ");
     let ellipsis = if bv.len() > limit { ", ..." } else { "" };
 
-    format!("{} (e.g., [{}]{})", bv_debug_str, samples_str, ellipsis)
+    format!("{} (e.g., [{}]{})", bv_neat_str, samples_str, ellipsis)
 }
 
 /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
@@ -60,6 +97,7 @@ pub fn dump_precompute_trie_recursive(
 
     {
         let node = node_arc.lock().expect("Mutex poisoned during dump");
+        // Collect children information while holding the lock
         children_to_visit = node.children().iter().flat_map(|(edge_key, dest_map)| {
             dest_map.iter().map(move |(child_wrapper, edge_val)| {
                 (edge_key.clone(), edge_val.clone(), child_wrapper.as_arc().clone())
@@ -90,24 +128,34 @@ pub fn dump_precompute_trie_recursive(
         let child_ptr;
         let child_info;
         let is_visited;
+        let is_end_node;
         {
             let child_node = child_arc.lock().unwrap();
             child_ptr = &*child_node as *const PrecomputeNode;
             is_visited = visited.contains(&child_ptr);
-            child_info = format!("Node {:p} (MaxDepth: {}){}", child_ptr, child_node.max_depth, if child_node.value.end { " [END]" } else { "" });
+            is_end_node = child_node.value.end;
+            child_info = format!("Node {:p} (MaxDepth: {}){}", child_ptr, child_node.max_depth, if is_end_node { " [END]" } else { "" });
         }
 
-        if is_visited {
+        // Don't shortcut the display for end nodes, even if they are visited.
+        if is_visited && !is_end_node {
             println!("{}{} Edge {}: {} -> Ref to {}", prefix, connector, edge_key_display, tokens_display, child_info);
         } else {
+            // Print full info for unvisited nodes or for any end node.
             println!("{}{} Edge {}: {} -> {}", prefix, connector, edge_key_display, tokens_display, child_info);
-            visited.insert(child_ptr);
-            let child_prefix = if is_last {
-                format!("{}   ", prefix)
-            } else {
-                format!("{}│  ", prefix)
-            };
-            dump_precompute_trie_recursive(child_arc, child_prefix, visited, original_internal_bimap, token_name_map, llm_token_map);
+
+            // Only recurse if the node has not been visited before.
+            // This prevents re-printing the children of a shared node and avoids cycles.
+            // End nodes are leaves, so they won't recurse anyway.
+            if !is_visited {
+                visited.insert(child_ptr);
+                let child_prefix = if is_last {
+                    format!("{}   ", prefix)
+                } else {
+                    format!("{}│  ", prefix)
+                };
+                dump_precompute_trie_recursive(child_arc, child_prefix, visited, original_internal_bimap, token_name_map, llm_token_map);
+            }
         }
     }
 }
@@ -519,7 +567,7 @@ mod tests {
     #[test]
     fn test_format_bv_with_tokens_no_maps() {
         let bv = HybridBitset::from_iter(vec![1, 2]);
-        assert_eq!(format_bv_with_tokens(&bv, None, None, 5), "HybridBitset { inner: 1..=2 }");
+        assert_eq!(format_bv_with_tokens(&bv, None, None, 5), "[1..=2]");
     }
 
     #[test]
@@ -532,7 +580,7 @@ mod tests {
         llm_map.insert(b"ten".to_vec(), LLMTokenID(10));
         llm_map.insert(b"twenty".to_vec(), LLMTokenID(20));
 
-        let expected = "HybridBitset { inner: 0..=1 } (e.g., [\"ten\", \"twenty\"])";
+        let expected = "[0..=1] (e.g., [\"ten\", \"twenty\"])";
         assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 5), expected);
     }
 
@@ -546,10 +594,9 @@ mod tests {
             llm_map.insert(format!("{}", 100 + i).into_bytes(), LLMTokenID(100 + i));
         }
 
-        let expected = "HybridBitset { inner: 0..=9 } (e.g., [\"100\", \"101\", \"102\"], ...)";
+        let expected = "[0..=9] (e.g., [\"100\", \"101\", \"102\"], ...)";
         assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 3), expected);
     }
-
 
     // Helper function to create a minimal constraint for testing dump
     fn create_minimal_constraint() -> GrammarConstraint {
@@ -598,4 +645,3 @@ mod tests {
         println!("--- Finished dump_precomputed test output ---");
     }
 }
-
