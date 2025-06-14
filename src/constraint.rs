@@ -631,7 +631,89 @@ impl<'r> Precomputer<'r> {
     }
 
     fn prune_dead_paths(&mut self) {
-        todo!()
+        crate::debug!(2, "Pruning dead paths from precomputed trie.");
+
+        let mut live_nodes_cache: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = HashSet::new();
+        let mut visited_for_dfs: HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>> = HashSet::new();
+
+        // A node is "live" if it can reach a node with `value.end == true`.
+        // We iterate through all roots. For each root, we do a post-order traversal (DFS).
+        // `is_live_and_prune` recursively determines if a node is live and prunes its dead children.
+        // `BTreeMap::retain` then removes any root that is not itself live.
+        self.roots.retain(|_sid, root_arc| {
+            let root_wrapper = ArcPtrWrapper::new(root_arc.clone());
+            self.is_live_and_prune(root_wrapper, &mut live_nodes_cache, &mut visited_for_dfs)
+        });
+
+        crate::debug!(2, "Finished pruning dead paths.");
+    }
+
+    /// Recursively determines if a node is "live" (can reach an end node)
+    /// and prunes its children that are not live. This is a post-order traversal.
+    ///
+    /// - `node_wrapper`: The node to check.
+    /// - `live_nodes_cache`: A cache of nodes already determined to be live.
+    /// - `visited_for_dfs`: Tracks nodes visited in the current DFS traversal to handle shared nodes and cycles.
+    ///
+    /// Returns `true` if `node_wrapper` is live, `false` otherwise.
+    fn is_live_and_prune(
+        &self,
+        node_wrapper: ArcPtrWrapper<Mutex<PrecomputeNode>>,
+        live_nodes_cache: &mut HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+        visited_for_dfs: &mut HashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
+    ) -> bool {
+        // If we've already determined this node is live, we're done.
+        if live_nodes_cache.contains(&node_wrapper) {
+            return true;
+        }
+        // If we've visited this node in the DFS but it's not in the live cache,
+        // it means it was processed and found to be dead.
+        if visited_for_dfs.contains(&node_wrapper) {
+            return false;
+        }
+        visited_for_dfs.insert(node_wrapper.clone());
+
+        let node_arc = node_wrapper.as_arc();
+
+        // A node is live if it's an end node itself.
+        let is_this_node_an_end_node = node_arc.lock().unwrap().value.end;
+
+        // Or if it has at least one live child. We find out by recursing.
+        // We must collect children before recursing to avoid holding the lock.
+        let children_to_check: Vec<ArcPtrWrapper<Mutex<PrecomputeNode>>> = {
+            let node_guard = node_arc.lock().unwrap();
+            node_guard.children.values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
+        };
+
+        let mut live_children_for_this_node = HashSet::new();
+        let mut has_live_child = false;
+
+        for child_wrapper in children_to_check {
+            if self.is_live_and_prune(child_wrapper.clone(), live_nodes_cache, visited_for_dfs) {
+                has_live_child = true;
+                live_children_for_this_node.insert(child_wrapper);
+            }
+        }
+
+        // Now that we know which children are live, prune the dead ones.
+        {
+            let mut node_guard = node_arc.lock().unwrap();
+            node_guard.children_mut().retain(|_edge_key, dest_map| {
+                dest_map.retain(|child_wrapper, _edge_value| {
+                    live_children_for_this_node.contains(child_wrapper)
+                });
+                // Keep the edge key only if it still has destinations.
+                !dest_map.is_empty()
+            });
+        }
+
+        let is_node_live = is_this_node_an_end_node || has_live_child;
+
+        if is_node_live {
+            live_nodes_cache.insert(node_wrapper);
+        }
+
+        is_node_live
     }
 
     fn merge_nodes(&mut self) {
