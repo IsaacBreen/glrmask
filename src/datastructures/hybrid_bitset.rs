@@ -450,15 +450,16 @@ impl Sub for &HybridBitset {
 
 impl BitAndAssign for HybridBitset {
     fn bitand_assign(&mut self, rhs: Self) {
-        let start_time = std::time::Instant::now();
-        self.inner = &self.inner & &rhs.inner;
-        let duration = start_time.elapsed();
-        if duration.as_millis() > 1 {
-            println!("HybridBitset::bitand_assign (owned) took {:?}", duration);
-        }
-        if duration.as_millis() > 10 {
-            // panic!("HybridBitset::bitand_assign (owned) took {:?}", duration);
-        }
+        // let start_time = std::time::Instant::now();
+        // self.inner = &self.inner & &rhs.inner;
+        // let duration = start_time.elapsed();
+        // if duration.as_millis() > 1 {
+        //     println!("HybridBitset::bitand_assign (owned) took {:?}", duration);
+        // }
+        // if duration.as_millis() > 10 {
+        //     // panic!("HybridBitset::bitand_assign (owned) took {:?}", duration);
+        // }
+        self.inner = std::mem::take(&mut self.inner) & rhs.inner;
     }
 }
 
