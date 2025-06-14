@@ -930,7 +930,7 @@ impl<'a> GrammarConstraintState<'a> {
             let final_mask_internal = RefCell::new(HybridBitset::zeros());
     
             if self.state.is_empty() {
-                return self.parent.internal_bv_to_original(&final_mask_internal);
+                return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
             }
     
             let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, usize>::new()));
@@ -973,7 +973,7 @@ impl<'a> GrammarConstraintState<'a> {
             if initial_values_for_map.is_empty() {
                  // This can happen if all GLR states had empty GSS stacks or no corresponding precomputed tries.
                  crate::debug!(2, "No valid initial states for get_mask's special_map traversal.");
-                 return self.parent.internal_bv_to_original(&final_mask_internal);
+                 return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
             }
     
             let step_counts_clone1 = Arc::clone(&step_counts);
