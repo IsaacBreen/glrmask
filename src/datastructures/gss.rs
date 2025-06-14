@@ -360,6 +360,7 @@ impl<'a> GSSPeek<'a> {
     /// `n=1` returns the predecessor node with an updated accumulator.
     /// `n>1` pops `n-1` from the predecessor.
     /// The accumulator of the returned node is correctly adjusted for the path.
+    #[time_it]
     pub fn popn(&self, n: usize) -> Arc<GSSNode> {
         if n == 0 {
             return self.to_arc_node();
