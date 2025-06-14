@@ -1010,6 +1010,8 @@ impl<'a> GrammarConstraintState<'a> {
                 },
                 // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
                 |precomputed_node_data, glr_s| {
+                    subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal, &mut HashMap::new());
+
                     if glr_s.active_state.stack.is_empty() {
                         return false;
                     }
@@ -1017,9 +1019,8 @@ impl<'a> GrammarConstraintState<'a> {
                     if precomputed_node_data.value.end {
                         let glr_active_tokens = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
                         final_mask_internal |= glr_active_tokens;
-                        subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal, &mut HashMap::new());
                     }
-                    true 
+                    true
                 },
             );
     
