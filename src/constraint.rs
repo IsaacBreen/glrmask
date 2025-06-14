@@ -1026,10 +1026,7 @@ impl<'a> GrammarConstraintState<'a> {
                         false
                     } else {
                         subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
-                        if glr_s.active_state.stack.is_empty() {
-                            return false;
-                        }
-                        true
+                        !glr_s.active_state.stack.is_empty()
                     }
                 },
             );
