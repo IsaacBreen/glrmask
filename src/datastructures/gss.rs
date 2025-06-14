@@ -700,7 +700,7 @@ impl GSSNode {
         })
     }
 
-    #[time_it("GSSNode::merge")]
+    // #[time_it("GSSNode::merge")]
     pub fn merge(&mut self, other: &Self) {
         if self == other { return; }
 
