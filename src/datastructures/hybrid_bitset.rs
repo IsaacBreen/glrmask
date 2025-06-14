@@ -498,7 +498,7 @@ impl BitXorAssign for HybridBitset {
 
 impl SubAssign for HybridBitset {
     fn sub_assign(&mut self, rhs: Self) {
-        self.inner = &self.inner - &rhs.inner;
+        self.inner = std::mem::take(&mut self.inner) - rhs.inner;
     }
 }
 
