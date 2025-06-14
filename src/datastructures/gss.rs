@@ -927,7 +927,8 @@ pub fn intersect_llm_tokens_and_prune_arc(
             new_acc = Acc::new(Some(tokens_to_intersect.clone()), current_acc.allowed_terminals().clone());
         }
         if new_acc.is_alive() {
-            let continue_recursion = &new_acc != current_acc;
+            // let continue_recursion = &new_acc != current_acc;
+            let continue_recursion = false;
             Some((new_acc, continue_recursion))
         } else {
             None // Prune this node
