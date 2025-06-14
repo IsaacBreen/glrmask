@@ -843,53 +843,53 @@ where
 // Requires T: Clone, EK: Ord + Clone, EV: Clone
 impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     /// Performs a specialized breadth-first traversal (related to Dijkstra/Bellman-Ford relaxation).
-    /// (special_map implementation remains unchanged)
+    /// This traversal is optimized to perform work related to an edge key `EK` only once,
+    /// even if that key leads to multiple destination nodes.
     #[time_it]
-    pub fn special_map<V: Clone>(
+    pub fn special_map<V: Clone, VI: Clone>(
         initial_nodes_and_values: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
-        mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // Changed Trie<...> to &Trie<...>
+        mut step_ek: impl FnMut(&V, &EK) -> Option<VI>,
+        mut step_ev: impl FnMut(&VI, &EV, &Trie<EK, EV, T>) -> Option<V>,
         mut merge: impl FnMut(&mut V, V),
         mut process: impl FnMut(&mut Trie<EK, EV, T>, &mut V) -> bool,
     ) {
         // ------------------------------------------------------------------
-        //  Simple depth-driven scheduler.
+        //  Depth-driven scheduler with grouped edge processing.
         //
         //  The key observation is:
         //      parent.max_depth  <  child.max_depth
         //  for every edge (parent → child).
         //  Therefore processing nodes strictly in ascending `max_depth`
         //  guarantees every parent is handled before each of its children.
+        //  This implementation further optimizes traversal by grouping children
+        //  by their edge key (EK) and performing EK-dependent work only once.
         //
         //  • `values`  – accumulated V for every discovered node
         //  • `done`    – nodes that have already been processed
         //  • `todo`    – min-heap keyed by max_depth
         // ------------------------------------------------------------------
-        let mut values   : HashMap<*const Mutex<Self>, V> = HashMap::new();
-        let mut done     : HashSet <*const Mutex<Self>>   = HashSet ::new();
-        let mut todo     : BTreeMap<usize, HashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
+        let mut values: HashMap<*const Mutex<Self>, V> = HashMap::new();
+        let mut done: HashSet<*const Mutex<Self>> = HashSet::new();
+        let mut todo: BTreeMap<usize, HashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
 
         // Seed with the user-supplied starting set
         for (node_arc, v0) in initial_nodes_and_values {
             let ptr = Arc::as_ptr(&node_arc);
-            values
-                .entry(ptr)
-                .and_modify(|old| merge(old, v0.clone()))
-                .or_insert(v0);
+            values.entry(ptr).and_modify(|old| merge(old, v0.clone())).or_insert(v0);
             let depth = node_arc.lock().expect("poison").max_depth;
             todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
         }
 
         // Main loop ---------------------------------------------------------
         while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
-            // #[allow(clippy::iter_over_hash_type)]
             for node_arc_ptr_wrapper in &node_arc_ptr_wrappers {
                 let ptr = Arc::as_ptr(node_arc_ptr_wrapper.as_arc());
-                if done.contains(&ptr) { continue; }               // already processed
+                if done.contains(&ptr) { continue; } // already processed
 
                 // Pull the merged value that all parents contributed
                 let mut agg_v = match values.remove(&ptr) {
                     Some(v) => v,
-                    None => continue,                            // can happen if every parent’s `step` returned None
+                    None => continue, // can happen if every parent’s `step` returned None
                 };
 
                 // ---------- user ‘process’ callback ----------
@@ -899,37 +899,40 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 };
                 done.insert(ptr);
 
-                if !proceed { continue; }                           // user stopped traversal at this node
+                if !proceed { continue; } // user stopped traversal at this node
 
                 // ---------- propagate to children -------------
-                // We read children once, outside any long-lived locks
-                let edges: Vec<(EK, EV, Arc<Mutex<Self>>)> = {
+                // We clone the children map to release the lock on the current node before processing.
+                let children_to_process = {
                     let guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
-                    guard.children
-                        .iter()
-                        .flat_map(|(ek, dst_map)| {
-                            dst_map.iter().map(move |(wrap, ev)| (ek.clone(), ev.clone(), wrap.as_arc().clone()))
-                        })
-                        .collect()
+                    guard.children.clone()
                 };
 
-                for (ek, ev, child_arc) in edges {
-                    let child_ptr = Arc::as_ptr(&child_arc);
+                for (ek, dest_map) in children_to_process {
+                    // Part 1: Perform the expensive, edge-key-dependent computation once.
+                    if let Some(v_intermediate) = step_ek(&agg_v, &ek) {
+                        // Part 2: Propagate to all children under this edge key.
+                        for (child_arc_wrapper, ev) in &dest_map {
+                            let child_arc = child_arc_wrapper.as_arc();
+                            let child_ptr = Arc::as_ptr(child_arc);
 
-                    // user ‘step’ callback
-                    let maybe_v = {
-                        let child_guard = child_arc.lock().expect("poison");
-                        step(&agg_v, &ek, &ev, &child_guard) // Pass &child_guard
-                    };
-                    if let Some(new_v) = maybe_v {
-                        values
-                            .entry(child_ptr)
-                            .and_modify(|old| merge(old, new_v.clone()))
-                            .or_insert(new_v);
+                            // User 'step_ev' callback for each destination.
+                            let maybe_v = {
+                                let child_guard = child_arc.lock().expect("poison");
+                                step_ev(&v_intermediate, ev, &child_guard)
+                            };
 
-                        // Queue child by its declared depth
-                        let child_depth = child_arc.lock().expect("poison").max_depth;
-                        todo.entry(child_depth).or_default().insert(ArcPtrWrapper::new(child_arc));
+                            if let Some(new_v) = maybe_v {
+                                values
+                                    .entry(child_ptr)
+                                    .and_modify(|old| merge(old, new_v.clone()))
+                                    .or_insert(new_v);
+
+                                // Queue child by its declared depth.
+                                let child_depth = child_arc.lock().expect("poison").max_depth;
+                                todo.entry(child_depth).or_default().insert(ArcPtrWrapper::new(child_arc.clone()));
+                            }
+                        }
                     }
                 }
             }
