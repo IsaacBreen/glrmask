@@ -982,7 +982,7 @@ impl<'a> GrammarConstraintState<'a> {
             Trie::special_map(
                 initial_values_for_map,
                 // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
-                |glr_s, grammar_token_opt, edge_llm_tokens_bv, _child_node_trie_data| {
+                |glr_s, grammar_token_opt, edge_llm_tokens_bv, child_node_trie_data| {
                     let mut glr_s = glr_s.clone();
                     crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
                     subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
@@ -997,6 +997,15 @@ impl<'a> GrammarConstraintState<'a> {
                     }
                     crate::debug!(4, "After stepping with grammar_token_opt: {:?}", glr_s.is_ok());
                     // glr_s.log_gss("After stepping", grammar_token_opt.unwrap_or(TerminalID(0)));
+
+                    if glr_s.is_ok() {
+                        if child_node_trie_data.value.end {
+                            let glr_active_tokens = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                            *final_mask_internal.borrow_mut() |= glr_active_tokens;
+                        }
+                    }
+
+                    subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
 
                     if glr_s.is_ok() {
                         Some(glr_s)
