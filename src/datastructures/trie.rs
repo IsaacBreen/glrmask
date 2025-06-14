@@ -847,7 +847,11 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     #[time_it]
     pub fn special_map<V: Clone>(
         initial_nodes_and_values: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
-        mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // Changed Trie<...> to &Trie<...>
+        mut step: impl FnMut(
+            &V,
+            &EK,
+            &OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>,
+        ) -> Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
         mut merge: impl FnMut(&mut V, V),
         mut process: impl FnMut(&mut Trie<EK, EV, T>, &mut V) -> bool,
     ) {
@@ -902,26 +906,19 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 if !proceed { continue; }                           // user stopped traversal at this node
 
                 // ---------- propagate to children -------------
-                // We read children once, outside any long-lived locks
-                let edges: Vec<(EK, EV, Arc<Mutex<Self>>)> = {
+                // We clone the children map to release the lock on the current node before calling step
+                let children_by_ek: BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<Mutex<Self>>, EV>> = {
                     let guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
-                    guard.children
-                        .iter()
-                        .flat_map(|(ek, dst_map)| {
-                            dst_map.iter().map(move |(wrap, ev)| (ek.clone(), ev.clone(), wrap.as_arc().clone()))
-                        })
-                        .collect()
+                    guard.children.clone()
                 };
 
-                for (ek, ev, child_arc) in edges {
-                    let child_ptr = Arc::as_ptr(&child_arc);
-
+                for (ek, dest_map) in &children_by_ek {
                     // user ‘step’ callback
-                    let maybe_v = {
-                        let child_guard = child_arc.lock().expect("poison");
-                        step(&agg_v, &ek, &ev, &child_guard) // Pass &child_guard
-                    };
-                    if let Some(new_v) = maybe_v {
+                    let new_values_for_children = step(&agg_v, ek, dest_map);
+
+                    for (child_arc, new_v) in new_values_for_children {
+                        let child_ptr = Arc::as_ptr(&child_arc);
+
                         values
                             .entry(child_ptr)
                             .and_modify(|old| merge(old, new_v.clone()))
@@ -929,7 +926,9 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
                         // Queue child by its declared depth
                         let child_depth = child_arc.lock().expect("poison").max_depth;
-                        todo.entry(child_depth).or_default().insert(ArcPtrWrapper::new(child_arc));
+                        todo.entry(child_depth)
+                            .or_default()
+                            .insert(ArcPtrWrapper::new(child_arc));
                     }
                 }
             }
