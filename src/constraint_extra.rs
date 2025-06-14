@@ -31,50 +31,28 @@ fn format_bv_indices(
             internal_id_val.to_string() // No map provided, print the internal ID
         }
     }).collect();
-    // if indices.len() > 10 {
-    //     format!("[{} indices starting with {}...]", indices.len(), indices[0..5].join(", "))
-    // } else if indices.is_empty() {
-    //     "[]".to_string()
-    // } else {
-    //     format!("[{}]", indices.join(", "))
-    // }
-    format!("{:?}", bv)
+    if indices.len() > 10 {
+        format!("[{} indices starting with {}...]", indices.len(), indices[0..5].join(", "))
+    } else if indices.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[{}]", indices.join(", "))
+    }
 }
 
 /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
 pub fn dump_precompute_trie_recursive(
     node_arc: &Arc<Mutex<PrecomputeNode>>,
-    indent: String,
+    prefix: String,
     visited: &mut HashSet<*const PrecomputeNode>,
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
     token_name_map: Option<&BiBTreeMap<String, usize>>,
 ) {
-    let node_ptr;
     let children_to_visit;
-    let is_leaf;
 
     {
         let node = node_arc.lock().expect("Mutex poisoned during dump");
-        node_ptr = &*node as *const PrecomputeNode;
-
-        if !visited.insert(node_ptr) {
-            println!("{}-> Ref to Node {:p} (already printed)", indent, node_ptr);
-            return;
-        }
-
-        println!("{}-> Node {:p} (MaxDepth: {})", indent, node_ptr, node.max_depth);
-
-        if node.value.end {
-            println!("{}  End", indent);
-        }
-
-        is_leaf = node.children().is_empty();
-        if is_leaf {
-            println!("{}  (Leaf Node)", indent);
-            return;
-        }
-
-        println!("{}  Children:", indent);
+        // Collect children information while holding the lock
         children_to_visit = node.children().iter().flat_map(|(edge_key, dest_map)| {
             dest_map.iter().map(move |(child_wrapper, edge_val)| {
                 (edge_key.clone(), edge_val.clone(), child_wrapper.as_arc().clone())
@@ -82,32 +60,48 @@ pub fn dump_precompute_trie_recursive(
         }).collect::<Vec<_>>();
     }
 
-    let new_indent = format!("{}    ", indent);
-    for (edge_key, edge_val_bv, child_arc) in children_to_visit {
-        let child_node_ptr = {
-            let child_node_guard = child_arc.lock().expect("Mutex poisoned");
-            &*child_node_guard as *const PrecomputeNode
-        };
+    let num_children = children_to_visit.len();
+    for (i, (edge_key, edge_val_bv, child_arc)) in children_to_visit.iter().enumerate() {
+        let is_last = i == num_children - 1;
+        let connector = if is_last { "└──" } else { "├──" };
+
         let edge_key_display = match edge_key {
             Some(gtid) => {
                 if let Some(name_map) = token_name_map {
                     name_map.get_by_right(&gtid.0)
-                        .map(|name| format!("'{}' (ID: {})", name, gtid.0))
-                        .unwrap_or_else(|| format!("Unknown (ID: {})", gtid.0))
+                        .map(|name| format!("'{}'", name))
+                        .unwrap_or_else(|| format!("ID:{}", gtid.0))
                 } else {
-                    format!("ID: {}", gtid.0)
+                    format!("ID:{}", gtid.0)
                 }
             },
-            None => "None".to_string(),
+            None => "ε".to_string(),
         };
-        println!(
-            "{}Edge {}: LLM Tokens: {} -> Child Node Ptr: {:p}",
-            indent,
-            edge_key_display,
-            format_bv_indices(&edge_val_bv, original_internal_bimap),
-            child_node_ptr
-        );
-        dump_precompute_trie_recursive(&child_arc, new_indent.clone(), visited, original_internal_bimap, token_name_map);
+
+        let tokens_display = format_bv_indices(&edge_val_bv, original_internal_bimap);
+
+        let child_ptr;
+        let child_info;
+        let is_visited;
+        {
+            let child_node = child_arc.lock().unwrap();
+            child_ptr = &*child_node as *const PrecomputeNode;
+            is_visited = visited.contains(&child_ptr);
+            child_info = format!("Node {:p} (MaxDepth: {}){}", child_ptr, child_node.max_depth, if child_node.value.end { " [END]" } else { "" });
+        }
+
+        if is_visited {
+            println!("{}{} Edge {}: {} -> Ref to {}", prefix, connector, edge_key_display, tokens_display, child_info);
+        } else {
+            println!("{}{} Edge {}: {} -> {}", prefix, connector, edge_key_display, tokens_display, child_info);
+            visited.insert(child_ptr);
+            let child_prefix = if is_last {
+                format!("{}   ", prefix)
+            } else {
+                format!("{}│  ", prefix)
+            };
+            dump_precompute_trie_recursive(child_arc, child_prefix, visited, original_internal_bimap, token_name_map);
+        }
     }
 }
 
@@ -120,7 +114,22 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
         for (tokenizer_state_id, root_node_trie) in &self.precomputed {
             println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
-            dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap), Some(&self.token_name_map));
+            
+            let root_ptr;
+            let root_info;
+            {
+                let root_node = root_node_trie.lock().unwrap();
+                root_ptr = &*root_node as *const PrecomputeNode;
+                root_info = format!("Root Node {:p} (MaxDepth: {}){}", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" });
+            }
+            println!("{}", root_info);
+
+            if visited.contains(&root_ptr) {
+                println!("  (Root already visited)");
+            } else {
+                visited.insert(root_ptr);
+                dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap), Some(&self.token_name_map));
+            }
         }
         println!("\n===================================");
         println!("Dump Complete.");
