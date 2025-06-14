@@ -45,7 +45,7 @@ impl PathAccumulator for () {
 }
 
 impl PathAccumulator for Option<LLMTokenBV> {
-    #[time_it]
+    // #[time_it]
     fn union_assign(&mut self, other: Self) {
         match (self.as_mut(), other) {
             (Some(self_bv), Some(other_bv)) => {
@@ -151,7 +151,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
         }
     }
 
-    #[time_it]
+    // #[time_it]
     fn intersect_assign(&mut self, right: Self) {
         match (self.as_mut(), right) {
             (Some(self_bv), Some(right_bv)) => {
@@ -286,7 +286,7 @@ fn compute_hash_key(predecessors: &NodeMap) -> u64 {
     hasher.finish()
 }
 
-#[time_it("allowed_terminals_union_assign")]
+// #[time_it("allowed_terminals_union_assign")]
 pub fn allowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
     let mut common_keys = BTreeSet::new();
     common_keys.extend(left.keys());
@@ -299,7 +299,7 @@ pub fn allowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalIn
     }
 }
 
-#[time_it("allowed_terminals_intersect_assign")]
+// #[time_it("allowed_terminals_intersect_assign")]
 pub fn allowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
     let mut common_keys = BTreeSet::new();
     common_keys.extend(left.keys());
@@ -456,17 +456,17 @@ pub mod acc_mod {
     }
 
     impl PathAccumulator for Acc {
-        #[time_it("Acc::union_assign")]
+        // // #[time_it("Acc::union_assign")]
         fn union_assign(&mut self, other: Self) {
             self.acc.union_assign(other.acc);
             allowed_terminals_union_assign(&mut self.allowed_terminals, other.allowed_terminals);
         }
-        #[time_it("Acc::intersect_assign")]
+        // // #[time_it("Acc::intersect_assign")]
         fn intersect_assign(&mut self, right: Self) {
             self.acc.intersect_assign(right.acc);
             allowed_terminals_intersect_assign(&mut self.allowed_terminals, right.allowed_terminals);
         }
-        // #[time_it("Acc::intersect_has_effect")]
+        // // #[time_it("Acc::intersect_has_effect")]
         fn intersect_has_effect(&self, right: &Self) -> bool {
             self.acc.intersect_has_effect(&right.acc)
         }
@@ -626,7 +626,7 @@ impl GSSNode {
         Self::new_with_single_predecessor(Arc::new(self), edge_value, acc_for_new_node)
     }
 
-    #[time_it("GSSNode::pop")]
+    // #[time_it("GSSNode::pop")]
     pub fn pop(&self) -> Self {
         let mut result_acc = Acc::new_for_merging();
         let mut result_predecessors = NodeMap::new();
@@ -665,7 +665,7 @@ impl GSSNode {
     }
 
 
-    #[time_it("GSSNode::popn")]
+    // #[time_it("GSSNode::popn")]
     pub fn popn(&self, n: usize) -> Self {
         if n == 0 {
             self.clone()
@@ -674,7 +674,7 @@ impl GSSNode {
         }
     }
 
-    #[time_it("GSSNode::pop_iter")]
+    // #[time_it("GSSNode::pop_iter")]
     pub fn pop_iter(&self) -> Vec<(ParseStateEdgeContent, Arc<Self>)> {
         self.predecessors.values().flat_map(|m| m.iter()).filter_map(|(edge_val, pred_arc)| {
             let mut pred_arc = pred_arc.clone();
@@ -700,7 +700,7 @@ impl GSSNode {
         })
     }
 
-    #[time_it("GSSNode::merge")]
+    // // #[time_it("GSSNode::merge")]
     pub fn merge(&mut self, other: &Self) {
         if self == other { return; }
 
@@ -773,7 +773,7 @@ impl Hash for GSSNode {
 }
 
 impl PartialEq for GSSNode {
-    // #[time_it("GSSNode::eq")]
+    // // #[time_it("GSSNode::eq")]
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self, other) || (
             self.hash_key_cache == other.hash_key_cache && // Structural hash
@@ -786,7 +786,7 @@ impl PartialEq for GSSNode {
 impl Eq for GSSNode {}
 
 impl PartialOrd for GSSNode {
-    // #[time_it("GSSNode::partial_cmp")]
+    // // #[time_it("GSSNode::partial_cmp")]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         if std::ptr::eq(self, other) { return Some(Ordering::Equal); }
         // Order by hash_key_cache, then acc, then predecessors
@@ -797,7 +797,7 @@ impl PartialOrd for GSSNode {
 }
 
 impl Ord for GSSNode {
-    // #[time_it("GSSNode::cmp")]
+    // // #[time_it("GSSNode::cmp")]
     fn cmp(&self, other: &Self) -> Ordering {
         if std::ptr::eq(self, other) { return Ordering::Equal; }
         self.hash_key_cache.cmp(&other.hash_key_cache)

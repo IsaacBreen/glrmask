@@ -421,7 +421,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
-    #[time_it("GLRParserState::reduce_and_goto")]
+    // #[time_it("GLRParserState::reduce_and_goto")]
     fn reduce_and_goto(
         &self,
         peek: &GSSPeek,
@@ -577,7 +577,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         !self.active_state.stack.is_empty()
     }
 
-    #[time_it("GLRParserState::log_gss")]
+    // #[time_it("GLRParserState::log_gss")]
     pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
         // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
         return;
