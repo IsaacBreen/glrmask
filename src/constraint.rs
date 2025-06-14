@@ -580,12 +580,12 @@ impl<'r> Precomputer<'r> {
             .map(|root_arc| (root_arc.clone(), BTreeSet::<GrammarTokenID>::new()))
             .collect();
     
-        let terminal_follow_map = self.terminal_follow_map;
+        let terminal_follow_map = &self.terminal_follow_map;
     
         Trie::special_map(
             initial_nodes_and_values,
-            // step_ek: Determine the set of predecessor terminals for children under this edge key.
-            |predecessors, edge_terminal_opt| {
+            // step: Propagate predecessor terminals.
+            |predecessors, edge_terminal_opt, _edge_bv, _child_node| {
                 if let Some(terminal_id) = edge_terminal_opt {
                     // A new chain of terminals starts. The only predecessor that matters for the child
                     // is the terminal on this edge.
@@ -595,10 +595,6 @@ impl<'r> Precomputer<'r> {
                     // "most recent" predecessors from the parent.
                     Some(predecessors.clone())
                 }
-            },
-            // step_ev: The value for the child is the intermediate set. It doesn't depend on EV or child T.
-            |intermediate_set, _edge_bv, _child_node| {
-                Some(intermediate_set.clone())
             },
             // merge: Union of predecessor sets from different paths.
             |existing_set, new_set| {
@@ -614,7 +610,7 @@ impl<'r> Precomputer<'r> {
     
                 // Compute the set of all allowed terminals that can follow any of the immediate predecessors.
                 let mut allowed_follow_terminals = BTreeSet::new();
-                for preceding_terminal in all_immediate_predecessors.iter() {
+                for preceding_terminal in &*all_immediate_predecessors {
                     if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
                         allowed_follow_terminals.extend(follow_set.iter().cloned());
                     }
@@ -987,52 +983,56 @@ impl<'a> GrammarConstraintState<'a> {
         let step_counts_clone1 = Arc::clone(&step_counts);
         let step_counts_clone2 = Arc::clone(&step_counts);
 
+        let stepped_state_cache: RefCell<HashMap<(usize, TerminalID), GLRParserState<'a>>> = RefCell::new(HashMap::new());
+
         Trie::special_map(
             initial_values_for_map,
-            // step_ek: (current_glr_state, edge_grammar_token_opt) -> Option<intermediate_glr_state>
-            |glr_s, grammar_token_opt| {
-                timeit!("get_mask step_ek", {
-                    let mut glr_s = glr_s.clone();
-                    // This subtract was at the start of the old step function. It prunes based on already found tokens.
-                    subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+            // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
+            |glr_s, grammar_token_opt, edge_llm_tokens_bv, child_node_trie_data| {
+                timeit!("get_mask step_fn", {
+                    // The optimization: step first (and cache it), then intersect.
+                    // This is correct because step() and intersect() should be commutative.
+                    // step() works on the grammar structure of the GSS.
+                    // intersect() works on the LLM token bitsets within the GSS.
+                    let mut stepped_s = if let Some(gtid) = grammar_token_opt {
+                        let cache_key = (Arc::as_ptr(&glr_s.active_state.stack) as usize, *gtid);
+                        let mut cache = stepped_state_cache.borrow_mut();
 
-                    crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
-                    glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
-
-                    // The expensive part: advance the GLR parser state.
-                    if let Some(gtid) = grammar_token_opt {
-                        *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
-                        glr_s.step(*gtid);
-                    }
-                    crate::debug!(4, "After stepping with grammar_token_opt: {:?}", glr_s.is_ok());
-
-                    if glr_s.is_ok() {
-                        Some(glr_s)
-                    } else {
-                        None
-                    }
-                })
-            },
-            // step_ev: (intermediate_glr_state, edge_llm_tokens_bv, child_precomputed_node_data) -> Option<final_glr_state>
-            |glr_s_intermediate, edge_llm_tokens_bv, child_node_trie_data| {
-                timeit!("get_mask step_ev", {
-                    let mut glr_s = glr_s_intermediate.clone();
-
-                    crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
-                    intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, edge_llm_tokens_bv, &mut HashMap::new());
-
-                    if glr_s.is_ok() {
-                        if child_node_trie_data.value.end {
-                            let glr_active_tokens = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
-                            *final_mask_internal.borrow_mut() |= glr_active_tokens;
+                        if let Some(cached_s) = cache.get(&cache_key) {
+                            cached_s.clone()
+                        } else {
+                            let mut new_stepped_s = glr_s.clone();
+                            *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
+                            new_stepped_s.step(*gtid);
+                            cache.insert(cache_key, new_stepped_s.clone());
+                            new_stepped_s
                         }
+                    } else {
+                        glr_s.clone()
+                    };
+
+                    if !stepped_s.is_ok() {
+                        return None;
                     }
 
-                    // Prune again with any new tokens found.
-                    subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                    // Now, perform the operations that are specific to the edge value and child.
+                    subtract_llm_tokens_and_prune_arc(&mut stepped_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                    intersect_llm_tokens_and_prune_arc(&mut stepped_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
 
-                    if glr_s.is_ok() {
-                        Some(glr_s)
+                    if !stepped_s.is_ok() {
+                        return None;
+                    }
+
+                    if child_node_trie_data.value.end {
+                        let glr_active_tokens = stepped_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                        *final_mask_internal.borrow_mut() |= glr_active_tokens;
+                    }
+
+                    // This final prune is important to reduce state size for subsequent steps.
+                    subtract_llm_tokens_and_prune_arc(&mut stepped_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+
+                    if stepped_s.is_ok() {
+                        Some(stepped_s)
                     } else {
                         None
                     }
@@ -1041,20 +1041,20 @@ impl<'a> GrammarConstraintState<'a> {
             // merge_fn
             |glr_s1, glr_s2| {
                 timeit!("get_mask merge_fn", {
-                    glr_s1.merge_with(glr_s2);
+                glr_s1.merge_with(glr_s2);
                 })
             },
             // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
             |precomputed_node_data, glr_s| {
                 timeit!("get_mask process_fn", {
-                    if precomputed_node_data.value.end {
-                        let glr_active_tokens = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
-                        *final_mask_internal.borrow_mut() |= glr_active_tokens;
-                        false
-                    } else {
-                        subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
-                        !glr_s.active_state.stack.is_empty()
-                    }
+                if precomputed_node_data.value.end {
+                    let glr_active_tokens = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                    *final_mask_internal.borrow_mut() |= glr_active_tokens;
+                    false
+                } else {
+                    subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                    !glr_s.active_state.stack.is_empty()
+                }
                 })
             },
         );

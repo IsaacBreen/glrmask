@@ -843,53 +843,53 @@ where
 // Requires T: Clone, EK: Ord + Clone, EV: Clone
 impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     /// Performs a specialized breadth-first traversal (related to Dijkstra/Bellman-Ford relaxation).
-    /// This traversal is optimized to perform work related to an edge key `EK` only once,
-    /// even if that key leads to multiple destination nodes.
+    /// (special_map implementation remains unchanged)
     #[time_it]
-    pub fn special_map<V: Clone, VI: Clone>(
+    pub fn special_map<V: Clone>(
         initial_nodes_and_values: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
-        mut step_ek: impl FnMut(&V, &EK) -> Option<VI>,
-        mut step_ev: impl FnMut(&VI, &EV, &Trie<EK, EV, T>) -> Option<V>,
+        mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // Changed Trie<...> to &Trie<...>
         mut merge: impl FnMut(&mut V, V),
         mut process: impl FnMut(&mut Trie<EK, EV, T>, &mut V) -> bool,
     ) {
         // ------------------------------------------------------------------
-        //  Depth-driven scheduler with grouped edge processing.
+        //  Simple depth-driven scheduler.
         //
         //  The key observation is:
         //      parent.max_depth  <  child.max_depth
         //  for every edge (parent → child).
         //  Therefore processing nodes strictly in ascending `max_depth`
         //  guarantees every parent is handled before each of its children.
-        //  This implementation further optimizes traversal by grouping children
-        //  by their edge key (EK) and performing EK-dependent work only once.
         //
         //  • `values`  – accumulated V for every discovered node
         //  • `done`    – nodes that have already been processed
         //  • `todo`    – min-heap keyed by max_depth
         // ------------------------------------------------------------------
-        let mut values: HashMap<*const Mutex<Self>, V> = HashMap::new();
-        let mut done: HashSet<*const Mutex<Self>> = HashSet::new();
-        let mut todo: BTreeMap<usize, HashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
+        let mut values   : HashMap<*const Mutex<Self>, V> = HashMap::new();
+        let mut done     : HashSet <*const Mutex<Self>>   = HashSet ::new();
+        let mut todo     : BTreeMap<usize, HashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
 
         // Seed with the user-supplied starting set
         for (node_arc, v0) in initial_nodes_and_values {
             let ptr = Arc::as_ptr(&node_arc);
-            values.entry(ptr).and_modify(|old| merge(old, v0.clone())).or_insert(v0);
+            values
+                .entry(ptr)
+                .and_modify(|old| merge(old, v0.clone()))
+                .or_insert(v0);
             let depth = node_arc.lock().expect("poison").max_depth;
             todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
         }
 
         // Main loop ---------------------------------------------------------
         while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
+            // #[allow(clippy::iter_over_hash_type)]
             for node_arc_ptr_wrapper in &node_arc_ptr_wrappers {
                 let ptr = Arc::as_ptr(node_arc_ptr_wrapper.as_arc());
-                if done.contains(&ptr) { continue; } // already processed
+                if done.contains(&ptr) { continue; }               // already processed
 
                 // Pull the merged value that all parents contributed
                 let mut agg_v = match values.remove(&ptr) {
                     Some(v) => v,
-                    None => continue, // can happen if every parent’s `step` returned None
+                    None => continue,                            // can happen if every parent’s `step` returned None
                 };
 
                 // ---------- user ‘process’ callback ----------
@@ -899,40 +899,37 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 };
                 done.insert(ptr);
 
-                if !proceed { continue; } // user stopped traversal at this node
+                if !proceed { continue; }                           // user stopped traversal at this node
 
                 // ---------- propagate to children -------------
-                // We clone the children map to release the lock on the current node before processing.
-                let children_to_process = {
+                // We read children once, outside any long-lived locks
+                let edges: Vec<(EK, EV, Arc<Mutex<Self>>)> = {
                     let guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
-                    guard.children.clone()
+                    guard.children
+                        .iter()
+                        .flat_map(|(ek, dst_map)| {
+                            dst_map.iter().map(move |(wrap, ev)| (ek.clone(), ev.clone(), wrap.as_arc().clone()))
+                        })
+                        .collect()
                 };
 
-                for (ek, dest_map) in children_to_process {
-                    // Part 1: Perform the expensive, edge-key-dependent computation once.
-                    if let Some(v_intermediate) = step_ek(&agg_v, &ek) {
-                        // Part 2: Propagate to all children under this edge key.
-                        for (child_arc_wrapper, ev) in &dest_map {
-                            let child_arc = child_arc_wrapper.as_arc();
-                            let child_ptr = Arc::as_ptr(child_arc);
+                for (ek, ev, child_arc) in edges {
+                    let child_ptr = Arc::as_ptr(&child_arc);
 
-                            // User 'step_ev' callback for each destination.
-                            let maybe_v = {
-                                let child_guard = child_arc.lock().expect("poison");
-                                step_ev(&v_intermediate, ev, &child_guard)
-                            };
+                    // user ‘step’ callback
+                    let maybe_v = {
+                        let child_guard = child_arc.lock().expect("poison");
+                        step(&agg_v, &ek, &ev, &child_guard) // Pass &child_guard
+                    };
+                    if let Some(new_v) = maybe_v {
+                        values
+                            .entry(child_ptr)
+                            .and_modify(|old| merge(old, new_v.clone()))
+                            .or_insert(new_v);
 
-                            if let Some(new_v) = maybe_v {
-                                values
-                                    .entry(child_ptr)
-                                    .and_modify(|old| merge(old, new_v.clone()))
-                                    .or_insert(new_v);
-
-                                // Queue child by its declared depth.
-                                let child_depth = child_arc.lock().expect("poison").max_depth;
-                                todo.entry(child_depth).or_default().insert(ArcPtrWrapper::new(child_arc.clone()));
-                            }
-                        }
+                        // Queue child by its declared depth
+                        let child_depth = child_arc.lock().expect("poison").max_depth;
+                        todo.entry(child_depth).or_default().insert(ArcPtrWrapper::new(child_arc));
                     }
                 }
             }
@@ -1567,20 +1564,13 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)],
-            // step_ek: pass parent value and edge key to step_ev
-            |parent_val, ek| {
-                Some((*parent_val, *ek)) // VI is (i32, &'static str)
+            // step: add one, ignore edge info
+            |parent_val, ek, ev, _child_node| {
+                 edge_info_at_step.push((ek.clone(), ev.clone()));
+                 Some(parent_val + 1)
             },
-            // step_ev: log edge info and compute new value
-            |intermediate, ev, _child_node| {
-                let (parent_val, ek) = *intermediate;
-                edge_info_at_step.push((ek, *ev));
-                Some(parent_val + 1)
-            },
-            // merge
-            |current, new| *current = new,
-            // process
-            |node, computed_val| {
+            |current, new| *current = new, // merge: replace
+            |node, computed_val| { // process: always continue
                 processed_node_values.push(node.value);
                 computed_values.push(*computed_val);
                 true
@@ -1655,19 +1645,14 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)],
-            // step_ek
-            |parent_val, ek| {
-                Some((*parent_val, *ek))
-            },
-            // step_ev
-            |intermediate, ev, _child_node| {
-                let (parent_val, ek) = *intermediate;
-                edge_info_at_step.push((ek, *ev));
+            // step: add one, record edge info
+            |parent_val, ek, ev, _child_node| {
+                edge_info_at_step.push((ek.clone(), ev.clone()));
                 Some(parent_val + 1)
             },
-            // merge
+            // merge: replace
             |current, new| { *current = new; },
-            // process
+            // process: always continue
             |node, computed_val| {
                 processed_node_values.push(node.value);
                 computed_values.push(*computed_val);
@@ -1779,10 +1764,8 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)], // Start at root
-            // step_ek: pass parent value through
-            |p_val, _ek| Some(*p_val),
-            // step_ev: increment value
-            |intermediate_val, _ev, _child_node| Some(intermediate_val + 1),
+            // step: increment value, ignore edges
+            |p_val, _ek, _ev, _child_node| Some(p_val + 1),
             // merge: take max value
             |current_v, new_v| *current_v = (*current_v).max(new_v),
             { // process: always continue
@@ -1818,8 +1801,7 @@ mod tests {
         let mut processed = false;
         Trie::special_map(
             vec![(root.clone(), 100)],
-            |_p, _ek| -> Option<()> { panic!("Step_ek should not be called for leaf") },
-            |_intermediate, _ev, _n| -> Option<i32> { panic!("Step_ev should not be called for leaf") },
+            |_p, _ek, _ev, _n| panic!("Step should not be called for leaf"),
             |_cur, _new| {},
             |node, v| { // process: always continue
                 assert_eq!(node.value, 42);
@@ -1976,14 +1958,9 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)], // Start at root
-            // step_ek
-            |p, _ek| Some(*p),
-            // step_ev
-            |intermediate, _ev, _n| Some(intermediate + 1),
-            // merge
-            |cur, new| *cur = (*cur).max(new),
-            // process
-            |node, v| {
+            |p, _ek, _ev, _n| Some(p + 1), // Step: increment
+            |cur, new| *cur = (*cur).max(new), // Merge: max
+            |node, v| { // process: always continue
                 processed_vals.push(node.value);
                 computed_vals.push(*v);
                 true
@@ -2035,12 +2012,8 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)],
-            // step_ek
-            |p_val, _ek| Some(*p_val),
-            // step_ev
-            |intermediate, _ev, _child_node| Some(intermediate + 1),
-            // merge
-            |current_v, new_v| *current_v = new_v,
+            |p_val, _ek, _ev, _child_node| Some(p_val + 1), // step: increment value
+            |current_v, new_v| *current_v = new_v, // merge: replace
             {
                 let processed_nodes = processed_nodes.clone();
                 let computed_values = computed_values.clone();
@@ -2102,18 +2075,15 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)],
-            // step_ek: check edge key and pass parent value
-            |p_val, ek| {
+            // step: increment value only if edge key is "keep"
+            |p_val, ek, _ev, _child_node| {
                 if *ek == "keep" {
-                    Some(*p_val)
+                    Some(p_val + 1)
                 } else {
-                    None // Skip this edge and all its children
+                    None // Skip this edge
                 }
             },
-            // step_ev: increment value
-            |intermediate, _ev, _child_node| Some(intermediate + 1),
-            // merge
-            |current_v, new_v| *current_v = new_v,
+            |current_v, new_v| *current_v = new_v, // merge: replace
             {
                 let processed_nodes = processed_nodes.clone();
                 let computed_values = computed_values.clone();
