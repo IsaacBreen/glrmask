@@ -460,6 +460,8 @@ struct Precomputer<'r> {
     end_node:       ArcPtrWrapper<Mutex<PrecomputeNode>>,
 }
 
+enum Liveness { Live, Dead }
+
 impl<'r> Precomputer<'r> {
     fn new(
         tokenizer:        &'r Regex,
@@ -632,7 +634,6 @@ impl<'r> Precomputer<'r> {
 
     fn prune_dead_paths(&mut self) {
         crate::debug!(2, "Pruning dead paths from precomputed trie.");
-        enum Liveness { Live, Dead }
         let mut cache: HashMap<*const Mutex<PrecomputeNode>, Liveness> = HashMap::new();
 
         // Populate cache by checking liveness from all roots
@@ -649,10 +650,18 @@ impl<'r> Precomputer<'r> {
         for node_arc in all_nodes {
             let mut node_guard = node_arc.lock().unwrap();
             node_guard.children_mut().values_mut().for_each(|dest_map| {
-                dest_map.retain(|child_arc_wrapper, _ev| {
+                // dest_map.retain(|child_arc_wrapper, _ev| {
+                //     let child_ptr = Arc::as_ptr(child_arc_wrapper.as_arc());
+                //     matches!(cache.get(&child_ptr), Some(Liveness::Live))
+                // });
+                let mut new_dest_map = OrderedHashMap::new();
+                for (child_arc_wrapper, ev) in &mut *dest_map {
                     let child_ptr = Arc::as_ptr(child_arc_wrapper.as_arc());
-                    matches!(cache.get(&child_ptr), Some(Liveness::Live))
-                });
+                    if matches!(cache.get(&child_ptr), Some(Liveness::Live)) {
+                        new_dest_map.insert(child_arc_wrapper.clone(), ev.clone());
+                    }
+                }
+                *dest_map = new_dest_map;
             });
             node_guard.children_mut().retain(|_ek, dest_map| !dest_map.is_empty());
         }
@@ -859,7 +868,7 @@ impl<'r> Precomputer<'r> {
             return true;
         }
     
-        let children_arcs: Vec<_> = node_guard.children.values()
+        let children_arcs: Vec<_> = node_guard.children().values()
             .flat_map(|dest_map| dest_map.keys().map(|wrapper| wrapper.as_arc().clone()))
             .collect();
         drop(node_guard);
