@@ -460,8 +460,6 @@ struct Precomputer<'r> {
     end_node:       ArcPtrWrapper<Mutex<PrecomputeNode>>,
 }
 
-enum Liveness { Live, Dead }
-
 impl<'r> Precomputer<'r> {
     fn new(
         tokenizer:        &'r Regex,
@@ -633,7 +631,7 @@ impl<'r> Precomputer<'r> {
     }
 
     fn prune_dead_paths(&mut self) {
-        todo!()j
+        todo!()
     }
 
     fn merge_nodes(&mut self) {
@@ -813,42 +811,6 @@ impl<'r> Precomputer<'r> {
         let mut out = OrderedHashSet::new();
         out.insert(ArcPtrWrapper::new(merged_node_arc)); 
         out
-    }
-
-    fn compute_liveness_recursive(
-        &self,
-        node_arc: &Arc<Mutex<PrecomputeNode>>,
-        cache: &mut HashMap<*const Mutex<PrecomputeNode>, Liveness>,
-    ) -> bool {
-        let node_ptr = Arc::as_ptr(node_arc);
-    
-        if let Some(liveness) = cache.get(&node_ptr) {
-            return matches!(liveness, Liveness::Live);
-        }
-    
-        // Mark as Dead to handle cycles. If we re-encounter this node down a path,
-        // we'll return false, which is correct unless another path proves it's live.
-        cache.insert(node_ptr, Liveness::Dead);
-    
-        let node_guard = node_arc.lock().unwrap();
-        if node_guard.value.end {
-            cache.insert(node_ptr, Liveness::Live);
-            return true;
-        }
-    
-        let children_arcs: Vec<_> = node_guard.children().values()
-            .flat_map(|dest_map| dest_map.keys().map(|wrapper| wrapper.as_arc().clone()))
-            .collect();
-        drop(node_guard);
-    
-        for child_arc in children_arcs {
-            if self.compute_liveness_recursive(&child_arc, cache) {
-                cache.insert(node_ptr, Liveness::Live);
-                return true;
-            }
-        }
-    
-        false
     }
 }
 
