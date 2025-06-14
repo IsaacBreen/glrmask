@@ -235,9 +235,9 @@ where
                                                                     destinations_for_this_ek.insert(ArcPtrWrapper::new(child_arc), edge_value);
                                                                 }
                                                                 _ => return Err(format!("Invalid child_idx-EV pair format for node {} under edge key {:?}", i, edge_key)),
-        }
-    }
-}
+                                                            }
+                                                        }
+                                                    }
                                                     _ => return Err(format!("Children destination map for node {} under edge key {:?} is not an array", i, edge_key)),
                                                 }
                                                 current_node_guard.children.insert(edge_key, destinations_for_this_ek);
@@ -845,15 +845,12 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     /// Performs a specialized breadth-first traversal (related to Dijkstra/Bellman-Ford relaxation).
     /// (special_map implementation remains unchanged)
     #[time_it]
-    pub fn special_map<V: Clone, I>(
+    pub fn special_map<V: Clone>(
         initial_nodes_and_values: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
-        mut step: impl FnMut(
-            &V, &EK, &OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>
-        ) -> I,
+        mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // Changed Trie<...> to &Trie<...>
         mut merge: impl FnMut(&mut V, V),
         mut process: impl FnMut(&mut Trie<EK, EV, T>, &mut V) -> bool,
-    ) where
-        I: IntoIterator<Item = (Arc<Mutex<Trie<EK, EV, T>>>, V)>, {
+    ) {
         // ------------------------------------------------------------------
         //  Simple depth-driven scheduler.
         //
@@ -905,24 +902,32 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
                 if !proceed { continue; }                           // user stopped traversal at this node
 
                 // ---------- propagate to children -------------
-                let children_by_key: BTreeMap<EK, OrderedHashMap<ArcPtrWrapper<Mutex<Self>>, EV>> = {
+                // We read children once, outside any long-lived locks
+                let edges: Vec<(EK, EV, Arc<Mutex<Self>>)> = {
                     let guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
-                    guard.children.clone()
+                    guard.children
+                        .iter()
+                        .flat_map(|(ek, dst_map)| {
+                            dst_map.iter().map(move |(wrap, ev)| (ek.clone(), ev.clone(), wrap.as_arc().clone()))
+                        })
+                        .collect()
                 };
 
-                for (ek, dst_map) in &children_by_key {
-                    // The `step` closure is now responsible for iterating through destinations for a given edge key.
-                    // It returns an iterator of (child_arc, new_value) pairs.
-                    let new_values_for_children = step(&agg_v, ek, dst_map);
+                for (ek, ev, child_arc) in edges {
+                    let child_ptr = Arc::as_ptr(&child_arc);
 
-                    for (child_arc, new_v) in new_values_for_children {
-                        let child_ptr = Arc::as_ptr(&child_arc);
+                    // user ‘step’ callback
+                    let maybe_v = {
+                        let child_guard = child_arc.lock().expect("poison");
+                        step(&agg_v, &ek, &ev, &child_guard) // Pass &child_guard
+                    };
+                    if let Some(new_v) = maybe_v {
                         values
                             .entry(child_ptr)
                             .and_modify(|old| merge(old, new_v.clone()))
                             .or_insert(new_v);
 
-                        // Queue child for processing
+                        // Queue child by its declared depth
                         let child_depth = child_arc.lock().expect("poison").max_depth;
                         todo.entry(child_depth).or_default().insert(ArcPtrWrapper::new(child_arc));
                     }
@@ -1560,11 +1565,9 @@ mod tests {
         Trie::special_map(
             vec![(root.clone(), 100)],
             // step: add one, ignore edge info
-            |parent_val, ek, dest_map| {
-                dest_map.iter().map(|(child_wrapper, ev)| {
-                    edge_info_at_step.push((*ek, *ev));
-                    (child_wrapper.as_arc().clone(), parent_val + 1)
-                }).collect::<Vec<_>>()
+            |parent_val, ek, ev, _child_node| {
+                 edge_info_at_step.push((ek.clone(), ev.clone()));
+                 Some(parent_val + 1)
             },
             |current, new| *current = new, // merge: replace
             |node, computed_val| { // process: always continue
@@ -1643,11 +1646,9 @@ mod tests {
         Trie::special_map(
             vec![(root.clone(), 100)],
             // step: add one, record edge info
-            |parent_val, ek, dest_map| {
-                dest_map.iter().map(|(child_wrapper, ev)| {
-                    edge_info_at_step.push((*ek, *ev));
-                    (child_wrapper.as_arc().clone(), parent_val + 1)
-                }).collect::<Vec<_>>()
+            |parent_val, ek, ev, _child_node| {
+                edge_info_at_step.push((ek.clone(), ev.clone()));
+                Some(parent_val + 1)
             },
             // merge: replace
             |current, new| { *current = new; },
@@ -1764,11 +1765,7 @@ mod tests {
         Trie::special_map(
             vec![(root.clone(), 100)], // Start at root
             // step: increment value, ignore edges
-            |p_val, _ek, dest_map| {
-                dest_map.keys().map(|child_wrapper| {
-                    (child_wrapper.as_arc().clone(), p_val + 1)
-                }).collect::<Vec<_>>()
-            },
+            |p_val, _ek, _ev, _child_node| Some(p_val + 1),
             // merge: take max value
             |current_v, new_v| *current_v = (*current_v).max(new_v),
             { // process: always continue
@@ -1804,9 +1801,7 @@ mod tests {
         let mut processed = false;
         Trie::special_map(
             vec![(root.clone(), 100)],
-            |_p, _ek, _dest_map| -> Vec<(TestNodeBasic, i32)> {
-                panic!("Step should not be called for leaf")
-            },
+            |_p, _ek, _ev, _n| panic!("Step should not be called for leaf"),
             |_cur, _new| {},
             |node, v| { // process: always continue
                 assert_eq!(node.value, 42);
@@ -1963,11 +1958,7 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)], // Start at root
-            |p, _ek, dest_map| { // Step: increment
-                dest_map.keys().map(|child_wrapper| {
-                    (child_wrapper.as_arc().clone(), p + 1)
-                }).collect::<Vec<_>>()
-            },
+            |p, _ek, _ev, _n| Some(p + 1), // Step: increment
             |cur, new| *cur = (*cur).max(new), // Merge: max
             |node, v| { // process: always continue
                 processed_vals.push(node.value);
@@ -2021,11 +2012,7 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)],
-            |p_val, _ek, dest_map| { // step: increment value
-                dest_map.keys().map(|child_wrapper| {
-                    (child_wrapper.as_arc().clone(), p_val + 1)
-                }).collect::<Vec<_>>()
-            },
+            |p_val, _ek, _ev, _child_node| Some(p_val + 1), // step: increment value
             |current_v, new_v| *current_v = new_v, // merge: replace
             {
                 let processed_nodes = processed_nodes.clone();
@@ -2088,14 +2075,12 @@ mod tests {
 
         Trie::special_map(
             vec![(root.clone(), 100)],
-            // step: increment value only if edge key is "keep", returning an iterator of new values
-            |p_val, ek, dest_map| {
+            // step: increment value only if edge key is "keep"
+            |p_val, ek, _ev, _child_node| {
                 if *ek == "keep" {
-                    dest_map.keys().map(|child_wrapper| {
-                        (child_wrapper.as_arc().clone(), p_val + 1)
-                    }).collect::<Vec<_>>()
+                    Some(p_val + 1)
                 } else {
-                    Vec::new() // Skip this edge key by returning an empty iterator
+                    None // Skip this edge
                 }
             },
             |current_v, new_v| *current_v = new_v, // merge: replace
