@@ -67,6 +67,12 @@ local_system:
           let total_ms = node.total_time.as_secs_f64() * 1000.0;
           let own_ms = node.own_time.as_secs_f64() * 1000.0;
 
+          let (total_per_hit_ms, own_per_hit_ms) = if node.hits > 0 {
+              (total_ms / node.hits as f64, own_ms / node.hits as f64)
+          } else {
+              (0.0, 0.0)
+          };
+
           let percentage = if !parent_total_time.is_zero() {
               (node.total_time.as_secs_f64() / parent_total_time.as_secs_f64()) * 100.0
           } else {
@@ -75,11 +81,19 @@ local_system:
 
           let total_str = format!("{:.3}ms", total_ms);
           let own_str = format!("{:.3}ms", own_ms);
+          let total_per_hit_str = format!("{:.3}ms", total_per_hit_ms);
+          let own_per_hit_str = format!("{:.3}ms", own_per_hit_ms);
           let percentage_str = format!("{:.1}%", percentage);
 
           println!(
-              "{:>10} {:>15} {:>15} {:>15}  {}",
-              node.hits, total_str, own_str, percentage_str, name_with_indent
+              "{:>10} {:>15} {:>15} {:>15} {:>15} {:>15}  {}",
+              node.hits,
+              total_str,
+              total_per_hit_str,
+              own_str,
+              own_per_hit_str,
+              percentage_str,
+              name_with_indent
           );
 
           let mut sorted_children: Vec<_> = node.children.iter().collect();
@@ -107,8 +121,8 @@ local_system:
           if !no_timing_data {
               println!("\n[Hierarchical Timings]");
               println!(
-                  "{:>10} {:>15} {:>15} {:>15}  {}",
-                  "Hits", "Total Time", "Own Time", "% of Parent", "Name"
+                  "{:>10} {:>15} {:>15} {:>15} {:>15} {:>15}  {}",
+                  "Hits", "Total Time", "Total/Hit", "Own Time", "Own/Hit", "% of Parent", "Name"
               );
 
               let root_total_time: Duration = data
@@ -174,8 +188,8 @@ local_system:
 
               println!("\n[Flat Timings]");
               println!(
-                  "{:>10} {:>15} {:>15}  {}",
-                  "Hits", "Total Time", "Own Time", "Name"
+                  "{:>10} {:>15} {:>15} {:>15} {:>15}  {}",
+                  "Hits", "Total Time", "Total/Hit", "Own Time", "Own/Hit", "Name"
               );
 
               let mut sorted_list: Vec<_> = flat_map.iter().collect();
@@ -184,12 +198,21 @@ local_system:
               for (name, node) in sorted_list {
                   let total_ms = node.total_time.as_secs_f64() * 1000.0;
                   let own_ms = node.own_time.as_secs_f64() * 1000.0;
+
+                  let (total_per_hit_ms, own_per_hit_ms) = if node.hits > 0 {
+                      (total_ms / node.hits as f64, own_ms / node.hits as f64)
+                  } else {
+                      (0.0, 0.0)
+                  };
+
                   let total_str = format!("{:.3}ms", total_ms);
                   let own_str = format!("{:.3}ms", own_ms);
+                  let total_per_hit_str = format!("{:.3}ms", total_per_hit_ms);
+                  let own_per_hit_str = format!("{:.3}ms", own_per_hit_ms);
 
                   println!(
-                      "{:>10} {:>15} {:>15}  {}",
-                      node.hits, total_str, own_str, name
+                      "{:>10} {:>15} {:>15} {:>15} {:>15}  {}",
+                      node.hits, total_str, total_per_hit_str, own_str, own_per_hit_str, name
                   );
               }
           }
@@ -411,6 +434,12 @@ local_system:
           let total_ms = node.total_time.as_secs_f64() * 1000.0;
           let own_ms = node.own_time.as_secs_f64() * 1000.0;
 
+          let (total_per_hit_ms, own_per_hit_ms) = if node.hits > 0 {
+              (total_ms / node.hits as f64, own_ms / node.hits as f64)
+          } else {
+              (0.0, 0.0)
+          };
+
           let percentage = if !parent_total_time.is_zero() {
               (node.total_time.as_secs_f64() / parent_total_time.as_secs_f64()) * 100.0
           } else {
@@ -419,11 +448,19 @@ local_system:
 
           let total_str = format!("{:.3}ms", total_ms);
           let own_str = format!("{:.3}ms", own_ms);
+          let total_per_hit_str = format!("{:.3}ms", total_per_hit_ms);
+          let own_per_hit_str = format!("{:.3}ms", own_per_hit_ms);
           let percentage_str = format!("{:.1}%", percentage);
 
           println!(
-              "{:>10} {:>15} {:>15} {:>15}  {}",
-              node.hits, total_str, own_str, percentage_str, name_with_indent
+              "{:>10} {:>15} {:>15} {:>15} {:>15} {:>15}  {}",
+              node.hits,
+              total_str,
+              total_per_hit_str,
+              own_str,
+              own_per_hit_str,
+              percentage_str,
+              name_with_indent
           );
 
           let mut sorted_children: Vec<_> = node.children.iter().collect();
@@ -451,8 +488,8 @@ local_system:
           if !no_timing_data {
               println!("\n[Hierarchical Timings]");
               println!(
-                  "{:>10} {:>15} {:>15} {:>15}  {}",
-                  "Hits", "Total Time", "Own Time", "% of Parent", "Name"
+                  "{:>10} {:>15} {:>15} {:>15} {:>15} {:>15}  {}",
+                  "Hits", "Total Time", "Total/Hit", "Own Time", "Own/Hit", "% of Parent", "Name"
               );
 
               let root_total_time: Duration = data
@@ -518,8 +555,8 @@ local_system:
 
               println!("\n[Flat Timings]");
               println!(
-                  "{:>10} {:>15} {:>15}  {}",
-                  "Hits", "Total Time", "Own Time", "Name"
+                  "{:>10} {:>15} {:>15} {:>15} {:>15}  {}",
+                  "Hits", "Total Time", "Total/Hit", "Own Time", "Own/Hit", "Name"
               );
 
               let mut sorted_list: Vec<_> = flat_map.iter().collect();
@@ -528,12 +565,21 @@ local_system:
               for (name, node) in sorted_list {
                   let total_ms = node.total_time.as_secs_f64() * 1000.0;
                   let own_ms = node.own_time.as_secs_f64() * 1000.0;
+
+                  let (total_per_hit_ms, own_per_hit_ms) = if node.hits > 0 {
+                      (total_ms / node.hits as f64, own_ms / node.hits as f64)
+                  } else {
+                      (0.0, 0.0)
+                  };
+
                   let total_str = format!("{:.3}ms", total_ms);
                   let own_str = format!("{:.3}ms", own_ms);
+                  let total_per_hit_str = format!("{:.3}ms", total_per_hit_ms);
+                  let own_per_hit_str = format!("{:.3}ms", own_per_hit_ms);
 
                   println!(
-                      "{:>10} {:>15} {:>15}  {}",
-                      node.hits, total_str, own_str, name
+                      "{:>10} {:>15} {:>15} {:>15} {:>15}  {}",
+                      node.hits, total_str, total_per_hit_str, own_str, own_per_hit_str, name
                   );
               }
           }
@@ -778,6 +824,12 @@ messages:
           let total_ms = node.total_time.as_secs_f64() * 1000.0;
           let own_ms = node.own_time.as_secs_f64() * 1000.0;
 
+          let (total_per_hit_ms, own_per_hit_ms) = if node.hits > 0 {
+              (total_ms / node.hits as f64, own_ms / node.hits as f64)
+          } else {
+              (0.0, 0.0)
+          };
+
           let percentage = if !parent_total_time.is_zero() {
               (node.total_time.as_secs_f64() / parent_total_time.as_secs_f64()) * 100.0
           } else {
@@ -786,11 +838,19 @@ messages:
 
           let total_str = format!("{:.3}ms", total_ms);
           let own_str = format!("{:.3}ms", own_ms);
+          let total_per_hit_str = format!("{:.3}ms", total_per_hit_ms);
+          let own_per_hit_str = format!("{:.3}ms", own_per_hit_ms);
           let percentage_str = format!("{:.1}%", percentage);
 
           println!(
-              "{:>10} {:>15} {:>15} {:>15}  {}",
-              node.hits, total_str, own_str, percentage_str, name_with_indent
+              "{:>10} {:>15} {:>15} {:>15} {:>15} {:>15}  {}",
+              node.hits,
+              total_str,
+              total_per_hit_str,
+              own_str,
+              own_per_hit_str,
+              percentage_str,
+              name_with_indent
           );
 
           let mut sorted_children: Vec<_> = node.children.iter().collect();
@@ -818,8 +878,8 @@ messages:
           if !no_timing_data {
               println!("\n[Hierarchical Timings]");
               println!(
-                  "{:>10} {:>15} {:>15} {:>15}  {}",
-                  "Hits", "Total Time", "Own Time", "% of Parent", "Name"
+                  "{:>10} {:>15} {:>15} {:>15} {:>15} {:>15}  {}",
+                  "Hits", "Total Time", "Total/Hit", "Own Time", "Own/Hit", "% of Parent", "Name"
               );
 
               let root_total_time: Duration = data
@@ -885,8 +945,8 @@ messages:
 
               println!("\n[Flat Timings]");
               println!(
-                  "{:>10} {:>15} {:>15}  {}",
-                  "Hits", "Total Time", "Own Time", "Name"
+                  "{:>10} {:>15} {:>15} {:>15} {:>15}  {}",
+                  "Hits", "Total Time", "Total/Hit", "Own Time", "Own/Hit", "Name"
               );
 
               let mut sorted_list: Vec<_> = flat_map.iter().collect();
@@ -895,12 +955,21 @@ messages:
               for (name, node) in sorted_list {
                   let total_ms = node.total_time.as_secs_f64() * 1000.0;
                   let own_ms = node.own_time.as_secs_f64() * 1000.0;
+
+                  let (total_per_hit_ms, own_per_hit_ms) = if node.hits > 0 {
+                      (total_ms / node.hits as f64, own_ms / node.hits as f64)
+                  } else {
+                      (0.0, 0.0)
+                  };
+
                   let total_str = format!("{:.3}ms", total_ms);
                   let own_str = format!("{:.3}ms", own_ms);
+                  let total_per_hit_str = format!("{:.3}ms", total_per_hit_ms);
+                  let own_per_hit_str = format!("{:.3}ms", own_per_hit_ms);
 
                   println!(
-                      "{:>10} {:>15} {:>15}  {}",
-                      node.hits, total_str, own_str, name
+                      "{:>10} {:>15} {:>15} {:>15} {:>15}  {}",
+                      node.hits, total_str, total_per_hit_str, own_str, own_per_hit_str, name
                   );
               }
           }
@@ -1062,101 +1131,120 @@ messages:
       ```
     metadata:
       filename: src/profiler.rs
-  - user: 'Modify this so we have two new columns: total time per hit and own time
-      per hit. Both in flat and Hierarchical Timings.'
+  - user: Modify this so it eg prints in microseconds if the number is in an appropriate
+      range or something. Is there a built-in way to handle this?
     metadata:
   - assistant: |-
-      Of course! Here are the modifications to add "total time per hit" and "own time per hit" columns to both the hierarchical and flat profiler summaries.
+      Of course! Dealing with different scales of time measurements is a classic problem in profiling. Displaying times in milliseconds is often a good default, but for very short or very long durations, it can become hard to read. Using units like microseconds (µs), or seconds (s) makes the output much more intuitive.
 
-      Here is the git diff for the changes:
+      While Rust's `std::time::Duration` has a `Debug` format that automatically adjusts units, creating a custom formatting function gives you more control over precision and representation, which is perfect for profiler output.
+
+      Here are the patches to implement adaptive time unit formatting for your profiler. I've added a helper function to format `Duration` values and updated the summary-printing functions to use it. This new formatter will choose the most appropriate unit from nanoseconds, microseconds, milliseconds, or seconds.
+
+      Here is the git diff for `src/profiler.rs`:
 
       ```diff
       --- a/src/profiler.rs
       +++ b/src/profiler.rs
-      @@ -60,6 +60,13 @@
-           let total_ms = node.total_time.as_secs_f64() * 1000.0;
-           let own_ms = node.own_time.as_secs_f64() * 1000.0;
+      @@ -60,30 +60,38 @@
+           data.hits.clear();
+       }
        
-      +    let (total_per_hit_ms, own_per_hit_ms) = if node.hits > 0 {
-      +        (total_ms / node.hits as f64, own_ms / node.hits as f64)
+      +/// Formats a `Duration` into a human-readable string with appropriate units (s, ms, µs, ns).
+      +fn format_duration(duration: Duration) -> String {
+      +    let total_nanos = duration.as_nanos();
+      +    if total_nanos >= 1_000_000_000 {
+      +        format!("{:.3}s", duration.as_secs_f64())
+      +    } else if total_nanos >= 1_000_000 {
+      +        format!("{:.3}ms", duration.as_micros() as f64 / 1000.0)
+      +    } else if total_nanos >= 1_000 {
+      +        format!("{:.3}µs", duration.as_nanos() as f64 / 1000.0)
       +    } else {
-      +        (0.0, 0.0)
-      +    };
+      +        format!("{}ns", total_nanos)
+      +    }
+      +}
       +
+       fn print_node_recursive(
+           node: &ProfileNode,
+           name: &str,
+           indent_level: usize,
+           parent_total_time: Duration,
+       ) {
+           let indent = "  ".repeat(indent_level);
+           let name_with_indent = format!("{}{}", indent, name);
+       
+      -    let total_ms = node.total_time.as_secs_f64() * 1000.0;
+      -    let own_ms = node.own_time.as_secs_f64() * 1000.0;
+      -
+      -    let (total_per_hit_ms, own_per_hit_ms) = if node.hits > 0 {
+      -        (total_ms / node.hits as f64, own_ms / node.hits as f64)
+      -    } else {
+      -        (0.0, 0.0)
+      +    let (total_per_hit, own_per_hit) = if node.hits > 0 {
+      +        (
+      +            node.total_time.mul_f64(1.0 / node.hits as f64),
+      +            node.own_time.mul_f64(1.0 / node.hits as f64),
+      +        )
+      +    } else {
+      +        (Duration::from_secs(0), Duration::from_secs(0))
+           };
+       
            let percentage = if !parent_total_time.is_zero() {
                (node.total_time.as_secs_f64() / parent_total_time.as_secs_f64()) * 100.0
            } else {
-      @@ -68,11 +75,18 @@
+               0.0
+           };
        
-           let total_str = format!("{:.3}ms", total_ms);
-           let own_str = format!("{:.3}ms", own_ms);
-      +    let total_per_hit_str = format!("{:.3}ms", total_per_hit_ms);
-      +    let own_per_hit_str = format!("{:.3}ms", own_per_hit_ms);
+      -    let total_str = format!("{:.3}ms", total_ms);
+      -    let own_str = format!("{:.3}ms", own_ms);
+      -    let total_per_hit_str = format!("{:.3}ms", total_per_hit_ms);
+      -    let own_per_hit_str = format!("{:.3}ms", own_per_hit_ms);
+      +    let total_str = format_duration(node.total_time);
+      +    let own_str = format_duration(node.own_time);
+      +    let total_per_hit_str = format_duration(total_per_hit);
+      +    let own_per_hit_str = format_duration(own_per_hit);
            let percentage_str = format!("{:.1}%", percentage);
        
            println!(
-      -        "{:>10} {:>15} {:>15} {:>15}  {}",
-      -        node.hits, total_str, own_str, percentage_str, name_with_indent
-      +        "{:>10} {:>15} {:>15} {:>15} {:>15} {:>15}  {}",
-      +        node.hits,
-      +        total_str,
-      +        total_per_hit_str,
-      +        own_str,
-      +        own_per_hit_str,
-      +        percentage_str,
-      +        name_with_indent
-           );
-       
-           let mut sorted_children: Vec<_> = node.children.iter().collect();
-      @@ -98,8 +112,8 @@
-           if !no_timing_data {
-               println!("\n[Hierarchical Timings]");
-               println!(
-      -            "{:>10} {:>15} {:>15} {:>15}  {}",
-      -            "Hits", "Total Time", "Own Time", "% of Parent", "Name"
-      +            "{:>10} {:>15} {:>15} {:>15} {:>15} {:>15}  {}",
-      +            "Hits", "Total Time", "Total/Hit", "Own Time", "Own/Hit", "% of Parent", "Name"
-               );
-       
-               let root_total_time: Duration = data
-      @@ -155,20 +169,31 @@
-       
-               println!("\n[Flat Timings]");
-               println!(
-      -            "{:>10} {:>15} {:>15}  {}",
-      -            "Hits", "Total Time", "Own Time", "Name"
-      +            "{:>10} {:>15} {:>15} {:>15} {:>15}  {}",
-      +            "Hits", "Total Time", "Total/Hit", "Own Time", "Own/Hit", "Name"
-               );
-       
-               let mut sorted_list: Vec<_> = flat_map.iter().collect();
+      @@ -179,24 +187,22 @@
                sorted_list.sort_by(|a, b| b.1.total_time.cmp(&a.1.total_time));
        
                for (name, node) in sorted_list {
-                   let total_ms = node.total_time.as_secs_f64() * 1000.0;
-                   let own_ms = node.own_time.as_secs_f64() * 1000.0;
-      +
-      +            let (total_per_hit_ms, own_per_hit_ms) = if node.hits > 0 {
-      +                (total_ms / node.hits as f64, own_ms / node.hits as f64)
+      -            let total_ms = node.total_time.as_secs_f64() * 1000.0;
+      -            let own_ms = node.own_time.as_secs_f64() * 1000.0;
+      -
+      -            let (total_per_hit_ms, own_per_hit_ms) = if node.hits > 0 {
+      -                (total_ms / node.hits as f64, own_ms / node.hits as f64)
+      -            } else {
+      -                (0.0, 0.0)
+      +            let (total_per_hit, own_per_hit) = if node.hits > 0 {
+      +                (
+      +                    node.total_time.mul_f64(1.0 / node.hits as f64),
+      +                    node.own_time.mul_f64(1.0 / node.hits as f64),
+      +                )
       +            } else {
-      +                (0.0, 0.0)
-      +            };
-      +
-                   let total_str = format!("{:.3}ms", total_ms);
-                   let own_str = format!("{:.3}ms", own_ms);
-      +            let total_per_hit_str = format!("{:.3}ms", total_per_hit_ms);
-      +            let own_per_hit_str = format!("{:.3}ms", own_per_hit_ms);
+      +                (Duration::from_secs(0), Duration::from_secs(0))
+                   };
+       
+      -            let total_str = format!("{:.3}ms", total_ms);
+      -            let own_str = format!("{:.3}ms", own_ms);
+      -            let total_per_hit_str = format!("{:.3}ms", total_per_hit_ms);
+      -            let own_per_hit_str = format!("{:.3}ms", own_per_hit_ms);
+      +            let total_str = format_duration(node.total_time);
+      +            let own_str = format_duration(node.own_time);
+      +            let total_per_hit_str = format_duration(total_per_hit);
+      +            let own_per_hit_str = format_duration(own_per_hit);
        
                    println!(
-      -                "{:>10} {:>15} {:>15}  {}",
-      -                node.hits, total_str, own_str, name
-      +                "{:>10} {:>15} {:>15} {:>15} {:>15}  {}",
-      +                node.hits, total_str, total_per_hit_str, own_str, own_per_hit_str, name
+                       "{:>10} {:>15} {:>15} {:>15} {:>15}  {}",
+                       node.hits, total_str, total_per_hit_str, own_str, own_per_hit_str, name
                    );
                }
            }
 
       ```
+
+      I've replaced the floating-point millisecond calculations with `Duration`-based arithmetic, which is more robust and less prone to floating-point precision issues. The new `format_duration` function will make your profiler's output much more readable across a wide range of time scales. Let me know if you have any other questions
     metadata:
   - user: |
       Git apply result:

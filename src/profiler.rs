@@ -48,6 +48,20 @@ pub fn reset() {
     data.hits.clear();
 }
 
+/// Formats a `Duration` into a human-readable string with appropriate units (s, ms, µs, ns).
+fn format_duration(duration: Duration) -> String {
+    let total_nanos = duration.as_nanos();
+    if total_nanos >= 1_000_000_000 {
+        format!("{:.3}s", duration.as_secs_f64())
+    } else if total_nanos >= 1_000_000 {
+        format!("{:.3}ms", duration.as_micros() as f64 / 1000.0)
+    } else if total_nanos >= 1_000 {
+        format!("{:.3}µs", duration.as_nanos() as f64 / 1000.0)
+    } else {
+        format!("{}ns", total_nanos)
+    }
+}
+
 fn print_node_recursive(
     node: &ProfileNode,
     name: &str,
@@ -57,13 +71,13 @@ fn print_node_recursive(
     let indent = "  ".repeat(indent_level);
     let name_with_indent = format!("{}{}", indent, name);
 
-    let total_ms = node.total_time.as_secs_f64() * 1000.0;
-    let own_ms = node.own_time.as_secs_f64() * 1000.0;
-
-    let (total_per_hit_ms, own_per_hit_ms) = if node.hits > 0 {
-        (total_ms / node.hits as f64, own_ms / node.hits as f64)
+    let (total_per_hit, own_per_hit) = if node.hits > 0 {
+        (
+            node.total_time.mul_f64(1.0 / node.hits as f64),
+            node.own_time.mul_f64(1.0 / node.hits as f64),
+        )
     } else {
-        (0.0, 0.0)
+        (Duration::from_secs(0), Duration::from_secs(0))
     };
 
     let percentage = if !parent_total_time.is_zero() {
@@ -72,10 +86,10 @@ fn print_node_recursive(
         0.0
     };
 
-    let total_str = format!("{:.3}ms", total_ms);
-    let own_str = format!("{:.3}ms", own_ms);
-    let total_per_hit_str = format!("{:.3}ms", total_per_hit_ms);
-    let own_per_hit_str = format!("{:.3}ms", own_per_hit_ms);
+    let total_str = format_duration(node.total_time);
+    let own_str = format_duration(node.own_time);
+    let total_per_hit_str = format_duration(total_per_hit);
+    let own_per_hit_str = format_duration(own_per_hit);
     let percentage_str = format!("{:.1}%", percentage);
 
     println!(
@@ -189,19 +203,19 @@ pub fn print_summary_flat() {
         sorted_list.sort_by(|a, b| b.1.total_time.cmp(&a.1.total_time));
 
         for (name, node) in sorted_list {
-            let total_ms = node.total_time.as_secs_f64() * 1000.0;
-            let own_ms = node.own_time.as_secs_f64() * 1000.0;
-
-            let (total_per_hit_ms, own_per_hit_ms) = if node.hits > 0 {
-                (total_ms / node.hits as f64, own_ms / node.hits as f64)
+            let (total_per_hit, own_per_hit) = if node.hits > 0 {
+                (
+                    node.total_time.mul_f64(1.0 / node.hits as f64),
+                    node.own_time.mul_f64(1.0 / node.hits as f64),
+                )
             } else {
-                (0.0, 0.0)
+                (Duration::from_secs(0), Duration::from_secs(0))
             };
 
-            let total_str = format!("{:.3}ms", total_ms);
-            let own_str = format!("{:.3}ms", own_ms);
-            let total_per_hit_str = format!("{:.3}ms", total_per_hit_ms);
-            let own_per_hit_str = format!("{:.3}ms", own_per_hit_ms);
+            let total_str = format_duration(node.total_time);
+            let own_str = format_duration(node.own_time);
+            let total_per_hit_str = format_duration(total_per_hit);
+            let own_per_hit_str = format_duration(own_per_hit);
 
             println!(
                 "{:>10} {:>15} {:>15} {:>15} {:>15}  {}",
