@@ -935,6 +935,79 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             }
         }
     }
+
+    /// Performs a specialized breadth-first traversal, grouping children by edge key.
+    /// This is more efficient than `special_map` when many edges share the same key,
+    /// as the `step` function is called once per key, not once per edge.
+    #[time_it]
+    pub fn special_map_grouped<V, S, I>(
+        initial_nodes_and_values: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
+        mut step: S,
+        mut merge: impl FnMut(&mut V, V),
+        mut process: impl FnMut(&mut Trie<EK, EV, T>, &mut V) -> bool,
+    )
+    where
+        V: Clone,
+        S: FnMut(
+            &V, &EK, &OrderedHashMap<ArcPtrWrapper<Mutex<Trie<EK, EV, T>>>, EV>
+        ) -> I,
+        I: IntoIterator<Item = (Arc<Mutex<Trie<EK, EV, T>>>, V)>,
+    {
+        // ------------------------------------------------------------------
+        //  Simple depth-driven scheduler. (Same as special_map)
+        // ------------------------------------------------------------------
+        let mut values: HashMap<*const Mutex<Self>, V> = HashMap::new();
+        let mut done: HashSet<*const Mutex<Self>> = HashSet::new();
+        let mut todo: BTreeMap<usize, HashSet<ArcPtrWrapper<Mutex<Self>>>> = BTreeMap::new();
+
+        // Seed with the user-supplied starting set
+        for (node_arc, v0) in initial_nodes_and_values {
+            let ptr = Arc::as_ptr(&node_arc);
+            values
+                .entry(ptr)
+                .and_modify(|old| merge(old, v0.clone()))
+                .or_insert(v0);
+            let depth = node_arc.lock().expect("poison").max_depth;
+            todo.entry(depth).or_default().insert(ArcPtrWrapper::new(node_arc.clone()));
+        }
+
+        // Main loop ---------------------------------------------------------
+        while let Some((_depth, node_arc_ptr_wrappers)) = todo.pop_first() {
+            for node_arc_ptr_wrapper in &node_arc_ptr_wrappers {
+                let ptr = Arc::as_ptr(node_arc_ptr_wrapper.as_arc());
+                if done.contains(&ptr) { continue; }
+
+                let mut agg_v = match values.remove(&ptr) {
+                    Some(v) => v,
+                    None => continue,
+                };
+
+                let proceed = {
+                    let mut guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
+                    process(&mut guard, &mut agg_v)
+                };
+                done.insert(ptr);
+
+                if !proceed { continue; }
+
+                // ---------- propagate to children (grouped by edge key) -------------
+                let children_by_ek: Vec<(EK, OrderedHashMap<ArcPtrWrapper<Mutex<Self>>, EV>)> = {
+                    let guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
+                    guard.children.iter().map(|(ek, dst_map)| (ek.clone(), dst_map.clone())).collect()
+                };
+
+                for (ek, dest_map) in children_by_ek {
+                    let new_values_for_children = step(&agg_v, &ek, &dest_map);
+                    for (child_arc, new_v) in new_values_for_children {
+                        let child_ptr = Arc::as_ptr(&child_arc);
+                        values.entry(child_ptr).and_modify(|old| merge(old, new_v.clone())).or_insert(new_v);
+                        let child_depth = child_arc.lock().expect("poison").max_depth;
+                        todo.entry(child_depth).or_default().insert(ArcPtrWrapper::new(child_arc));
+                    }
+                }
+            }
+        }
+    }
 }
 
 // Implement PartialEq for Trie

@@ -983,59 +983,69 @@ impl<'a> GrammarConstraintState<'a> {
         let step_counts_clone1 = Arc::clone(&step_counts);
         let step_counts_clone2 = Arc::clone(&step_counts);
 
-        Trie::special_map(
+        Trie::special_map_grouped(
             initial_values_for_map,
-            // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
-            |glr_s, grammar_token_opt, edge_llm_tokens_bv, child_node_trie_data| {
+            // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
+            |glr_s, grammar_token_opt, dest_map| {
                 timeit!("get_mask step_fn", {
-                let mut glr_s = glr_s.clone();
-                crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
-                subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
-                intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
-                // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
+                    let mut results = Vec::new();
 
-                crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
-                glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
-                if let Some(gtid) = grammar_token_opt {
-                    *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
-                    glr_s.step(*gtid);
-                }
-                crate::debug!(4, "After stepping with grammar_token_opt: {:?}", glr_s.is_ok());
-                // glr_s.log_gss("After stepping", grammar_token_opt.unwrap_or(TerminalID(0)));
+                    let mut glr_s_after_step = glr_s.clone();
+                    subtract_llm_tokens_and_prune_arc(&mut glr_s_after_step.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
 
-                if glr_s.is_ok() {
-                    if child_node_trie_data.value.end {
-                        let glr_active_tokens = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
-                        *final_mask_internal.borrow_mut() |= glr_active_tokens;
+                    glr_s_after_step.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
+                    if let Some(gtid) = grammar_token_opt {
+                        *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
+                        glr_s_after_step.step(*gtid);
                     }
-                }
+                    crate::debug!(4, "After stepping with grammar_token_opt: {:?}", glr_s_after_step.is_ok());
 
-                subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                    if !glr_s_after_step.is_ok() {
+                        return results; // empty vec
+                    }
 
-                if glr_s.is_ok() {
-                    Some(glr_s)
-                } else {
-                    None
-                }
+                    for (child_wrapper, edge_llm_tokens_bv) in dest_map {
+                        let child_arc = child_wrapper.as_arc();
+                        let child_node_trie_data = child_arc.lock().unwrap();
+
+                        let mut new_glr_s = glr_s_after_step.clone();
+
+                        crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
+                        intersect_llm_tokens_and_prune_arc(&mut new_glr_s.active_state.stack, edge_llm_tokens_bv, &mut HashMap::new());
+
+                        if new_glr_s.is_ok() {
+                            if child_node_trie_data.value.end {
+                                let glr_active_tokens = new_glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                                *final_mask_internal.borrow_mut() |= glr_active_tokens;
+                            }
+                        }
+
+                        subtract_llm_tokens_and_prune_arc(&mut new_glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+
+                        if new_glr_s.is_ok() {
+                            results.push((child_arc.clone(), new_glr_s));
+                        }
+                    }
+                    results
                 })
             },
             // merge_fn
             |glr_s1, glr_s2| {
                 timeit!("get_mask merge_fn", {
-                glr_s1.merge_with(glr_s2);
+                    glr_s1.merge_with(glr_s2);
                 })
             },
             // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
             |precomputed_node_data, glr_s| {
                 timeit!("get_mask process_fn", {
-                if precomputed_node_data.value.end {
-                    let glr_active_tokens = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
-                    *final_mask_internal.borrow_mut() |= glr_active_tokens;
-                    false
-                } else {
-                    subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
-                    !glr_s.active_state.stack.is_empty()
-                }
+                    if precomputed_node_data.value.end {
+                        let glr_active_tokens = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                        *final_mask_internal.borrow_mut() |= glr_active_tokens;
+                        false
+                    } else {
+                        subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                        !glr_s.active_state.stack.is_empty()
+                    }
                 })
             },
         );
