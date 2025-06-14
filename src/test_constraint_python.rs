@@ -651,7 +651,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
     // gpt2_raw_vocab.retain(|k, _| [b"from".as_ref(), b" x"].contains(&k.as_ref()) || k.len() <= 2);
     // llm_token_map.retain(|v, _| [b"from".as_ref(), b" x".as_ref()].contains(&v.as_ref()) || v.len() == 2 && v.iter().all(|c| !c.is_ascii_alphanumeric()));
-    llm_token_map.retain(|v, _| [b"from".as_ref(), b" x".as_ref(), ].contains(&v.as_ref()) || v.len() == 2 && *String::from_utf8_lossy(v.as_ref()) <= *"xx");
+    llm_token_map.retain(|v, _| [b"from".as_ref(), b" x".as_ref(), ].contains(&v.as_ref()) || v.len() == 2 && v.iter().all(|c| !c.is_ascii_alphanumeric()) && *String::from_utf8_lossy(v.as_ref()) <= *">]");
     assert!(llm_token_map.contains_left(&b"from".to_vec()));
     assert!(llm_token_map.contains_left(&b" x".to_vec()));
 
