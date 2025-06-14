@@ -576,6 +576,7 @@ impl<'r> Precomputer<'r> {
         let mut content_to_canonical_arc_map: HashMap<PrecomputeNode, Arc<Mutex<PrecomputeNode>>> = HashMap::new();
         
         for (_tokenizer_state_id, root_arc_ref) in &self.roots {
+            crate::debug!(4, "Merging nodes: first collecting unique roots and their canonical Arcs: Root {:p}", root_arc_ref);
             let node_content = root_arc_ref.lock().unwrap().clone();
             // This will associate node_content with root_arc_ref.clone().
             // If node_content was already in the map, its associated Arc gets updated to root_arc_ref.clone().
@@ -585,8 +586,10 @@ impl<'r> Precomputer<'r> {
 
         crate::debug!(2, "Merging nodes: second pass, rewriting roots in self.roots to point to canonical Arcs");
         for (_tokenizer_state_id, root_arc_in_self_roots_mut) in &mut self.roots {
+            crate::debug!(4, "Merging nodes: second pass, rewriting roots in self.roots to point to canonical Arcs: Root {:p}", root_arc_in_self_roots_mut);
             let current_content = root_arc_in_self_roots_mut.lock().unwrap().clone();
             if let Some(canonical_arc) = content_to_canonical_arc_map.get(&current_content) {
+                crate::debug!(4, "Merging nodes: canonical Arc found for {:?}, updating root to {:p}", current_content, canonical_arc);
                 *root_arc_in_self_roots_mut = canonical_arc.clone();
             } else {
                 // This should not happen if content_to_canonical_arc_map was built correctly from all roots
