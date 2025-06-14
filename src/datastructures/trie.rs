@@ -1058,29 +1058,29 @@ where
         // Hash children.
         // Iterate edge keys in sorted order (BTreeMap).
         node.children.len().hash(state);
-        for (ek, dest_map) in &node.children {
-            ek.hash(state);
-
-            // For the destinations under this edge key, their order due to ArcPtrWrapper (pointers)
-            // is not canonical. To be consistent with PartialEq (which treats them as a multiset),
-            // we hash each (Arc, EV) pair, collect these hashes, sort them, and then hash the sorted list.
-            dest_map.len().hash(state);
-            let mut pair_hashes = Vec::with_capacity(dest_map.len());
-
-            for (apw, ev) in dest_map { // Iterates in ArcPtrWrapper order
-                let child_arc = apw.as_arc();
-                // Create a temporary hasher for the (EV, Arc_content) pair.
-                let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
-                ev.hash(&mut pair_hasher);
-                Self::hash_arc_recursive(child_arc, &mut pair_hasher, recursion_marker, current_depth);
-                pair_hashes.push(pair_hasher.finish());
-            }
-
-            pair_hashes.sort_unstable(); // Sort the hashes of the (EV, Arc_content) pairs.
-            for h in pair_hashes {
-                h.hash(state);
-            }
-        }
+        // for (ek, dest_map) in &node.children {
+        //     ek.hash(state);
+        //
+        //     // For the destinations under this edge key, their order due to ArcPtrWrapper (pointers)
+        //     // is not canonical. To be consistent with PartialEq (which treats them as a multiset),
+        //     // we hash each (Arc, EV) pair, collect these hashes, sort them, and then hash the sorted list.
+        //     dest_map.len().hash(state);
+        //     let mut pair_hashes = Vec::with_capacity(dest_map.len());
+        //
+        //     for (apw, ev) in dest_map { // Iterates in ArcPtrWrapper order
+        //         let child_arc = apw.as_arc();
+        //         // Create a temporary hasher for the (EV, Arc_content) pair.
+        //         let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
+        //         ev.hash(&mut pair_hasher);
+        //         Self::hash_arc_recursive(child_arc, &mut pair_hasher, recursion_marker, current_depth);
+        //         pair_hashes.push(pair_hasher.finish());
+        //     }
+        //
+        //     pair_hashes.sort_unstable(); // Sort the hashes of the (EV, Arc_content) pairs.
+        //     for h in pair_hashes {
+        //         h.hash(state);
+        //     }
+        // }
     }
 
     /// Helper function to hash an Arc<Mutex<Trie>>. Handles cycles.
