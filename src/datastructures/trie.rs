@@ -847,7 +847,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         initial_nodes_and_values: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
         mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // Changed Trie<...> to &Trie<...>
         mut merge: impl FnMut(&mut V, V),
-        mut process: impl FnMut(&Trie<EK, EV, T>, &mut V) -> bool, // Changed Trie<...> to &Trie<...>
+        mut process: impl FnMut(&mut Trie<EK, EV, T>, &mut V) -> bool,
     ) {
         // ------------------------------------------------------------------
         //  Simple depth-driven scheduler.
@@ -892,8 +892,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
 
                 // ---------- user ‘process’ callback ----------
                 let proceed = {
-                    let guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
-                    process(&guard, &mut agg_v)
+                    let mut guard = node_arc_ptr_wrapper.as_arc().lock().expect("poison");
+                    process(&mut guard, &mut agg_v)
                 };
                 done.insert(ptr);
 
