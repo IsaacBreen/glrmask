@@ -603,8 +603,6 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     //     }
     // }).collect();
 
-    gpt2_raw_vocab.retain(|k, _| [b"from".as_ref(), b" typing"].contains(&k.as_ref()) || k.len() <= 2);
-
     let mut llm_token_map = LLMTokenMap::new();
     let mut max_original_llm_token_id_val: usize = 0;
 
@@ -650,6 +648,9 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // // Keep only "1" and "11"
     // // llm_token_map.retain(|v, _| v.len() == 1 || v == b"1" || v == b"11");
     // // llm_token_map.retain(|v, _| v == b"1" || v == b"11");
+
+    // gpt2_raw_vocab.retain(|k, _| [b"from".as_ref(), b" typing"].contains(&k.as_ref()) || k.len() <= 2);
+    llm_token_map.retain(|v, _| [b"from".as_ref(), b" typing".as_ref()].contains(&v.as_ref()) || v.len() <= 2);
 
     // Print the vocab
     println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
