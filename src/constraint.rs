@@ -375,6 +375,7 @@ impl GrammarConstraint {
         internal_bv
     }
 
+    #[time_it]
     fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
         let mut original_bv = HybridBitset::zeros();
         for internal_id_val in internal_bv.iter() {
