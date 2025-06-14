@@ -649,10 +649,10 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // // llm_token_map.retain(|v, _| v.len() == 1 || v == b"1" || v == b"11");
     // // llm_token_map.retain(|v, _| v == b"1" || v == b"11");
 
-    // gpt2_raw_vocab.retain(|k, _| [b"from".as_ref(), b" typing"].contains(&k.as_ref()) || k.len() <= 2);
-    llm_token_map.retain(|v, _| [b"from".as_ref(), b" typing".as_ref()].contains(&v.as_ref()) || v.len() <= 2);
+    // gpt2_raw_vocab.retain(|k, _| [b"from".as_ref(), b" x"].contains(&k.as_ref()) || k.len() <= 2);
+    llm_token_map.retain(|v, _| [b"from".as_ref(), b" x".as_ref()].contains(&v.as_ref()) || v.len() <= 2);
     assert!(llm_token_map.contains_left(&b"from".to_vec()));
-    assert!(llm_token_map.contains_left(&b" typing".to_vec()));
+    assert!(llm_token_map.contains_left(&b" x".to_vec()));
 
     // Print the vocab
     println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
@@ -906,7 +906,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // let grammar_tokenss = vec![vec!["\"from\""], vec!["NAME[0]"]];
     // let llm_tokens_for_comp: Vec<&[u8]> = vec![b"from", b" typing", b" import", b" Any", b",", b" List", b","];
     // let grammar_tokenss_for_comp = vec![vec!["\"from\"", "NAME[0]", "\"import\"", "NAME[0]", "\",\"", "NAME[0]", "\",\""]];
-    let llm_tokens_for_comp: Vec<&[u8]> = vec![b"from", b" typing"];
+    let llm_tokens_for_comp: Vec<&[u8]> = vec![b"from", b" x"];
     let grammar_tokenss_for_comp = vec![vec!["\"from\"", "NAME[0]"]];
     let llm_token_ids_for_comp = llm_tokens_for_comp.iter().map(|llm_token| llm_token_map.get_by_left(*llm_token).expect(format!("LLM token '{}' not found in llm_token_map", String::from_utf8_lossy(*llm_token)).as_str())).collect::<Vec<_>>();
 
