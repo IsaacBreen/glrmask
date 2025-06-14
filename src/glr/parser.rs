@@ -470,7 +470,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         todo.push(ParseState { stack: self.active_state.stack.clone() });
 
         let mut next = ParseState::new();
-        let mut not_found = ParseState::new();
+        // let mut not_found = ParseState::new();
 
         while let Some(state) = todo.pop() {
             for peek in state.stack.peek_iter() {
@@ -520,14 +520,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     None => {
                         crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, peek.edge_value().state_id.0);
                         // Reconstruct the ParseState for this specific path and add to not_found.
-                        not_found.merge(ParseState { stack: peek.to_arc_node() });
+                        // not_found.merge(ParseState { stack: peek.to_arc_node() });
                     },
                 }
             }
         }
 
         self.active_state = next;
-        self.action_not_found_states = not_found; // Retain for potential inspection, though current design drops them.
+        // self.action_not_found_states = not_found; // Retain for potential inspection, though current design drops them.
 
         // Simplify the active GSS forest at the end of the step
         if !self.active_state.stack.is_empty() {
