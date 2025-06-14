@@ -338,8 +338,8 @@ impl GrammarConstraint {
         );
 
         helper.run_dfs();
-        // helper.prune_on_no_terminal_follow();
-        // helper.prune_dead_paths();
+        helper.prune_on_no_terminal_follow();
+        helper.prune_dead_paths();
         helper.merge_nodes();
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
@@ -569,6 +569,145 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish_with_message("Precomputation complete");
         crate::debug!(2, "Precomputation complete");
+    }
+
+    fn prune_on_no_terminal_follow(&mut self) {
+        crate::debug!(2, "Pruning based on terminal follow sets.");
+        let all_root_nodes: Vec<_> = self.roots.values().cloned().collect();
+        if all_root_nodes.is_empty() {
+            return;
+        }
+
+        // The initial value for roots is None, meaning "can be preceded by anything".
+        let initial_values: Vec<_> = all_root_nodes.into_iter().map(|arc| (arc, None)).collect();
+
+        Trie::special_map(
+            initial_values,
+            // step: V is Option<TerminalBV>
+            |parent_v_opt, edge_key_opt, _edge_llm_bv, _child_node| {
+                if let Some(terminal_id) = edge_key_opt {
+                    // This edge introduces a new terminal context. The child is now preceded by this terminal.
+                    let mut new_v = TerminalBV::zeros();
+                    new_v.insert(terminal_id.0);
+                    Some(Some(new_v))
+                } else {
+                    // This is a None-edge (e.g., from merging). The child inherits the parent's context.
+                    Some(parent_v_opt.clone())
+                }
+            },
+            // merge
+            |acc_v_opt, new_v_opt| {
+                match (acc_v_opt, new_v_opt) {
+                    (Some(acc_v), Some(new_v)) => {
+                        *acc_v |= new_v;
+                    },
+                    (acc_v_ref, _) => {
+                        // If either accumulated or new value is None ("anything is possible"),
+                        // the merged result is also None.
+                        *acc_v_ref = None;
+                    }
+                }
+            },
+            // process
+            |node, preceding_terminals_opt| {
+                if let Some(preceding_terminals) = preceding_terminals_opt {
+                    // If we have a concrete set of preceding terminals, we can prune.
+                    let mut allowed_followers = TerminalBV::zeros();
+                    let mut can_be_anything = false;
+
+                    for terminal_id_val in preceding_terminals.iter() {
+                        let terminal_id = TerminalID(terminal_id_val);
+                        if let Some(followers) = self.terminal_follow_map.get(&terminal_id) {
+                            for follower_id in followers {
+                                allowed_followers.insert(follower_id.0);
+                            }
+                        } else {
+                            // This preceding terminal is not in the follow map.
+                            // This might mean it's a terminal that can only appear at the end of a sequence.
+                            // To be safe, we assume it can be followed by anything.
+                            can_be_anything = true;
+                            break;
+                        }
+                    }
+
+                    if !can_be_anything {
+                        node.children_mut().retain(|edge_key_opt, _dest_map| {
+                            if let Some(edge_key) = edge_key_opt {
+                                allowed_followers.contains(edge_key.0)
+                            } else {
+                                true // Always keep None-edges
+                            }
+                        });
+                    }
+                }
+                // If preceding_terminals_opt is None, we don't prune.
+                true // Continue traversal
+            },
+        );
+    }
+
+    fn prune_dead_paths(&mut self) {
+        crate::debug!(2, "Pruning dead paths.");
+        // Use a HashSet to get unique Arcs, then collect into a Vec.
+        let mut unique_arcs = OrderedHashSet::new();
+        for root_arc in self.roots.values() {
+            for node_arc in Trie::all_nodes(root_arc.clone()) {
+                unique_arcs.insert(ArcPtrWrapper::new(node_arc));
+            }
+        }
+        let all_nodes: Vec<_> = unique_arcs.into_iter().map(|w| w.as_arc().clone()).collect();
+
+        if all_nodes.is_empty() {
+            return;
+        }
+
+        // 1. Build reverse adjacency list and find initial end nodes.
+        let mut rev_adj: HashMap<ArcPtrWrapper<_>, Vec<ArcPtrWrapper<_>>> = HashMap::new();
+        let mut end_nodes = Vec::new();
+
+        for node_arc in &all_nodes {
+            let node_wrapper = ArcPtrWrapper::new(node_arc.clone());
+            let node_guard = node_arc.lock().unwrap();
+            if node_guard.value.end {
+                end_nodes.push(node_wrapper.clone());
+            }
+            for dest_map in node_guard.children().values() {
+                for child_wrapper in dest_map.keys() {
+                    rev_adj.entry(child_wrapper.clone()).or_default().push(node_wrapper.clone());
+                }
+            }
+        }
+
+        // 2. BFS from end nodes on reverse graph to find all nodes that can reach an end.
+        let mut can_reach_end = HashSet::new();
+        let mut queue: VecDeque<ArcPtrWrapper<_>> = VecDeque::new();
+
+        for end_node_wrapper in end_nodes {
+            if can_reach_end.insert(end_node_wrapper.clone()) {
+                queue.push_back(end_node_wrapper);
+            }
+        }
+
+        while let Some(node_wrapper) = queue.pop_front() {
+            if let Some(parents) = rev_adj.get(&node_wrapper) {
+                for parent_wrapper in parents {
+                    if can_reach_end.insert(parent_wrapper.clone()) {
+                        queue.push_back(parent_wrapper.clone());
+                    }
+                }
+            }
+        }
+
+        // 3. Prune edges pointing to nodes not in `can_reach_end`.
+        for node_arc in &all_nodes {
+            let mut node_guard = node_arc.lock().unwrap();
+            // Prune destinations within each edge key's map.
+            node_guard.children_mut().values_mut().for_each(|dest_map| {
+                dest_map.retain(|child_wrapper, _| can_reach_end.contains(child_wrapper));
+            });
+            // Prune edge keys that now have no destinations.
+            node_guard.children_mut().retain(|_, dest_map| !dest_map.is_empty());
+        }
     }
 
     fn merge_nodes(&mut self) {
