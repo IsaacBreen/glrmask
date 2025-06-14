@@ -1058,6 +1058,7 @@ where
         // Hash children.
         // Iterate edge keys in sorted order (BTreeMap).
         node.children.len().hash(state);
+        // TODO: for some reason this is causing an infinite loop. Shouldn't be the case!
         // for (ek, dest_map) in &node.children {
         //     ek.hash(state);
         //
