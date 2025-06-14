@@ -270,8 +270,8 @@ impl PathAccumulator for Option<LLMTokenBV> {
 }
 
 fn compute_max_depth(predecessors: &NodeMap) -> MaxDepth {
-    // predecessors.keys().next_back().map_or(0, |max_pred_depth| max_pred_depth + 1)
-    0
+    predecessors.keys().next_back().map_or(0, |max_pred_depth| max_pred_depth + 1)
+    // 0
 }
 
 fn compute_hash_key(predecessors: &NodeMap) -> u64 {
@@ -797,7 +797,7 @@ impl PartialOrd for GSSNode {
 }
 
 impl Ord for GSSNode {
-    // // #[time_it("GSSNode::cmp")]
+    // // #[time_it]("GSSNode::cmp")]
     fn cmp(&self, other: &Self) -> Ordering {
         if std::ptr::eq(self, other) { return Ordering::Equal; }
         self.hash_key_cache.cmp(&other.hash_key_cache)
