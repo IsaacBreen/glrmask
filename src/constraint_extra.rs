@@ -46,7 +46,8 @@ pub fn dump_precompute_trie_recursive(
     node_arc: &Arc<Mutex<PrecomputeNode>>,
     indent: String,
     visited: &mut HashSet<*const PrecomputeNode>,
-    original_internal_bimap: Option<&BiBTreeMap<usize, usize>>
+    original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+    token_name_map: Option<&BiBTreeMap<String, usize>>,
 ) {
     let node_ptr;
     let children_to_visit;
@@ -87,14 +88,26 @@ pub fn dump_precompute_trie_recursive(
             let child_node_guard = child_arc.lock().expect("Mutex poisoned");
             &*child_node_guard as *const PrecomputeNode
         };
+        let edge_key_display = match edge_key {
+            Some(gtid) => {
+                if let Some(name_map) = token_name_map {
+                    name_map.get_by_right(&gtid.0)
+                        .map(|name| format!("'{}' (ID: {})", name, gtid.0))
+                        .unwrap_or_else(|| format!("Unknown (ID: {})", gtid.0))
+                } else {
+                    format!("ID: {}", gtid.0)
+                }
+            },
+            None => "None".to_string(),
+        };
         println!(
-            "{}Edge GrammarTokenID({:?}): LLM Tokens: {} -> Child Node Ptr: {:p}",
+            "{}Edge {}: LLM Tokens: {} -> Child Node Ptr: {:p}",
             indent,
-            edge_key.map(|grammar_token_id| grammar_token_id.0),
+            edge_key_display,
             format_bv_indices(&edge_val_bv, original_internal_bimap),
             child_node_ptr
         );
-        dump_precompute_trie_recursive(&child_arc, new_indent.clone(), visited, original_internal_bimap);
+        dump_precompute_trie_recursive(&child_arc, new_indent.clone(), visited, original_internal_bimap, token_name_map);
     }
 }
 
@@ -107,7 +120,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         let mut visited: HashSet<*const PrecomputeNode> = HashSet::new();
         for (tokenizer_state_id, root_node_trie) in &self.precomputed {
             println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
-            dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap));
+            dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap), Some(&self.token_name_map));
         }
         println!("\n===================================");
         println!("Dump Complete.");
