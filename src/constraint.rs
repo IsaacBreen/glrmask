@@ -982,7 +982,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         let step_counts_clone1 = Arc::clone(&step_counts);
         let step_counts_clone2 = Arc::clone(&step_counts);
-
+        
         Trie::special_map(
             initial_values_for_map,
             // step_fn: (current_glr_state, edge_grammar_token_opt, edge_llm_tokens_bv, child_precomputed_node_data)
@@ -1023,7 +1023,6 @@ impl<'a> GrammarConstraintState<'a> {
             },
             // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
             |precomputed_node_data, glr_s| {
-
                 if precomputed_node_data.value.end {
                     let glr_active_tokens = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
                     *final_mask_internal.borrow_mut() |= glr_active_tokens;

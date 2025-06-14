@@ -16,6 +16,7 @@ use crate::datastructures::hybrid_bitset::HybridBitset; // Import HybridBitset
 use crate::datastructures::ArcPtrWrapper; // Import ArcPtrWrapper
 use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
 use deterministic_hash::DeterministicHasher;
+use profiler_macro::time_it;
 // Added for derive macro pattern
 
 
@@ -843,6 +844,7 @@ where
 impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     /// Performs a specialized breadth-first traversal (related to Dijkstra/Bellman-Ford relaxation).
     /// (special_map implementation remains unchanged)
+    #[time_it]
     pub fn special_map<V: Clone>(
         initial_nodes_and_values: Vec<(Arc<Mutex<Trie<EK, EV, T>>>, V)>,
         mut step: impl FnMut(&V, &EK, &EV, &Trie<EK, EV, T>) -> Option<V>, // Changed Trie<...> to &Trie<...>
