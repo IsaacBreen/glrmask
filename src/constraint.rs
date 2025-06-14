@@ -1005,7 +1005,7 @@ impl<'a> GrammarConstraintState<'a> {
                         }
                     }
 
-                    // subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                    subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
 
                     if glr_s.is_ok() {
                         Some(glr_s)
