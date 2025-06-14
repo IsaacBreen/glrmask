@@ -438,7 +438,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Goto::State(goto_state_id) => {
                     // crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
                     let new_gss_node = popped_peek.to_node().push_with_existing_acc(ParseStateEdgeContent { state_id: goto_state_id });
-                    out.push(Arc::new(new_gss_node));
+                    out.push(new_gss_node);
                 }
                 Goto::Accept => {
                     // No action needed for Accept
@@ -448,14 +448,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
         if out.is_empty() {
             return Arc::new(GSSNode::new(Acc::new_for_merging()));
         } else if out.len() == 1 {
-            return out.into_iter().next().unwrap();
+            return Arc::new(out.into_iter().next().unwrap());
         } else {
             let mut out_iter = out.into_iter();
             let mut out_node = out_iter.next().unwrap();
             for next_node in out_iter {
                 out_node.merge(&next_node);
             }
-            out_node
+            return Arc::new(out_node);
         }
     }
 
