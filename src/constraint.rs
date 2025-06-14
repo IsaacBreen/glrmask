@@ -1046,14 +1046,17 @@ impl<'a> GrammarConstraintState<'a> {
             crate::debug!(2, "{}", log_msg);
         }
 
-        crate::profiler::print_summary();
-        crate::profiler::print_summary_flat();
-        crate::profiler::reset();
+        let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
 
         crate::debug!(2, "Done computing mask");
         let t1 = std::time::Instant::now();
         println!("get_mask took: {:?}", t1.duration_since(t0));
-        self.parent.internal_bv_to_original(&final_mask_internal.into_inner())
+
+        crate::profiler::print_summary();
+        crate::profiler::print_summary_flat();
+        crate::profiler::reset();
+
+        final_mask_mapped
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
