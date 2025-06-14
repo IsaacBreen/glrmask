@@ -338,8 +338,8 @@ impl GrammarConstraint {
         );
 
         helper.run_dfs();
-        // helper.prune_on_no_terminal_follow();
-        // helper.prune_dead_paths();
+        helper.prune_on_no_terminal_follow();
+        helper.prune_dead_paths();
         helper.merge_nodes();
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
@@ -570,6 +570,94 @@ impl<'r> Precomputer<'r> {
         self.pb.finish_with_message("Precomputation complete");
         crate::debug!(2, "Precomputation complete");
     }
+    
+    fn prune_on_no_terminal_follow(&mut self) {
+        crate::debug!(2, "Pruning based on terminal follow sets.");
+    
+        let initial_nodes_and_values: Vec<_> = self.roots.values()
+            .map(|root_arc| (root_arc.clone(), BTreeSet::<GrammarTokenID>::new()))
+            .collect();
+    
+        let terminal_follow_map = &self.terminal_follow_map;
+    
+        Trie::special_map(
+            initial_nodes_and_values,
+            // step: Propagate predecessor terminals.
+            |predecessors, edge_terminal_opt, _edge_bv, _child_node| {
+                if let Some(terminal_id) = edge_terminal_opt {
+                    // A new chain of terminals starts. The only predecessor that matters for the child
+                    // is the terminal on this edge.
+                    Some(BTreeSet::from([*terminal_id]))
+                } else {
+                    // No terminal on this edge, so the child inherits the same set of
+                    // "most recent" predecessors from the parent.
+                    Some(predecessors.clone())
+                }
+            },
+            // merge: Union of predecessor sets from different paths.
+            |existing_set, new_set| {
+                existing_set.extend(new_set);
+            },
+            // process: Prune outgoing edges based on allowed follows.
+            move |node, all_immediate_predecessors| {
+                // If there are no preceding terminals (e.g., root or only None-edges path from root),
+                // all outgoing terminals are considered valid.
+                if all_immediate_predecessors.is_empty() {
+                    return true; // Continue traversal
+                }
+    
+                // Compute the set of all allowed terminals that can follow any of the immediate predecessors.
+                let mut allowed_follow_terminals = BTreeSet::new();
+                for preceding_terminal in &*all_immediate_predecessors {
+                    if let Some(follow_set) = terminal_follow_map.get(preceding_terminal) {
+                        allowed_follow_terminals.extend(follow_set.iter().cloned());
+                    }
+                }
+    
+                // Prune children of the current node.
+                node.children_mut().retain(|edge_terminal_opt, _dest_map| {
+                    match edge_terminal_opt {
+                        // Keep edges with terminals that are in the allowed follow set.
+                        Some(edge_terminal) => allowed_follow_terminals.contains(edge_terminal),
+                        // Always keep `None` edges, as they don't represent grammar terminals.
+                        None => true,
+                    }
+                });
+    
+                true // Continue traversal
+            },
+        );
+        crate::debug!(2, "Finished pruning based on terminal follow sets.");
+    }
+
+    fn prune_dead_paths(&mut self) {
+        crate::debug!(2, "Pruning dead paths from precomputed trie.");
+        enum Liveness { Live, Dead }
+        let mut cache: HashMap<*const Mutex<PrecomputeNode>, Liveness> = HashMap::new();
+
+        // Populate cache by checking liveness from all roots
+        for root_arc in self.roots.values() {
+            self.compute_liveness_recursive(root_arc, &mut cache);
+        }
+
+        // Get all unique nodes in the graph
+        let all_nodes: Vec<_> = self.roots.values()
+            .flat_map(|root| Trie::all_nodes(root.clone()))
+            .collect();
+
+        // Prune edges pointing to dead nodes
+        for node_arc in all_nodes {
+            let mut node_guard = node_arc.lock().unwrap();
+            node_guard.children_mut().values_mut().for_each(|dest_map| {
+                dest_map.retain(|child_arc_wrapper, _ev| {
+                    let child_ptr = Arc::as_ptr(child_arc_wrapper.as_arc());
+                    matches!(cache.get(&child_ptr), Some(Liveness::Live))
+                });
+            });
+            node_guard.children_mut().retain(|_ek, dest_map| !dest_map.is_empty());
+        }
+        crate::debug!(2, "Finished pruning dead paths.");
+    }
 
     fn merge_nodes(&mut self) {
         crate::debug!(2, "Merging nodes: first collecting unique roots and their canonical Arcs");
@@ -748,6 +836,42 @@ impl<'r> Precomputer<'r> {
         let mut out = OrderedHashSet::new();
         out.insert(ArcPtrWrapper::new(merged_node_arc)); 
         out
+    }
+
+    fn compute_liveness_recursive(
+        &self,
+        node_arc: &Arc<Mutex<PrecomputeNode>>,
+        cache: &mut HashMap<*const Mutex<PrecomputeNode>, Liveness>,
+    ) -> bool {
+        let node_ptr = Arc::as_ptr(node_arc);
+    
+        if let Some(liveness) = cache.get(&node_ptr) {
+            return matches!(liveness, Liveness::Live);
+        }
+    
+        // Mark as Dead to handle cycles. If we re-encounter this node down a path,
+        // we'll return false, which is correct unless another path proves it's live.
+        cache.insert(node_ptr, Liveness::Dead);
+    
+        let node_guard = node_arc.lock().unwrap();
+        if node_guard.value.end {
+            cache.insert(node_ptr, Liveness::Live);
+            return true;
+        }
+    
+        let children_arcs: Vec<_> = node_guard.children.values()
+            .flat_map(|dest_map| dest_map.keys().map(|wrapper| wrapper.as_arc().clone()))
+            .collect();
+        drop(node_guard);
+    
+        for child_arc in children_arcs {
+            if self.compute_liveness_recursive(&child_arc, cache) {
+                cache.insert(node_ptr, Liveness::Live);
+                return true;
+            }
+        }
+    
+        false
     }
 }
 

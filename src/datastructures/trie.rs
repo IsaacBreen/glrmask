@@ -1032,80 +1032,59 @@ where
 {
     fn hash<H: Hasher>(&self, state: &mut H) {
         // Cache to handle cycles and shared nodes during hashing.
-        // Maps node pointer to a marker (e.g., depth) to break cycles.
-        let mut recursion_marker: HashMap<*const Mutex<Trie<EK, EV, T>>, usize> = HashMap::new();
+        // Maps the raw data pointer of a Trie node to a marker (depth) to break cycles.
+        let mut recursion_marker: HashMap<*const Trie<EK, EV, T>, usize> = HashMap::new();
         Self::hash_trie_recursive(self, state, &mut recursion_marker, 0);
     }
 }
 
 impl<EK, EV, T> Trie<EK, EV, T>
 where
-    EK: Ord + Hash,
-    EV: PartialEq + Clone + Hash,
-    T: PartialEq + Hash,
+    EK: Ord + Hash, // Ord for BTreeMap iteration, Hash for hashing EK
+    EV: PartialEq + Clone + Hash, // From PartialEq, add Hash for EV
+    T: PartialEq + Hash,    // From PartialEq, add Hash for T
 {
     /// Helper function to hash a &Trie instance.
     fn hash_trie_recursive<S: Hasher>(
         node: &Trie<EK, EV, T>,
         state: &mut S,
-        recursion_marker: &mut HashMap<*const Mutex<Trie<EK, EV, T>>, usize>,
+        recursion_marker: &mut HashMap<*const Trie<EK, EV, T>, usize>,
         current_depth: usize,
     ) {
+        let node_ptr = node as *const _;
+        if let Some(visited_depth) = recursion_marker.get(&node_ptr) {
+            // Node already visited. Hash its pointer and depth to break cycles
+            // and distinguish it from other nodes.
+            node_ptr.hash(state);
+            visited_depth.hash(state);
+            return;
+        }
+        recursion_marker.insert(node_ptr, current_depth);
+
         // Hash non-recursive fields.
         node.value.hash(state);
         node.max_depth.hash(state);
 
         // Hash children.
-        // Iterate edge keys in sorted order (BTreeMap).
         node.children.len().hash(state);
-        // TODO: for some reason this is causing an infinite loop. Shouldn't be the case!
-        // for (ek, dest_map) in &node.children {
-        //     ek.hash(state);
-        //
-        //     // For the destinations under this edge key, their order due to ArcPtrWrapper (pointers)
-        //     // is not canonical. To be consistent with PartialEq (which treats them as a multiset),
-        //     // we hash each (Arc, EV) pair, collect these hashes, sort them, and then hash the sorted list.
-        //     dest_map.len().hash(state);
-        //     let mut pair_hashes = Vec::with_capacity(dest_map.len());
-        //
-        //     for (apw, ev) in dest_map { // Iterates in ArcPtrWrapper order
-        //         let child_arc = apw.as_arc();
-        //         // Create a temporary hasher for the (EV, Arc_content) pair.
-        //         let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
-        //         ev.hash(&mut pair_hasher);
-        //         Self::hash_arc_recursive(child_arc, &mut pair_hasher, recursion_marker, current_depth);
-        //         pair_hashes.push(pair_hasher.finish());
-        //     }
-        //
-        //     pair_hashes.sort_unstable(); // Sort the hashes of the (EV, Arc_content) pairs.
-        //     for h in pair_hashes {
-        //         h.hash(state);
-        //     }
-        // }
-    }
+        for (ek, dest_map) in &node.children {
+            ek.hash(state);
+            dest_map.len().hash(state);
 
-    /// Helper function to hash an Arc<Mutex<Trie>>. Handles cycles.
-    fn hash_arc_recursive<S: Hasher>(
-        arc: &Arc<Mutex<Trie<EK, EV, T>>>,
-        state: &mut S,
-        recursion_marker: &mut HashMap<*const Mutex<Trie<EK, EV, T>>, usize>,
-        current_depth: usize,
-    ) {
-        let ptr = Arc::as_ptr(arc);
+            let mut pair_hashes = Vec::with_capacity(dest_map.len());
+            for (apw, ev) in dest_map {
+                let mut pair_hasher = DeterministicHasher::new(DefaultHasher::new());
+                ev.hash(&mut pair_hasher);
+                let child_guard = apw.as_arc().lock().expect("Mutex poisoned during Hash");
+                Self::hash_trie_recursive(&*child_guard, &mut pair_hasher, recursion_marker, current_depth + 1);
+                pair_hashes.push(pair_hasher.finish());
+            }
 
-        if let Some(visited_depth) = recursion_marker.get(&ptr) {
-            // Node already visited in this hashing traversal. Hash depth to break cycle.
-            visited_depth.hash(state); // Include depth to distinguish different cycle points/sharing levels
-            return;
+            pair_hashes.sort_unstable();
+            for h in pair_hashes {
+                h.hash(state);
+            }
         }
-
-        recursion_marker.insert(ptr, current_depth);
-
-        let guard = arc.lock().expect("Mutex poisoned during Hash operation");
-        Self::hash_trie_recursive(&*guard, state, recursion_marker, current_depth + 1);
-        drop(guard);
-
-        recursion_marker.remove(&ptr); // Backtrack: remove from current recursion path.
     }
 }
 

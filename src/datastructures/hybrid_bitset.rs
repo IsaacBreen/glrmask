@@ -25,31 +25,6 @@ impl JSONConvertible for HybridBitset {
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-    //     match node {
-    //         JSONNode::Array(arr) => {
-    //             let mut ranges = Vec::new();
-    //             for range_node in arr {
-    //                 match range_node {
-    //                     JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
-    //                         let end_node = pair_vec.pop().unwrap();
-    //                         let start_node = pair_vec.pop().unwrap();
-    //                         let start = match start_node {
-    //                             JSONNode::Number(n) => n,
-    //                             _ => return Err("Expected number for range start".to_string()),
-    //                         };
-    //                         let end = match end_node {
-    //                             JSONNode::Number(n) => n,
-    //                             _ => return Err("Expected number for range end".to_string()),
-    //                         };
-    //                         ranges.push(start..=end);
-    //                     }
-    //                     _ => return Err("Expected 2-element array for HybridBitset range".to_string()),
-    //                 }
-    //             }
-    //             Ok(HybridBitset { inner: RangeSetBlaze::from_iter(ranges) })
-    //         }
-    //         _ => Err("Expected JSONNode::Array for HybridBitset".to_string()),
-    //     }
         let ranges_vec: Vec<Vec<usize>> = Vec::from_json(node)?;
         let mut ranges = Vec::new();
         for mut range_vec in ranges_vec {
