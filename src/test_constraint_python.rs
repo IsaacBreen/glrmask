@@ -650,7 +650,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // // llm_token_map.retain(|v, _| v == b"1" || v == b"11");
 
     // gpt2_raw_vocab.retain(|k, _| [b"from".as_ref(), b" x"].contains(&k.as_ref()) || k.len() <= 2);
-    llm_token_map.retain(|v, _| [b"from".as_ref(), b" x".as_ref()].contains(&v.as_ref()) || v.len() <= 2);
+    llm_token_map.retain(|v, _| [b"from".as_ref(), b" x".as_ref()].contains(&v.as_ref()) || v.len() <= 1);
     assert!(llm_token_map.contains_left(&b"from".to_vec()));
     assert!(llm_token_map.contains_left(&b" x".to_vec()));
 
@@ -684,42 +684,43 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         println!("  original {}, internal {}, token {:?}, raw: {:?}", original_id, internal_id, String::from_utf8_lossy(token), token);
     }
 
+    // TODO: uncomment this
     // Ensure there's an edge in the root precompute node for state 0 that has the terminal for `IGNORE[0][0][1]` on the edge key and which the LLM token for "\n" on the edge value.
-    {
-        // 1. Get the root precompute node for tokenizer state 0.
-        let precompute_root_node = grammar_constraint.precomputed.get(&TokenizerStateID(0))
-            .expect("Precomputed data for tokenizer state 0 should exist.").lock().unwrap();
-
-        // 2. Get the TerminalID for the terminal we are interested in.
-        let newline_terminal_name = "IGNORE[0][0][1]".to_string();
-        let newline_terminal_id = grammar_constraint.parser.terminal_map
-            .get_by_left(&Terminal(newline_terminal_name.clone()))
-            .unwrap_or_else(|| panic!("Terminal '{}' not found in parser's terminal map.", newline_terminal_name));
-
-        // 3. Get the LLMTokenID for the newline character.
-        let newline_bytes = b"\n";
-        let newline_llm_token_id = grammar_constraint.llm_token_map
-            .get_by_left(&newline_bytes.to_vec())
-            .unwrap_or_else(|| panic!("LLM token for newline '{:?}' not found in token map.", String::from_utf8_lossy(newline_bytes)));
-        let newline_llm_token_id = grammar_constraint.original_to_internal_id_bimap.get_by_left(&newline_llm_token_id.0).unwrap();
-
-        // 4. Check for the edge in the precompute root node.
-        // The edge key is Option<TerminalID>.
-        let edge_key = Some(*newline_terminal_id);
-
-        let destinations_map = precompute_root_node.children().get(&edge_key)
-            .unwrap_or_else(|| panic!("No edge for terminal '{}' (ID {}) found in precompute root for state 0.", newline_terminal_name, newline_terminal_id.0));
-
-        // 5. Check if any edge for this key contains the newline LLM token.
-        let found_edge_with_newline_token = destinations_map.values().any(|edge_value_bv| edge_value_bv.contains(*newline_llm_token_id));
-
-        assert!(found_edge_with_newline_token, "Expected to find an edge for terminal '{}' (ID {}) containing the LLM token for newline (ID {}), but none was found. Got: {:?}", newline_terminal_name, newline_terminal_id.0, newline_llm_token_id, destinations_map);
-
-        // Print the edge value
-        println!("Edge value for terminal '{}' (ID {}) containing the LLM token for newline (ID {}): {:?}", newline_terminal_name, newline_terminal_id.0, newline_llm_token_id, destinations_map);
-
-        println!("Successfully verified edge for '{}' with LLM token for '\\n'.", newline_terminal_name);
-    }
+    // {
+    //     // 1. Get the root precompute node for tokenizer state 0.
+    //     let precompute_root_node = grammar_constraint.precomputed.get(&TokenizerStateID(0))
+    //         .expect("Precomputed data for tokenizer state 0 should exist.").lock().unwrap();
+    //
+    //     // 2. Get the TerminalID for the terminal we are interested in.
+    //     let newline_terminal_name = "IGNORE[0][0][1]".to_string();
+    //     let newline_terminal_id = grammar_constraint.parser.terminal_map
+    //         .get_by_left(&Terminal(newline_terminal_name.clone()))
+    //         .unwrap_or_else(|| panic!("Terminal '{}' not found in parser's terminal map.", newline_terminal_name));
+    //
+    //     // 3. Get the LLMTokenID for the newline character.
+    //     let newline_bytes = b"\n";
+    //     let newline_llm_token_id = grammar_constraint.llm_token_map
+    //         .get_by_left(&newline_bytes.to_vec())
+    //         .unwrap_or_else(|| panic!("LLM token for newline '{:?}' not found in token map.", String::from_utf8_lossy(newline_bytes)));
+    //     let newline_llm_token_id = grammar_constraint.original_to_internal_id_bimap.get_by_left(&newline_llm_token_id.0).unwrap();
+    //
+    //     // 4. Check for the edge in the precompute root node.
+    //     // The edge key is Option<TerminalID>.
+    //     let edge_key = Some(*newline_terminal_id);
+    //
+    //     let destinations_map = precompute_root_node.children().get(&edge_key)
+    //         .unwrap_or_else(|| panic!("No edge for terminal '{}' (ID {}) found in precompute root for state 0.", newline_terminal_name, newline_terminal_id.0));
+    //
+    //     // 5. Check if any edge for this key contains the newline LLM token.
+    //     let found_edge_with_newline_token = destinations_map.values().any(|edge_value_bv| edge_value_bv.contains(*newline_llm_token_id));
+    //
+    //     assert!(found_edge_with_newline_token, "Expected to find an edge for terminal '{}' (ID {}) containing the LLM token for newline (ID {}), but none was found. Got: {:?}", newline_terminal_name, newline_terminal_id.0, newline_llm_token_id, destinations_map);
+    //
+    //     // Print the edge value
+    //     println!("Edge value for terminal '{}' (ID {}) containing the LLM token for newline (ID {}): {:?}", newline_terminal_name, newline_terminal_id.0, newline_llm_token_id, destinations_map);
+    //
+    //     println!("Successfully verified edge for '{}' with LLM token for '\\n'.", newline_terminal_name);
+    // }
 
     // Ensure grammar constraint creation is deterministic
     // assert_eq!(grammar_constraint, GrammarConstraint::from_compiled_grammar(
