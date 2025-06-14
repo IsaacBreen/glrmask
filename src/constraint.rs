@@ -633,39 +633,7 @@ impl<'r> Precomputer<'r> {
     }
 
     fn prune_dead_paths(&mut self) {
-        crate::debug!(2, "Pruning dead paths from precomputed trie.");
-        let mut cache: HashMap<*const Mutex<PrecomputeNode>, Liveness> = HashMap::new();
-
-        // Populate cache by checking liveness from all roots
-        for root_arc in self.roots.values() {
-            self.compute_liveness_recursive(root_arc, &mut cache);
-        }
-
-        // Get all unique nodes in the graph
-        let all_nodes: Vec<_> = self.roots.values()
-            .flat_map(|root| Trie::all_nodes(root.clone()))
-            .collect();
-
-        // Prune edges pointing to dead nodes
-        for node_arc in all_nodes {
-            let mut node_guard = node_arc.lock().unwrap();
-            node_guard.children_mut().values_mut().for_each(|dest_map| {
-                // dest_map.retain(|child_arc_wrapper, _ev| {
-                //     let child_ptr = Arc::as_ptr(child_arc_wrapper.as_arc());
-                //     matches!(cache.get(&child_ptr), Some(Liveness::Live))
-                // });
-                let mut new_dest_map = OrderedHashMap::new();
-                for (child_arc_wrapper, ev) in &mut *dest_map {
-                    let child_ptr = Arc::as_ptr(child_arc_wrapper.as_arc());
-                    if matches!(cache.get(&child_ptr), Some(Liveness::Live)) {
-                        new_dest_map.insert(child_arc_wrapper.clone(), ev.clone());
-                    }
-                }
-                *dest_map = new_dest_map;
-            });
-            node_guard.children_mut().retain(|_ek, dest_map| !dest_map.is_empty());
-        }
-        crate::debug!(2, "Finished pruning dead paths.");
+        todo!()j
     }
 
     fn merge_nodes(&mut self) {
