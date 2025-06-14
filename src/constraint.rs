@@ -925,6 +925,7 @@ pub struct GrammarConstraintState<'a> {
 impl<'a> GrammarConstraintState<'a> {
     #[time_it]
     pub fn get_mask(&self) -> LLMTokenBV {
+        let t0 = std::time::Instant::now();
         crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
         let final_mask_internal = RefCell::new(HybridBitset::zeros());
 
@@ -1050,6 +1051,8 @@ impl<'a> GrammarConstraintState<'a> {
         crate::profiler::reset();
 
         crate::debug!(2, "Done computing mask");
+        let t1 = std::time::Instant::now();
+        println!("get_mask took: {:?}", t1.duration_since(t0));
         self.parent.internal_bv_to_original(&final_mask_internal.into_inner())
     }
 
