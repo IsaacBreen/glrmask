@@ -1185,7 +1185,7 @@ impl<'a> GrammarConstraintState<'a> {
         //     GSSNode::simplify_together(&mut roots_to_simplify_arcs);
         // }
 
-        crate::debug!(2, "State after committing text (bytes {:?}): {} active tokenizer states.", llm_token_bytes, self.state.len());
+        crate::debug!(2, "Active tokenizer states after committing text (bytes {:?}): {:?}", llm_token_bytes, self.state.keys().map(|k|k.0).collect::<Vec<_>>());
         for (tokenizer_id, glr_state) in &self.state {
             if !glr_state.active_state.stack.is_empty() { // Log only for non-empty GSS
                 // glr_state.log_gss(
