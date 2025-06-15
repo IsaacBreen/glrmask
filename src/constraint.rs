@@ -1053,7 +1053,7 @@ impl<'a> GrammarConstraintState<'a> {
                     .unwrap_or("UNKNOWN_TERMINAL");
                 log_msg.push_str(&format!("\n  - '{}': {}", terminal_name, count));
             }
-            crate::debug!(2, "{}", log_msg);
+            crate::debug!(3, "{}", log_msg);
         }
 
         let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
@@ -1062,9 +1062,9 @@ impl<'a> GrammarConstraintState<'a> {
         let t1 = std::time::Instant::now();
         println!("get_mask took: {:?}", t1.duration_since(t0));
 
-        crate::profiler::print_summary();
-        crate::profiler::print_summary_flat();
-        crate::profiler::reset();
+        // crate::profiler::print_summary();
+        // crate::profiler::print_summary_flat();
+        // crate::profiler::reset();
 
         final_mask_mapped
     }
