@@ -696,6 +696,7 @@ fn test_precompute_x_eq() {
         eat_u8(b'x'),
         rep1(eat_u8(b' ')),
         eat_u8(b'='),
+        rep1(eat_any_fast()),
     ];
     let tokenizer = tokenizer_expr.build();
 
@@ -715,6 +716,7 @@ fn test_precompute_x_eq() {
     grammar_token_map.insert(Terminal("X".to_string()), TerminalID(0));      // 'x' is group 0
     grammar_token_map.insert(Terminal("SPACE".to_string()), TerminalID(1));  // ' ' is group 1
     grammar_token_map.insert(Terminal("EQUALS".to_string()), TerminalID(2)); // '=' is group 2
+    grammar_token_map.insert(Terminal("ANY".to_string()), TerminalID(3));    // Anything else is group 3
 
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone());
 
@@ -723,6 +725,7 @@ fn test_precompute_x_eq() {
     token_name_map.insert("X".to_string(), 0);
     token_name_map.insert("SPACE".to_string(), 1);
     token_name_map.insert("EQUALS".to_string(), 2);
+    token_name_map.insert("ANY".to_string(), 3);
 
     // Create the constraint, which runs precomputation
     let constraint = GrammarConstraint::new(
@@ -744,7 +747,7 @@ fn test_precompute_x_eq() {
 
     // The root node should have two outgoing edge keys: one for 'X' (from LLM token "x")
     // and one for 'SPACE' (from LLM token " =").
-    assert_eq!(root_node.children().len(), 2, "Root node should have two outgoing edge keys");
+    assert_eq!(root_node.children().len(), 3, "Root node should have three outgoing edge keys");
 
     // Get the grammar token IDs for our terminals
     let x_tid = *grammar_token_map.get_by_left(&Terminal("X".to_string())).unwrap();
