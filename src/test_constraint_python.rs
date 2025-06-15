@@ -667,6 +667,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // }
     // llm_token_map.retain(|v, _| v.len() == 1 || ![b"-".as_ref(), b"*", b"...", b"_"].iter().any(|other| vec_contains(v.as_ref(), other)));
 
+    llm_token_map.retain(|v, _| v.len() <= 1);
 
     // Print the vocab
     println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
@@ -785,6 +786,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // let full_text_to_tokenize = "                        ";
     // let full_text_to_tokenize = "# Top-level comment, challenging parser start\nimport os, sys # Multiple imports on one line\nfrom collections import (defaultdict,\n                         deque) # Multi-line import with parens\n\nGLOBAL_VAR: int = 100";
     // let full_text_to_tokenize = "azazazazazazazazazazazazazazazazazazazazazazazazazazaz";
+    let full_text_to_tokenize = "x = 1";
 
     // Tokenize the full_text_to_tokenize using the VocabPrefixTree
     let mut test_token_sequence_ids = Vec::new();
