@@ -152,7 +152,7 @@ def main():
         .token:hover {{ outline: 1px solid blue; }}
         .token.locked {{ outline: 2px solid blue; }}
         #details-container h3 {{ margin-top: 0; }}
-        #details-content pre {{ background-color: #f4f4f4; padding: 1em; border-radius: 4px; white-space: pre-wrap; word-wrap: break-word; }}
+        #details-content pre {{ background-color: #f4f4f4; padding: 1em; border-radius: 4px; white-space: pre; overflow-x: auto; }}
     </style>
 </head>
 <body>
