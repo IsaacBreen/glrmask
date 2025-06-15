@@ -733,5 +733,9 @@ fn test_precompute_x_eq() {
         max_original_llm_token_id,
     );
     constraint.dump_precomputed();
+
+    // LLM token "x" should result in one edge in the root precompute node for state 0 with the terminal for `X`.
+    // LLM token " =" should result in one edge in the root precompute node for state 0 with the terminal for `SPACE` and a subsequent edge from its destination with the terminal for `EQUALS`.
+    todo!()
 }
 
