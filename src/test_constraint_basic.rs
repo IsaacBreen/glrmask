@@ -693,9 +693,9 @@ fn test_precompute_a_plus_tokenizer() {
 fn test_precompute_x_eq() {
     // Tokenizer for `=|x| `
     let tokenizer_expr = groups![
-        eat_u8(b'='),
         eat_u8(b'x'),
         eat_u8(b' '),
+        eat_u8(b'='),
     ];
     let tokenizer = tokenizer_expr.build();
 
@@ -712,17 +712,17 @@ fn test_precompute_x_eq() {
 
     // Map grammar terminal to tokenizer group
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(Terminal("EQUALS".to_string()), TerminalID(0)); // '=' is group 0
-    grammar_token_map.insert(Terminal("X".to_string()), TerminalID(1));      // 'x' is group 1
-    grammar_token_map.insert(Terminal("SPACE".to_string()), TerminalID(2));  // ' ' is group 2
+    grammar_token_map.insert(Terminal("X".to_string()), TerminalID(0));      // 'x' is group 0
+    grammar_token_map.insert(Terminal("SPACE".to_string()), TerminalID(1));  // ' ' is group 1
+    grammar_token_map.insert(Terminal("EQUALS".to_string()), TerminalID(2)); // '=' is group 2
 
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone());
 
     // Token name map for stats
     let mut token_name_map = BiBTreeMap::new();
-    token_name_map.insert("EQUALS".to_string(), 0);
-    token_name_map.insert("X".to_string(), 1);
-    token_name_map.insert("SPACE".to_string(), 2);
+    token_name_map.insert("X".to_string(), 0);
+    token_name_map.insert("SPACE".to_string(), 1);
+    token_name_map.insert("EQUALS".to_string(), 2);
 
     // Create the constraint, which runs precomputation
     let constraint = GrammarConstraint::new(
