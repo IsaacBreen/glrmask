@@ -762,6 +762,7 @@ fn test_precompute_x_eq() {
     assert_eq!(*x_edge_bv, HybridBitset::from_iter(vec![x_llm_id]), "Edge for 'X' has wrong LLM token bitset");
     let x_dest_node = x_dest_wrapper.as_arc().lock().unwrap();
     assert!(x_dest_node.value.end, "Destination for 'X' edge should be an end node");
+    drop(x_dest_node);
 
     // 2. Verify the edge for 'SPACE'
     let space_dests = root_node.get(&Some(space_tid)).expect("No edge for terminal 'SPACE'");
