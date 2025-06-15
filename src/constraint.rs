@@ -581,9 +581,8 @@ impl<'r> Precomputer<'r> {
             .collect();
     
         let terminal_follow_map = &self.terminal_follow_map;
-        
         dbg!(&terminal_follow_map);
-    
+        
         Trie::special_map(
             initial_nodes_and_values,
             // step: Propagate predecessor terminals.
