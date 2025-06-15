@@ -728,7 +728,7 @@ fn test_precompute_x_eq() {
     let constraint = GrammarConstraint::new(
         tokenizer.clone(),
         parser,
-        llm_token_map,
+        llm_token_map.clone(),
         token_name_map,
         max_original_llm_token_id,
     );
@@ -752,8 +752,8 @@ fn test_precompute_x_eq() {
     let equals_tid = *grammar_token_map.get_by_left(&Terminal("EQUALS".to_string())).unwrap();
 
     // Get the LLM token IDs
-    let x_llm_id = llm_token_map.get_by_left(b"x".as_ref()).unwrap().0;
-    let space_equals_llm_id = llm_token_map.get_by_left(b" =".as_ref()).unwrap().0;
+    let x_llm_id = constraint.original_id_to_internal(*llm_token_map.get_by_left(b"x".as_ref()).unwrap()).unwrap().0;
+    let space_equals_llm_id = constraint.original_id_to_internal(*llm_token_map.get_by_left(b" =".as_ref()).unwrap()).unwrap().0;
 
     // 1. Verify the edge for 'X'
     let x_dests = root_node.get(&Some(x_tid)).expect("No edge for terminal 'X'");

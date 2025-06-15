@@ -356,17 +356,17 @@ impl GrammarConstraint {
     }
 
     #[inline]
-    fn original_id_to_internal(&self, original_id: LLMTokenID) -> Option<LLMTokenID> {
+    pub(crate) fn original_id_to_internal(&self, original_id: LLMTokenID) -> Option<LLMTokenID> {
         self.original_to_internal_id_bimap.get_by_left(&original_id.0).map(|internal_val| LLMTokenID(*internal_val))
     }
 
     #[inline]
-    fn internal_id_to_original(&self, internal_id: LLMTokenID) -> Option<LLMTokenID> {
+    pub(crate) fn internal_id_to_original(&self, internal_id: LLMTokenID) -> Option<LLMTokenID> {
         self.original_to_internal_id_bimap.get_by_right(&internal_id.0).map(|original_val| LLMTokenID(*original_val))
     }
 
     #[allow(dead_code)] 
-    fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
+    pub(crate) fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
         let mut internal_bv = HybridBitset::zeros();
         for original_id_val in original_bv.iter() {
             let internal_id_val = self.original_to_internal_id_bimap.get_by_left(&(original_id_val as usize)).expect(format!("Original ID {} not found in original_to_internal_id_bimap", original_id_val).as_str());
