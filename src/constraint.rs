@@ -17,7 +17,7 @@ use bitvec::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, TerminalInfo, prune_disallowed_terminals};
+use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, TerminalInfo, TerminalInfoValue, prune_disallowed_terminals};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -945,7 +945,7 @@ impl<'a> GrammarConstraintState<'a> {
                 for (tokenizer_state_id, disallowed_terminals_for_state) in disallowed_terminals_for_gss {
                     let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
                     for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
-                        if disallowed_terminals_for_state.contains(terminal_id.0) {
+                        if disallowed_terminals_for_state.union.contains(terminal_id.0) {
                             // This terminal is disallowed, so the LLM tokens that produce it are forbidden.
                             forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
                         }
@@ -1143,7 +1143,8 @@ impl<'a> GrammarConstraintState<'a> {
                             let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
                             // Disallow this token from being matched again immediately.
                             disallowed_terminals_for_end_state.insert(match_info.id);
-                            disallowed_terminals.insert(TokenizerStateID(end_state_id), disallowed_terminals_for_end_state);
+                            let info_value = TerminalInfoValue::new(disallowed_terminals_for_end_state);
+                            disallowed_terminals.insert(TokenizerStateID(end_state_id), info_value);
                         }
                         disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
 
