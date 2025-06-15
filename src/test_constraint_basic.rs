@@ -1,7 +1,7 @@
 use crate::glr::parser::ParseState;
 use rand::rngs::StdRng;
 use std::collections::{BTreeMap, BTreeSet};
-use crate::finite_automata::eat_u8;
+use crate::finite_automata::{eat_u8, rep1};
 use crate::{choice, choice_fast, groups, seq, seq_fast};
 use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
@@ -694,7 +694,7 @@ fn test_precompute_x_eq() {
     // Tokenizer for `=|x| `
     let tokenizer_expr = groups![
         eat_u8(b'x'),
-        eat_u8(b' '),
+        rep1(eat_u8(b' ')),
         eat_u8(b'='),
     ];
     let tokenizer = tokenizer_expr.build();
