@@ -399,6 +399,7 @@ impl FromIterator<usize> for HybridBitset {
 impl BitAnd for &HybridBitset {
     type Output = HybridBitset;
 
+    #[time_it]
     fn bitand(self, rhs: Self) -> Self::Output {
         HybridBitset {
             inner: &self.inner & &rhs.inner,
@@ -409,6 +410,7 @@ impl BitAnd for &HybridBitset {
 impl BitOr for &HybridBitset {
     type Output = HybridBitset;
 
+    #[time_it]
     fn bitor(self, rhs: Self) -> Self::Output {
         HybridBitset {
             inner: &self.inner | &rhs.inner,
@@ -429,6 +431,7 @@ impl BitXor for &HybridBitset {
 impl Sub for HybridBitset {
     type Output = HybridBitset;
 
+    #[time_it]
     fn sub(self, rhs: Self) -> Self::Output {
         HybridBitset {
             inner: &self.inner - &rhs.inner,
@@ -439,6 +442,7 @@ impl Sub for HybridBitset {
 impl Sub for &HybridBitset {
     type Output = HybridBitset;
 
+    #[time_it]
     fn sub(self, rhs: Self) -> Self::Output {
         HybridBitset {
             inner: &self.inner - &rhs.inner,
@@ -449,6 +453,7 @@ impl Sub for &HybridBitset {
 // --- In-place Bitwise Operations ---
 
 impl BitAndAssign for HybridBitset {
+    #[time_it]
     fn bitand_assign(&mut self, rhs: Self) {
         // let start_time = std::time::Instant::now();
         // self.inner = &self.inner & &rhs.inner;
@@ -464,6 +469,7 @@ impl BitAndAssign for HybridBitset {
 }
 
 impl BitOrAssign for HybridBitset {
+    #[time_it]
     fn bitor_assign(&mut self, rhs: Self) {
         // let self_ranges_len = self.inner.ranges_len();
         // let rhs_ranges_len = rhs.inner.ranges_len();
@@ -491,12 +497,14 @@ impl BitOrAssign for HybridBitset {
 }
 
 impl BitXorAssign for HybridBitset {
+    #[time_it]
     fn bitxor_assign(&mut self, rhs: Self) {
         self.inner = &self.inner ^ &rhs.inner;
     }
 }
 
 impl SubAssign for HybridBitset {
+    #[time_it]
     fn sub_assign(&mut self, rhs: Self) {
         self.inner = std::mem::take(&mut self.inner) - rhs.inner;
     }
@@ -505,6 +513,7 @@ impl SubAssign for HybridBitset {
 // --- In-place Bitwise Operations with References ---
 
 impl BitAndAssign<&HybridBitset> for HybridBitset {
+    #[time_it]
     fn bitand_assign(&mut self, rhs: &HybridBitset) {
         // let start_time = std::time::Instant::now();
         // self.inner = &self.inner & &rhs.inner;
@@ -520,18 +529,21 @@ impl BitAndAssign<&HybridBitset> for HybridBitset {
 }
 
 impl BitOrAssign<&HybridBitset> for HybridBitset {
+    #[time_it]
     fn bitor_assign(&mut self, rhs: &HybridBitset) {
         self.inner |= &rhs.inner; // RangeSetBlaze has BitOrAssign<&RangeSetBlaze>
     }
 }
 
 impl BitXorAssign<&HybridBitset> for HybridBitset {
+    #[time_it]
     fn bitxor_assign(&mut self, rhs: &HybridBitset) {
         self.inner = &self.inner ^ &rhs.inner;
     }
 }
 
 impl SubAssign<&HybridBitset> for HybridBitset {
+    #[time_it]
     fn sub_assign(&mut self, rhs: &HybridBitset) {
         self.inner = &self.inner - &rhs.inner;
     }
@@ -552,7 +564,9 @@ impl Hash for HybridBitset {
 }
 
 // --- Conversions and Indexing (Kept as todo! as per original) ---
-use bitvec::prelude::*; // Keep for BitVec type in signatures
+use bitvec::prelude::*;
+use profiler_macro::time_it;
+// Keep for BitVec type in signatures
 
 impl Into<BitVec<usize, Lsb0>> for HybridBitset {
     fn into(self) -> BitVec<usize, Lsb0> {
