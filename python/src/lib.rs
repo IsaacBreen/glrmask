@@ -316,7 +316,7 @@ impl PyGrammarConstraint {
         let constraint = GrammarConstraint::from_compiled_grammar(
             grammar.inner.clone(), // Clone the CompiledGrammar
             llm_token_map,
-            0, // Placeholder for eof_llm_token_id, as current from_compiled_grammar doesn't take it
+            LLMTokenID(0),
             max_llm_token_id,
         );
 
