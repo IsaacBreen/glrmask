@@ -1061,9 +1061,9 @@ impl<'a> GrammarConstraintState<'a> {
         let t1 = std::time::Instant::now();
         println!("get_mask took: {:>15?}", t1.duration_since(t0));
 
-        // crate::profiler::print_summary();
-        // crate::profiler::print_summary_flat();
-        // crate::profiler::reset();
+        crate::profiler::print_summary();
+        crate::profiler::print_summary_flat();
+        crate::profiler::reset();
 
         final_mask_mapped
     }
