@@ -277,6 +277,10 @@ impl GrammarConstraint {
         // Assuming compute_first_sets is available from grammar module.
 
         let terminal_follow_sets_named = compute_terminal_follow_sets(grammar_productions);
+        println!("terminal_follow_sets_named:");
+        for (terminal, following_terminals) in &terminal_follow_sets_named {
+            println!("{} -> {}", terminal.0, following_terminals.iter().map(|t| t.0.clone()).collect::<Vec<_>>().join(", "));
+        }
 
         let mut terminal_follow_map_ids: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> = BTreeMap::new();
         for (terminal1, following_terminals) in terminal_follow_sets_named {
@@ -573,7 +577,7 @@ impl<'r> Precomputer<'r> {
             .collect();
     
         let terminal_follow_map = &self.terminal_follow_map;
-        
+
         Trie::special_map(
             initial_nodes_and_values,
             // step: Propagate predecessor terminals.
