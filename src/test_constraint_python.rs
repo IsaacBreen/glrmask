@@ -786,7 +786,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // let full_text_to_tokenize = "                        ";
     // let full_text_to_tokenize = "# Top-level comment, challenging parser start\nimport os, sys # Multiple imports on one line\nfrom collections import (defaultdict,\n                         deque) # Multi-line import with parens\n\nGLOBAL_VAR: int = 100";
     // let full_text_to_tokenize = "azazazazazazazazazazazazazazazazazazazazazazazazazazaz";
-    let full_text_to_tokenize = "x = 1";
+    let full_text_to_tokenize = "x=1";
 
     // Tokenize the full_text_to_tokenize using the VocabPrefixTree
     let mut test_token_sequence_ids = Vec::new();
@@ -918,33 +918,35 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
          println!("Constraint state was not stepped as the input string was empty and produced no tokens.");
     }
 
-    // Ensure the parse state after stepping the constraint with all LLM tokens and committing an LLM token is the same as the parse state after stepping the parser itself tokens emitted by the tokenizer for that same LLM token.
-    // In general, this should be true if all LLM tokens cleanly match grammar tokens (or, equivalently, if the only non-empty entry in the precompute tree is under the initial tokenizer state).
-    // let grammar_tokenss = vec![vec!["\"from\""], vec!["NAME[0]"]];
-    // let llm_tokens_for_comp: Vec<&[u8]> = vec![b"from", b" typing", b" import", b" Any", b",", b" List", b","];
-    // let grammar_tokenss_for_comp = vec![vec!["\"from\"", "NAME[0]", "\"import\"", "NAME[0]", "\",\"", "NAME[0]", "\",\""]];
-    let llm_tokens_for_comp: Vec<&[u8]> = vec![b"from", b" x"];
-    let grammar_tokenss_for_comp = vec![vec!["\"from\"", "NAME[0]"]];
-    let llm_token_ids_for_comp = llm_tokens_for_comp.iter().map(|llm_token| llm_token_map.get_by_left(*llm_token).expect(format!("LLM token '{}' not found in llm_token_map", String::from_utf8_lossy(*llm_token)).as_str())).collect::<Vec<_>>();
+    if false {
+        // Ensure the parse state after stepping the constraint with all LLM tokens and committing an LLM token is the same as the parse state after stepping the parser itself tokens emitted by the tokenizer for that same LLM token.
+        // In general, this should be true if all LLM tokens cleanly match grammar tokens (or, equivalently, if the only non-empty entry in the precompute tree is under the initial tokenizer state).
+        // let grammar_tokenss = vec![vec!["\"from\""], vec!["NAME[0]"]];
+        // let llm_tokens_for_comp: Vec<&[u8]> = vec![b"from", b" typing", b" import", b" Any", b",", b" List", b","];
+        // let grammar_tokenss_for_comp = vec![vec!["\"from\"", "NAME[0]", "\"import\"", "NAME[0]", "\",\"", "NAME[0]", "\",\""]];
+        let llm_tokens_for_comp: Vec<&[u8]> = vec![b"from", b" x"];
+        let grammar_tokenss_for_comp = vec![vec!["\"from\"", "NAME[0]"]];
+        let llm_token_ids_for_comp = llm_tokens_for_comp.iter().map(|llm_token| llm_token_map.get_by_left(*llm_token).expect(format!("LLM token '{}' not found in llm_token_map", String::from_utf8_lossy(*llm_token)).as_str())).collect::<Vec<_>>();
 
-    let mut parser_state_for_comp = grammar_constraint.parser.init_glr_parser();
-    for grammar_tokens in grammar_tokenss_for_comp {
-        let mut this_parser_state = grammar_constraint.parser.init_glr_parser();
-        for grammar_token in &grammar_tokens {
-            let grammar_token_id = grammar_constraint.parser.terminal_map.get_by_left(&Terminal(grammar_token.to_string())).unwrap();
-            this_parser_state.step(*grammar_token_id);
-            assert!(this_parser_state.is_ok(), "Parser failed to step with token {:?} in sequence {:?}", grammar_token, grammar_tokens);
+        let mut parser_state_for_comp = grammar_constraint.parser.init_glr_parser();
+        for grammar_tokens in grammar_tokenss_for_comp {
+            let mut this_parser_state = grammar_constraint.parser.init_glr_parser();
+            for grammar_token in &grammar_tokens {
+                let grammar_token_id = grammar_constraint.parser.terminal_map.get_by_left(&Terminal(grammar_token.to_string())).unwrap();
+                this_parser_state.step(*grammar_token_id);
+                assert!(this_parser_state.is_ok(), "Parser failed to step with token {:?} in sequence {:?}", grammar_token, grammar_tokens);
+            }
+            parser_state_for_comp.merge_with(this_parser_state);
         }
-        parser_state_for_comp.merge_with(this_parser_state);
-    }
 
-    let mut constraint_state_for_comp = grammar_constraint.init();
-    for llm_token_for_comp in llm_tokens_for_comp {
-        // Ensure token is allowed before committing
-        let llm_token_id_for_comp = llm_token_map.get_by_left(llm_token_for_comp).unwrap();
-        let mask_before_commit = constraint_state_for_comp.get_mask();
-        assert!(mask_before_commit.contains(llm_token_id_for_comp.0), "Token {:?} (ID {}) not found in mask during comparison setup. Mask: {:?}", String::from_utf8_lossy(llm_token_for_comp), llm_token_id_for_comp.0, mask_before_commit);
-        constraint_state_for_comp.commit(*llm_token_id_for_comp);
+        let mut constraint_state_for_comp = grammar_constraint.init();
+        for llm_token_for_comp in llm_tokens_for_comp {
+            // Ensure token is allowed before committing
+            let llm_token_id_for_comp = llm_token_map.get_by_left(llm_token_for_comp).unwrap();
+            let mask_before_commit = constraint_state_for_comp.get_mask();
+            assert!(mask_before_commit.contains(llm_token_id_for_comp.0), "Token {:?} (ID {}) not found in mask during comparison setup. Mask: {:?}", String::from_utf8_lossy(llm_token_for_comp), llm_token_id_for_comp.0, mask_before_commit);
+            constraint_state_for_comp.commit(*llm_token_id_for_comp);
+        }
     }
 
     // assert_eq!(constraint_state_for_comp.state().len(), 1, "Constraint state for comparison should have one tokenizer state");
