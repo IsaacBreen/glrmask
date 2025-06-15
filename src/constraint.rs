@@ -336,7 +336,7 @@ impl GrammarConstraint {
 
         helper.run_dfs();
         helper.prune_on_no_terminal_follow();
-        // helper.prune_dead_paths();
+        helper.prune_dead_paths();
         helper.merge_nodes();
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
