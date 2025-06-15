@@ -25,8 +25,7 @@ local_system:
       use indicatif::{ProgressBar, ProgressStyle};
 
       use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-      use crate::datastructures::charmap::TrieMap;
-      use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, intersect_allowed_terminals_and_prune_arc, TerminalInfo, prune_disallowed_terminals};
+      use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, TerminalInfo, prune_disallowed_terminals};
       use crate::datastructures::hybrid_bitset::HybridBitset;
       use crate::datastructures::trie::{EdgeInserter, Trie};
       use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -950,15 +949,12 @@ local_system:
                   if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
                       let mut forbidden_llm_tokens = LLMTokenBV::zeros();
                       forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.internal_max_llm_token + 1);
-                      let allowed_terminals_for_gss = glr_state.active_state.stack.acc2().allowed_terminals();
-                      for (tokenizer_state_id, allowed_terminals_for_state) in allowed_terminals_for_gss {
+                      let disallowed_terminals_for_gss = glr_state.active_state.stack.acc2().disallowed_terminals();
+                      for (tokenizer_state_id, disallowed_terminals_for_state) in disallowed_terminals_for_gss {
                           let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
                           for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
-                              if !allowed_terminals_for_state.contains(terminal_id.0) {
-                                  // This terminal is not allowed
-                                  // crate::debug!(4, "Allowed terminals for GSS: {:?}", allowed_terminals_for_gss);
-                                  // crate::debug!(4, "Possible matches for state {}: {:?}", tokenizer_state_id.0, possible_matches_for_state);
-                                  // crate::debug!(4, "Subtracting forbidden LLM tokens for terminal {:?} (ID {}) for state {}: {:?}", self.parent.parser.terminal_map.get_by_right(terminal_id).map(|t| t.0.clone()).unwrap_or("UNKNOWN_TERMINAL".to_string()), terminal_id.0, tokenizer_state_id.0, llm_tokens_that_match_this_terminal);
+                              if disallowed_terminals_for_state.contains(terminal_id.0) {
+                                  // This terminal is disallowed, so the LLM tokens that produce it are forbidden.
                                   forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
                               }
                           }
@@ -1150,14 +1146,14 @@ local_system:
                               // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
                               let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
 
-                              let mut allowed_terminals: TerminalInfo = BTreeMap::new();
+                              let mut disallowed_terminals: TerminalInfo = BTreeMap::new();
                               if let Some(end_state_id) = exec_result.end_state {
-                                  let mut allowed_terminals_for_end_state = TerminalBV::max_ones();
-                                  // Prevent this token from being matched again.
-                                  allowed_terminals_for_end_state.remove(match_info.id);
-                                  allowed_terminals.insert(TokenizerStateID(end_state_id), allowed_terminals_for_end_state);
+                                  let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
+                                  // Disallow this token from being matched again immediately.
+                                  disallowed_terminals_for_end_state.insert(match_info.id);
+                                  disallowed_terminals.insert(TokenizerStateID(end_state_id), disallowed_terminals_for_end_state);
                               }
-                              intersect_allowed_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &allowed_terminals, &mut HashMap::new());
+                              disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
 
                               if new_offset == llm_token_bytes.len() {
                                   // reset_allowed_terminals(&mut cloned_glr_s.active_state.stack);
@@ -1209,7 +1205,7 @@ local_system:
               &self.state
           }
       }
-    src/datastructures/gss.rs: |-
+    src/datastructures/gss.rs: |
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
       use std::sync::Arc;
       use std::fmt::{Debug, Write};
@@ -1235,6 +1231,10 @@ local_system:
 
       pub type LLMTokenInfo = Option<LLMTokenBV>;
       pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalBV>;
+
+      struct X {
+          union: usize,
+      }
 
       pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
           fn union_assign(&mut self, other: Self);
@@ -1499,42 +1499,46 @@ local_system:
       }
 
       #[time_it]
-      pub fn allowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-          let mut common_keys = BTreeSet::new();
-          common_keys.extend(left.keys());
-          common_keys.extend(right.keys());
-          for terminal_id in common_keys {
-              let left_value = left.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
-              let right_value = right.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
-              let union = &left_value | &right_value;
-              left.insert(terminal_id, union);
+      pub fn disallowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
+          let mut all_keys = BTreeSet::new();
+          all_keys.extend(left.keys());
+          all_keys.extend(right.keys());
+          for tokenizer_state_id in all_keys {
+              // An absent key means "no terminals disallowed" -> zeros()
+              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+              let intersection = &left_value & &right_value;
+              if !intersection.is_empty() {
+                  left.insert(tokenizer_state_id, intersection);
+              } else {
+                  left.remove(&tokenizer_state_id);
+              }
           }
       }
 
       #[time_it]
-      pub fn allowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-          let mut common_keys = BTreeSet::new();
-          common_keys.extend(left.keys());
-          common_keys.extend(right.keys());
-          for terminal_id in common_keys {
-              let left_value = left.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
-              let right_value = right.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
-              let intersection = &left_value & &right_value;
-              left.insert(terminal_id, intersection);
+      pub fn disallowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
+          let mut all_keys = BTreeSet::new();
+          all_keys.extend(left.keys());
+          all_keys.extend(right.keys());
+          for tokenizer_state_id in all_keys {
+              // An absent key means "no terminals disallowed" -> zeros()
+              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+              let union = &left_value | &right_value;
+              if !union.is_empty() {
+                  left.insert(tokenizer_state_id, union);
+              } else {
+                  left.remove(&tokenizer_state_id);
+              }
           }
       }
 
-      pub fn allowed_terminals_subtract_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
-          for (terminal_id, right_bv) in right {
-              // If a tokenizer state is not in 'left', it implies all terminals are allowed for that state.
-              // So, we start with max_ones() and then subtract.
-              let left_value = left.entry(*terminal_id).or_insert_with(TerminalBV::max_ones);
-              // Assuming TerminalBV implements SubAssign<&TerminalBV>
-              // e.g., for FixedBitSet, this would be left_value.difference_with(right_bv);
-              *left_value -= right_bv;
+      pub fn disallow_terminals_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
+          for (tokenizer_state_id, terminals_to_disallow) in right {
+              let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalBV::zeros);
+              *entry |= terminals_to_disallow;
           }
-          // Keys in 'left' but not in 'right' are unaffected.
-          // Optionally, remove entries from 'left' if their TerminalBV becomes empty after subtraction.
       }
 
       #[derive(Clone, Copy)]
@@ -1595,7 +1599,7 @@ local_system:
           use std::collections::{BTreeMap, BTreeSet};
           use profiler_macro::time_it;
           use crate::constraint::{LLMTokenBV, TerminalBV};
-          use crate::datastructures::gss::{allowed_terminals_intersect_assign, allowed_terminals_union_assign, LLMTokenInfo, PathAccumulator, TerminalInfo};
+          use crate::datastructures::gss::{disallowed_terminals_union_assign, disallowed_terminals_intersect_assign, LLMTokenInfo, PathAccumulator, TerminalInfo};
           use crate::glr::grammar::Symbol::Terminal;
           use crate::tokenizer::TokenizerStateID;
           use crate::types::TerminalID;
@@ -1610,20 +1614,20 @@ local_system:
               // TODO: What about when a tokenizer state *can't* match the disallowed terminal? Shouldn't be necessary to have an entry for it right?
               //  But then we need an all-ones entry here, otherwise there's no tokenizer states in the map and it's considered 'not valid'.
               //  Perhaps we should...
-              allowed_terminals: TerminalInfo,
+              disallowed_terminals: TerminalInfo,
           }
 
           impl Acc {
-              pub fn new(acc: LLMTokenInfo, allowed_terminals: TerminalInfo) -> Self {
-                  Self { acc, allowed_terminals }
+              pub fn new(acc: LLMTokenInfo, disallowed_terminals: TerminalInfo) -> Self {
+                  Self { acc, disallowed_terminals }
               }
 
               pub fn new_fresh() -> Self {
-                  Self { acc: None, allowed_terminals: BTreeMap::new() }
+                  Self { acc: None, disallowed_terminals: BTreeMap::new() }
               }
 
               pub fn new_for_merging() -> Self {
-                  Self { acc: Some(LLMTokenBV::zeros()), allowed_terminals: BTreeMap::new() }
+                  Self { acc: Some(LLMTokenBV::zeros()), disallowed_terminals: BTreeMap::new() }
               }
 
               pub fn acc(&self) -> &LLMTokenInfo {
@@ -1634,16 +1638,16 @@ local_system:
                   &mut self.acc
               }
 
-              pub fn allowed_terminals(&self) -> &TerminalInfo {
-                  &self.allowed_terminals
+              pub fn disallowed_terminals(&self) -> &TerminalInfo {
+                  &self.disallowed_terminals
               }
 
-              pub fn allowed_terminals_mut(&mut self) -> &mut TerminalInfo {
-                  &mut self.allowed_terminals
+              pub fn disallowed_terminals_mut(&mut self) -> &mut TerminalInfo {
+                  &mut self.disallowed_terminals
               }
 
               pub fn is_default(&self) -> bool {
-                  self.acc.is_none() && self.allowed_terminals.is_empty()
+                  self.acc.is_none() && self.disallowed_terminals.is_empty()
               }
 
               pub fn is_dead(&self) -> bool {
@@ -1652,11 +1656,11 @@ local_system:
                           return true;
                       }
                   }
-                  if self.allowed_terminals.is_empty() {
+                  if self.disallowed_terminals.is_empty() {
                       return false;
                   }
-                  for allowed_terminals in self.allowed_terminals.values() {
-                      if !allowed_terminals.is_empty() {
+                  for disallowed_terminals in self.disallowed_terminals.values() {
+                      if !disallowed_terminals.is_empty() {
                           return false;
                       }
                   }
@@ -1672,12 +1676,12 @@ local_system:
               #[time_it]
               fn union_assign(&mut self, other: Self) {
                   self.acc.union_assign(other.acc);
-                  allowed_terminals_union_assign(&mut self.allowed_terminals, other.allowed_terminals);
+                  disallowed_terminals_intersect_assign(&mut self.disallowed_terminals, other.disallowed_terminals);
               }
               #[time_it]
               fn intersect_assign(&mut self, right: Self) {
                   self.acc.intersect_assign(right.acc);
-                  allowed_terminals_intersect_assign(&mut self.allowed_terminals, right.allowed_terminals);
+                  disallowed_terminals_union_assign(&mut self.disallowed_terminals, right.disallowed_terminals);
               }
               #[time_it]
               fn intersect_has_effect(&self, right: &Self) -> bool {
@@ -2137,7 +2141,7 @@ local_system:
               if let Some(bv) = new_acc.acc_mut() {
                   *bv &= tokens_to_intersect;
               } else {
-                  new_acc = Acc::new(Some(tokens_to_intersect.clone()), current_acc.allowed_terminals().clone());
+                  new_acc = Acc::new(Some(tokens_to_intersect.clone()), current_acc.disallowed_terminals().clone());
               }
               if new_acc.is_alive() {
                   let continue_recursion = &new_acc != current_acc;
@@ -2167,7 +2171,7 @@ local_system:
               if let Some(bv) = new_acc.acc_mut() {
                   *bv -= llm_tokens;
               } else {
-                  new_acc = Acc::new(Some(LLMTokenBV::max_ones() - llm_tokens.clone()), current_acc.allowed_terminals().clone());
+                  new_acc = Acc::new(Some(LLMTokenBV::max_ones() - llm_tokens.clone()), current_acc.disallowed_terminals().clone());
               }
               if new_acc.is_alive() {
                   // let continue_recursion = &new_acc != current_acc;
@@ -2191,7 +2195,7 @@ local_system:
       ) {
           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
               let continue_recursion = !current_acc.is_default();
-              Some((Acc::new(None, current_acc.allowed_terminals().clone()), continue_recursion)) // Keep node, continue recursion
+              Some((Acc::new(None, current_acc.disallowed_terminals().clone()), continue_recursion)) // Keep node, continue recursion
           };
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
               *root_arc = new_root;
@@ -2201,14 +2205,14 @@ local_system:
           }
       }
 
-      pub fn intersect_allowed_terminals_and_prune_arc(
+      pub fn disallow_terminals_and_prune_arc(
           root_arc: &mut Arc<GSSNode>,
-          allowed_terminals: &TerminalInfo,
+          disallowed_terminals: &TerminalInfo,
           memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
       ) {
           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
               let mut new_acc = current_acc.clone();
-              allowed_terminals_intersect_assign(new_acc.allowed_terminals_mut(), allowed_terminals.clone());
+              disallowed_terminals_union_assign(new_acc.disallowed_terminals_mut(), disallowed_terminals.clone());
               if new_acc.is_alive() {
                   Some((new_acc, false))
               } else {
@@ -2230,15 +2234,16 @@ local_system:
       ) {
           // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-              for (gss_state_id, gss_allowed_bv) in current_acc.allowed_terminals() {
-                  let gss_disallowed_bv = gss_allowed_bv.inverted();
+              for (gss_state_id, gss_disallowed_bv) in current_acc.disallowed_terminals() {
                   if let Some(actual_bv_for_state) = terminals_map.get(gss_state_id) {
-                      if !(&gss_disallowed_bv & actual_bv_for_state).is_empty() {
+                      // If any terminal disallowed by GSS is also matched by current segment, prune.
+                      // This means (gss_disallowed_bv AND actual_bv_for_state) must be empty.
+                      if !gss_disallowed_bv.is_disjoint(actual_bv_for_state) {
                           return None;
                       }
                   }
               }
-              let continue_recursion = !current_acc.allowed_terminals().is_empty();
+              let continue_recursion = !current_acc.disallowed_terminals().is_empty();
               Some((current_acc.clone(), continue_recursion))
           };
 
@@ -2255,29 +2260,29 @@ local_system:
           memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
       ) {
           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-              let mut new_allowed_terminals = BTreeMap::new();
+              let mut new_disallowed_terminals = BTreeMap::new();
               let mut changed = false;
 
-              for (old_id, bv) in current_acc.allowed_terminals() {
+              for (old_id, bv) in current_acc.disallowed_terminals() {
                   if let Some(new_id) = map.get(old_id) {
-                      *new_allowed_terminals.entry(*new_id)
+                      *new_disallowed_terminals.entry(*new_id)
                           .or_insert_with(TerminalBV::zeros) |= bv;
-                      if new_allowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
+                      if new_disallowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
                           changed = true;
                       }
                   } else {
-                      changed = true; // A state was removed
+                      changed = true; // A state was removed, which is a change.
                   }
               }
               // new_allowed_terminals.retain(|_, bv| bv != &TerminalBV::max_ones());
-              if !changed && current_acc.allowed_terminals().len() == new_allowed_terminals.len() { // No structural change
+              if !changed && current_acc.disallowed_terminals().len() == new_disallowed_terminals.len() { // No structural change
                    // No change in content or structure of allowed_terminals
               } else {
                   changed = true;
               }
 
-              let new_acc = Acc::new(current_acc.acc().clone(), new_allowed_terminals);
-              let continue_recursion = changed || !current_acc.allowed_terminals().is_empty(); // Recurse if there was something to map or a change occurred.
+              let new_acc = Acc::new(current_acc.acc().clone(), new_disallowed_terminals);
+              let continue_recursion = changed || !current_acc.disallowed_terminals().is_empty(); // Recurse if there was something to map or a change occurred.
               Some((new_acc, continue_recursion))
           };
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
@@ -2391,13 +2396,13 @@ local_system:
               *self = node_arc.as_ref().clone();
           }
 
-          pub fn intersect_allowed_terminals_and_prune_arc(
+          pub fn disallow_terminals_and_prune_arc(
               &mut self,
-              allowed_terminals: &TerminalInfo,
+              disallowed_terminals: &TerminalInfo,
           ) {
               let mut node_arc = Arc::new(self.clone());
               let mut memo = HashMap::new();
-              intersect_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals, &mut memo);
+              disallow_terminals_and_prune_arc(&mut node_arc, &disallowed_terminals, &mut memo);
               *self = node_arc.as_ref().clone();
           }
 
@@ -2833,8 +2838,7 @@ local_system:
       use indicatif::{ProgressBar, ProgressStyle};
 
       use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-      use crate::datastructures::charmap::TrieMap;
-      use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, intersect_allowed_terminals_and_prune_arc, TerminalInfo, prune_disallowed_terminals};
+      use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, TerminalInfo, prune_disallowed_terminals};
       use crate::datastructures::hybrid_bitset::HybridBitset;
       use crate::datastructures::trie::{EdgeInserter, Trie};
       use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -3758,15 +3762,12 @@ local_system:
                   if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
                       let mut forbidden_llm_tokens = LLMTokenBV::zeros();
                       forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.internal_max_llm_token + 1);
-                      let allowed_terminals_for_gss = glr_state.active_state.stack.acc2().allowed_terminals();
-                      for (tokenizer_state_id, allowed_terminals_for_state) in allowed_terminals_for_gss {
+                      let disallowed_terminals_for_gss = glr_state.active_state.stack.acc2().disallowed_terminals();
+                      for (tokenizer_state_id, disallowed_terminals_for_state) in disallowed_terminals_for_gss {
                           let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
                           for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
-                              if !allowed_terminals_for_state.contains(terminal_id.0) {
-                                  // This terminal is not allowed
-                                  // crate::debug!(4, "Allowed terminals for GSS: {:?}", allowed_terminals_for_gss);
-                                  // crate::debug!(4, "Possible matches for state {}: {:?}", tokenizer_state_id.0, possible_matches_for_state);
-                                  // crate::debug!(4, "Subtracting forbidden LLM tokens for terminal {:?} (ID {}) for state {}: {:?}", self.parent.parser.terminal_map.get_by_right(terminal_id).map(|t| t.0.clone()).unwrap_or("UNKNOWN_TERMINAL".to_string()), terminal_id.0, tokenizer_state_id.0, llm_tokens_that_match_this_terminal);
+                              if disallowed_terminals_for_state.contains(terminal_id.0) {
+                                  // This terminal is disallowed, so the LLM tokens that produce it are forbidden.
                                   forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
                               }
                           }
@@ -3958,14 +3959,14 @@ local_system:
                               // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
                               let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
 
-                              let mut allowed_terminals: TerminalInfo = BTreeMap::new();
+                              let mut disallowed_terminals: TerminalInfo = BTreeMap::new();
                               if let Some(end_state_id) = exec_result.end_state {
-                                  let mut allowed_terminals_for_end_state = TerminalBV::max_ones();
-                                  // Prevent this token from being matched again.
-                                  allowed_terminals_for_end_state.remove(match_info.id);
-                                  allowed_terminals.insert(TokenizerStateID(end_state_id), allowed_terminals_for_end_state);
+                                  let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
+                                  // Disallow this token from being matched again immediately.
+                                  disallowed_terminals_for_end_state.insert(match_info.id);
+                                  disallowed_terminals.insert(TokenizerStateID(end_state_id), disallowed_terminals_for_end_state);
                               }
-                              intersect_allowed_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &allowed_terminals, &mut HashMap::new());
+                              disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
 
                               if new_offset == llm_token_bytes.len() {
                                   // reset_allowed_terminals(&mut cloned_glr_s.active_state.stack);
@@ -4017,7 +4018,7 @@ local_system:
               &self.state
           }
       }
-    src/datastructures/gss.rs: |-
+    src/datastructures/gss.rs: |
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
       use std::sync::Arc;
       use std::fmt::{Debug, Write};
@@ -4043,6 +4044,10 @@ local_system:
 
       pub type LLMTokenInfo = Option<LLMTokenBV>;
       pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalBV>;
+
+      struct X {
+          union: usize,
+      }
 
       pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
           fn union_assign(&mut self, other: Self);
@@ -4307,42 +4312,46 @@ local_system:
       }
 
       #[time_it]
-      pub fn allowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-          let mut common_keys = BTreeSet::new();
-          common_keys.extend(left.keys());
-          common_keys.extend(right.keys());
-          for terminal_id in common_keys {
-              let left_value = left.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
-              let right_value = right.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
-              let union = &left_value | &right_value;
-              left.insert(terminal_id, union);
+      pub fn disallowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
+          let mut all_keys = BTreeSet::new();
+          all_keys.extend(left.keys());
+          all_keys.extend(right.keys());
+          for tokenizer_state_id in all_keys {
+              // An absent key means "no terminals disallowed" -> zeros()
+              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+              let intersection = &left_value & &right_value;
+              if !intersection.is_empty() {
+                  left.insert(tokenizer_state_id, intersection);
+              } else {
+                  left.remove(&tokenizer_state_id);
+              }
           }
       }
 
       #[time_it]
-      pub fn allowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-          let mut common_keys = BTreeSet::new();
-          common_keys.extend(left.keys());
-          common_keys.extend(right.keys());
-          for terminal_id in common_keys {
-              let left_value = left.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
-              let right_value = right.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
-              let intersection = &left_value & &right_value;
-              left.insert(terminal_id, intersection);
+      pub fn disallowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
+          let mut all_keys = BTreeSet::new();
+          all_keys.extend(left.keys());
+          all_keys.extend(right.keys());
+          for tokenizer_state_id in all_keys {
+              // An absent key means "no terminals disallowed" -> zeros()
+              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+              let union = &left_value | &right_value;
+              if !union.is_empty() {
+                  left.insert(tokenizer_state_id, union);
+              } else {
+                  left.remove(&tokenizer_state_id);
+              }
           }
       }
 
-      pub fn allowed_terminals_subtract_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
-          for (terminal_id, right_bv) in right {
-              // If a tokenizer state is not in 'left', it implies all terminals are allowed for that state.
-              // So, we start with max_ones() and then subtract.
-              let left_value = left.entry(*terminal_id).or_insert_with(TerminalBV::max_ones);
-              // Assuming TerminalBV implements SubAssign<&TerminalBV>
-              // e.g., for FixedBitSet, this would be left_value.difference_with(right_bv);
-              *left_value -= right_bv;
+      pub fn disallow_terminals_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
+          for (tokenizer_state_id, terminals_to_disallow) in right {
+              let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalBV::zeros);
+              *entry |= terminals_to_disallow;
           }
-          // Keys in 'left' but not in 'right' are unaffected.
-          // Optionally, remove entries from 'left' if their TerminalBV becomes empty after subtraction.
       }
 
       #[derive(Clone, Copy)]
@@ -4403,7 +4412,7 @@ local_system:
           use std::collections::{BTreeMap, BTreeSet};
           use profiler_macro::time_it;
           use crate::constraint::{LLMTokenBV, TerminalBV};
-          use crate::datastructures::gss::{allowed_terminals_intersect_assign, allowed_terminals_union_assign, LLMTokenInfo, PathAccumulator, TerminalInfo};
+          use crate::datastructures::gss::{disallowed_terminals_union_assign, disallowed_terminals_intersect_assign, LLMTokenInfo, PathAccumulator, TerminalInfo};
           use crate::glr::grammar::Symbol::Terminal;
           use crate::tokenizer::TokenizerStateID;
           use crate::types::TerminalID;
@@ -4418,20 +4427,20 @@ local_system:
               // TODO: What about when a tokenizer state *can't* match the disallowed terminal? Shouldn't be necessary to have an entry for it right?
               //  But then we need an all-ones entry here, otherwise there's no tokenizer states in the map and it's considered 'not valid'.
               //  Perhaps we should...
-              allowed_terminals: TerminalInfo,
+              disallowed_terminals: TerminalInfo,
           }
 
           impl Acc {
-              pub fn new(acc: LLMTokenInfo, allowed_terminals: TerminalInfo) -> Self {
-                  Self { acc, allowed_terminals }
+              pub fn new(acc: LLMTokenInfo, disallowed_terminals: TerminalInfo) -> Self {
+                  Self { acc, disallowed_terminals }
               }
 
               pub fn new_fresh() -> Self {
-                  Self { acc: None, allowed_terminals: BTreeMap::new() }
+                  Self { acc: None, disallowed_terminals: BTreeMap::new() }
               }
 
               pub fn new_for_merging() -> Self {
-                  Self { acc: Some(LLMTokenBV::zeros()), allowed_terminals: BTreeMap::new() }
+                  Self { acc: Some(LLMTokenBV::zeros()), disallowed_terminals: BTreeMap::new() }
               }
 
               pub fn acc(&self) -> &LLMTokenInfo {
@@ -4442,16 +4451,16 @@ local_system:
                   &mut self.acc
               }
 
-              pub fn allowed_terminals(&self) -> &TerminalInfo {
-                  &self.allowed_terminals
+              pub fn disallowed_terminals(&self) -> &TerminalInfo {
+                  &self.disallowed_terminals
               }
 
-              pub fn allowed_terminals_mut(&mut self) -> &mut TerminalInfo {
-                  &mut self.allowed_terminals
+              pub fn disallowed_terminals_mut(&mut self) -> &mut TerminalInfo {
+                  &mut self.disallowed_terminals
               }
 
               pub fn is_default(&self) -> bool {
-                  self.acc.is_none() && self.allowed_terminals.is_empty()
+                  self.acc.is_none() && self.disallowed_terminals.is_empty()
               }
 
               pub fn is_dead(&self) -> bool {
@@ -4460,11 +4469,11 @@ local_system:
                           return true;
                       }
                   }
-                  if self.allowed_terminals.is_empty() {
+                  if self.disallowed_terminals.is_empty() {
                       return false;
                   }
-                  for allowed_terminals in self.allowed_terminals.values() {
-                      if !allowed_terminals.is_empty() {
+                  for disallowed_terminals in self.disallowed_terminals.values() {
+                      if !disallowed_terminals.is_empty() {
                           return false;
                       }
                   }
@@ -4480,12 +4489,12 @@ local_system:
               #[time_it]
               fn union_assign(&mut self, other: Self) {
                   self.acc.union_assign(other.acc);
-                  allowed_terminals_union_assign(&mut self.allowed_terminals, other.allowed_terminals);
+                  disallowed_terminals_intersect_assign(&mut self.disallowed_terminals, other.disallowed_terminals);
               }
               #[time_it]
               fn intersect_assign(&mut self, right: Self) {
                   self.acc.intersect_assign(right.acc);
-                  allowed_terminals_intersect_assign(&mut self.allowed_terminals, right.allowed_terminals);
+                  disallowed_terminals_union_assign(&mut self.disallowed_terminals, right.disallowed_terminals);
               }
               #[time_it]
               fn intersect_has_effect(&self, right: &Self) -> bool {
@@ -4945,7 +4954,7 @@ local_system:
               if let Some(bv) = new_acc.acc_mut() {
                   *bv &= tokens_to_intersect;
               } else {
-                  new_acc = Acc::new(Some(tokens_to_intersect.clone()), current_acc.allowed_terminals().clone());
+                  new_acc = Acc::new(Some(tokens_to_intersect.clone()), current_acc.disallowed_terminals().clone());
               }
               if new_acc.is_alive() {
                   let continue_recursion = &new_acc != current_acc;
@@ -4975,7 +4984,7 @@ local_system:
               if let Some(bv) = new_acc.acc_mut() {
                   *bv -= llm_tokens;
               } else {
-                  new_acc = Acc::new(Some(LLMTokenBV::max_ones() - llm_tokens.clone()), current_acc.allowed_terminals().clone());
+                  new_acc = Acc::new(Some(LLMTokenBV::max_ones() - llm_tokens.clone()), current_acc.disallowed_terminals().clone());
               }
               if new_acc.is_alive() {
                   // let continue_recursion = &new_acc != current_acc;
@@ -4999,7 +5008,7 @@ local_system:
       ) {
           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
               let continue_recursion = !current_acc.is_default();
-              Some((Acc::new(None, current_acc.allowed_terminals().clone()), continue_recursion)) // Keep node, continue recursion
+              Some((Acc::new(None, current_acc.disallowed_terminals().clone()), continue_recursion)) // Keep node, continue recursion
           };
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
               *root_arc = new_root;
@@ -5009,14 +5018,14 @@ local_system:
           }
       }
 
-      pub fn intersect_allowed_terminals_and_prune_arc(
+      pub fn disallow_terminals_and_prune_arc(
           root_arc: &mut Arc<GSSNode>,
-          allowed_terminals: &TerminalInfo,
+          disallowed_terminals: &TerminalInfo,
           memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
       ) {
           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
               let mut new_acc = current_acc.clone();
-              allowed_terminals_intersect_assign(new_acc.allowed_terminals_mut(), allowed_terminals.clone());
+              disallowed_terminals_union_assign(new_acc.disallowed_terminals_mut(), disallowed_terminals.clone());
               if new_acc.is_alive() {
                   Some((new_acc, false))
               } else {
@@ -5038,15 +5047,16 @@ local_system:
       ) {
           // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-              for (gss_state_id, gss_allowed_bv) in current_acc.allowed_terminals() {
-                  let gss_disallowed_bv = gss_allowed_bv.inverted();
+              for (gss_state_id, gss_disallowed_bv) in current_acc.disallowed_terminals() {
                   if let Some(actual_bv_for_state) = terminals_map.get(gss_state_id) {
-                      if !(&gss_disallowed_bv & actual_bv_for_state).is_empty() {
+                      // If any terminal disallowed by GSS is also matched by current segment, prune.
+                      // This means (gss_disallowed_bv AND actual_bv_for_state) must be empty.
+                      if !gss_disallowed_bv.is_disjoint(actual_bv_for_state) {
                           return None;
                       }
                   }
               }
-              let continue_recursion = !current_acc.allowed_terminals().is_empty();
+              let continue_recursion = !current_acc.disallowed_terminals().is_empty();
               Some((current_acc.clone(), continue_recursion))
           };
 
@@ -5063,29 +5073,29 @@ local_system:
           memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
       ) {
           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-              let mut new_allowed_terminals = BTreeMap::new();
+              let mut new_disallowed_terminals = BTreeMap::new();
               let mut changed = false;
 
-              for (old_id, bv) in current_acc.allowed_terminals() {
+              for (old_id, bv) in current_acc.disallowed_terminals() {
                   if let Some(new_id) = map.get(old_id) {
-                      *new_allowed_terminals.entry(*new_id)
+                      *new_disallowed_terminals.entry(*new_id)
                           .or_insert_with(TerminalBV::zeros) |= bv;
-                      if new_allowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
+                      if new_disallowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
                           changed = true;
                       }
                   } else {
-                      changed = true; // A state was removed
+                      changed = true; // A state was removed, which is a change.
                   }
               }
               // new_allowed_terminals.retain(|_, bv| bv != &TerminalBV::max_ones());
-              if !changed && current_acc.allowed_terminals().len() == new_allowed_terminals.len() { // No structural change
+              if !changed && current_acc.disallowed_terminals().len() == new_disallowed_terminals.len() { // No structural change
                    // No change in content or structure of allowed_terminals
               } else {
                   changed = true;
               }
 
-              let new_acc = Acc::new(current_acc.acc().clone(), new_allowed_terminals);
-              let continue_recursion = changed || !current_acc.allowed_terminals().is_empty(); // Recurse if there was something to map or a change occurred.
+              let new_acc = Acc::new(current_acc.acc().clone(), new_disallowed_terminals);
+              let continue_recursion = changed || !current_acc.disallowed_terminals().is_empty(); // Recurse if there was something to map or a change occurred.
               Some((new_acc, continue_recursion))
           };
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
@@ -5199,13 +5209,13 @@ local_system:
               *self = node_arc.as_ref().clone();
           }
 
-          pub fn intersect_allowed_terminals_and_prune_arc(
+          pub fn disallow_terminals_and_prune_arc(
               &mut self,
-              allowed_terminals: &TerminalInfo,
+              disallowed_terminals: &TerminalInfo,
           ) {
               let mut node_arc = Arc::new(self.clone());
               let mut memo = HashMap::new();
-              intersect_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals, &mut memo);
+              disallow_terminals_and_prune_arc(&mut node_arc, &disallowed_terminals, &mut memo);
               *self = node_arc.as_ref().clone();
           }
 
@@ -5666,8 +5676,7 @@ messages:
       use indicatif::{ProgressBar, ProgressStyle};
 
       use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-      use crate::datastructures::charmap::TrieMap;
-      use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, intersect_allowed_terminals_and_prune_arc, TerminalInfo, prune_disallowed_terminals};
+      use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, TerminalInfo, prune_disallowed_terminals};
       use crate::datastructures::hybrid_bitset::HybridBitset;
       use crate::datastructures::trie::{EdgeInserter, Trie};
       use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -6591,15 +6600,12 @@ messages:
                   if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
                       let mut forbidden_llm_tokens = LLMTokenBV::zeros();
                       forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.internal_max_llm_token + 1);
-                      let allowed_terminals_for_gss = glr_state.active_state.stack.acc2().allowed_terminals();
-                      for (tokenizer_state_id, allowed_terminals_for_state) in allowed_terminals_for_gss {
+                      let disallowed_terminals_for_gss = glr_state.active_state.stack.acc2().disallowed_terminals();
+                      for (tokenizer_state_id, disallowed_terminals_for_state) in disallowed_terminals_for_gss {
                           let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
                           for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
-                              if !allowed_terminals_for_state.contains(terminal_id.0) {
-                                  // This terminal is not allowed
-                                  // crate::debug!(4, "Allowed terminals for GSS: {:?}", allowed_terminals_for_gss);
-                                  // crate::debug!(4, "Possible matches for state {}: {:?}", tokenizer_state_id.0, possible_matches_for_state);
-                                  // crate::debug!(4, "Subtracting forbidden LLM tokens for terminal {:?} (ID {}) for state {}: {:?}", self.parent.parser.terminal_map.get_by_right(terminal_id).map(|t| t.0.clone()).unwrap_or("UNKNOWN_TERMINAL".to_string()), terminal_id.0, tokenizer_state_id.0, llm_tokens_that_match_this_terminal);
+                              if disallowed_terminals_for_state.contains(terminal_id.0) {
+                                  // This terminal is disallowed, so the LLM tokens that produce it are forbidden.
                                   forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
                               }
                           }
@@ -6791,14 +6797,14 @@ messages:
                               // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
                               let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
 
-                              let mut allowed_terminals: TerminalInfo = BTreeMap::new();
+                              let mut disallowed_terminals: TerminalInfo = BTreeMap::new();
                               if let Some(end_state_id) = exec_result.end_state {
-                                  let mut allowed_terminals_for_end_state = TerminalBV::max_ones();
-                                  // Prevent this token from being matched again.
-                                  allowed_terminals_for_end_state.remove(match_info.id);
-                                  allowed_terminals.insert(TokenizerStateID(end_state_id), allowed_terminals_for_end_state);
+                                  let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
+                                  // Disallow this token from being matched again immediately.
+                                  disallowed_terminals_for_end_state.insert(match_info.id);
+                                  disallowed_terminals.insert(TokenizerStateID(end_state_id), disallowed_terminals_for_end_state);
                               }
-                              intersect_allowed_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &allowed_terminals, &mut HashMap::new());
+                              disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
 
                               if new_offset == llm_token_bytes.len() {
                                   // reset_allowed_terminals(&mut cloned_glr_s.active_state.stack);
@@ -6881,6 +6887,10 @@ messages:
 
       pub type LLMTokenInfo = Option<LLMTokenBV>;
       pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalBV>;
+
+      struct X {
+          union: usize,
+      }
 
       pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
           fn union_assign(&mut self, other: Self);
@@ -7145,42 +7155,46 @@ messages:
       }
 
       #[time_it]
-      pub fn allowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-          let mut common_keys = BTreeSet::new();
-          common_keys.extend(left.keys());
-          common_keys.extend(right.keys());
-          for terminal_id in common_keys {
-              let left_value = left.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
-              let right_value = right.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
-              let union = &left_value | &right_value;
-              left.insert(terminal_id, union);
+      pub fn disallowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
+          let mut all_keys = BTreeSet::new();
+          all_keys.extend(left.keys());
+          all_keys.extend(right.keys());
+          for tokenizer_state_id in all_keys {
+              // An absent key means "no terminals disallowed" -> zeros()
+              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+              let intersection = &left_value & &right_value;
+              if !intersection.is_empty() {
+                  left.insert(tokenizer_state_id, intersection);
+              } else {
+                  left.remove(&tokenizer_state_id);
+              }
           }
       }
 
       #[time_it]
-      pub fn allowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-          let mut common_keys = BTreeSet::new();
-          common_keys.extend(left.keys());
-          common_keys.extend(right.keys());
-          for terminal_id in common_keys {
-              let left_value = left.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
-              let right_value = right.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
-              let intersection = &left_value & &right_value;
-              left.insert(terminal_id, intersection);
+      pub fn disallowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
+          let mut all_keys = BTreeSet::new();
+          all_keys.extend(left.keys());
+          all_keys.extend(right.keys());
+          for tokenizer_state_id in all_keys {
+              // An absent key means "no terminals disallowed" -> zeros()
+              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+              let union = &left_value | &right_value;
+              if !union.is_empty() {
+                  left.insert(tokenizer_state_id, union);
+              } else {
+                  left.remove(&tokenizer_state_id);
+              }
           }
       }
 
-      pub fn allowed_terminals_subtract_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
-          for (terminal_id, right_bv) in right {
-              // If a tokenizer state is not in 'left', it implies all terminals are allowed for that state.
-              // So, we start with max_ones() and then subtract.
-              let left_value = left.entry(*terminal_id).or_insert_with(TerminalBV::max_ones);
-              // Assuming TerminalBV implements SubAssign<&TerminalBV>
-              // e.g., for FixedBitSet, this would be left_value.difference_with(right_bv);
-              *left_value -= right_bv;
+      pub fn disallow_terminals_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
+          for (tokenizer_state_id, terminals_to_disallow) in right {
+              let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalBV::zeros);
+              *entry |= terminals_to_disallow;
           }
-          // Keys in 'left' but not in 'right' are unaffected.
-          // Optionally, remove entries from 'left' if their TerminalBV becomes empty after subtraction.
       }
 
       #[derive(Clone, Copy)]
@@ -7241,7 +7255,7 @@ messages:
           use std::collections::{BTreeMap, BTreeSet};
           use profiler_macro::time_it;
           use crate::constraint::{LLMTokenBV, TerminalBV};
-          use crate::datastructures::gss::{allowed_terminals_intersect_assign, allowed_terminals_union_assign, LLMTokenInfo, PathAccumulator, TerminalInfo};
+          use crate::datastructures::gss::{disallowed_terminals_union_assign, disallowed_terminals_intersect_assign, LLMTokenInfo, PathAccumulator, TerminalInfo};
           use crate::glr::grammar::Symbol::Terminal;
           use crate::tokenizer::TokenizerStateID;
           use crate::types::TerminalID;
@@ -7256,20 +7270,20 @@ messages:
               // TODO: What about when a tokenizer state *can't* match the disallowed terminal? Shouldn't be necessary to have an entry for it right?
               //  But then we need an all-ones entry here, otherwise there's no tokenizer states in the map and it's considered 'not valid'.
               //  Perhaps we should...
-              allowed_terminals: TerminalInfo,
+              disallowed_terminals: TerminalInfo,
           }
 
           impl Acc {
-              pub fn new(acc: LLMTokenInfo, allowed_terminals: TerminalInfo) -> Self {
-                  Self { acc, allowed_terminals }
+              pub fn new(acc: LLMTokenInfo, disallowed_terminals: TerminalInfo) -> Self {
+                  Self { acc, disallowed_terminals }
               }
 
               pub fn new_fresh() -> Self {
-                  Self { acc: None, allowed_terminals: BTreeMap::new() }
+                  Self { acc: None, disallowed_terminals: BTreeMap::new() }
               }
 
               pub fn new_for_merging() -> Self {
-                  Self { acc: Some(LLMTokenBV::zeros()), allowed_terminals: BTreeMap::new() }
+                  Self { acc: Some(LLMTokenBV::zeros()), disallowed_terminals: BTreeMap::new() }
               }
 
               pub fn acc(&self) -> &LLMTokenInfo {
@@ -7280,16 +7294,16 @@ messages:
                   &mut self.acc
               }
 
-              pub fn allowed_terminals(&self) -> &TerminalInfo {
-                  &self.allowed_terminals
+              pub fn disallowed_terminals(&self) -> &TerminalInfo {
+                  &self.disallowed_terminals
               }
 
-              pub fn allowed_terminals_mut(&mut self) -> &mut TerminalInfo {
-                  &mut self.allowed_terminals
+              pub fn disallowed_terminals_mut(&mut self) -> &mut TerminalInfo {
+                  &mut self.disallowed_terminals
               }
 
               pub fn is_default(&self) -> bool {
-                  self.acc.is_none() && self.allowed_terminals.is_empty()
+                  self.acc.is_none() && self.disallowed_terminals.is_empty()
               }
 
               pub fn is_dead(&self) -> bool {
@@ -7298,11 +7312,11 @@ messages:
                           return true;
                       }
                   }
-                  if self.allowed_terminals.is_empty() {
+                  if self.disallowed_terminals.is_empty() {
                       return false;
                   }
-                  for allowed_terminals in self.allowed_terminals.values() {
-                      if !allowed_terminals.is_empty() {
+                  for disallowed_terminals in self.disallowed_terminals.values() {
+                      if !disallowed_terminals.is_empty() {
                           return false;
                       }
                   }
@@ -7318,12 +7332,12 @@ messages:
               #[time_it]
               fn union_assign(&mut self, other: Self) {
                   self.acc.union_assign(other.acc);
-                  allowed_terminals_union_assign(&mut self.allowed_terminals, other.allowed_terminals);
+                  disallowed_terminals_intersect_assign(&mut self.disallowed_terminals, other.disallowed_terminals);
               }
               #[time_it]
               fn intersect_assign(&mut self, right: Self) {
                   self.acc.intersect_assign(right.acc);
-                  allowed_terminals_intersect_assign(&mut self.allowed_terminals, right.allowed_terminals);
+                  disallowed_terminals_union_assign(&mut self.disallowed_terminals, right.disallowed_terminals);
               }
               #[time_it]
               fn intersect_has_effect(&self, right: &Self) -> bool {
@@ -7783,7 +7797,7 @@ messages:
               if let Some(bv) = new_acc.acc_mut() {
                   *bv &= tokens_to_intersect;
               } else {
-                  new_acc = Acc::new(Some(tokens_to_intersect.clone()), current_acc.allowed_terminals().clone());
+                  new_acc = Acc::new(Some(tokens_to_intersect.clone()), current_acc.disallowed_terminals().clone());
               }
               if new_acc.is_alive() {
                   let continue_recursion = &new_acc != current_acc;
@@ -7813,7 +7827,7 @@ messages:
               if let Some(bv) = new_acc.acc_mut() {
                   *bv -= llm_tokens;
               } else {
-                  new_acc = Acc::new(Some(LLMTokenBV::max_ones() - llm_tokens.clone()), current_acc.allowed_terminals().clone());
+                  new_acc = Acc::new(Some(LLMTokenBV::max_ones() - llm_tokens.clone()), current_acc.disallowed_terminals().clone());
               }
               if new_acc.is_alive() {
                   // let continue_recursion = &new_acc != current_acc;
@@ -7837,7 +7851,7 @@ messages:
       ) {
           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
               let continue_recursion = !current_acc.is_default();
-              Some((Acc::new(None, current_acc.allowed_terminals().clone()), continue_recursion)) // Keep node, continue recursion
+              Some((Acc::new(None, current_acc.disallowed_terminals().clone()), continue_recursion)) // Keep node, continue recursion
           };
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
               *root_arc = new_root;
@@ -7847,14 +7861,14 @@ messages:
           }
       }
 
-      pub fn intersect_allowed_terminals_and_prune_arc(
+      pub fn disallow_terminals_and_prune_arc(
           root_arc: &mut Arc<GSSNode>,
-          allowed_terminals: &TerminalInfo,
+          disallowed_terminals: &TerminalInfo,
           memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
       ) {
           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
               let mut new_acc = current_acc.clone();
-              allowed_terminals_intersect_assign(new_acc.allowed_terminals_mut(), allowed_terminals.clone());
+              disallowed_terminals_union_assign(new_acc.disallowed_terminals_mut(), disallowed_terminals.clone());
               if new_acc.is_alive() {
                   Some((new_acc, false))
               } else {
@@ -7876,15 +7890,16 @@ messages:
       ) {
           // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-              for (gss_state_id, gss_allowed_bv) in current_acc.allowed_terminals() {
-                  let gss_disallowed_bv = gss_allowed_bv.inverted();
+              for (gss_state_id, gss_disallowed_bv) in current_acc.disallowed_terminals() {
                   if let Some(actual_bv_for_state) = terminals_map.get(gss_state_id) {
-                      if !(&gss_disallowed_bv & actual_bv_for_state).is_empty() {
+                      // If any terminal disallowed by GSS is also matched by current segment, prune.
+                      // This means (gss_disallowed_bv AND actual_bv_for_state) must be empty.
+                      if !gss_disallowed_bv.is_disjoint(actual_bv_for_state) {
                           return None;
                       }
                   }
               }
-              let continue_recursion = !current_acc.allowed_terminals().is_empty();
+              let continue_recursion = !current_acc.disallowed_terminals().is_empty();
               Some((current_acc.clone(), continue_recursion))
           };
 
@@ -7901,29 +7916,29 @@ messages:
           memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
       ) {
           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-              let mut new_allowed_terminals = BTreeMap::new();
+              let mut new_disallowed_terminals = BTreeMap::new();
               let mut changed = false;
 
-              for (old_id, bv) in current_acc.allowed_terminals() {
+              for (old_id, bv) in current_acc.disallowed_terminals() {
                   if let Some(new_id) = map.get(old_id) {
-                      *new_allowed_terminals.entry(*new_id)
+                      *new_disallowed_terminals.entry(*new_id)
                           .or_insert_with(TerminalBV::zeros) |= bv;
-                      if new_allowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
+                      if new_disallowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
                           changed = true;
                       }
                   } else {
-                      changed = true; // A state was removed
+                      changed = true; // A state was removed, which is a change.
                   }
               }
               // new_allowed_terminals.retain(|_, bv| bv != &TerminalBV::max_ones());
-              if !changed && current_acc.allowed_terminals().len() == new_allowed_terminals.len() { // No structural change
+              if !changed && current_acc.disallowed_terminals().len() == new_disallowed_terminals.len() { // No structural change
                    // No change in content or structure of allowed_terminals
               } else {
                   changed = true;
               }
 
-              let new_acc = Acc::new(current_acc.acc().clone(), new_allowed_terminals);
-              let continue_recursion = changed || !current_acc.allowed_terminals().is_empty(); // Recurse if there was something to map or a change occurred.
+              let new_acc = Acc::new(current_acc.acc().clone(), new_disallowed_terminals);
+              let continue_recursion = changed || !current_acc.disallowed_terminals().is_empty(); // Recurse if there was something to map or a change occurred.
               Some((new_acc, continue_recursion))
           };
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
@@ -8037,13 +8052,13 @@ messages:
               *self = node_arc.as_ref().clone();
           }
 
-          pub fn intersect_allowed_terminals_and_prune_arc(
+          pub fn disallow_terminals_and_prune_arc(
               &mut self,
-              allowed_terminals: &TerminalInfo,
+              disallowed_terminals: &TerminalInfo,
           ) {
               let mut node_arc = Arc::new(self.clone());
               let mut memo = HashMap::new();
-              intersect_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals, &mut memo);
+              disallow_terminals_and_prune_arc(&mut node_arc, &disallowed_terminals, &mut memo);
               *self = node_arc.as_ref().clone();
           }
 
@@ -8458,383 +8473,249 @@ messages:
               assert_eq!(all_nodes.len(), 7, "Incorrect number of unique nodes in simplified graph. Actual: {:?}", all_nodes.len());
           }
       }
+
       ```
     metadata:
       filename: src/datastructures/gss.rs
   - user: |-
-      Modify this code so instead of 'allowed terminals' we have 'disallowed terminals'.
-      Now, when we used to use `HybridBitset::zeros()`, we'll use `HybridBitset::max_ones()`, and vice-versa.
-      And when we used to do bitwise-and, we'll do bitwise-or, and vice-versa.
-      Make all necessary modifications to ensure the code is logically consistent.
+      Modify this so `TerminalInfo` instead being this
+      ```rust
+      pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalBV>;
+      ```
+      is this
+      ```rust
+      pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalInfoValue>;
+      pub struct TerminalInfoValue {
+          union: TerminalBV,
+          intersection: TerminalBV,
+      }
+      ```
+      Minimize the amount of changes needed to the throughout the code by implementing equivalent equivalents to `HybridBitset` methods and related functions. e.g. implement BitOr, BitOrAssign, BitAnd, Sub, etc. on `TerminalInfoValue`.
     metadata:
   - assistant: |-
-      Of course! Dealing with sets of allowed versus disallowed items can be tricky. Inverting the logic from "allowed" to "disallowed" requires careful changes to set operations and default values. Here are the patches to refactor your code as requested.
+      Hello! As a helpful assistant, I'm here to guide you through modifying your code. Here are the detailed, step-by-step instructions to implement the requested changes.
 
-      ### `src/constraint.rs`
+      ### File: `src/datastructures/gss.rs`
 
-      I'll start with `constraint.rs` to update how the GSS transformations are called. The logic in `get_mask` is inverted to handle disallowed terminals. In `commit_bytes`, the call to `intersect_allowed_terminals_and_prune_arc` is replaced with a call to the new `disallow_terminals_and_prune_arc`, and the corresponding `disallowed_terminals` map is constructed.
+      I'll start by adding the new `TerminalInfoValue` struct and its associated implementations, then update the `TerminalInfo` type alias and the functions that use it.
 
-      ```diff
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -1,6 +1,6 @@
-       // src/constraint.rs
-       #![allow(clippy::too_many_arguments)]
-       
-      -use crate::datastructures::ordered_hash_map::Retain;
-       use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, subtract_llm_tokens_and_prune_arc};
-       use ordered_hash_map::OrderedHashMap;
-       use ordered_hash_map::OrderedHashSet;
-      @@ -12,7 +12,7 @@
-       use bitvec::prelude::*;
-       use indicatif::{ProgressBar, ProgressStyle};
-       
-       use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-      -use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, intersect_allowed_terminals_and_prune_arc, TerminalInfo, prune_disallowed_terminals};
-      +use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, TerminalInfo, prune_disallowed_terminals};
-       use crate::datastructures::hybrid_bitset::HybridBitset;
-       use crate::datastructures::trie::{EdgeInserter, Trie};
-       use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
-      @@ -1122,17 +1122,13 @@
-                   if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
-                       let mut forbidden_llm_tokens = LLMTokenBV::zeros();
-                       forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.internal_max_llm_token + 1);
-      -                let allowed_terminals_for_gss = glr_state.active_state.stack.acc2().allowed_terminals();
-      -                for (tokenizer_state_id, allowed_terminals_for_state) in allowed_terminals_for_gss {
-      +                let disallowed_terminals_for_gss = glr_state.active_state.stack.acc2().disallowed_terminals();
-      +                for (tokenizer_state_id, disallowed_terminals_for_state) in disallowed_terminals_for_gss {
-                           let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
-                           for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
-      -                        if !allowed_terminals_for_state.contains(terminal_id.0) {
-      -                            // This terminal is not allowed
-      -                            // crate::debug!(4, "Allowed terminals for GSS: {:?}", allowed_terminals_for_gss);
-      -                            // crate::debug!(4, "Possible matches for state {}: {:?}", tokenizer_state_id.0, possible_matches_for_state);
-      -                            // crate::debug!(4, "Subtracting forbidden LLM tokens for terminal {:?} (ID {}) for state {}: {:?}", self.parent.parser.terminal_map.get_by_right(terminal_id).map(|t| t.0.clone()).unwrap_or("UNKNOWN_TERMINAL".to_string()), terminal_id.0, tokenizer_state_id.0, llm_tokens_that_match_this_terminal);
-      +                        if disallowed_terminals_for_state.contains(terminal_id.0) {
-      +                            // This terminal is disallowed, so the LLM tokens that produce it are forbidden.
-                                   forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
-                               }
-                           }
-                       }
-      @@ -1310,16 +1306,14 @@
-                               // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
-                               let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
-       
-      -                        let mut allowed_terminals: TerminalInfo = BTreeMap::new();
-      +                        let mut disallowed_terminals: TerminalInfo = BTreeMap::new();
-                               if let Some(end_state_id) = exec_result.end_state {
-      -                            let mut allowed_terminals_for_end_state = TerminalBV::max_ones();
-      -                            // Prevent this token from being matched again.
-      -                            allowed_terminals_for_end_state.remove(match_info.id);
-      -                            allowed_terminals.insert(TokenizerStateID(end_state_id), allowed_terminals_for_end_state);
-      +                            let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
-      +                            // Disallow this token from being matched again immediately.
-      +                            disallowed_terminals_for_end_state.insert(match_info.id);
-      +                            disallowed_terminals.insert(TokenizerStateID(end_state_id), disallowed_terminals_for_end_state);
-                               }
-      -                        intersect_allowed_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &allowed_terminals, &mut HashMap::new());
-      +                        disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
-       
-                               if new_offset == llm_token_bytes.len() {
-                                   // reset_allowed_terminals(&mut cloned_glr_s.active_state.stack);
+      1.  Add a `use` statement for `std::ops` traits at the top of the file, near the other `use` statements.
 
-      ```
-      ### `src/datastructures/gss.rs`
+          ```rust
+          use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
+          ```
 
-      This is the core of the change. I've renamed `allowed_terminals` to `disallowed_terminals` throughout the file. The functions for manipulating `TerminalInfo` have been updated to reflect the inverted logic (union becomes intersection, intersection becomes union, and defaults change from `max_ones` to `zeros`).
+      2.  Locate the `TerminalInfo` type alias. It's currently defined as:
+          ```rust
+          pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalBV>;
+          ```
+          Just before this line, insert the new `TerminalInfoValue` struct definition and its implementations:
 
-      - `allowed_terminals_union_assign` is now `disallowed_terminals_intersect_assign` and performs a bitwise AND.
-      - `allowed_terminals_intersect_assign` is now `disallowed_terminals_union_assign` and performs a bitwise OR.
-      - `prune_disallowed_terminals` is simplified, as it no longer needs to conceptually invert the terminal set from the GSS.
-      - `intersect_allowed_terminals_and_prune_arc` is now `disallow_terminals_and_prune_arc`.
+          ```rust
+          #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+          pub struct TerminalInfoValue {
+              pub union: TerminalBV,
+              pub intersection: TerminalBV,
+          }
+          
+          impl TerminalInfoValue {
+              pub fn zeros() -> Self {
+                  Self::default()
+              }
+          
+              pub fn is_empty(&self) -> bool {
+                  self.union.is_empty() && self.intersection.is_empty()
+              }
+          }
+          
+          impl BitOrAssign for TerminalInfoValue {
+              fn bitor_assign(&mut self, rhs: Self) {
+                  self.union |= rhs.union;
+                  self.intersection |= rhs.intersection;
+              }
+          }
+          
+          impl<'a> BitOrAssign<&'a Self> for TerminalInfoValue {
+              fn bitor_assign(&mut self, rhs: &'a Self) {
+                  self.union |= &rhs.union;
+                  self.intersection |= &rhs.intersection;
+              }
+          }
+          
+          impl<'a, 'b> BitOr<&'b TerminalInfoValue> for &'a TerminalInfoValue {
+              type Output = TerminalInfoValue;
+              fn bitor(self, rhs: &'b TerminalInfoValue) -> Self::Output {
+                  TerminalInfoValue {
+                      union: &self.union | &rhs.union,
+                      intersection: &self.intersection | &rhs.intersection,
+                  }
+              }
+          }
+          
+          impl BitAndAssign for TerminalInfoValue {
+              fn bitand_assign(&mut self, rhs: Self) {
+                  self.union &= rhs.union;
+                  self.intersection &= rhs.intersection;
+              }
+          }
+          
+          impl<'a> BitAndAssign<&'a Self> for TerminalInfoValue {
+              fn bitand_assign(&mut self, rhs: &'a Self) {
+                  self.union &= &rhs.union;
+                  self.intersection &= &rhs.intersection;
+              }
+          }
+          
+          impl<'a, 'b> BitAnd<&'b TerminalInfoValue> for &'a TerminalInfoValue {
+              type Output = TerminalInfoValue;
+              fn bitand(self, rhs: &'b TerminalInfoValue) -> Self::Output {
+                  TerminalInfoValue {
+                      union: &self.union & &rhs.union,
+                      intersection: &self.intersection & &rhs.intersection,
+                  }
+              }
+          }
+          ```
 
-      ```diff
-      --- a/src/datastructures/gss.rs
-      +++ b/src/datastructures/gss.rs
-      @@ -348,50 +348,48 @@
-       }
-       
-       #[time_it]
-      -pub fn allowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-      -    let mut common_keys = BTreeSet::new();
-      -    common_keys.extend(left.keys());
-      -    common_keys.extend(right.keys());
-      -    for terminal_id in common_keys {
-      -        let left_value = left.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
-      -        let right_value = right.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
-      -        let union = &left_value | &right_value;
-      -        left.insert(terminal_id, union);
-      +pub fn disallowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-      +    let mut all_keys = BTreeSet::new();
-      +    all_keys.extend(left.keys());
-      +    all_keys.extend(right.keys());
-      +    for tokenizer_state_id in all_keys {
-      +        // An absent key means "no terminals disallowed" -> zeros()
-      +        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
-      +        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
-      +        let intersection = &left_value & &right_value;
-      +        if !intersection.is_empty() {
-      +            left.insert(tokenizer_state_id, intersection);
-      +        } else {
-      +            left.remove(&tokenizer_state_id);
-      +        }
-           }
-       }
-       
-       #[time_it]
-      -pub fn allowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-      -    let mut common_keys = BTreeSet::new();
-      -    common_keys.extend(left.keys());
-      -    common_keys.extend(right.keys());
-      -    for terminal_id in common_keys {
-      -        let left_value = left.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
-      -        let right_value = right.get(&terminal_id).cloned().unwrap_or_else(TerminalBV::max_ones);
-      -        let intersection = &left_value & &right_value;
-      -        left.insert(terminal_id, intersection);
-      +pub fn disallowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
-      +    let mut all_keys = BTreeSet::new();
-      +    all_keys.extend(left.keys());
-      +    all_keys.extend(right.keys());
-      +    for tokenizer_state_id in all_keys {
-      +        // An absent key means "no terminals disallowed" -> zeros()
-      +        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
-      +        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
-      +        let union = &left_value | &right_value;
-      +        if !union.is_empty() {
-      +            left.insert(tokenizer_state_id, union);
-      +        } else {
-      +            left.remove(&tokenizer_state_id);
-      +        }
-           }
-       }
-       
-      -pub fn allowed_terminals_subtract_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
-      -    for (terminal_id, right_bv) in right {
-      -        // If a tokenizer state is not in 'left', it implies all terminals are allowed for that state.
-      -        // So, we start with max_ones() and then subtract.
-      -        let left_value = left.entry(*terminal_id).or_insert_with(TerminalBV::max_ones);
-      -        // Assuming TerminalBV implements SubAssign<&TerminalBV>
-      -        // e.g., for FixedBitSet, this would be left_value.difference_with(right_bv);
-      -        *left_value -= right_bv;
-      +pub fn disallow_terminals_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
-      +    for (tokenizer_state_id, terminals_to_disallow) in right {
-      +        let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalBV::zeros);
-      +        *entry |= terminals_to_disallow;
-           }
-      -    // Keys in 'left' but not in 'right' are unaffected.
-      -    // Optionally, remove entries from 'left' if their TerminalBV becomes empty after subtraction.
-       }
-       
-       #[derive(Clone, Copy)]
-      @@ -441,7 +439,7 @@
-       pub mod acc_mod {
-           use std::collections::{BTreeMap, BTreeSet};
-           use profiler_macro::time_it;
-      -    use crate::constraint::{LLMTokenBV, TerminalBV};
-      -    use crate::datastructures::gss::{allowed_terminals_intersect_assign, allowed_terminals_union_assign, LLMTokenInfo, PathAccumulator, TerminalInfo};
-      +    use crate::constraint::{LLMTokenBV, TerminalBV};
-      +    use crate::datastructures::gss::{disallowed_terminals_union_assign, disallowed_terminals_intersect_assign, LLMTokenInfo, PathAccumulator, TerminalInfo};
-           use crate::glr::grammar::Symbol::Terminal;
-           use crate::tokenizer::TokenizerStateID;
-           use crate::types::TerminalID;
-      @@ -453,15 +451,15 @@
-               // This LLM token info is valid for a given tokenizer state in the map if any terminals it *does* match against the **next** input string
-               // are in the set of terminals under that tokenizer state in the map.
-               // If this LLM token info is not valid for any tokenizer state, it is not valid at all (dead).
-      -        // TODO: What about when a tokenizer state *can't* match the disallowed terminal? Shouldn't be necessary to have an entry for it right?
-      +        // TODO: What about when a tokenizer state *can't* match the disallowed terminal? Shouldn't be necessary to have an entry for it right?
-               //  But then we need an all-ones entry here, otherwise there's no tokenizer states in the map and it's considered 'not valid'.
-               //  Perhaps we should...
-      -        allowed_terminals: TerminalInfo,
-      +        disallowed_terminals: TerminalInfo,
-           }
-       
-           impl Acc {
-      -        pub fn new(acc: LLMTokenInfo, allowed_terminals: TerminalInfo) -> Self {
-      -            Self { acc, allowed_terminals }
-      +        pub fn new(acc: LLMTokenInfo, disallowed_terminals: TerminalInfo) -> Self {
-      +            Self { acc, disallowed_terminals }
-               }
-       
-               pub fn new_fresh() -> Self {
-      @@ -469,7 +467,7 @@
-               }
-       
-               pub fn new_for_merging() -> Self {
-      -            Self { acc: Some(LLMTokenBV::zeros()), allowed_terminals: BTreeMap::new() }
-      +            Self { acc: Some(LLMTokenBV::zeros()), disallowed_terminals: BTreeMap::new() }
-               }
-       
-               pub fn acc(&self) -> &LLMTokenInfo {
-      @@ -480,25 +478,25 @@
-                   &mut self.acc
-               }
-       
-      -        pub fn allowed_terminals(&self) -> &TerminalInfo {
-      -            &self.allowed_terminals
-      -        }
-      -
-      -        pub fn allowed_terminals_mut(&mut self) -> &mut TerminalInfo {
-      -            &mut self.allowed_terminals
-      +        pub fn disallowed_terminals(&self) -> &TerminalInfo {
-      +            &self.disallowed_terminals
-      +        }
-      +
-      +        pub fn disallowed_terminals_mut(&mut self) -> &mut TerminalInfo {
-      +            &mut self.disallowed_terminals
-               }
-       
-               pub fn is_default(&self) -> bool {
-      -            self.acc.is_none() && self.allowed_terminals.is_empty()
-      +            self.acc.is_none() && self.disallowed_terminals.is_empty()
-               }
-       
-               pub fn is_dead(&self) -> bool {
-                   if let Some(acc) = &self.acc {
-                       if acc.is_empty() {
-                           return true;
-                       }
-                   }
-      -            if self.allowed_terminals.is_empty() {
-      +            if self.disallowed_terminals.is_empty() {
-                       return false;
-                   }
-      -            for allowed_terminals in self.allowed_terminals.values() {
-      -                if !allowed_terminals.is_empty() {
-      +            for disallowed_terminals in self.disallowed_terminals.values() {
-      +                if !disallowed_terminals.is_empty() {
-                           return false;
-                       }
-                   }
-      @@ -513,12 +511,12 @@
-               #[time_it]
-               fn union_assign(&mut self, other: Self) {
-                   self.acc.union_assign(other.acc);
-      -            allowed_terminals_union_assign(&mut self.allowed_terminals, other.allowed_terminals);
-      +            disallowed_terminals_intersect_assign(&mut self.disallowed_terminals, other.disallowed_terminals);
-               }
-               #[time_it]
-               fn intersect_assign(&mut self, right: Self) {
-                   self.acc.intersect_assign(right.acc);
-      -            allowed_terminals_intersect_assign(&mut self.allowed_terminals, right.allowed_terminals);
-      +            disallowed_terminals_union_assign(&mut self.disallowed_terminals, right.disallowed_terminals);
-               }
-               #[time_it]
-               fn intersect_has_effect(&self, right: &Self) -> bool {
-      @@ -1002,7 +1000,7 @@
-               if let Some(bv) = new_acc.acc_mut() {
-                   *bv &= tokens_to_intersect;
-               } else {
-      -            new_acc = Acc::new(Some(tokens_to_intersect.clone()), current_acc.allowed_terminals().clone());
-      +            new_acc = Acc::new(Some(tokens_to_intersect.clone()), current_acc.disallowed_terminals().clone());
-               }
-               if new_acc.is_alive() {
-                   let continue_recursion = &new_acc != current_acc;
-      @@ -1031,7 +1029,7 @@
-               if let Some(bv) = new_acc.acc_mut() {
-                   *bv -= llm_tokens;
-               } else {
-      -            new_acc = Acc::new(Some(LLMTokenBV::max_ones() - llm_tokens.clone()), current_acc.allowed_terminals().clone());
-      +            new_acc = Acc::new(Some(LLMTokenBV::max_ones() - llm_tokens.clone()), current_acc.disallowed_terminals().clone());
-               }
-               if new_acc.is_alive() {
-                   // let continue_recursion = &new_acc != current_acc;
-      @@ -1053,7 +1051,7 @@
-       ) {
-           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-               let continue_recursion = !current_acc.is_default();
-      -        Some((Acc::new(None, current_acc.allowed_terminals().clone()), continue_recursion)) // Keep node, continue recursion
-      +        Some((Acc::new(None, current_acc.disallowed_terminals().clone()), continue_recursion)) // Keep node, continue recursion
-           };
-           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
-               *root_arc = new_root;
-      @@ -1063,15 +1061,15 @@
-           }
-       }
-       
-      -pub fn intersect_allowed_terminals_and_prune_arc(
-      +pub fn disallow_terminals_and_prune_arc(
-           root_arc: &mut Arc<GSSNode>,
-      -    allowed_terminals: &TerminalInfo,
-      +    disallowed_terminals: &TerminalInfo,
-           memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
-       ) {
-           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-               let mut new_acc = current_acc.clone();
-      -        allowed_terminals_intersect_assign(new_acc.allowed_terminals_mut(), allowed_terminals.clone());
-      +        disallowed_terminals_union_assign(new_acc.disallowed_terminals_mut(), disallowed_terminals.clone());
-               if new_acc.is_alive() {
-                   Some((new_acc, false))
-               } else {
-      @@ -1092,16 +1090,15 @@
-       ) {
-           // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
-           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-      -        for (gss_state_id, gss_allowed_bv) in current_acc.allowed_terminals() {
-      -            let gss_disallowed_bv = gss_allowed_bv.inverted();
-      +        for (gss_state_id, gss_disallowed_bv) in current_acc.disallowed_terminals() {
-                   if let Some(actual_bv_for_state) = terminals_map.get(gss_state_id) {
-      -                if !(&gss_disallowed_bv & actual_bv_for_state).is_empty() {
-      +                if !gss_disallowed_bv.is_disjoint(actual_bv_for_state) {
-                           return None;
-                       }
-                   }
-               }
-      -        let continue_recursion = !current_acc.allowed_terminals().is_empty();
-      +        let continue_recursion = !current_acc.disallowed_terminals().is_empty();
-               Some((current_acc.clone(), continue_recursion))
-           };
-       
-      @@ -1120,19 +1117,19 @@
-               let mut new_allowed_terminals = BTreeMap::new();
-               let mut changed = false;
-       
-      -        for (old_id, bv) in current_acc.allowed_terminals() {
-      +        for (old_id, bv) in current_acc.disallowed_terminals() {
-                   if let Some(new_id) = map.get(old_id) {
-                       *new_allowed_terminals.entry(*new_id)
-                           .or_insert_with(TerminalBV::zeros) |= bv;
-                       if new_allowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
-                           changed = true;
-                       }
-                   } else {
-      -                changed = true; // A state was removed
-      +                changed = true; // A state was removed, which is a change.
-                   }
-               }
-               // new_allowed_terminals.retain(|_, bv| bv != &TerminalBV::max_ones());
-      -        if !changed && current_acc.allowed_terminals().len() == new_allowed_terminals.len() { // No structural change
-      +        if !changed && current_acc.disallowed_terminals().len() == new_allowed_terminals.len() { // No structural change
-                    // No change in content or structure of allowed_terminals
-               } else {
-                   changed = true;
-      @@ -1140,7 +1137,7 @@
-       
-               let new_acc = Acc::new(current_acc.acc().clone(), new_allowed_terminals);
-      -        let continue_recursion = changed || !current_acc.allowed_terminals().is_empty(); // Recurse if there was something to map or a change occurred.
-      +        let continue_recursion = changed || !current_acc.disallowed_terminals().is_empty(); // Recurse if there was something to map or a change occurred.
-               Some((new_acc, continue_recursion))
-           };
-           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
-      @@ -1234,13 +1231,13 @@
-               *self = node_arc.as_ref().clone();
-           }
-       
-      -    pub fn intersect_allowed_terminals_and_prune_arc(
-      +    pub fn disallow_terminals_and_prune_arc(
-               &mut self,
-      -        allowed_terminals: &TerminalInfo,
-      +        disallowed_terminals: &TerminalInfo,
-           ) {
-               let mut node_arc = Arc::new(self.clone());
-               let mut memo = HashMap::new();
-      -        intersect_allowed_terminals_and_prune_arc(&mut node_arc, &allowed_terminals, &mut memo);
-      +        disallow_terminals_and_prune_arc(&mut node_arc, &disallowed_terminals, &mut memo);
-               *self = node_arc.as_ref().clone();
-           }
-       
+      3.  Now, modify the `TerminalInfo` type alias to use `TerminalInfoValue`:
 
-      ```
+          ```rust
+          // Change this line:
+          pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalBV>;
+          
+          // To this:
+          pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalInfoValue>;
+          ```
+
+      4.  In the `disallowed_terminals_intersect_assign` function, update the default value creation:
+
+          ```rust
+          // Change this line:
+          let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+          // To this:
+          let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+          
+          // And this line:
+          let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+          // To this:
+          let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+          ```
+
+      5.  Similarly, in the `disallowed_terminals_union_assign` function, update the default value creation:
+
+          ```rust
+          // Change this line:
+          let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+          // To this:
+          let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+
+          // And this line:
+          let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+          // To this:
+          let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+          ```
+
+      6.  In the `disallow_terminals_assign` function, update the entry insertion:
+
+          ```rust
+          // Change this line:
+          let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalBV::zeros);
+          // To this:
+          let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalInfoValue::zeros);
+          ```
+
+      7.  In the `prune_disallowed_terminals` function, modify the closure to handle `TerminalInfoValue`:
+
+          ```rust
+          // Change this block:
+          for (gss_state_id, gss_disallowed_bv) in current_acc.disallowed_terminals() {
+              if let Some(actual_bv_for_state) = terminals_map.get(gss_state_id) {
+                  // If any terminal disallowed by GSS is also matched by current segment, prune.
+                  // This means (gss_disallowed_bv AND actual_bv_for_state) must be empty.
+                  if !gss_disallowed_bv.is_disjoint(actual_bv_for_state) {
+                      return None;
+                  }
+              }
+          }
+
+          // To this:
+          for (gss_state_id, gss_disallowed_val) in current_acc.disallowed_terminals() {
+              if let Some(actual_val_for_state) = terminals_map.get(gss_state_id) {
+                  // If any terminal disallowed by GSS is also matched by current segment, prune.
+                  // This means (gss_disallowed_bv AND actual_bv_for_state) must be empty.
+                  if !gss_disallowed_val.union.is_disjoint(&actual_val_for_state.union) {
+                      return None;
+                  }
+              }
+          }
+          ```
+
+      8.  In the `map_allowed_terminals_tokenizer_states` function, update the entry insertion within the closure:
+
+          ```rust
+          // Change this line:
+          .or_insert_with(TerminalBV::zeros) |= bv;
+          // To this:
+          .or_insert_with(TerminalInfoValue::zeros) |= bv;
+          ```
+
+      ### File: `src/constraint.rs`
+
+      Now, let's apply the necessary changes to this file.
+
+      1.  First, add `TerminalInfoValue` to the `gss` import list.
+
+          ```rust
+          // Find this line:
+          use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, TerminalInfo, prune_disallowed_terminals};
+          
+          // And change it to:
+          use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, TerminalInfo, TerminalInfoValue, prune_disallowed_terminals};
+          ```
+
+      2.  In the `get_mask` method, update the check for disallowed terminals:
+
+          ```rust
+          // Change this line:
+          if disallowed_terminals_for_state.contains(terminal_id.0) {
+          
+          // To this:
+          if disallowed_terminals_for_state.union.contains(terminal_id.0) {
+          ```
+
+      3.  In the `commit_bytes` method, you'll need to make a few adjustments.
+
+          a. Change the type of `terminals_map`:
+
+          ```rust
+          // Change this line:
+          let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
+          
+          // To this (using the type alias is cleaner):
+          let mut terminals_map: TerminalInfo = BTreeMap::new();
+          ```
+
+          b. Update how `terminals_map` is populated:
+
+          ```rust
+          // Change this line:
+          terminals_map.insert(*tokenizer_state_id, terminals);
+          
+          // To this:
+          terminals_map.insert(*tokenizer_state_id, TerminalInfoValue { union: terminals, intersection: TerminalBV::zeros() });
+          ```
+
+          c. Finally, update how `disallowed_terminals` is populated inside the `for match_info in &exec_result.matches` loop:
+
+          ```rust
+          // Change this line:
+          disallowed_terminals.insert(TokenizerStateID(end_state_id), disallowed_terminals_for_end_state);
+          
+          // To this:
+          disallowed_terminals.insert(TokenizerStateID(end_state_id), TerminalInfoValue { union: disallowed_terminals_for_end_state, intersection: TerminalBV::zeros() });
+          ```
+
+      These changes should correctly implement the new `TerminalInfoValue` structure throughout your code. Let me know if you have any other questions
     metadata:
   - user: |
       Using model 'gemini/gemini-2.5-flash-preview-05-20' for code completion.
@@ -8856,7 +8737,7 @@ messages:
       All required file contents received or no content needed.
 
       --- Applying Changes ---
-      Successfully replaced file: src/datastructures/gss.rs
       Successfully replaced file: src/constraint.rs
+      Successfully replaced file: src/datastructures/gss.rs
     metadata:
 ...
