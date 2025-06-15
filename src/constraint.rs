@@ -286,16 +286,14 @@ impl GrammarConstraint {
 
         let mut terminal_follow_map_ids: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> = BTreeMap::new();
         for (terminal1, following_terminals) in terminal_follow_sets_named {
-            if let Some(t1_id) = grammar_term_map.get_by_left(&terminal1) {
-                let mut following_ids = BTreeSet::new();
-                for t2 in following_terminals {
-                    if let Some(t2_id) = grammar_term_map.get_by_left(&t2) {
-                        following_ids.insert(*t2_id);
-                    }
-                }
-                if !following_ids.is_empty() {
-                    terminal_follow_map_ids.insert(*t1_id, following_ids);
-                }
+            let t1_id = *grammar_term_map.get_by_left(&terminal1).unwrap();
+            let mut following_ids = BTreeSet::new();
+            for t2 in following_terminals {
+                let t2_id = *grammar_term_map.get_by_left(&t2).unwrap();
+                following_ids.insert(t2_id);
+            }
+            if !following_ids.is_empty() {
+                terminal_follow_map_ids.insert(t1_id, following_ids);
             }
         }
         crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map_ids.len());
