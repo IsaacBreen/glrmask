@@ -214,10 +214,27 @@ def main():
             document.getElementById('details-content').innerHTML = '<p>Hover over or click a token on the left to see its details.</p>';
         }}
 
-        const entityMap = {{'&': '&', '<': '<', '>': '>', '"': '"', "'": ''', '/': '/', '`': '`', '=': '='}};
+        /* -------------------------------------------------------------------
+           Simple HTML-escaper for the small snippets we put into the details
+           pane. We can’t rely on the browser’s implicit escaping because we’re
+           building the markup with template-literals.
+        ------------------------------------------------------------------- */
+        const entityMap = {{
+            '&':  '&amp;',
+            '<':  '&lt;',
+            '>':  '&gt;',
+            '"':  '&quot;',
+            "'":  '&#39;',
+            '/':  '&#x2F;',
+            '`':  '&#x60;',
+            '=':  '&#x3D;'
+        }};
+
         function escapeHtml(string) {{
-            return String(string).replace(/[&<>"'`=\/]/g, (s) => entityMap[s]);
+            return String(string).replace(/[&<>"'`=\/]/g, s => entityMap[s]);
         }}
+
+        /* expose as window.html.escape so that updateDetails() can use it */
         window.html = {{ escape: escapeHtml }};
     </script>
 </body>
