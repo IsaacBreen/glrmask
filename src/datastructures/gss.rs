@@ -1057,6 +1057,7 @@ pub fn map_allowed_terminals_tokenizer_states(
                 changed = true; // A state was removed
             }
         }
+        // new_allowed_terminals.retain(|_, bv| bv != &TerminalBV::max_ones());
         if !changed && current_acc.allowed_terminals().len() == new_allowed_terminals.len() { // No structural change
              // No change in content or structure of allowed_terminals
         } else {
