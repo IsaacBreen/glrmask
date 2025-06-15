@@ -17,7 +17,7 @@ use bitvec::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, TerminalInfo, TerminalInfoValue, prune_disallowed_terminals};
+use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, TerminalInfo, prune_disallowed_terminals};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -945,7 +945,7 @@ impl<'a> GrammarConstraintState<'a> {
                 for (tokenizer_state_id, disallowed_terminals_for_state) in disallowed_terminals_for_gss {
                     let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
                     for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
-                        if disallowed_terminals_for_state.union.contains(terminal_id.0) {
+                        if disallowed_terminals_for_state.contains(terminal_id.0) {
                             // This terminal is disallowed, so the LLM tokens that produce it are forbidden.
                             forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
                         }
@@ -1087,7 +1087,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         // Handle allowed terminals
         let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
-        let mut terminals_map: TerminalInfo = BTreeMap::new();
+        let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
         for (tokenizer_state_id, _state) in self.state.iter() {
             let exec_result = self.parent.tokenizer.execute_from_state(
                 &llm_token_bytes,
@@ -1100,7 +1100,7 @@ impl<'a> GrammarConstraintState<'a> {
             for token in exec_result.matches {
                 terminals.insert(token.id);
             }
-            terminals_map.insert(*tokenizer_state_id, TerminalInfoValue { union: terminals, intersection: TerminalBV::zeros() });
+            terminals_map.insert(*tokenizer_state_id, terminals);
         }
 
         for state in self.state.values_mut() {
@@ -1143,7 +1143,7 @@ impl<'a> GrammarConstraintState<'a> {
                             let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
                             // Disallow this token from being matched again immediately.
                             disallowed_terminals_for_end_state.insert(match_info.id);
-                            disallowed_terminals.insert(TokenizerStateID(end_state_id), TerminalInfoValue { union: disallowed_terminals_for_end_state, intersection: TerminalBV::zeros() });
+                            disallowed_terminals.insert(TokenizerStateID(end_state_id), disallowed_terminals_for_end_state);
                         }
                         disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
 
@@ -1197,4 +1197,3 @@ impl<'a> GrammarConstraintState<'a> {
         &self.state
     }
 }
-
