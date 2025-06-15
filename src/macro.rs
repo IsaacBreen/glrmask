@@ -41,7 +41,7 @@ macro_rules! debug {
                 .map_or("", |os_str| os_str.to_str().unwrap_or(""));
 
             // Allow if ALLOWED_FILES is empty (no filter) or if the current file is in the list
-            if ALLOWED_FILES.is_empty() || ALLOWED_FILES.contains(&current_filename) {
+            if ALLOWED_FILES.is_empty() || ALLOWED_FILES.contains(¤t_filename) {
                 // Optional: Keep this if you want compile-time stripping based on a feature flag
                 // #[cfg(feature = "debug")]
                 { // Use a block to scope the 'now' variable and the import
@@ -87,7 +87,7 @@ macro_rules! debug {
                 .map_or("", |os_str| os_str.to_str().unwrap_or(""));
 
             // Allow if ALLOWED_FILES is empty (no filter) or if the current file is in the list
-            if ALLOWED_FILES.is_empty() || ALLOWED_FILES.contains(&current_filename) {
+            if ALLOWED_FILES.is_empty() || ALLOWED_FILES.contains(¤t_filename) {
                 // Optional: Keep this if you want compile-time stripping based on a feature flag
                 // #[cfg(feature = "debug")]
                 { // Use a block to scope the 'now' variable and the import

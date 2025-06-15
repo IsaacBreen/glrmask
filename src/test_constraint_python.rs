@@ -837,7 +837,10 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // 5. Basic Interaction with the GrammarConstraintState
     let mut constraint_state = grammar_constraint.init();
     // Initial step to populate possibilities
+    let step_start = Instant::now();
     let initial_mask = constraint_state.get_mask();
+    let step_duration = step_start.elapsed();
+    println!("\nInitial get_mask took: {:?}", step_duration);
     println!("\nInitial mask obtained ({} allowed LLM tokens).", initial_mask.iter_bits().count());
     let all_code_lines: Vec<&str> = full_text_to_tokenize.lines().collect();
     let mut current_text_byte_offset = 0;
