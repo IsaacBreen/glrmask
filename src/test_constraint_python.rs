@@ -662,10 +662,10 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // assert!(llm_token_map.contains_left(&b"from".to_vec()));
     // assert!(llm_token_map.contains_left(&b" x".to_vec()));
 
-    fn vec_contains(vec: &[u8], other: &[u8]) -> bool {
-        vec.windows(other.len()).any(|window| window == other)
-    }
-    llm_token_map.retain(|v, _| v.len() == 1 || ![b"-".as_ref(), b"*", b"...", b"_"].iter().any(|other| vec_contains(v.as_ref(), other)));
+    // fn vec_contains(vec: &[u8], other: &[u8]) -> bool {
+    //     vec.windows(other.len()).any(|window| window == other)
+    // }
+    // llm_token_map.retain(|v, _| v.len() == 1 || ![b"-".as_ref(), b"*", b"...", b"_"].iter().any(|other| vec_contains(v.as_ref(), other)));
 
 
     // Print the vocab
@@ -883,8 +883,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
         assert!(
             current_mask.contains(llm_token_id.0),
-            "Expected LLMTokenID({}) for '{}' to be in the mask. Mask (first 100 if many): {:?}",
-            llm_token_id.0, current_token_str, current_mask.iter_bits().take(100).collect::<Vec<_>>()
+            "Expected LLMTokenID({}) for '{}' to be in the mask. Mask: {:?}",
+            llm_token_id.0, current_token_str, current_mask
         );
         println!("  LLMTokenID({}) for '{}' is in the mask.", llm_token_id.0, current_token_str);
 
