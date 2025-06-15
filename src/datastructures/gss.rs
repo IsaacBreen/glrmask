@@ -24,10 +24,19 @@ type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 
 pub type LLMTokenInfo = Option<LLMTokenBV>;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TerminalInfoValue {
     pub union: TerminalBV,
     pub intersection: TerminalBV,
+}
+
+impl Default for TerminalInfoValue {
+    fn default() -> Self {
+        Self {
+            union: TerminalBV::max_ones(),
+            intersection: TerminalBV::zeros(),
+        }
+    }
 }
 
 impl TerminalInfoValue {
