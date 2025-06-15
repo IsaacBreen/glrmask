@@ -286,7 +286,7 @@ fn compute_hash_key(predecessors: &NodeMap) -> u64 {
     hasher.finish()
 }
 
-// #[time_it("allowed_terminals_union_assign")]
+#[time_it]
 pub fn allowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
     let mut common_keys = BTreeSet::new();
     common_keys.extend(left.keys());
@@ -299,7 +299,7 @@ pub fn allowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalIn
     }
 }
 
-// #[time_it("allowed_terminals_intersect_assign")]
+#[time_it]
 pub fn allowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
     let mut common_keys = BTreeSet::new();
     common_keys.extend(left.keys());
@@ -457,17 +457,17 @@ pub mod acc_mod {
     }
 
     impl PathAccumulator for Acc {
-        // // #[time_it("Acc::union_assign")]
+        #[time_it]
         fn union_assign(&mut self, other: Self) {
             self.acc.union_assign(other.acc);
             allowed_terminals_union_assign(&mut self.allowed_terminals, other.allowed_terminals);
         }
-        // // #[time_it("Acc::intersect_assign")]
+        #[time_it]
         fn intersect_assign(&mut self, right: Self) {
             self.acc.intersect_assign(right.acc);
             allowed_terminals_intersect_assign(&mut self.allowed_terminals, right.allowed_terminals);
         }
-        // // #[time_it("Acc::intersect_has_effect")]
+        #[time_it]
         fn intersect_has_effect(&self, right: &Self) -> bool {
             self.acc.intersect_has_effect(&right.acc)
         }
