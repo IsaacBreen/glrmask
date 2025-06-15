@@ -1,7 +1,7 @@
 use std::cmp::PartialEq;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use kdam::{tqdm, BarExt};
-use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{compute_first_sets, NonTerminal, Production, Symbol, Terminal};
 
 /// Computes the set of non-terminals that can derive the empty string (epsilon).
 pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
@@ -542,11 +542,10 @@ fn find_last_non_nullable_symbol<'a>(
 
 /// Computes a map from each terminal to a set of terminals that can immediately follow it in the grammar.
 /// This considers sequences T1 -> T2, and T1 -> NT -> T2 where NT can be a sequence of non-terminals.
-pub fn compute_terminal_follow_sets(
-    productions: &[Production],
-    nullable_nonterminals: &BTreeSet<NonTerminal>,
-    first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
-) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
+pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
+    let first_sets = compute_first_sets(productions);
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+
     let mut terminal_follows: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
 
     for prod in productions {

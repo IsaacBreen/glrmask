@@ -275,14 +275,8 @@ impl GrammarConstraint {
 
         // These might be computed elsewhere or need to be computed here.
         // Assuming compute_first_sets is available from grammar module.
-        let first_sets = crate::glr::grammar::compute_first_sets(grammar_productions);
-        let nullable_nonterminals = compute_nullable_nonterminals(grammar_productions);
 
-        let terminal_follow_sets_named = compute_terminal_follow_sets(
-            grammar_productions,
-            &nullable_nonterminals,
-            &first_sets,
-        );
+        let terminal_follow_sets_named = compute_terminal_follow_sets(grammar_productions);
 
         let mut terminal_follow_map_ids: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> = BTreeMap::new();
         for (terminal1, following_terminals) in terminal_follow_sets_named {
@@ -579,7 +573,6 @@ impl<'r> Precomputer<'r> {
             .collect();
     
         let terminal_follow_map = &self.terminal_follow_map;
-        dbg!(&terminal_follow_map);
         
         Trie::special_map(
             initial_nodes_and_values,
