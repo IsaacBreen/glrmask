@@ -688,3 +688,50 @@ fn test_precompute_a_plus_tokenizer() {
     assert!(child_node.is_leaf(), "Child node should be a leaf after pruning");
     // assert_eq!(*child_node.value.clean_end.as_ref().unwrap(), expected_tokens, "Clean_end bitset is incorrect");
 }
+
+#[test]
+fn test_precompute_x_eq() {
+    // Tokenizer for `=|x| `
+    let tokenizer_expr = groups![
+        eat_u8(b'='),
+        eat_u8(b'x'),
+        eat_u8(b' '),
+    ];
+    let tokenizer = tokenizer_expr.build();
+
+    // LLM tokens "x" and " ="
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"x".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b" =".to_vec(), LLMTokenID(1));
+    let max_original_llm_token_id = 1;
+
+    // Grammar S -> X SPACE EQUALS
+    let productions = vec![
+        prod("S", vec![t("X"), t("SPACE"), t("EQUALS")]), // S -> X SPACE EQUALS
+    ];
+
+    // Map grammar terminal to tokenizer group
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(Terminal("X".to_string()), TerminalID(0)); // Corresponds to tokenizer group 0
+    grammar_token_map.insert(Terminal("EQUALS".to_string()), TerminalID(1)); // Corresponds to tokenizer group 1
+    grammar_token_map.insert(Terminal("SPACE".to_string()), TerminalID(2)); // Corresponds to tokenizer group 2
+
+    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone());
+
+    // Token name map for stats
+    let mut token_name_map = BiBTreeMap::new();
+    token_name_map.insert("X".to_string(), 0);
+    token_name_map.insert("EQUALS".to_string(), 1);
+    token_name_map.insert("SPACE".to_string(), 2);
+
+    // Create the constraint, which runs precomputation
+    let constraint = GrammarConstraint::new(
+        tokenizer.clone(),
+        parser,
+        llm_token_map,
+        token_name_map,
+        max_original_llm_token_id,
+    );
+    constraint.dump_precomputed();
+}
+
