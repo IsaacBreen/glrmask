@@ -547,7 +547,51 @@ pub fn compute_terminal_follow_sets(productions: &[Production]) -> BTreeMap<Term
 
     let mut terminal_follows: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
 
-    todo!();
+    for production in productions {
+        let lhs = &production.lhs;
+        let rhs = &production.rhs;
+
+        for (i, symbol) in rhs.iter().enumerate() {
+            if let Symbol::Terminal(t) = symbol {
+                // We found a terminal 't'. Now, find what can follow it in this rule.
+                let mut all_following_are_nullable = true;
+
+                // Look at the rest of the production's RHS (the suffix)
+                for next_symbol in &rhs[i + 1..] {
+                    match next_symbol {
+                        Symbol::Terminal(next_t) => {
+                            // The next symbol is a terminal. It's in the follow set.
+                            terminal_follows.entry(t.clone()).or_default().insert(next_t.clone());
+                            all_following_are_nullable = false;
+                            break; // Found a non-nullable symbol, so we're done with this suffix.
+                        }
+                        Symbol::NonTerminal(next_nt) => {
+                            // The next symbol is a non-terminal. Add its FIRST set.
+                            if let Some(first_set_for_next_nt) = first_sets.get(next_nt) {
+                                terminal_follows
+                                    .entry(t.clone())
+                                    .or_default()
+                                    .extend(first_set_for_next_nt.iter().cloned());
+                            }
+                            // If the non-terminal is not nullable, we stop looking further.
+                            if !nullable_nonterminals.contains(next_nt) {
+                                all_following_are_nullable = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // If the rest of the RHS was empty or consisted entirely of nullable non-terminals,
+                // then FOLLOW(t) must also include FOLLOW(lhs).
+                if all_following_are_nullable {
+                    if let Some(follow_set_for_lhs) = nonterminal_follow_sets.get(lhs) {
+                        terminal_follows.entry(t.clone()).or_default().extend(follow_set_for_lhs.iter().cloned());
+                    }
+                }
+            }
+        }
+    }
 
     terminal_follows
 }

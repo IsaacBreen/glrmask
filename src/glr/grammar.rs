@@ -147,7 +147,17 @@ pub fn compute_epsilon_nonterminals(productions: &[Production]) -> BTreeSet<NonT
 pub fn compute_first_sets(productions: &[Production]) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
     let epsilon_nonterminals = compute_epsilon_nonterminals(productions);
     let mut first_sets: BTreeMap<NonTerminal, BTreeSet<Terminal>> = BTreeMap::new();
-    
+
+    // Initialize for all non-terminals to avoid panics and handle non-terminals that only appear on RHS.
+    for p in productions {
+        first_sets.entry(p.lhs.clone()).or_default();
+        for s in &p.rhs {
+            if let Symbol::NonTerminal(nt) = s {
+                first_sets.entry(nt.clone()).or_default();
+            }
+        }
+    }
+
     let mut changed = true;
     while changed {
         changed = false;
@@ -156,7 +166,7 @@ pub fn compute_first_sets(productions: &[Production]) -> BTreeMap<NonTerminal, B
             let lhs = &production.lhs;
             let rhs = &production.rhs;
 
-            let old_size = first_sets.get_mut(lhs).unwrap().len();
+            let old_size = first_sets.get(lhs).unwrap().len();
 
             for symbol in rhs {
                 if let Symbol::NonTerminal(nt) = symbol {
@@ -172,7 +182,7 @@ pub fn compute_first_sets(productions: &[Production]) -> BTreeMap<NonTerminal, B
                 }
             }
 
-            if first_sets.get_mut(lhs).unwrap().len() != old_size {
+            if first_sets.get(lhs).unwrap().len() != old_size {
                 changed = true;
             }
         }
