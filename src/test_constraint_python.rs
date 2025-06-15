@@ -837,16 +837,18 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // 5. Basic Interaction with the GrammarConstraintState
     let mut constraint_state = grammar_constraint.init();
     // Initial step to populate possibilities
-    let initial_mask = constraint_state.get_mask();
-    println!("\nInitial mask obtained ({} allowed LLM tokens).", initial_mask.iter_bits().count());
+    println!("\n---- TOKEN START ----");
+    println!("token_str: \"<initial>\"");
+    let _initial_mask = constraint_state.get_mask();
     let all_code_lines: Vec<&str> = full_text_to_tokenize.lines().collect();
     let mut current_text_byte_offset = 0;
     // return Ok(());
 
-    println!("\nStepping through the token sequence with GrammarConstraint:");
     for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
         // Use tokenized_strs_for_logging for logging, as it corresponds to the llm_token_id
         let current_token_str = &tokenized_strs_for_logging[i];
+        println!("\n---- TOKEN START ----");
+        println!("token_str: {:?}", current_token_str);
         println!(
             "Processing token {}/{}: {:?} (LLMTokenID({}))",
             i + 1, // 1-indexed for display
@@ -873,10 +875,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             i + 1, current_token_str
         );
 
-        let step_start = Instant::now();
         let current_mask = constraint_state.get_mask();
-        let step_duration = step_start.elapsed();
-        println!("  get_mask took: {:?}", step_duration);
 
         println!(
             "  Mask (after get_mask) allows {} tokens. Checking for current token LLMTokenID({})...",
