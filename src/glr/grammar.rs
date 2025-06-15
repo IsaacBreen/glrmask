@@ -186,7 +186,6 @@ pub fn compute_first_sets(productions: &[Production]) -> BTreeMap<NonTerminal, B
                         break;
                     }
                 } else if let Symbol::Terminal(t) = symbol { // Added this case
-                    first_sets.get_mut(lhs).unwrap().insert(t.clone());
                     break;
                 }
             }
