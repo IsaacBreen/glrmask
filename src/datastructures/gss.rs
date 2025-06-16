@@ -428,7 +428,7 @@ pub fn disallowed_terminals_union_assign(left: &mut TerminalInfo, right: Termina
         let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
         
         let new_union = &left_value.union | &right_value.union;
-        let new_intersection = &left_value.intersection | &right_value.intersection;
+        let new_intersection = &left_value.intersection & &right_value.intersection;
         let new_value = TerminalInfoValue::new(new_union, new_intersection);
 
         if !new_value.is_empty() {
