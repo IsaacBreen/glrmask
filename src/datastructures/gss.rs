@@ -568,15 +568,7 @@ pub mod acc_mod {
                     return true;
                 }
             }
-            if self.disallowed_terminals.is_empty() {
-                return false;
-            }
-            for disallowed_terminals in self.disallowed_terminals.values() {
-                if !disallowed_terminals.is_empty() {
-                    return false;
-                }
-            }
-            true
+            false
         }
 
         pub fn is_alive(&self) -> bool {
