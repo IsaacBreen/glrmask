@@ -679,7 +679,7 @@ impl GSSNode {
         }
     }
 
-    // #[time_it("GSSNode::pop_iter")]
+    #[time_it]
     pub fn pop_iter(&self) -> Vec<(ParseStateEdgeContent, Arc<Self>)> {
         self.predecessors.values().flat_map(|m| m.iter()).filter_map(|(edge_val, pred_arc)| {
             let mut pred_arc = pred_arc.clone();
