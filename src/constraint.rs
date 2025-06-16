@@ -945,7 +945,7 @@ impl<'a> GrammarConstraintState<'a> {
                 for (tokenizer_state_id, disallowed_terminals_for_state) in disallowed_terminals_for_gss {
                     let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
                     for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
-                        if disallowed_terminals_for_state.union.contains(terminal_id.0) {
+                        if disallowed_terminals_for_state.contains(terminal_id.0) {
                             // This terminal is disallowed, so the LLM tokens that produce it are forbidden.
                             forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
                         }
@@ -999,7 +999,7 @@ impl<'a> GrammarConstraintState<'a> {
                         }
                         crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
                         // subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
-                        // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0));
+                        // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
 
                         if glr_s.is_ok() && child_node_trie_data.as_arc().lock().unwrap().value.end {
                             let glr_active_tokens = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
@@ -1143,11 +1143,7 @@ impl<'a> GrammarConstraintState<'a> {
                             let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
                             // Disallow this token from being matched again immediately.
                             disallowed_terminals_for_end_state.insert(match_info.id);
-                            let val = crate::datastructures::gss::TerminalInfoValue {
-                                union: disallowed_terminals_for_end_state.clone(),
-                                intersection: disallowed_terminals_for_end_state,
-                            };
-                            disallowed_terminals.insert(TokenizerStateID(end_state_id), val);
+                            disallowed_terminals.insert(TokenizerStateID(end_state_id), disallowed_terminals_for_end_state);
                         }
                         disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
 
@@ -1201,4 +1197,3 @@ impl<'a> GrammarConstraintState<'a> {
         &self.state
     }
 }
-
