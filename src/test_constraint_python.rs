@@ -922,6 +922,29 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
          println!("Constraint state was not stepped as the input string was empty and produced no tokens.");
     }
 
+    if true {
+        println!("\n--- Testing commit equivalence for 'if x: ' and 'print(x)' ---");
+
+        let b1 = b"if x: ";
+        let b2 = b"print(x)";
+
+        // Scenario 1: Commit bytes separately
+        let mut state1 = grammar_constraint.init();
+        println!("Scenario 1: Committing b1: {:?}", String::from_utf8_lossy(b1));
+        state1.commit_bytes(b1);
+        println!("Scenario 1: Committing b2: {:?}", String::from_utf8_lossy(b2));
+        state1.commit_bytes(b2);
+
+        // Scenario 2: Commit concatenated bytes
+        let mut state2 = grammar_constraint.init();
+        let combined_bytes = [b1.as_ref(), b2.as_ref()].concat();
+        println!("Scenario 2: Committing combined bytes: {:?}", String::from_utf8_lossy(&combined_bytes));
+        state2.commit_bytes(&combined_bytes);
+
+        assert_eq!(state1, state2, "States from separate and combined commits should be equivalent.");
+        println!("--- Equivalence test passed ---");
+    }
+
     if false {
         // Ensure the parse state after stepping the constraint with all LLM tokens and committing an LLM token is the same as the parse state after stepping the parser itself tokens emitted by the tokenizer for that same LLM token.
         // In general, this should be true if all LLM tokens cleanly match grammar tokens (or, equivalently, if the only non-empty entry in the precompute tree is under the initial tokenizer state).

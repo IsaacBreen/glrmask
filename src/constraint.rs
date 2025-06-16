@@ -918,6 +918,15 @@ pub struct GrammarConstraintState<'a> {
     state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
 }
 
+impl<'a> PartialEq for GrammarConstraintState<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare parent by pointer to ensure they originate from the same constraint object.
+        std::ptr::eq(self.parent, other.parent) && self.state == other.state
+    }
+}
+
+impl<'a> Eq for GrammarConstraintState<'a> {}
+
 impl<'a> GrammarConstraintState<'a> {
     #[time_it]
     pub fn get_mask(&self) -> LLMTokenBV {
