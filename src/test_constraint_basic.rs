@@ -509,6 +509,64 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
 }
 
 #[test]
+fn test_aa_commit_equivalence() {
+    // Grammar: S -> A, where A is the terminal for "aa"
+    // LLM Tokens: "a", "aa"
+    // We test that (commit "a" then "a") is equivalent to (commit "aa").
+    // This tests the constraint's ability to handle partial matches of grammar terminals
+    // that span multiple LLM token commits.
+
+    // 1. Tokenizer for "aa"
+    let tokenizer_expr = groups![eat_string_fast("aa")];
+    let tokenizer = tokenizer_expr.build();
+
+    // 2. Grammar
+    let productions = vec![
+        prod("S", vec![t("A")]),
+    ];
+
+    // 3. LLM Token Map
+    let mut llm_token_map = LLMTokenMap::new();
+    let llm_a = LLMTokenID(0);
+    let llm_aa = LLMTokenID(1);
+    llm_token_map.insert(b"a".to_vec(), llm_a);
+    llm_token_map.insert(b"aa".to_vec(), llm_aa);
+    let max_original_llm_token_id = 1;
+
+    // 4. Map grammar terminal to tokenizer group
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0));
+
+    // 5. Parser
+    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone());
+
+    // 6. Token name map for constraint
+    let mut token_name_map = BiBTreeMap::new();
+    token_name_map.insert("A".to_string(), 0);
+
+    // 7. Create constraint
+    let constraint = GrammarConstraint::new(
+        tokenizer,
+        parser,
+        llm_token_map.clone(),
+        token_name_map,
+        max_original_llm_token_id,
+    );
+
+    // Scenario 1: Commit "a", then "a"
+    let mut state1 = constraint.init();
+    state1.commit(llm_a); // Commit first "a"
+    state1.commit(llm_a); // Commit second "a"
+
+    // Scenario 2: Commit "aa"
+    let mut state2 = constraint.init();
+    state2.commit(llm_aa);
+
+    // Assert equivalence of the final states
+    assert_eq!(state1.state(), state2.state(), "States from (commit 'a' then 'a') and (commit 'aa') should be equivalent.");
+}
+
+#[test]
 fn test_hideous_ambiguity() {
     // 1. Define the grammar
     let productions = vec![
@@ -571,8 +629,7 @@ fn test_simple_def_match_non_zero_llm_id() {
 
     // 2. LLM vocabulary: only "def", but with a non-zero original ID
     let mut llm_token_map = LLMTokenMap::new();
-    // let def_original_llm_id = 750; // Using the ID from your Python script's log
-    let def_original_llm_id = 0;
+    let def_original_llm_id = 750; // Using the ID from your Python script's log
     llm_token_map.insert(b"def".to_vec(), LLMTokenID(def_original_llm_id));
     let max_original_llm_token_id = def_original_llm_id;
 
