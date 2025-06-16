@@ -4,6 +4,7 @@ use std::fmt::{Debug, Write};
 use std::hash::{Hash, Hasher};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub, SubAssign};
 use deterministic_hash::DeterministicHasher;
 use std::any::{Any, TypeId};
 use profiler_macro::{time_it, timeit};
@@ -22,7 +23,97 @@ type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 
 pub type LLMTokenInfo = Option<LLMTokenBV>;
-pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalBV>;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TerminalInfoValue {
+    pub union: TerminalBV,
+    pub intersection: TerminalBV,
+}
+
+impl TerminalInfoValue {
+    pub fn new(union: TerminalBV, intersection: TerminalBV) -> Self {
+        Self { union, intersection }
+    }
+
+    pub fn zeros() -> Self {
+        Self {
+            union: TerminalBV::zeros(),
+            intersection: TerminalBV::zeros(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.union.is_empty() && self.intersection.is_empty()
+    }
+
+    pub fn contains(&self, index: usize) -> bool {
+        self.union.contains(index)
+    }
+
+    pub fn insert(&mut self, index: usize) {
+        self.union.insert(index);
+    }
+}
+
+impl BitAnd<&TerminalBV> for &TerminalInfoValue {
+    type Output = TerminalInfoValue;
+    fn bitand(self, rhs: &TerminalBV) -> Self::Output {
+        TerminalInfoValue {
+            union: &self.union & rhs,
+            intersection: &self.intersection & rhs,
+        }
+    }
+}
+
+impl BitAndAssign<&TerminalBV> for TerminalInfoValue {
+    fn bitand_assign(&mut self, rhs: &TerminalBV) {
+        self.union &= rhs;
+        self.intersection &= rhs;
+    }
+}
+
+impl BitOr<&TerminalBV> for &TerminalInfoValue {
+    type Output = TerminalInfoValue;
+    fn bitor(self, rhs: &TerminalBV) -> Self::Output {
+        TerminalInfoValue {
+            union: &self.union | rhs,
+            intersection: &self.intersection | rhs,
+        }
+    }
+}
+
+impl BitOrAssign<&TerminalBV> for TerminalInfoValue {
+    fn bitor_assign(&mut self, rhs: &TerminalBV) {
+        self.union |= rhs;
+        self.intersection |= rhs;
+    }
+}
+
+impl Sub<&TerminalBV> for &TerminalInfoValue {
+    type Output = TerminalInfoValue;
+    fn sub(self, rhs: &TerminalBV) -> Self::Output {
+        TerminalInfoValue {
+            union: &self.union - rhs,
+            intersection: &self.intersection - rhs,
+        }
+    }
+}
+
+impl SubAssign<&TerminalBV> for TerminalInfoValue {
+    fn sub_assign(&mut self, rhs: &TerminalBV) {
+        self.union -= rhs;
+        self.intersection -= rhs;
+    }
+}
+
+impl BitOrAssign<&TerminalInfoValue> for TerminalInfoValue {
+    fn bitor_assign(&mut self, rhs: &TerminalInfoValue) {
+        self.union |= &rhs.union;
+        self.intersection |= &rhs.intersection;
+    }
+}
+
+pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalInfoValue>;
 
 pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
     fn union_assign(&mut self, other: Self);
@@ -42,6 +133,24 @@ impl PathAccumulator for () {
     fn union_assign(&mut self, _other: Self) { }
     fn intersect_assign(&mut self, _right: Self) { } // Renamed from pop_assign
     fn intersect_has_effect(&self, _right: &Self) -> bool { false }
+}
+
+impl PathAccumulator for TerminalInfoValue {
+    fn union_assign(&mut self, other: Self) {
+        self.union |= &other.union;
+        self.intersection &= &other.intersection;
+    }
+
+    fn intersect_assign(&mut self, right: Self) {
+        self.union &= &right.union;
+        self.intersection &= &right.intersection;
+    }
+
+    fn intersect_has_effect(&self, right: &Self) -> bool {
+        let new_union = &self.union & &right.union;
+        let new_intersection = &self.intersection & &right.intersection;
+        new_union != self.union || new_intersection != self.intersection
+    }
 }
 
 impl PathAccumulator for Option<LLMTokenBV> {
@@ -293,11 +402,15 @@ pub fn disallowed_terminals_intersect_assign(left: &mut TerminalInfo, right: Ter
     all_keys.extend(right.keys());
     for tokenizer_state_id in all_keys {
         // An absent key means "no terminals disallowed" -> zeros()
-        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
-        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
-        let intersection = &left_value & &right_value;
-        if !intersection.is_empty() {
-            left.insert(tokenizer_state_id, intersection);
+        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+        
+        let new_union = &left_value.union & &right_value.union;
+        let new_intersection = &left_value.intersection & &right_value.intersection;
+        let new_value = TerminalInfoValue::new(new_union, new_intersection);
+
+        if !new_value.is_empty() {
+            left.insert(tokenizer_state_id, new_value);
         } else {
             left.remove(&tokenizer_state_id);
         }
@@ -311,11 +424,15 @@ pub fn disallowed_terminals_union_assign(left: &mut TerminalInfo, right: Termina
     all_keys.extend(right.keys());
     for tokenizer_state_id in all_keys {
         // An absent key means "no terminals disallowed" -> zeros()
-        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
-        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
-        let union = &left_value | &right_value;
-        if !union.is_empty() {
-            left.insert(tokenizer_state_id, union);
+        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+        
+        let new_union = &left_value.union | &right_value.union;
+        let new_intersection = &left_value.intersection | &right_value.intersection;
+        let new_value = TerminalInfoValue::new(new_union, new_intersection);
+
+        if !new_value.is_empty() {
+            left.insert(tokenizer_state_id, new_value);
         } else {
             left.remove(&tokenizer_state_id);
         }
@@ -324,7 +441,7 @@ pub fn disallowed_terminals_union_assign(left: &mut TerminalInfo, right: Termina
 
 pub fn disallow_terminals_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
     for (tokenizer_state_id, terminals_to_disallow) in right {
-        let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalBV::zeros);
+        let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalInfoValue::zeros);
         *entry |= terminals_to_disallow;
     }
 }
@@ -387,7 +504,7 @@ pub mod acc_mod {
     use std::collections::{BTreeMap, BTreeSet};
     use profiler_macro::time_it;
     use crate::constraint::{LLMTokenBV, TerminalBV};
-    use crate::datastructures::gss::{disallowed_terminals_union_assign, disallowed_terminals_intersect_assign, LLMTokenInfo, PathAccumulator, TerminalInfo};
+    use crate::datastructures::gss::{disallowed_terminals_union_assign, disallowed_terminals_intersect_assign, LLMTokenInfo, PathAccumulator, TerminalInfo, TerminalInfoValue};
     use crate::glr::grammar::Symbol::Terminal;
     use crate::tokenizer::TokenizerStateID;
     use crate::types::TerminalID;
@@ -447,8 +564,8 @@ pub mod acc_mod {
             if self.disallowed_terminals.is_empty() {
                 return false;
             }
-            for disallowed_terminals in self.disallowed_terminals.values() {
-                if !disallowed_terminals.is_empty() {
+            for disallowed_terminals_value in self.disallowed_terminals.values() {
+                if !disallowed_terminals_value.is_empty() {
                     return false;
                 }
             }
@@ -1017,16 +1134,16 @@ pub fn disallow_terminals_and_prune_arc(
 
 pub fn prune_disallowed_terminals(
     root_arc: &mut Arc<GSSNode>, 
-    terminals_map: &TerminalInfo,
+    terminals_map: &BTreeMap<TokenizerStateID, TerminalBV>,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
     // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-        for (gss_state_id, gss_disallowed_bv) in current_acc.disallowed_terminals() {
+        for (gss_state_id, gss_disallowed_tiv) in current_acc.disallowed_terminals() {
             if let Some(actual_bv_for_state) = terminals_map.get(gss_state_id) {
                 // If any terminal disallowed by GSS is also matched by current segment, prune.
-                // This means (gss_disallowed_bv AND actual_bv_for_state) must be empty.
-                if !gss_disallowed_bv.is_disjoint(actual_bv_for_state) {
+                // This means (gss_disallowed_bv.union AND actual_bv_for_state) must be empty.
+                if !gss_disallowed_tiv.union.is_disjoint(actual_bv_for_state) {
                     return None;
                 }
             }
@@ -1051,11 +1168,14 @@ pub fn map_allowed_terminals_tokenizer_states(
         let mut new_disallowed_terminals = BTreeMap::new();
         let mut changed = false;
 
-        for (old_id, bv) in current_acc.disallowed_terminals() {
+        for (old_id, tiv) in current_acc.disallowed_terminals() {
             if let Some(new_id) = map.get(old_id) {
-                *new_disallowed_terminals.entry(*new_id)
-                    .or_insert_with(TerminalBV::zeros) |= bv;
-                if new_disallowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
+                let entry = new_disallowed_terminals.entry(*new_id)
+                    .or_insert_with(TerminalInfoValue::zeros);
+                entry.union |= &tiv.union;
+                entry.intersection |= &tiv.intersection;
+
+                if new_disallowed_terminals.get(new_id) != Some(tiv) || old_id != new_id { // Basic change check
                     changed = true;
                 }
             } else {
@@ -1196,7 +1316,7 @@ impl GSSNode {
 
     pub fn prune_disallowed_terminals(
         &mut self, 
-        terminals_map: &TerminalInfo,
+        terminals_map: &BTreeMap<TokenizerStateID, TerminalBV>,
     ) {
         let mut node_arc = Arc::new(self.clone());
         let mut memo = HashMap::new();

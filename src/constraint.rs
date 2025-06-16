@@ -2,7 +2,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::datastructures::ordered_hash_map::Retain;
-use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, subtract_llm_tokens_and_prune_arc};
+use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, subtract_llm_tokens_and_prune_arc, TerminalInfoValue};
 use ordered_hash_map::OrderedHashMap;
 use ordered_hash_map::OrderedHashSet;
 use std::cmp::Ordering;
@@ -1140,7 +1140,7 @@ impl<'a> GrammarConstraintState<'a> {
 
                         let mut disallowed_terminals: TerminalInfo = BTreeMap::new();
                         if let Some(end_state_id) = exec_result.end_state {
-                            let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
+                            let mut disallowed_terminals_for_end_state = TerminalInfoValue::zeros();
                             // Disallow this token from being matched again immediately.
                             disallowed_terminals_for_end_state.insert(match_info.id);
                             disallowed_terminals.insert(TokenizerStateID(end_state_id), disallowed_terminals_for_end_state);
