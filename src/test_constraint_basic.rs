@@ -504,8 +504,8 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
     println!("Scenario 2: State after '#aa': {:?}", constraint_state2.state().keys().map(|k|k.0).collect::<Vec<_>>());
 
     // Assert equivalence
-    // assert_eq!(constraint_state1.state(), constraint_state2.state(), "States from (commit '#' then 'a' then 'a') and (commit '#aa') should be equivalent.");
-    // println!("\nAssertion passed: States are equivalent for multi-commit scenario.");
+    assert_eq!(constraint_state1.state(), constraint_state2.state(), "States from (commit '#' then 'a' then 'a') and (commit '#aa') should be equivalent.");
+    println!("\nAssertion passed: States are equivalent for multi-commit scenario.");
 }
 
 #[test]
