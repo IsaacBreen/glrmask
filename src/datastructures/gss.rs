@@ -1119,9 +1119,11 @@ pub fn reset_llm_tokens(
 
 pub fn disallow_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
-    disallowed_terminals: &TerminalInfo,
+    disallowed_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
+    // TODO: shouldn't be necessary to do this...
+    let disallowed_terminals: TerminalInfo = disallowed_terminals.iter().map(|(k, v)| (*k, TerminalInfoValue { union: v.clone(), intersection: v.clone() })).collect();
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
         disallowed_terminals_union_assign(new_acc.disallowed_terminals_mut(), disallowed_terminals.clone());
@@ -1310,7 +1312,7 @@ impl GSSNode {
 
     pub fn disallow_terminals_and_prune_arc(
         &mut self,
-        disallowed_terminals: &TerminalInfo,
+        disallowed_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
     ) {
         let mut node_arc = Arc::new(self.clone());
         let mut memo = HashMap::new();

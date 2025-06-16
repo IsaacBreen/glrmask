@@ -1138,9 +1138,9 @@ impl<'a> GrammarConstraintState<'a> {
                         // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
                         let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
 
-                        let mut disallowed_terminals: TerminalInfo = BTreeMap::new();
+                        let mut disallowed_terminals: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
                         if let Some(end_state_id) = exec_result.end_state {
-                            let mut disallowed_terminals_for_end_state = TerminalInfoValue::zeros();
+                            let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
                             // Disallow this token from being matched again immediately.
                             disallowed_terminals_for_end_state.insert(match_info.id);
                             disallowed_terminals.insert(TokenizerStateID(end_state_id), disallowed_terminals_for_end_state);
