@@ -487,25 +487,25 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
     let mut constraint_state1 = constraint.init();
     println!("Scenario 1: Committing LLM Token '#' (ID {})", llm_hash.0);
     constraint_state1.commit(llm_hash);
-    println!("{}", &constraint_state1);
     println!("Scenario 1: State after '#': {:?}", constraint_state1.state().keys().map(|k|k.0).collect::<Vec<_>>());
+    println!("{}", &constraint_state1);
 
     println!("\nScenario 1: Committing LLM Token 'a' (ID {})", llm_a.0);
     constraint_state1.commit(llm_a);
-    println!("{}", &constraint_state1);
     println!("Scenario 1: State after '#a': {:?}", constraint_state1.state().keys().map(|k|k.0).collect::<Vec<_>>());
+    println!("{}", &constraint_state1);
 
     println!("\nScenario 1: Committing LLM Token 'a' (ID {})", llm_a.0);
     constraint_state1.commit(llm_a);
-    println!("{}", &constraint_state1);
     println!("Scenario 1: State after '#aa': {:?}", constraint_state1.state().keys().map(|k|k.0).collect::<Vec<_>>());
+    println!("{}", &constraint_state1);
 
     // Scenario 2: Commit "#aa"
     let mut constraint_state2 = constraint.init();
     println!("\nScenario 2: Committing LLM Token '#aa' (ID {})", llm_hash_aa.0);
     constraint_state2.commit(llm_hash_aa);
-    println!("{}", &constraint_state2);
     println!("Scenario 2: State after '#aa': {:?}", constraint_state2.state().keys().map(|k|k.0).collect::<Vec<_>>());
+    println!("{}", &constraint_state2);
 
     // Assert equivalence
     assert_eq!(constraint_state1.state(), constraint_state2.state(), "States from (commit '#' then 'a' then 'a') and (commit '#aa') should be equivalent.");
