@@ -1459,7 +1459,8 @@ pub fn print_gss_forest(
         }
         
         let node_ptr = Arc::as_ptr(node_arc);
-        let node_id = *node_ids.entry(node_ptr).or_insert_with(|| node_ids.len());
+        let node_ids_len = node_ids.len();
+        let node_id = *node_ids.entry(node_ptr).or_insert(node_ids_len);
 
         let acc_str = format_acc(node_arc.acc2());
         writeln!(output, "{}Node {} (depth {}) {}", prefix, node_id, node_arc.max_depth, acc_str)?;
@@ -1483,14 +1484,15 @@ pub fn print_gss_forest(
             let new_prefix = format!("{}  {}", prefix, if is_last { "  " } else { "│ " });
             
             let pred_ptr = Arc::as_ptr(pred_arc);
-            let pred_id = *node_ids.entry(pred_ptr).or_insert_with(|| node_ids.len());
+            let node_ids_len = node_ids.len();
+            let pred_id = *node_ids.entry(pred_ptr).or_insert(node_ids_len);
 
             write!(output, "{}{}Edge {:?} -> ", prefix, connector, edge_val)?;
             
             if visited_for_printing.contains(&pred_ptr) {
                 writeln!(output, "Node {} (ref)", pred_id)?;
             } else if *node_count < max_nodes {
-                print_node_recursive(pred_arc, node_ids, visited_for_printing, &new_prefix, output, node_count, max_nodes)?;
+                print_node_recursive(pred_arc, node_ids, visited_for_printing, &new_prefix, node_count, max_nodes, output)?;
             } else {
                 writeln!(output, "Node {} (truncated)", pred_id)?;
             }
