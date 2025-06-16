@@ -130,18 +130,18 @@ impl BitOrAssign<&TerminalInfoValue> for TerminalInfoValue {
 
 pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalInfoValue>;
 
-pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
-    fn union_assign(&mut self, other: Self);
-    fn intersect_assign(&mut self, right: Self); // Renamed from pop_assign
-    fn union(mut self, other: Self) -> Self {
+pub trait PathAccumulator<Other=Self>: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
+    fn union_assign(&mut self, other: Other);
+    fn intersect_assign(&mut self, right: Other); // Renamed from pop_assign
+    fn union(mut self, other: Other) -> Self {
         self.union_assign(other);
         self
     }
-    fn intersect(mut self, right: Self) -> Self { // Renamed from pop
+    fn intersect(mut self, right: Other) -> Self { // Renamed from pop
         self.intersect_assign(right);
         self
     }
-    fn intersect_has_effect(&self, right: &Self) -> bool;
+    fn intersect_has_effect(&self, right: &Other) -> bool;
 }
 
 impl PathAccumulator for () {
@@ -411,14 +411,14 @@ fn compute_hash_key(predecessors: &NodeMap) -> u64 {
 }
 
 #[time_it]
-pub fn disallowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
+pub fn disallowed_terminals_intersect_assign(left: &mut TerminalInfo, right: BTreeMap<TokenizerStateID, TerminalBV>) {
     let mut all_keys = BTreeSet::new();
     all_keys.extend(left.keys());
     all_keys.extend(right.keys());
     for tokenizer_state_id in all_keys {
         // An absent key means "no terminals disallowed" -> zeros()
         let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
-        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
         let intersection = &left_value & &right_value;
         if !intersection.is_empty() {
             left.insert(tokenizer_state_id, intersection);
@@ -429,14 +429,14 @@ pub fn disallowed_terminals_intersect_assign(left: &mut TerminalInfo, right: Ter
 }
 
 #[time_it]
-pub fn disallowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
+pub fn disallowed_terminals_union_assign(left: &mut TerminalInfo, right: BTreeMap<TokenizerStateID, TerminalBV>) {
     let mut all_keys = BTreeSet::new();
     all_keys.extend(left.keys());
     all_keys.extend(right.keys());
     for tokenizer_state_id in all_keys {
         // An absent key means "no terminals disallowed" -> zeros()
         let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
-        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
         let union = &left_value | &right_value;
         if !union.is_empty() {
             left.insert(tokenizer_state_id, union);
