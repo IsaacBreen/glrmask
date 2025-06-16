@@ -44,7 +44,7 @@ impl TerminalInfoValue {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.union.is_empty() && self.intersection.is_empty()
+        self.union.is_empty()
     }
 
     pub fn contains(&self, index: usize) -> bool {
