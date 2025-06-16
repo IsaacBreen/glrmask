@@ -5611,6 +5611,7 @@ local_system:
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
       use std::hash::{Hash, Hasher};
       use std::ops::BitOr;
+      use std::fmt::{self, Display, Formatter};
       use std::sync::{Arc, Mutex};
       use std::cell::RefCell;
 
@@ -6528,6 +6529,47 @@ local_system:
       }
 
       impl<'a> Eq for GrammarConstraintState<'a> {}
+
+      impl<'a> Display for GrammarConstraintState<'a> {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              writeln!(f, "GrammarConstraintState ({} active tokenizer states):", self.state.len())?;
+              if self.state.is_empty() {
+                  return Ok(());
+              }
+
+              let mut gss_roots = Vec::new();
+              let mut tokenizer_state_info = Vec::new();
+
+              for (tokenizer_state_id, glr_state) in &self.state {
+                  if !glr_state.active_state.stack.is_empty() {
+                      gss_roots.push(glr_state.active_state.stack.clone());
+                      tokenizer_state_info.push(format!(
+                          "  - Tokenizer State {:>3}: GSS Root @ {:p} ({} predecessors)",
+                          tokenizer_state_id.0,
+                          Arc::as_ptr(&glr_state.active_state.stack),
+                          glr_state.active_state.stack.num_predecessors()
+                      ));
+                  } else {
+                      tokenizer_state_info.push(format!(
+                          "  - Tokenizer State {:>3}: (Empty GSS)",
+                          tokenizer_state_id.0
+                      ));
+                  }
+              }
+
+              for info in tokenizer_state_info {
+                  writeln!(f, "{}", info)?;
+              }
+
+              if !gss_roots.is_empty() {
+                  writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
+                  let gss_str = crate::datastructures::gss::print_gss_forest(&gss_roots, 50);
+                  write!(f, "{}", gss_str)?;
+              }
+
+              Ok(())
+          }
+      }
 
       impl<'a> GrammarConstraintState<'a> {
           #[time_it]
@@ -13060,6 +13102,7 @@ local_system:
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
       use std::hash::{Hash, Hasher};
       use std::ops::BitOr;
+      use std::fmt::{self, Display, Formatter};
       use std::sync::{Arc, Mutex};
       use std::cell::RefCell;
 
@@ -13977,6 +14020,47 @@ local_system:
       }
 
       impl<'a> Eq for GrammarConstraintState<'a> {}
+
+      impl<'a> Display for GrammarConstraintState<'a> {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              writeln!(f, "GrammarConstraintState ({} active tokenizer states):", self.state.len())?;
+              if self.state.is_empty() {
+                  return Ok(());
+              }
+
+              let mut gss_roots = Vec::new();
+              let mut tokenizer_state_info = Vec::new();
+
+              for (tokenizer_state_id, glr_state) in &self.state {
+                  if !glr_state.active_state.stack.is_empty() {
+                      gss_roots.push(glr_state.active_state.stack.clone());
+                      tokenizer_state_info.push(format!(
+                          "  - Tokenizer State {:>3}: GSS Root @ {:p} ({} predecessors)",
+                          tokenizer_state_id.0,
+                          Arc::as_ptr(&glr_state.active_state.stack),
+                          glr_state.active_state.stack.num_predecessors()
+                      ));
+                  } else {
+                      tokenizer_state_info.push(format!(
+                          "  - Tokenizer State {:>3}: (Empty GSS)",
+                          tokenizer_state_id.0
+                      ));
+                  }
+              }
+
+              for info in tokenizer_state_info {
+                  writeln!(f, "{}", info)?;
+              }
+
+              if !gss_roots.is_empty() {
+                  writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
+                  let gss_str = crate::datastructures::gss::print_gss_forest(&gss_roots, 50);
+                  write!(f, "{}", gss_str)?;
+              }
+
+              Ok(())
+          }
+      }
 
       impl<'a> GrammarConstraintState<'a> {
           #[time_it]
@@ -20547,6 +20631,7 @@ messages:
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
       use std::hash::{Hash, Hasher};
       use std::ops::BitOr;
+      use std::fmt::{self, Display, Formatter};
       use std::sync::{Arc, Mutex};
       use std::cell::RefCell;
 
@@ -21464,6 +21549,47 @@ messages:
       }
 
       impl<'a> Eq for GrammarConstraintState<'a> {}
+
+      impl<'a> Display for GrammarConstraintState<'a> {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              writeln!(f, "GrammarConstraintState ({} active tokenizer states):", self.state.len())?;
+              if self.state.is_empty() {
+                  return Ok(());
+              }
+
+              let mut gss_roots = Vec::new();
+              let mut tokenizer_state_info = Vec::new();
+
+              for (tokenizer_state_id, glr_state) in &self.state {
+                  if !glr_state.active_state.stack.is_empty() {
+                      gss_roots.push(glr_state.active_state.stack.clone());
+                      tokenizer_state_info.push(format!(
+                          "  - Tokenizer State {:>3}: GSS Root @ {:p} ({} predecessors)",
+                          tokenizer_state_id.0,
+                          Arc::as_ptr(&glr_state.active_state.stack),
+                          glr_state.active_state.stack.num_predecessors()
+                      ));
+                  } else {
+                      tokenizer_state_info.push(format!(
+                          "  - Tokenizer State {:>3}: (Empty GSS)",
+                          tokenizer_state_id.0
+                      ));
+                  }
+              }
+
+              for info in tokenizer_state_info {
+                  writeln!(f, "{}", info)?;
+              }
+
+              if !gss_roots.is_empty() {
+                  writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
+                  let gss_str = crate::datastructures::gss::print_gss_forest(&gss_roots, 50);
+                  write!(f, "{}", gss_str)?;
+              }
+
+              Ok(())
+          }
+      }
 
       impl<'a> GrammarConstraintState<'a> {
           #[time_it]
@@ -22400,82 +22526,175 @@ messages:
       ```
     metadata:
       filename: src/constraint_extra.rs
-  - user: |-
-      ```
-      error[E0277]: `GrammarConstraintState<'_>` doesn't implement `std::fmt::Display`
-         --> src/test_constraint_basic.rs:490:20
-          |
-      490 |     println!("{}", &constraint_state1);
-          |                    ^^^^^^^^^^^^^^^^^^ `GrammarConstraintState<'_>` cannot be formatted with the default formatter
-      ```
-      Fix this by implementing `Display` for it.
-      Make sure it shows the GSS really prettily and readably. And informatively.
-      No need to show stuff like the parent tokenizer, parser, grammar etc, or the parent constraint.
+  - user: Improve GSS formatting. Make it pretty and readable. And informative, too.
     metadata:
   - assistant: |-
-      Of course, I can help with that. The compilation error is because `GrammarConstraintState` doesn't implement the `Display` trait, which is required by `println!`. I'll add an implementation that provides a readable summary of the state, focusing on the GSS nodes as you requested.
+      Hello! As a helpful assistant, I'm here to help you with your code. Dealing with complex data structures like a Graph-Structured Stack (GSS) can be tricky, and good visualization is key to debugging. I've improved the GSS formatting to be more readable and informative.
 
-      Here is the patch for `src/constraint.rs`:
+      Here are the patches for the files:
+
+      ### `src/datastructures/gss.rs`
+
+      I've replaced the `print_gss_forest` function with a new version that produces a much clearer, tree-like representation of the GSS. Here's what I've changed:
+
+      1.  **Node IDs**: Instead of raw memory pointers, each unique GSS node is now assigned a sequential integer ID (e.g., `Node 0`, `Node 1`), making the structure much easier to follow.
+      2.  **Improved Tree Formatting**: The output now uses box-drawing characters (`├──`, `└──`, `│`) to clearly delineate the stack structure and predecessor relationships.
+      3.  **Readable Accumulator**: The `Acc` (accumulator) for each node is now summarized (e.g., `LLM(Any)` or `LLM(123 tokens)`) instead of printing the full verbose `Debug` output.
+      4.  **DAG Representation**: When a path leads to a node that has already been fully printed, it now shows a clear reference (e.g., `-> Node 5 (ref)`) and avoids re-printing the entire subgraph, keeping the output concise while preserving structural information.
+
+      These changes should make debugging your GSS states significantly easier.
 
       ```diff
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -6,6 +6,7 @@
-       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-       use std::hash::{Hash, Hasher};
-       use std::ops::BitOr;
-      +use std::fmt::{self, Display, Formatter};
-       use std::sync::{Arc, Mutex};
-       use std::cell::RefCell;
+      --- a/src/datastructures/gss.rs
+      +++ b/src/datastructures/gss.rs
+      @@ -1101,79 +1101,93 @@
+           stats
+       }
        
-      @@ -242,6 +243,44 @@
+      +/// Formats the accumulator for concise display.
+      +fn format_acc(acc: &acc_mod::Acc) -> String {
+      +    let llm_info = match acc.acc() {
+      +        None => "LLM(Any)".to_string(),
+      +        Some(bv) if bv.is_empty() => "LLM(None)".to_string(),
+      +        Some(bv) => format!("LLM({} tokens)", bv.len()),
+      +    };
+      +
+      +    let disallowed_info = if acc.disallowed_terminals().is_empty() {
+      +        "".to_string()
+      +    } else {
+      +        let count = acc.disallowed_terminals().values().map(|v| v.union.len()).sum::<usize>();
+      +        format!(", Disallowed({} total)", count)
+      +    };
+      +
+      +    format!("({}{})", llm_info, disallowed_info)
+      +}
        
-       impl<'a> Eq for GrammarConstraintState<'a> {}
-       
-      +impl<'a> Display for GrammarConstraintState<'a> {
-      +    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-      +        writeln!(f, "GrammarConstraintState ({} active tokenizer states):", self.state.len())?;
-      +        if self.state.is_empty() {
+       pub fn print_gss_forest(
+           roots: &[Arc<GSSNode>], 
+           max_nodes: usize
+       ) -> String {
+      -    fn print_node_recursive( // Renamed print_node to print_node_recursive
+      +    fn print_node_recursive(
+               node_arc: &Arc<GSSNode>,
+      -        visited: &mut HashSet<*const GSSNode>,
+      -        indent: usize,
+      +        node_ids: &mut HashMap<*const GSSNode, usize>,
+      +        visited_for_printing: &mut HashSet<*const GSSNode>,
+      +        prefix: &str,
+               node_count: &mut usize,
+               max_nodes: usize,
+               output: &mut String,
+           ) -> Result<(), std::fmt::Error> {
+               if *node_count >= max_nodes {
+      -            return Ok(());
+      -        }
+      -
+      +            return Ok(())
+      +        }
+      +        
+               let node_ptr = Arc::as_ptr(node_arc);
+      -        let prefix = format!("{:indent$}", "", indent = indent * 2);
+      -
+      -        if visited.contains(&node_ptr) {
+      -            writeln!(output, "{}- Node {:p} (depth {}) (Visited)", prefix, node_ptr, node_arc.max_depth)?;
+      -            return Ok(());
+      -        }
+      -
+      -        visited.insert(node_ptr);
+      +        let node_id = *node_ids.entry(node_ptr).or_insert_with(|| node_ids.len());
+      +
+      +        let acc_str = format_acc(node_arc.acc2());
+      +        writeln!(output, "{}Node {} (depth {}) {}", prefix, node_id, node_arc.max_depth, acc_str)?;
+      +
+      +        if visited_for_printing.contains(&node_ptr) {
+      +            writeln!(output, "{}  └─ (Predecessors already shown)", prefix)?;
       +            return Ok(());
       +        }
+      +        visited_for_printing.insert(node_ptr);
+               *node_count += 1;
+       
+      -        writeln!(output, "{}- Node {:p}: (depth: {}, acc_mod::Acc: {:?})", prefix, node_ptr, node_arc.max_depth, node_arc.acc.acc())?;
+      -
+      -        if !node_arc.predecessors.is_empty() {
+      -            writeln!(output, "{}  Predecessors:", prefix)?;
+      -            for (depth, preds_for_depth) in &node_arc.predecessors {
+      -                writeln!(output, "{}    - Depth {}:", prefix, depth)?;
+      -                for (edge_val, pred_arc_val) in preds_for_depth { // Renamed pred_arc
+      -                    writeln!(output, "{}      - Edge: {:?} -> {:p}", prefix, edge_val, Arc::as_ptr(pred_arc_val))?;
+      -                    if *node_count < max_nodes {
+      -                        print_node_recursive(pred_arc_val, visited, indent + 3, node_count, max_nodes, output)?;
+      -                    }
+      -                    if *node_count >= max_nodes {
+      -                        return Ok(());
+      -                    }
+      -                }
+      -            }
+      -        }
+      +        let predecessors: Vec<_> = node_arc.predecessors()
+      +            .values()
+      +            .flat_map(|m| m.iter())
+      +            .collect();
+      +        
+      +        let num_preds = predecessors.len();
+      +        for (i, (edge_val, pred_arc)) in predecessors.iter().enumerate() {
+      +            let is_last = i == num_preds - 1;
+      +            let connector = if is_last { "└──" } else { "├──" };
+      +            let new_prefix = format!("{}  {}", prefix, if is_last { "  " } else { "│ " });
+      +            
+      +            let pred_ptr = Arc::as_ptr(pred_arc);
+      +            let pred_id = *node_ids.entry(pred_ptr).or_insert_with(|| node_ids.len());
       +
-      +        let mut gss_roots = Vec::new();
-      +        let mut tokenizer_state_info = Vec::new();
-      +
-      +        for (tokenizer_state_id, glr_state) in &self.state {
-      +            if !glr_state.active_state.stack.is_empty() {
-      +                gss_roots.push(glr_state.active_state.stack.clone());
-      +                tokenizer_state_info.push(format!(
-      +                    "  - Tokenizer State {:>3}: GSS Root @ {:p} ({} predecessors)",
-      +                    tokenizer_state_id.0,
-      +                    Arc::as_ptr(&glr_state.active_state.stack),
-      +                    glr_state.active_state.stack.num_predecessors()
-      +                ));
+      +            write!(output, "{}{}Edge {:?} -> ", prefix, connector, edge_val)?;
+      +            
+      +            if visited_for_printing.contains(&pred_ptr) {
+      +                writeln!(output, "Node {} (ref)", pred_id)?;
+      +            } else if *node_count < max_nodes {
+      +                print_node_recursive(pred_arc, node_ids, visited_for_printing, &new_prefix, output, node_count, max_nodes)?;
       +            } else {
-      +                tokenizer_state_info.push(format!(
-      +                    "  - Tokenizer State {:>3}: (Empty GSS)",
-      +                    tokenizer_state_id.0
-      +                ));
+      +                writeln!(output, "Node {} (truncated)", pred_id)?;
       +            }
       +        }
       +
-      +        for info in tokenizer_state_info {
-      +            writeln!(f, "{}", info)?;
+               Ok(())
+           }
+       
+      -    let mut visited_nodes = HashSet::new(); // Renamed visited
+      -    let mut count = 0; // Renamed node_count
+      -    let mut out_str = String::new(); // Renamed output
+      -
+      -    if roots.is_empty() {
+      -        return "GSS Forest: (No roots)".to_string();
+      -    }
+      -
+      +    let mut node_ids = HashMap::new();
+      +    let mut visited_for_printing = HashSet::new();
+      +    let mut count = 0;
+      +    let mut out_str = String::new();
+      +
+      +    if roots.is_empty() { return "GSS Forest: (No roots)".to_string(); }
+           writeln!(&mut out_str, "GSS Forest (Max Nodes: {}):", max_nodes).unwrap();
+       
+      -    for (i, root_arc_val) in roots.iter().enumerate() { // Renamed root
+      -        writeln!(&mut out_str, "Root {}: {:p}", i, Arc::as_ptr(root_arc_val)).unwrap();
+      -        if print_node_recursive(root_arc_val, &mut visited_nodes, 1, &mut count, max_nodes, &mut out_str).is_err() {
+      -            return format!("Error writing GSS structure");
+      -        }
+      +    for (i, root_arc) in roots.iter().enumerate() {
+      +        writeln!(&mut out_str, "Root {}:", i).unwrap();
+      +        if print_node_recursive(root_arc, &mut node_ids, &mut visited_for_printing, "  ", &mut count, max_nodes, &mut out_str).is_err() {
+      +            return "Error writing GSS structure".to_string();
       +        }
+               if count >= max_nodes && i < roots.len() - 1 {
+                   writeln!(&mut out_str, "... (Truncated)").unwrap();
+                   break;
+      @@ -1182,6 +1196,7 @@
+       
+           out_str
+       }
       +
-      +        if !gss_roots.is_empty() {
-      +            writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
-      +            let gss_str = crate::datastructures::gss::print_gss_forest(&gss_roots, 50);
-      +            write!(f, "{}", gss_str)?;
-      +        }
-      +
-      +        Ok(())
-      +    }
-      +}
-      +
-       impl<'a> GrammarConstraintState<'a> {
-           #[time_it]
-           pub fn get_mask(&self) -> LLMTokenBV {
+       
+       // Simplification methods
+       // This is the main simplification routine. It uses a cache for structural sharing.
 
       ```
     metadata:
@@ -22484,8 +22703,8 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
+      Identified target file: src/datastructures/gss.rs
+      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/gss.rs.
     metadata:
 ...

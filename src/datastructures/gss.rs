@@ -1423,68 +1423,94 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats { // Takes slice of refe
     stats
 }
 
+/// Formats the accumulator for concise display.
+fn format_acc(acc: &acc_mod::Acc) -> String {
+    let llm_info = match acc.acc() {
+        None => "LLM(Any)".to_string(),
+        Some(bv) if bv.is_empty() => "LLM(None)".to_string(),
+        Some(bv) => format!("LLM({} tokens)", bv.len()),
+    };
+
+    let disallowed_info = if acc.disallowed_terminals().is_empty() {
+        "".to_string()
+    } else {
+        let count = acc.disallowed_terminals().values().map(|v| v.union.len()).sum::<usize>();
+        format!(", Disallowed({} total)", count)
+    };
+
+    format!("({}{})", llm_info, disallowed_info)
+}
 
 pub fn print_gss_forest(
     roots: &[Arc<GSSNode>], 
     max_nodes: usize
 ) -> String {
-    fn print_node_recursive( // Renamed print_node to print_node_recursive
+    fn print_node_recursive(
         node_arc: &Arc<GSSNode>,
-        visited: &mut HashSet<*const GSSNode>,
-        indent: usize,
+        node_ids: &mut HashMap<*const GSSNode, usize>,
+        visited_for_printing: &mut HashSet<*const GSSNode>,
+        prefix: &str,
         node_count: &mut usize,
         max_nodes: usize,
         output: &mut String,
     ) -> Result<(), std::fmt::Error> {
         if *node_count >= max_nodes {
-            return Ok(());
+            return Ok(())
         }
-
+        
         let node_ptr = Arc::as_ptr(node_arc);
-        let prefix = format!("{:indent$}", "", indent = indent * 2);
+        let node_id = *node_ids.entry(node_ptr).or_insert_with(|| node_ids.len());
 
-        if visited.contains(&node_ptr) {
-            writeln!(output, "{}- Node {:p} (depth {}) (Visited)", prefix, node_ptr, node_arc.max_depth)?;
+        let acc_str = format_acc(node_arc.acc2());
+        writeln!(output, "{}Node {} (depth {}) {}", prefix, node_id, node_arc.max_depth, acc_str)?;
+
+        if visited_for_printing.contains(&node_ptr) {
+            writeln!(output, "{}  └─ (Predecessors already shown)", prefix)?;
             return Ok(());
         }
-
-        visited.insert(node_ptr);
+        visited_for_printing.insert(node_ptr);
         *node_count += 1;
 
-        writeln!(output, "{}- Node {:p}: (depth: {}, acc_mod::Acc: {:?})", prefix, node_ptr, node_arc.max_depth, node_arc.acc.acc())?;
+        let predecessors: Vec<_> = node_arc.predecessors()
+            .values()
+            .flat_map(|m| m.iter())
+            .collect();
+        
+        let num_preds = predecessors.len();
+        for (i, (edge_val, pred_arc)) in predecessors.iter().enumerate() {
+            let is_last = i == num_preds - 1;
+            let connector = if is_last { "└──" } else { "├──" };
+            let new_prefix = format!("{}  {}", prefix, if is_last { "  " } else { "│ " });
+            
+            let pred_ptr = Arc::as_ptr(pred_arc);
+            let pred_id = *node_ids.entry(pred_ptr).or_insert_with(|| node_ids.len());
 
-        if !node_arc.predecessors.is_empty() {
-            writeln!(output, "{}  Predecessors:", prefix)?;
-            for (depth, preds_for_depth) in &node_arc.predecessors {
-                writeln!(output, "{}    - Depth {}:", prefix, depth)?;
-                for (edge_val, pred_arc_val) in preds_for_depth { // Renamed pred_arc
-                    writeln!(output, "{}      - Edge: {:?} -> {:p}", prefix, edge_val, Arc::as_ptr(pred_arc_val))?;
-                    if *node_count < max_nodes {
-                        print_node_recursive(pred_arc_val, visited, indent + 3, node_count, max_nodes, output)?;
-                    }
-                    if *node_count >= max_nodes {
-                        return Ok(());
-                    }
-                }
+            write!(output, "{}{}Edge {:?} -> ", prefix, connector, edge_val)?;
+            
+            if visited_for_printing.contains(&pred_ptr) {
+                writeln!(output, "Node {} (ref)", pred_id)?;
+            } else if *node_count < max_nodes {
+                print_node_recursive(pred_arc, node_ids, visited_for_printing, &new_prefix, output, node_count, max_nodes)?;
+            } else {
+                writeln!(output, "Node {} (truncated)", pred_id)?;
             }
         }
+
         Ok(())
     }
 
-    let mut visited_nodes = HashSet::new(); // Renamed visited
-    let mut count = 0; // Renamed node_count
-    let mut out_str = String::new(); // Renamed output
+    let mut node_ids = HashMap::new();
+    let mut visited_for_printing = HashSet::new();
+    let mut count = 0;
+    let mut out_str = String::new();
 
-    if roots.is_empty() {
-        return "GSS Forest: (No roots)".to_string();
-    }
-
+    if roots.is_empty() { return "GSS Forest: (No roots)".to_string(); }
     writeln!(&mut out_str, "GSS Forest (Max Nodes: {}):", max_nodes).unwrap();
 
-    for (i, root_arc_val) in roots.iter().enumerate() { // Renamed root
-        writeln!(&mut out_str, "Root {}: {:p}", i, Arc::as_ptr(root_arc_val)).unwrap();
-        if print_node_recursive(root_arc_val, &mut visited_nodes, 1, &mut count, max_nodes, &mut out_str).is_err() {
-            return format!("Error writing GSS structure");
+    for (i, root_arc) in roots.iter().enumerate() {
+        writeln!(&mut out_str, "Root {}:", i).unwrap();
+        if print_node_recursive(root_arc, &mut node_ids, &mut visited_for_printing, "  ", &mut count, max_nodes, &mut out_str).is_err() {
+            return "Error writing GSS structure".to_string();
         }
         if count >= max_nodes && i < roots.len() - 1 {
             writeln!(&mut out_str, "... (Truncated)").unwrap();
@@ -1494,6 +1520,7 @@ pub fn print_gss_forest(
 
     out_str
 }
+
 
 // Simplification methods
 // This is the main simplification routine. It uses a cache for structural sharing.
