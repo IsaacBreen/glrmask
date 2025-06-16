@@ -9,6 +9,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::BitOr;
+use std::fmt::{self, Display, Formatter};
 use std::sync::{Arc, Mutex};
 use std::cell::RefCell;
 
@@ -926,6 +927,47 @@ impl<'a> PartialEq for GrammarConstraintState<'a> {
 }
 
 impl<'a> Eq for GrammarConstraintState<'a> {}
+
+impl<'a> Display for GrammarConstraintState<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(f, "GrammarConstraintState ({} active tokenizer states):", self.state.len())?;
+        if self.state.is_empty() {
+            return Ok(());
+        }
+
+        let mut gss_roots = Vec::new();
+        let mut tokenizer_state_info = Vec::new();
+
+        for (tokenizer_state_id, glr_state) in &self.state {
+            if !glr_state.active_state.stack.is_empty() {
+                gss_roots.push(glr_state.active_state.stack.clone());
+                tokenizer_state_info.push(format!(
+                    "  - Tokenizer State {:>3}: GSS Root @ {:p} ({} predecessors)",
+                    tokenizer_state_id.0,
+                    Arc::as_ptr(&glr_state.active_state.stack),
+                    glr_state.active_state.stack.num_predecessors()
+                ));
+            } else {
+                tokenizer_state_info.push(format!(
+                    "  - Tokenizer State {:>3}: (Empty GSS)",
+                    tokenizer_state_id.0
+                ));
+            }
+        }
+
+        for info in tokenizer_state_info {
+            writeln!(f, "{}", info)?;
+        }
+
+        if !gss_roots.is_empty() {
+            writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
+            let gss_str = crate::datastructures::gss::print_gss_forest(&gss_roots, 50);
+            write!(f, "{}", gss_str)?;
+        }
+
+        Ok(())
+    }
+}
 
 impl<'a> GrammarConstraintState<'a> {
     #[time_it]
