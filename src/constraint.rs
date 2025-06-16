@@ -915,7 +915,7 @@ fn count_vocab_nodes(node: &VocabPrefixTreeNode) -> u64 {
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintState<'a> {
     pub(crate) parent: &'a GrammarConstraint,
-    state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
+    pub(crate) state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
 }
 
 impl<'a> PartialEq for GrammarConstraintState<'a> {
