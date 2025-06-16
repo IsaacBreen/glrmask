@@ -2023,15 +2023,6 @@ local_system:
           state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
       }
 
-      impl<'a> PartialEq for GrammarConstraintState<'a> {
-          fn eq(&self, other: &Self) -> bool {
-              // Compare parent by pointer to ensure they originate from the same constraint object.
-              std::ptr::eq(self.parent, other.parent) && self.state == other.state
-          }
-      }
-
-      impl<'a> Eq for GrammarConstraintState<'a> {}
-
       impl<'a> GrammarConstraintState<'a> {
           #[time_it]
           pub fn get_mask(&self) -> LLMTokenBV {
@@ -2818,8 +2809,8 @@ local_system:
           println!("Scenario 2: State after '#aa': {:?}", constraint_state2.state().keys().map(|k|k.0).collect::<Vec<_>>());
 
           // Assert equivalence
-          assert_eq!(constraint_state1.state(), constraint_state2.state(), "States from (commit '#' then 'a' then 'a') and (commit '#aa') should be equivalent.");
-          println!("\nAssertion passed: States are equivalent for multi-commit scenario.");
+          // assert_eq!(constraint_state1.state(), constraint_state2.state(), "States from (commit '#' then 'a' then 'a') and (commit '#aa') should be equivalent.");
+          // println!("\nAssertion passed: States are equivalent for multi-commit scenario.");
       }
 
       #[test]
@@ -4025,29 +4016,6 @@ local_system:
               println!("Constraint state is active after the full sequence.");
           } else if full_text_to_tokenize.is_empty() {
                println!("Constraint state was not stepped as the input string was empty and produced no tokens.");
-          }
-
-          if true {
-              println!("\n--- Testing commit equivalence for 'if x: ' and 'print(x)' ---");
-
-              let b1 = b"if x: ";
-              let b2 = b"print(x)";
-
-              // Scenario 1: Commit bytes separately
-              let mut state1 = grammar_constraint.init();
-              println!("Scenario 1: Committing b1: {:?}", String::from_utf8_lossy(b1));
-              state1.commit_bytes(b1);
-              println!("Scenario 1: Committing b2: {:?}", String::from_utf8_lossy(b2));
-              state1.commit_bytes(b2);
-
-              // Scenario 2: Commit concatenated bytes
-              let mut state2 = grammar_constraint.init();
-              let combined_bytes = [b1.as_ref(), b2.as_ref()].concat();
-              println!("Scenario 2: Committing combined bytes: {:?}", String::from_utf8_lossy(&combined_bytes));
-              state2.commit_bytes(&combined_bytes);
-
-              assert_eq!(state1, state2, "States from separate and combined commits should be equivalent.");
-              println!("--- Equivalence test passed ---");
           }
 
           if false {
@@ -6872,15 +6840,6 @@ local_system:
           state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
       }
 
-      impl<'a> PartialEq for GrammarConstraintState<'a> {
-          fn eq(&self, other: &Self) -> bool {
-              // Compare parent by pointer to ensure they originate from the same constraint object.
-              std::ptr::eq(self.parent, other.parent) && self.state == other.state
-          }
-      }
-
-      impl<'a> Eq for GrammarConstraintState<'a> {}
-
       impl<'a> GrammarConstraintState<'a> {
           #[time_it]
           pub fn get_mask(&self) -> LLMTokenBV {
@@ -7667,8 +7626,8 @@ local_system:
           println!("Scenario 2: State after '#aa': {:?}", constraint_state2.state().keys().map(|k|k.0).collect::<Vec<_>>());
 
           // Assert equivalence
-          assert_eq!(constraint_state1.state(), constraint_state2.state(), "States from (commit '#' then 'a' then 'a') and (commit '#aa') should be equivalent.");
-          println!("\nAssertion passed: States are equivalent for multi-commit scenario.");
+          // assert_eq!(constraint_state1.state(), constraint_state2.state(), "States from (commit '#' then 'a' then 'a') and (commit '#aa') should be equivalent.");
+          // println!("\nAssertion passed: States are equivalent for multi-commit scenario.");
       }
 
       #[test]
@@ -8874,29 +8833,6 @@ local_system:
               println!("Constraint state is active after the full sequence.");
           } else if full_text_to_tokenize.is_empty() {
                println!("Constraint state was not stepped as the input string was empty and produced no tokens.");
-          }
-
-          if true {
-              println!("\n--- Testing commit equivalence for 'if x: ' and 'print(x)' ---");
-
-              let b1 = b"if x: ";
-              let b2 = b"print(x)";
-
-              // Scenario 1: Commit bytes separately
-              let mut state1 = grammar_constraint.init();
-              println!("Scenario 1: Committing b1: {:?}", String::from_utf8_lossy(b1));
-              state1.commit_bytes(b1);
-              println!("Scenario 1: Committing b2: {:?}", String::from_utf8_lossy(b2));
-              state1.commit_bytes(b2);
-
-              // Scenario 2: Commit concatenated bytes
-              let mut state2 = grammar_constraint.init();
-              let combined_bytes = [b1.as_ref(), b2.as_ref()].concat();
-              println!("Scenario 2: Committing combined bytes: {:?}", String::from_utf8_lossy(&combined_bytes));
-              state2.commit_bytes(&combined_bytes);
-
-              assert_eq!(state1, state2, "States from separate and combined commits should be equivalent.");
-              println!("--- Equivalence test passed ---");
           }
 
           if false {
@@ -11749,15 +11685,6 @@ messages:
           state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
       }
 
-      impl<'a> PartialEq for GrammarConstraintState<'a> {
-          fn eq(&self, other: &Self) -> bool {
-              // Compare parent by pointer to ensure they originate from the same constraint object.
-              std::ptr::eq(self.parent, other.parent) && self.state == other.state
-          }
-      }
-
-      impl<'a> Eq for GrammarConstraintState<'a> {}
-
       impl<'a> GrammarConstraintState<'a> {
           #[time_it]
           pub fn get_mask(&self) -> LLMTokenBV {
@@ -12549,8 +12476,8 @@ messages:
           println!("Scenario 2: State after '#aa': {:?}", constraint_state2.state().keys().map(|k|k.0).collect::<Vec<_>>());
 
           // Assert equivalence
-          assert_eq!(constraint_state1.state(), constraint_state2.state(), "States from (commit '#' then 'a' then 'a') and (commit '#aa') should be equivalent.");
-          println!("\nAssertion passed: States are equivalent for multi-commit scenario.");
+          // assert_eq!(constraint_state1.state(), constraint_state2.state(), "States from (commit '#' then 'a' then 'a') and (commit '#aa') should be equivalent.");
+          // println!("\nAssertion passed: States are equivalent for multi-commit scenario.");
       }
 
       #[test]
@@ -13763,29 +13690,6 @@ messages:
                println!("Constraint state was not stepped as the input string was empty and produced no tokens.");
           }
 
-          if true {
-              println!("\n--- Testing commit equivalence for 'if x: ' and 'print(x)' ---");
-
-              let b1 = b"if x: ";
-              let b2 = b"print(x)";
-
-              // Scenario 1: Commit bytes separately
-              let mut state1 = grammar_constraint.init();
-              println!("Scenario 1: Committing b1: {:?}", String::from_utf8_lossy(b1));
-              state1.commit_bytes(b1);
-              println!("Scenario 1: Committing b2: {:?}", String::from_utf8_lossy(b2));
-              state1.commit_bytes(b2);
-
-              // Scenario 2: Commit concatenated bytes
-              let mut state2 = grammar_constraint.init();
-              let combined_bytes = [b1.as_ref(), b2.as_ref()].concat();
-              println!("Scenario 2: Committing combined bytes: {:?}", String::from_utf8_lossy(&combined_bytes));
-              state2.commit_bytes(&combined_bytes);
-
-              assert_eq!(state1, state2, "States from separate and combined commits should be equivalent.");
-              println!("--- Equivalence test passed ---");
-          }
-
           if false {
               // Ensure the parse state after stepping the constraint with all LLM tokens and committing an LLM token is the same as the parse state after stepping the parser itself tokens emitted by the tokenizer for that same LLM token.
               // In general, this should be true if all LLM tokens cleanly match grammar tokens (or, equivalently, if the only non-empty entry in the precompute tree is under the initial tokenizer state).
@@ -14595,95 +14499,88 @@ messages:
       ```
     metadata:
       filename: src/test_constraint_python.rs
-  - user: Add a new test along the lines of `test_aborted_tokenizer_restart_equivalence`
-      and `test_multi_commit_aborted_tokenizer_restart_equivalence`, but with grammar
-      `S -> A`, terminal `A ::= a+`, and LLM tokens `a` and `aa`. Commit `a` then
-      `a`, and with a different constraint state commit `aa`, and make sure the resulting
-      constraint states are identical.
+  - user: |-
+      I want to make it easier to run tests like where we take two bytestrings and a grammar constraint and first initialize a constraint state and commit the bytestrings one after another, and then we initialize another constraint state and concatentate the bytestrings and feed it all in at once, and then assert that the two constraint states are equal.
+      In particular, I'd like to append a block to the big test `test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab` (inside `if true {..}` to keep it separate) that does this for the tokens `if x: ` and `print(x)`.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I've reviewed the code you provided. I found a logical issue in the way your grammar transformation handles terminals that can be nullable (i.e., can match an empty string). The original implementation could incorrectly create self-referential rules like `A -> A`, which would cause issues during parser generation.
+      Hello! As a helpful assistant, I'd be happy to help you with your request. Here are the git diff patches for the requested changes.
 
-      I've prepared a patch that refactors this part of the code to be more robust and correct. Here are the changes:
+      I've added a `PartialEq` implementation for `GrammarConstraintState` to make writing tests like the one you described easier. Then, I've added the requested test block to `test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab`.
 
-      ### `src/interface/interface.rs`
-
-      I've corrected the logic for handling "sometimes-null" terminals in `GrammarDefinition::from_exprs`. The original code could accidentally modify the new productions it had just created for handling optionality, leading to invalid recursive rules. The new implementation separates the creation of new productions from the modification of existing ones, which resolves the issue and makes the logic clearer.
+      Here are the patches for the modified files:
 
       ```diff
-      --- a/src/interface/interface.rs
-      +++ b/src/interface/interface.rs
-      @@ -619,39 +619,40 @@
-               // 3.  Turn the “sometimes null” terminals into *optional* non-terminals
-               // ------------------------------------------------------------------
-      -        for terminal_name in may_be_null_terminals {
-      -            // (a) generate a fresh non-terminal name that will stand for
-      -            //       “   <terminal> | ε   ”.
-      +        let mut new_optional_productions = Vec::new();
-      +        let mut terminal_to_optional_nt_map = HashMap::new();
-      +
-      +        for terminal_name in &may_be_null_terminals {
-                   let opt_nt_name = Self::generate_unique_indexed_name(
-      -                &format!("{}Opt", terminal_name.trim_matches('"')), // base for uniqueness
-      +                &format!("{}Opt", terminal_name.trim_matches('"')),
-                       &mut per_base_counters,
-                       &mut all_names,
-                   );
-                   let opt_nt = NonTerminal(opt_nt_name.clone());
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -1218,6 +1218,16 @@
+           state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
+       }
        
-      -            // (b) create the two new productions:
-      -            //         <opt_nt>  ->  <terminal_name>
-      -            //         <opt_nt>  ->  ε
-      -            productions.push(Production {
-      +            new_optional_productions.push(Production {
-                       lhs: opt_nt.clone(),
-                       rhs: vec![Symbol::Terminal(Terminal(terminal_name.clone()))],
-                   });
-      -            productions.push(Production {
-      +            new_optional_productions.push(Production {
-                       lhs: opt_nt.clone(),
-      -                rhs: Vec::new(), // ε
-      +                rhs: Vec::new(),
-                   });
+      +impl<'a> PartialEq for GrammarConstraintState<'a> {
+      +    fn eq(&self, other: &Self) -> bool {
+      +        // Compare parent by pointer to ensure they originate from the same constraint object.
+      +        std::ptr::eq(self.parent, other.parent) && self.state == other.state
+      +    }
+      +}
+      +
+      +impl<'a> Eq for GrammarConstraintState<'a> {}
+      +
+       impl<'a> GrammarConstraintState<'a> {
+           #[time_it]
+           pub fn get_mask(&self) -> LLMTokenBV {
+
+      ```
+      ```diff
+      --- a/src/test_constraint_python.rs
+      +++ b/src/test_constraint_python.rs
+      @@ -600,6 +600,27 @@
+                println!("Constraint state was not stepped as the input string was empty and produced no tokens.");
+           }
        
-      -            // (c) replace every occurrence of the terminal in all existing
-      -            //     productions with the new optional non-terminal.
-      -            for prod in productions.iter_mut() {
-      -                for sym in &mut prod.rhs {
-      -                    if let Symbol::Terminal(t) = sym {
-      -                        if t.0 == terminal_name {
-      -                            *sym = Symbol::NonTerminal(opt_nt.clone());
-      -                        }
-      -                    }
-      +            terminal_to_optional_nt_map.insert(terminal_name.clone(), opt_nt);
-      +        }
+      +    if true {
+      +        println!("\n--- Testing commit equivalence for 'if x: ' and 'print(x)' ---");
       +
-      +        for prod in &mut productions {
-      +            for sym in &mut prod.rhs {
-      +                if let Symbol::Terminal(t) = sym {
-      +                    if let Some(opt_nt) = terminal_to_optional_nt_map.get(&t.0) {
-      +                        *sym = Symbol::NonTerminal(opt_nt.clone());
-      +                    }
-                       }
-                   }
-               }
+      +        let b1 = b"if x: ";
+      +        let b2 = b"print(x)";
       +
-      +        productions.extend(new_optional_productions);
-               // ------------------------------------------------------------------
-               //  End of nullability processing
-               // ------------------------------------------------------------------
+      +        // Scenario 1: Commit bytes separately
+      +        let mut state1 = grammar_constraint.init();
+      +        println!("Scenario 1: Committing b1: {:?}", String::from_utf8_lossy(b1));
+      +        state1.commit_bytes(b1);
+      +        println!("Scenario 1: Committing b2: {:?}", String::from_utf8_lossy(b2));
+      +        state1.commit_bytes(b2);
+      +
+      +        // Scenario 2: Commit concatenated bytes
+      +        let mut state2 = grammar_constraint.init();
+      +        let combined_bytes = [b1.as_ref(), b2.as_ref()].concat();
+      +        println!("Scenario 2: Committing combined bytes: {:?}", String::from_utf8_lossy(&combined_bytes));
+      +        state2.commit_bytes(&combined_bytes);
+      +
+      +        assert_eq!(state1, state2, "States from separate and combined commits should be equivalent.");
+      +        println!("--- Equivalence test passed ---");
+      +    }
+      +
+           if false {
+               // Ensure the parse state after stepping the constraint with all LLM tokens and committing an LLM token is the same as the parse state after stepping the parser itself tokens emitted by the tokenizer for that same LLM token.
+               // In general, this should be true if all LLM tokens cleanly match grammar tokens (or, equivalently, if the only non-empty entry in the precompute tree is under the initial tokenizer state).
 
       ```
 
-      This change should make your grammar compilation more reliable. Let me know if you have any other questions
+      Let me know if you have any other questions
     metadata:
   - user: |
       Git apply result:
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/interface/interface.rs
-      Applying patch to 'src/interface/interface.rs' using custom patcher...
-      Successfully applied patch and wrote to src/interface/interface.rs.
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/test_constraint_python.rs
+      Applying patch to 'src/test_constraint_python.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_python.rs.
     metadata:
 ...

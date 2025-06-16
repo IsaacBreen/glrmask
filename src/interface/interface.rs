@@ -611,40 +611,40 @@ impl GrammarDefinition {
         // ------------------------------------------------------------------
         // 3.  Turn the “sometimes null” terminals into *optional* non-terminals
         // ------------------------------------------------------------------
-        let mut new_optional_productions = Vec::new();
-        let mut terminal_to_optional_nt_map = HashMap::new();
-
-        for terminal_name in &may_be_null_terminals {
+        for terminal_name in may_be_null_terminals {
+            // (a) generate a fresh non-terminal name that will stand for
+            //       “   <terminal> | ε   ”.
             let opt_nt_name = Self::generate_unique_indexed_name(
-                &format!("{}Opt", terminal_name.trim_matches('"')),
+                &format!("{}Opt", terminal_name.trim_matches('"')), // base for uniqueness
                 &mut per_base_counters,
                 &mut all_names,
             );
             let opt_nt = NonTerminal(opt_nt_name.clone());
 
-            new_optional_productions.push(Production {
+            // (b) create the two new productions:
+            //         <opt_nt>  ->  <terminal_name>
+            //         <opt_nt>  ->  ε
+            productions.push(Production {
                 lhs: opt_nt.clone(),
                 rhs: vec![Symbol::Terminal(Terminal(terminal_name.clone()))],
             });
-            new_optional_productions.push(Production {
+            productions.push(Production {
                 lhs: opt_nt.clone(),
-                rhs: Vec::new(),
+                rhs: Vec::new(), // ε
             });
 
-            terminal_to_optional_nt_map.insert(terminal_name.clone(), opt_nt);
-        }
-
-        for prod in &mut productions {
-            for sym in &mut prod.rhs {
-                if let Symbol::Terminal(t) = sym {
-                    if let Some(opt_nt) = terminal_to_optional_nt_map.get(&t.0) {
-                        *sym = Symbol::NonTerminal(opt_nt.clone());
+            // (c) replace every occurrence of the terminal in all existing
+            //     productions with the new optional non-terminal.
+            for prod in productions.iter_mut() {
+                for sym in &mut prod.rhs {
+                    if let Symbol::Terminal(t) = sym {
+                        if t.0 == terminal_name {
+                            *sym = Symbol::NonTerminal(opt_nt.clone());
+                        }
                     }
                 }
             }
         }
-
-        productions.extend(new_optional_productions);
         // ------------------------------------------------------------------
         //  End of nullability processing
         // ------------------------------------------------------------------
