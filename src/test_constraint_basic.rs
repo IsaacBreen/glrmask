@@ -509,6 +509,67 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
 }
 
 #[test]
+fn test_a_plus_commit_equivalence() {
+    // Grammar: S -> A, where A is the terminal for `a+`.
+    // This test verifies that committing "a", "a", "a" is equivalent to committing "aaa".
+    // This tests the ability of the constraint to handle cases where multiple LLM tokens
+    // can form a single grammar token, by carrying over tokenizer state between commits.
+
+    // 1. Tokenizer for `a+`
+    let tokenizer_expr = groups![repeat1_fast(eat_u8(b'a'))];
+    let tokenizer = tokenizer_expr.build();
+
+    // 2. Grammar: S -> A
+    let productions = vec![prod("S", vec![t("A")])];
+
+    // 3. Map grammar terminal "A" to tokenizer group ID 0
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0));
+
+    // 4. Create the Parser
+    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone());
+
+    // 5. LLM vocabulary: "a" and "aaa"
+    let mut llm_token_map = LLMTokenMap::new();
+    let llm_a = LLMTokenID(0);
+    let llm_aaa = LLMTokenID(1);
+    llm_token_map.insert(b"a".to_vec(), llm_a);
+    llm_token_map.insert(b"aaa".to_vec(), llm_aaa);
+    let max_original_llm_token_id = 1;
+
+    // 6. Token name map for stats/debugging
+    let mut token_name_map = BiBTreeMap::new();
+    token_name_map.insert("A".to_string(), 0);
+
+    // 7. Create the GrammarConstraint
+    let constraint = GrammarConstraint::new(
+        tokenizer,
+        parser,
+        llm_token_map.clone(),
+        token_name_map,
+        max_original_llm_token_id,
+    );
+
+    // Scenario 1: Commit "a" three times
+    let mut state1 = constraint.init();
+    println!("Scenario 1: Committing 'a' (ID {})", llm_a.0);
+    state1.commit(llm_a);
+    println!("Scenario 1: Committing 'a' (ID {}) again", llm_a.0);
+    state1.commit(llm_a);
+    println!("Scenario 1: Committing 'a' (ID {}) a third time", llm_a.0);
+    state1.commit(llm_a);
+
+    // Scenario 2: Commit "aaa" once
+    let mut state2 = constraint.init();
+    println!("\nScenario 2: Committing 'aaa' (ID {})", llm_aaa.0);
+    state2.commit(llm_aaa);
+
+    // Assert equivalence
+    assert_eq!(state1.state(), state2.state(), "States from (commit 'a' x3) and (commit 'aaa') should be equivalent.");
+    println!("\nAssertion passed: States are equivalent.");
+}
+
+#[test]
 fn test_hideous_ambiguity() {
     // 1. Define the grammar
     let productions = vec![
