@@ -82,7 +82,7 @@ impl BitOr<&TerminalBV> for &TerminalInfoValue {
     fn bitor(self, rhs: &TerminalBV) -> Self::Output {
         TerminalInfoValue {
             union: &self.union | rhs,
-            intersection: &self.intersection | rhs,
+            intersection: &self.intersection & rhs,
         }
     }
 }
@@ -90,24 +90,7 @@ impl BitOr<&TerminalBV> for &TerminalInfoValue {
 impl BitOrAssign<&TerminalBV> for TerminalInfoValue {
     fn bitor_assign(&mut self, rhs: &TerminalBV) {
         self.union |= rhs;
-        self.intersection |= rhs;
-    }
-}
-
-impl Sub<&TerminalBV> for &TerminalInfoValue {
-    type Output = TerminalInfoValue;
-    fn sub(self, rhs: &TerminalBV) -> Self::Output {
-        TerminalInfoValue {
-            union: &self.union - rhs,
-            intersection: &self.intersection - rhs,
-        }
-    }
-}
-
-impl SubAssign<&TerminalBV> for TerminalInfoValue {
-    fn sub_assign(&mut self, rhs: &TerminalBV) {
-        self.union -= rhs;
-        self.intersection -= rhs;
+        self.intersection &= rhs;
     }
 }
 
@@ -133,7 +116,7 @@ impl BitOr<&TerminalInfoValue> for &TerminalInfoValue {
     fn bitor(self, rhs: &TerminalInfoValue) -> Self::Output {
         TerminalInfoValue {
             union: &self.union | &rhs.union,
-            intersection: &self.intersection | &rhs.intersection,
+            intersection: &self.intersection & &rhs.intersection,
         }
     }
 }
@@ -141,7 +124,7 @@ impl BitOr<&TerminalInfoValue> for &TerminalInfoValue {
 impl BitOrAssign<&TerminalInfoValue> for TerminalInfoValue {
     fn bitor_assign(&mut self, rhs: &TerminalInfoValue) {
         self.union |= &rhs.union;
-        self.intersection |= &rhs.intersection;
+        self.intersection &= &rhs.intersection;
     }
 }
 
