@@ -1002,7 +1002,7 @@ pub fn disallow_terminals_and_prune_arc(
         let mut new_acc = current_acc.clone();
         disallowed_terminals_union_assign(new_acc.disallowed_terminals_mut(), disallowed_terminals.clone());
         if new_acc.is_alive() {
-            Some((new_acc, false))
+            Some((new_acc, true))
         } else {
             None // Prune this node
         }
