@@ -12,6 +12,7 @@ use profiler_macro::{time_it, timeit};
 use crate::glr::parser::ParseStateEdgeContent;
 use crate::constraint::{LLMTokenBV, TerminalBV};
 use crate::datastructures::gss::acc_mod::Acc;
+use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::glr::grammar::Terminal;
 use crate::tokenizer::TokenizerStateID;
 use crate::types::TerminalID;
@@ -52,6 +53,10 @@ impl TerminalInfoValue {
 
     pub fn insert(&mut self, index: usize) {
         self.union.insert(index);
+    }
+
+    pub fn is_disjoint(&self, other: &HybridBitset) -> bool {
+        self.union.is_disjoint(&other)
     }
 }
 
@@ -103,6 +108,33 @@ impl SubAssign<&TerminalBV> for TerminalInfoValue {
     fn sub_assign(&mut self, rhs: &TerminalBV) {
         self.union -= rhs;
         self.intersection -= rhs;
+    }
+}
+
+impl BitAnd<&TerminalInfoValue> for &TerminalInfoValue {
+    type Output = TerminalInfoValue;
+    fn bitand(self, rhs: &TerminalInfoValue) -> Self::Output {
+        TerminalInfoValue {
+            union: &self.union & &rhs.union,
+            intersection: &self.intersection & &rhs.intersection,
+        }
+    }
+}
+
+impl BitAndAssign<&TerminalInfoValue> for TerminalInfoValue {
+    fn bitand_assign(&mut self, rhs: &TerminalInfoValue) {
+        self.union &= &rhs.union;
+        self.intersection &= &rhs.intersection;
+    }
+}
+
+impl BitOr<&TerminalInfoValue> for &TerminalInfoValue {
+    type Output = TerminalInfoValue;
+    fn bitor(self, rhs: &TerminalInfoValue) -> Self::Output {
+        TerminalInfoValue {
+            union: &self.union | &rhs.union,
+            intersection: &self.intersection | &rhs.intersection,
+        }
     }
 }
 
@@ -402,8 +434,8 @@ pub fn disallowed_terminals_intersect_assign(left: &mut TerminalInfo, right: Ter
     all_keys.extend(right.keys());
     for tokenizer_state_id in all_keys {
         // An absent key means "no terminals disallowed" -> zeros()
-        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
-        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
         let intersection = &left_value & &right_value;
         if !intersection.is_empty() {
             left.insert(tokenizer_state_id, intersection);
@@ -420,8 +452,8 @@ pub fn disallowed_terminals_union_assign(left: &mut TerminalInfo, right: Termina
     all_keys.extend(right.keys());
     for tokenizer_state_id in all_keys {
         // An absent key means "no terminals disallowed" -> zeros()
-        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
-        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
         let union = &left_value | &right_value;
         if !union.is_empty() {
             left.insert(tokenizer_state_id, union);
