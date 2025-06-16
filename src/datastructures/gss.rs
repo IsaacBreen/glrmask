@@ -14,6 +14,8 @@ use crate::datastructures::gss::acc_mod::Acc;
 use crate::glr::grammar::Terminal;
 use crate::tokenizer::TokenizerStateID;
 use crate::types::TerminalID;
+use crate::datastructures::hybrid_bitset::HybridBitset;
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub, SubAssign};
 
 // Type aliases for cleaner signatures, now concrete
 pub type MaxDepth = usize;
@@ -22,250 +24,94 @@ type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 
 pub type LLMTokenInfo = Option<LLMTokenBV>;
-pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalBV>;
+pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalInfoValue>;
 
-pub trait PathAccumulator: Sized + Clone + Debug + Eq + PartialEq + Ord + PartialOrd + Hash {
-    fn union_assign(&mut self, other: Self);
-    fn intersect_assign(&mut self, right: Self); // Renamed from pop_assign
-    fn union(mut self, other: Self) -> Self {
-        self.union_assign(other);
-        self
-    }
-    fn intersect(mut self, right: Self) -> Self { // Renamed from pop
-        self.intersect_assign(right);
-        self
-    }
-    fn intersect_has_effect(&self, right: &Self) -> bool;
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TerminalInfoValue {
+    pub union: TerminalBV,
+    pub intersection: TerminalBV,
 }
 
-impl PathAccumulator for () {
-    fn union_assign(&mut self, _other: Self) { }
-    fn intersect_assign(&mut self, _right: Self) { } // Renamed from pop_assign
-    fn intersect_has_effect(&self, _right: &Self) -> bool { false }
+impl TerminalInfoValue {
+    pub fn new(union: TerminalBV, intersection: TerminalBV) -> Self {
+        Self { union, intersection }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.union.is_empty()
+    }
 }
 
-impl PathAccumulator for Option<LLMTokenBV> {
-    // #[time_it]
+impl Default for TerminalInfoValue {
+    fn default() -> Self {
+        Self {
+            union: TerminalBV::zeros(),
+            intersection: TerminalBV::max_ones(),
+        }
+    }
+}
+
+macro_rules! impl_bin_op_for_terminal_info_value {
+    ($trait:ident, $method:ident, $op:tt) => {
+        impl<'a> std::ops::$trait<&'a HybridBitset> for &'a TerminalInfoValue {
+            type Output = TerminalInfoValue;
+            fn $method(self, rhs: &'a HybridBitset) -> Self::Output {
+                TerminalInfoValue {
+                    union: &self.union $op rhs,
+                    intersection: &self.intersection $op rhs,
+                }
+            }
+        }
+        impl std::ops::$trait<HybridBitset> for TerminalInfoValue {
+            type Output = TerminalInfoValue;
+            fn $method(self, rhs: HybridBitset) -> Self::Output {
+                TerminalInfoValue {
+                    union: self.union $op &rhs,
+                    intersection: self.intersection $op &rhs,
+                }
+            }
+        }
+    };
+}
+
+macro_rules! impl_bin_op_assign_for_terminal_info_value {
+    ($trait:ident, $method:ident, $op:tt) => {
+        impl<'a> std::ops::$trait<&'a HybridBitset> for TerminalInfoValue {
+            fn $method(&mut self, rhs: &'a HybridBitset) {
+                self.union $op rhs;
+                self.intersection $op rhs;
+            }
+        }
+        impl std::ops::$trait<HybridBitset> for TerminalInfoValue {
+            fn $method(&mut self, rhs: HybridBitset) {
+                self.union $op rhs.clone();
+                self.intersection $op rhs;
+            }
+        }
+    };
+}
+
+impl_bin_op_for_terminal_info_value!(BitOr, bitor, |);
+impl_bin_op_for_terminal_info_value!(BitAnd, bitand, &);
+impl_bin_op_for_terminal_info_value!(Sub, sub, -);
+
+impl_bin_op_assign_for_terminal_info_value!(BitOrAssign, bitor_assign, |=);
+impl_bin_op_assign_for_terminal_info_value!(BitAndAssign, bitand_assign, &=);
+impl_bin_op_assign_for_terminal_info_value!(SubAssign, sub_assign, -=);
+
+impl PathAccumulator for TerminalInfoValue {
     fn union_assign(&mut self, other: Self) {
-        match (self.as_mut(), other) {
-            (Some(self_bv), Some(other_bv)) => {
-                if self_bv.inner() == other_bv.inner() {
-                    return;
-                }
-                if self_bv.is_empty() {
-                    *self_bv = other_bv;
-                    return;
-                }
-                if other_bv.is_empty() {
-                    return;
-                }
-                if false {
-                    // let BIG_RANGE_LEN = 1;
-                    // if other_bv.inner().ranges_len() > BIG_RANGE_LEN && self_bv.inner().ranges_len() > BIG_RANGE_LEN {
-                    //     println!("WARNING: union_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN && other_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
-                    //     println!("self_bv: {:?}", &self_bv);
-                    //     println!("other_bv: {:?}", &other_bv);
-                    // }
-
-                    // Count number of 'holes' - gaps between ranges of size 1
-                    let BIG_HOLE_LEN = 20;
-                    let mut self_holes = 0;
-                    let mut right_holes = 0;
-                    let mut self_holes_pos = Vec::new();
-                    let mut right_holes_pos = Vec::new();
-                    let mut ranges = self_bv.inner().ranges();
-                    let mut prev_range_end;
-                    if let Some(start_range) = ranges.next() {
-                        prev_range_end = *start_range.end();
-                        for range in ranges {
-                            let gap = range.start() - prev_range_end;
-                            if gap == 2 {
-                                self_holes += 1;
-                                self_holes_pos.push(range.start() - 1);
-                            }
-                            prev_range_end = *range.end();
-                        }
-                    }
-                    let mut ranges = other_bv.inner().ranges();
-                    let mut prev_range_end;
-                    if let Some(start_range) = ranges.next() {
-                        prev_range_end = *start_range.end();
-                        for range in ranges {
-                            let gap = range.start() - prev_range_end;
-                            if gap == 2 {
-                                right_holes += 1;
-                                right_holes_pos.push(range.start() - 1);
-                            }
-                            prev_range_end = *range.end();
-                        }
-                    }
-                    // let min_hole_pos = 2560;
-                    // let max_hole_pos = 4343;
-                    let min_hole_pos = 0;
-                    let max_hole_pos = 1000000;
-                    let is_eligible = self_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos) || right_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos);
-                    if (self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN) && is_eligible {
-                        eprintln!("WARNING: union_assign: self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
-                        eprintln!("self_bv: {:?}", &self_bv);
-                        eprintln!("other_bv: {:?}", &other_bv);
-                        eprintln!("self_holes_pos: {:?}", &self_holes_pos);
-                        eprintln!("right_holes_pos: {:?}", &right_holes_pos);
-                        // panic!("union_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
-                    }
-                    //
-                    // let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), other_bv.inner().ranges_len());
-
-                    // fn round_down_to_power_of_10(x: usize) -> usize {
-                    //     if x == 0 {
-                    //         return 0;
-                    //     }
-                    //
-                    //     let mut power = 1;
-                    //     while power * 10 <= x {
-                    //         power *= 10;
-                    //     }
-                    //     power
-                    // }
-                    // let self_bv_len = round_down_to_power_of_10(self_bv.inner().ranges_len());
-                    // let other_bv_len = round_down_to_power_of_10(other_bv.inner().ranges_len());
-                    // let overlap_len = round_down_to_power_of_10((&*self_bv & &other_bv).inner().ranges_len());
-                    // let difference_len = round_down_to_power_of_10(((&*self_bv | &other_bv) - (&*self_bv & &other_bv)).inner().ranges_len());
-                    // let time_str = format!("union_assign: self_bv.inner().ranges_len(): {}, other_bv.inner().ranges_len(): {}, overlap_len: {}, difference_len: {}",
-                    //     self_bv_len, other_bv_len, overlap_len, difference_len
-                    // );
-                }
-                // timeit!(time_str,
-                    *self_bv |= other_bv
-                // );
-                // An empty bitset resulting from a union is still Some(empty_bv), not None.
-            }
-            (None, Some(other_bv)) => {
-                *self = Some(LLMTokenBV::max_ones());
-            }
-            (Some(_), None) => {
-                *self = Some(LLMTokenBV::max_ones());
-            }
-            (None, None) => {
-                // self remains None
-            }
-        }
+        self.union |= other.union;
+        self.intersection &= other.intersection;
     }
 
-    // #[time_it]
     fn intersect_assign(&mut self, right: Self) {
-        match (self.as_mut(), right) {
-            (Some(self_bv), Some(right_bv)) => {
-                if self_bv.inner() == right_bv.inner() {
-                    return;
-                }
-                if self_bv.is_empty() {
-                    return;
-                }
-                if right_bv.is_empty() {
-                    *self_bv = right_bv;
-                    return;
-                }
-                // let BIG_RANGE_LEN = 1;
-                // if right_bv.inner().ranges_len() > BIG_RANGE_LEN && self_bv.inner().ranges_len() > BIG_RANGE_LEN {
-                //     println!("WARNING: intersection_assign: self_bv.inner().ranges_len() > BIG_RANGE_LEN && right_bv.inner().ranges_len() > BIG_RANGE_LEN, self_bv.inner().ranges_len(): {}, right_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), right_bv.inner().ranges_len());
-                //     println!("self_bv: {:?}", &self_bv);
-                //     println!("right_bv: {:?}", &right_bv);
-                // }
-
-                // Count number of 'holes' - gaps between ranges of size 1
-                if false {
-                    let BIG_HOLE_LEN = 10;
-                    let mut self_holes = 0;
-                    let mut right_holes = 0;
-                    let mut self_holes_pos = Vec::new();
-                    let mut right_holes_pos = Vec::new();
-                    let mut ranges = self_bv.inner().ranges();
-                    let mut prev_range_end;
-                    if let Some(start_range) = ranges.next() {
-                        prev_range_end = *start_range.end();
-                        for range in ranges {
-                            let gap = range.start() - prev_range_end;
-                            if gap == 2 {
-                                self_holes += 1;
-                                self_holes_pos.push(range.start() - 1);
-                            }
-                            prev_range_end = *range.end();
-                        }
-                    }
-                    let mut ranges = right_bv.inner().ranges();
-                    let mut prev_range_end;
-                    if let Some(start_range) = ranges.next() {
-                        prev_range_end = *start_range.end();
-                        for range in ranges {
-                            let gap = range.start() - prev_range_end;
-                            if gap == 2 {
-                                right_holes += 1;
-                                right_holes_pos.push(range.start() - 1);
-                            }
-                            prev_range_end = *range.end();
-                        }
-                    }
-                    let min_hole_pos = 2560;
-                    let max_hole_pos = 4343;
-                    let is_eligible = self_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos) || right_holes_pos.iter().any(|&pos| min_hole_pos < pos && pos < max_hole_pos);
-                    if (self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN) && is_eligible {
-                        eprintln!("WARNING: intersection_assign: self_holes > BIG_HOLE_LEN || right_holes > BIG_HOLE_LEN, self_holes: {}, right_holes: {}", self_holes, right_holes);
-                        eprintln!("self_bv: {:?}", &self_bv);
-                        eprintln!("right_bv: {:?}", &right_bv);
-                        eprintln!("self_holes_pos: {:?}", &self_holes_pos);
-                        eprintln!("right_holes_pos: {:?}", &right_holes_pos);
-                        // panic!("intersection_assign: self_holes > BIG_HOLE_LEN && right_holes > BIG_HOLE_LEN");
-                    }
-                    //
-                    // // let time_str = format!("intersection_assign: self_bv.inner().ranges_len(): {}, right_bv.inner().ranges_len(): {}", self_bv.inner().ranges_len(), right_bv.inner().ranges_len());
-                    //
-                    // // fn round_down_to_power_of_10(x: usize) -> usize {
-                    // //     if x == 0 {
-                    // //         return 0;
-                    // //     }
-                    // //
-                    // //     let mut power = 1;
-                    // //     while power * 10 <= x {
-                    // //         power *= 10;
-                    // //     }
-                    // //     power
-                    // // }
-                    // // let self_bv_len = round_down_to_power_of_10(self_bv.inner().ranges_len());
-                    // // let right_bv_len = round_down_to_power_of_10(right_bv.inner().ranges_len());
-                    // // let overlap_len = round_down_to_power_of_10((&*self_bv & &right_bv).inner().ranges_len());
-                    // // let difference_len = round_down_to_power_of_10(((&*self_bv | &right_bv) - (&*self_bv & &right_bv)).inner().ranges_len());
-                    // // let time_str = format!("intersection_assign: self_bv.inner().ranges_len(): {}, right_bv.inner().ranges_len(): {}, overlap_len: {}, difference_len: {}",
-                    // //     self_bv_len, right_bv_len, overlap_len, difference_len
-                    // // );
-                }
-                // // timeit!(time_str,
-                *self_bv &= right_bv
-                // );
-            }
-            (None, Some(right_bv)) => {
-                *self = Some(right_bv);
-            }
-            (Some(_), None) => {}
-            (None, None) => {}
-        }
+        self.union &= right.union;
+        self.intersection &= right.intersection;
     }
 
     fn intersect_has_effect(&self, right: &Self) -> bool {
-        // self.clone().intersect(right.clone()) != *self
-        match (self, right) {
-            (Some(self_bv), Some(right_bv)) => {
-                self_bv.is_subset(right_bv)
-            }
-            (None, Some(right_bv)) => {
-                true
-            }
-            (Some(_), None) => {
-                false
-            }
-            (None, None) => {
-                false
-            }
-        }
+        !self.union.is_subset(&right.union) || !self.intersection.is_subset(&right.intersection)
     }
 }
 
@@ -292,12 +138,14 @@ pub fn disallowed_terminals_intersect_assign(left: &mut TerminalInfo, right: Ter
     all_keys.extend(left.keys());
     all_keys.extend(right.keys());
     for tokenizer_state_id in all_keys {
-        // An absent key means "no terminals disallowed" -> zeros()
-        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
-        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
-        let intersection = &left_value & &right_value;
-        if !intersection.is_empty() {
-            left.insert(tokenizer_state_id, intersection);
+        // An absent key means "no terminals disallowed" -> default()
+        let mut left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_default();
+        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_default();
+        
+        left_value.union_assign(right_value);
+
+        if !left_value.is_empty() {
+            left.insert(tokenizer_state_id, left_value);
         } else {
             left.remove(&tokenizer_state_id);
         }
@@ -310,22 +158,26 @@ pub fn disallowed_terminals_union_assign(left: &mut TerminalInfo, right: Termina
     all_keys.extend(left.keys());
     all_keys.extend(right.keys());
     for tokenizer_state_id in all_keys {
-        // An absent key means "no terminals disallowed" -> zeros()
-        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
-        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
-        let union = &left_value | &right_value;
-        if !union.is_empty() {
-            left.insert(tokenizer_state_id, union);
+        // An absent key means "no terminals disallowed" -> default()
+        let mut left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_default();
+        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_default();
+        
+        left_value.intersect_assign(right_value);
+
+        if !left_value.is_empty() {
+            left.insert(tokenizer_state_id, left_value);
         } else {
             left.remove(&tokenizer_state_id);
         }
     }
 }
 
+#[time_it]
 pub fn disallow_terminals_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
-    for (tokenizer_state_id, terminals_to_disallow) in right {
-        let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalBV::zeros);
-        *entry |= terminals_to_disallow;
+    for (tokenizer_state_id, right_value) in right {
+        let entry = left.entry(*tokenizer_state_id).or_default();
+        entry.union |= &right_value.union;
+        entry.intersection |= &right_value.intersection;
     }
 }
 
@@ -387,7 +239,7 @@ pub mod acc_mod {
     use std::collections::{BTreeMap, BTreeSet};
     use profiler_macro::time_it;
     use crate::constraint::{LLMTokenBV, TerminalBV};
-    use crate::datastructures::gss::{disallowed_terminals_union_assign, disallowed_terminals_intersect_assign, LLMTokenInfo, PathAccumulator, TerminalInfo};
+    use crate::datastructures::gss::{disallowed_terminals_union_assign, disallowed_terminals_intersect_assign, LLMTokenInfo, PathAccumulator, TerminalInfo, TerminalInfoValue};
     use crate::glr::grammar::Symbol::Terminal;
     use crate::tokenizer::TokenizerStateID;
     use crate::types::TerminalID;
@@ -447,8 +299,8 @@ pub mod acc_mod {
             if self.disallowed_terminals.is_empty() {
                 return false;
             }
-            for disallowed_terminals in self.disallowed_terminals.values() {
-                if !disallowed_terminals.is_empty() {
+            for disallowed_terminals_value in self.disallowed_terminals.values() {
+                if !disallowed_terminals_value.is_empty() {
                     return false;
                 }
             }
@@ -696,11 +548,11 @@ impl GSSNode {
     }
 
     pub fn peek_iter(&self) -> impl Iterator<Item = GSSPeek<'_>> {
-        self.predecessors.values().flat_map(|m| m.iter()).map(|(edge_val, pred_arc)| {
+        self.predecessors.values().flat_map(|m| m.iter()).map(|(edge_val, pred_arc_val)| {
             GSSPeek {
                 parent_node: self,
                 edge_value: edge_val,
-                predecessor_node: pred_arc,
+                predecessor_node: pred_arc_val,
             }
         })
     }
@@ -750,10 +602,10 @@ impl GSSNode {
                 results.push(path);
             } else {
                 for (_, preds_for_depth) in &node.predecessors {
-                    for (edge_val, pred_arc) in preds_for_depth {
+                    for (edge_val, pred_arc_val) in preds_for_depth {
                         let mut new_path = path.clone();
                         new_path.push((edge_val.clone(), node.acc.acc().clone()));
-                        queue.push_back((pred_arc.as_ref(), new_path));
+                        queue.push_back((pred_arc_val.as_ref(), new_path));
                     }
                 }
             }
@@ -1000,7 +852,7 @@ pub fn disallow_terminals_and_prune_arc(
 ) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
-        disallowed_terminals_union_assign(new_acc.disallowed_terminals_mut(), disallowed_terminals.clone());
+        disallow_terminals_assign(new_acc.disallowed_terminals_mut(), disallowed_terminals);
         if new_acc.is_alive() {
             Some((new_acc, true))
         } else {
@@ -1026,7 +878,7 @@ pub fn prune_disallowed_terminals(
             if let Some(actual_bv_for_state) = terminals_map.get(gss_state_id) {
                 // If any terminal disallowed by GSS is also matched by current segment, prune.
                 // This means (gss_disallowed_bv AND actual_bv_for_state) must be empty.
-                if !gss_disallowed_bv.is_disjoint(actual_bv_for_state) {
+                if !gss_disallowed_bv.union.is_disjoint(actual_bv_for_state) {
                     return None;
                 }
             }
@@ -1053,8 +905,10 @@ pub fn map_allowed_terminals_tokenizer_states(
 
         for (old_id, bv) in current_acc.disallowed_terminals() {
             if let Some(new_id) = map.get(old_id) {
-                *new_disallowed_terminals.entry(*new_id)
-                    .or_insert_with(TerminalBV::zeros) |= bv;
+                let entry = new_disallowed_terminals.entry(*new_id).or_default();
+                entry.union |= &bv.union;
+                entry.intersection |= &bv.intersection;
+
                 if new_disallowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
                     changed = true;
                 }
@@ -1605,3 +1459,4 @@ mod tests {
         assert_eq!(all_nodes.len(), 7, "Incorrect number of unique nodes in simplified graph. Actual: {:?}", all_nodes.len());
     }
 }
+
