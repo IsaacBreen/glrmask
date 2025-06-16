@@ -411,14 +411,14 @@ fn compute_hash_key(predecessors: &NodeMap) -> u64 {
 }
 
 #[time_it]
-pub fn disallowed_terminals_intersect_assign(left: &mut TerminalInfo, right: BTreeMap<TokenizerStateID, TerminalBV>) {
+pub fn disallowed_terminals_intersect_assign(left: &mut TerminalInfo, right: TerminalInfo) {
     let mut all_keys = BTreeSet::new();
     all_keys.extend(left.keys());
     all_keys.extend(right.keys());
     for tokenizer_state_id in all_keys {
         // An absent key means "no terminals disallowed" -> zeros()
         let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
-        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
         let intersection = &left_value & &right_value;
         if !intersection.is_empty() {
             left.insert(tokenizer_state_id, intersection);
@@ -429,14 +429,14 @@ pub fn disallowed_terminals_intersect_assign(left: &mut TerminalInfo, right: BTr
 }
 
 #[time_it]
-pub fn disallowed_terminals_union_assign(left: &mut TerminalInfo, right: BTreeMap<TokenizerStateID, TerminalBV>) {
+pub fn disallowed_terminals_union_assign(left: &mut TerminalInfo, right: TerminalInfo) {
     let mut all_keys = BTreeSet::new();
     all_keys.extend(left.keys());
     all_keys.extend(right.keys());
     for tokenizer_state_id in all_keys {
         // An absent key means "no terminals disallowed" -> zeros()
         let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
-        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
         let union = &left_value | &right_value;
         if !union.is_empty() {
             left.insert(tokenizer_state_id, union);
