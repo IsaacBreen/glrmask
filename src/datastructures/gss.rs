@@ -402,15 +402,11 @@ pub fn disallowed_terminals_intersect_assign(left: &mut TerminalInfo, right: Ter
     all_keys.extend(right.keys());
     for tokenizer_state_id in all_keys {
         // An absent key means "no terminals disallowed" -> zeros()
-        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
-        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
-        
-        let new_union = &left_value.union & &right_value.union;
-        let new_intersection = &left_value.intersection & &right_value.intersection;
-        let new_value = TerminalInfoValue::new(new_union, new_intersection);
-
-        if !new_value.is_empty() {
-            left.insert(tokenizer_state_id, new_value);
+        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+        let intersection = &left_value & &right_value;
+        if !intersection.is_empty() {
+            left.insert(tokenizer_state_id, intersection);
         } else {
             left.remove(&tokenizer_state_id);
         }
@@ -424,15 +420,11 @@ pub fn disallowed_terminals_union_assign(left: &mut TerminalInfo, right: Termina
     all_keys.extend(right.keys());
     for tokenizer_state_id in all_keys {
         // An absent key means "no terminals disallowed" -> zeros()
-        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
-        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
-        
-        let new_union = &left_value.union | &right_value.union;
-        let new_intersection = &left_value.intersection & &right_value.intersection;
-        let new_value = TerminalInfoValue::new(new_union, new_intersection);
-
-        if !new_value.is_empty() {
-            left.insert(tokenizer_state_id, new_value);
+        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+        let union = &left_value | &right_value;
+        if !union.is_empty() {
+            left.insert(tokenizer_state_id, union);
         } else {
             left.remove(&tokenizer_state_id);
         }
@@ -564,8 +556,8 @@ pub mod acc_mod {
             if self.disallowed_terminals.is_empty() {
                 return false;
             }
-            for disallowed_terminals_value in self.disallowed_terminals.values() {
-                if !disallowed_terminals_value.is_empty() {
+            for disallowed_terminals in self.disallowed_terminals.values() {
+                if !disallowed_terminals.is_empty() {
                     return false;
                 }
             }
@@ -1139,11 +1131,11 @@ pub fn prune_disallowed_terminals(
 ) {
     // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-        for (gss_state_id, gss_disallowed_tiv) in current_acc.disallowed_terminals() {
+        for (gss_state_id, gss_disallowed_bv) in current_acc.disallowed_terminals() {
             if let Some(actual_bv_for_state) = terminals_map.get(gss_state_id) {
                 // If any terminal disallowed by GSS is also matched by current segment, prune.
-                // This means (gss_disallowed_bv.union AND actual_bv_for_state) must be empty.
-                if !gss_disallowed_tiv.union.is_disjoint(actual_bv_for_state) {
+                // This means (gss_disallowed_bv AND actual_bv_for_state) must be empty.
+                if !gss_disallowed_bv.is_disjoint(actual_bv_for_state) {
                     return None;
                 }
             }
@@ -1168,14 +1160,11 @@ pub fn map_allowed_terminals_tokenizer_states(
         let mut new_disallowed_terminals = BTreeMap::new();
         let mut changed = false;
 
-        for (old_id, tiv) in current_acc.disallowed_terminals() {
+        for (old_id, bv) in current_acc.disallowed_terminals() {
             if let Some(new_id) = map.get(old_id) {
-                let entry = new_disallowed_terminals.entry(*new_id)
-                    .or_insert_with(TerminalInfoValue::zeros);
-                entry.union |= &tiv.union;
-                entry.intersection |= &tiv.intersection;
-
-                if new_disallowed_terminals.get(new_id) != Some(tiv) || old_id != new_id { // Basic change check
+                *new_disallowed_terminals.entry(*new_id)
+                    .or_insert_with(TerminalInfoValue::zeros) |= bv;
+                if new_disallowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
                     changed = true;
                 }
             } else {
