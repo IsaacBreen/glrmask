@@ -1487,14 +1487,44 @@ pub fn print_gss_forest(
             let node_ids_len = node_ids.len();
             let pred_id = *node_ids.entry(pred_ptr).or_insert(node_ids_len);
 
-            write!(output, "{}{}Edge {:?} -> ", prefix, connector, edge_val)?;
-            
+            // Print the edge and child node header
+            let acc_child = format_acc(pred_arc.acc2());
+            let child_depth = pred_arc.max_depth;
             if visited_for_printing.contains(&pred_ptr) {
-                writeln!(output, "Node {} (ref)", pred_id)?;
-            } else if *node_count < max_nodes {
-                print_node_recursive(pred_arc, node_ids, visited_for_printing, &new_prefix, node_count, max_nodes, output)?;
+                // already shown
+                writeln!(
+                    output,
+                    "{}{} Edge {:?} -> Node {} (ref)",
+                    prefix,
+                    connector,
+                    edge_val.state_id,
+                    pred_id
+                )?;
             } else {
-                writeln!(output, "Node {} (truncated)", pred_id)?;
+                // print child header
+                writeln!(
+                    output,
+                    "{}{} Edge {:?} -> Node {} (depth {}) {}",
+                    prefix,
+                    connector,
+                    edge_val.state_id,
+                    pred_id,
+                    child_depth,
+                    acc_child
+                )?;
+                *node_count += 1;
+                // recurse into grandchildren
+                if *node_count < max_nodes {
+                    print_node_recursive(
+                        pred_arc,
+                        node_ids,
+                        visited_for_printing,
+                        &new_prefix,
+                        node_count,
+                        max_nodes,
+                        output,
+                    )?;
+                }
             }
         }
 
