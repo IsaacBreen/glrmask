@@ -5,6 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub, SubAssign};
+use bimap::BiBTreeMap;
 use deterministic_hash::DeterministicHasher;
 use std::any::{Any, TypeId};
 use profiler_macro::{time_it, timeit};
@@ -1424,7 +1425,7 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats { // Takes slice of refe
 }
 
 /// Formats the accumulator for concise display.
-fn format_acc(acc: &acc_mod::Acc) -> String {
+fn format_acc(acc: &acc_mod::Acc, terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> String {
     let llm_info = match acc.acc() {
         None => "LLM(Any)".to_string(),
         Some(bv) if bv.is_empty() => "LLM(None)".to_string(),
@@ -1434,16 +1435,44 @@ fn format_acc(acc: &acc_mod::Acc) -> String {
     let disallowed_info = if acc.disallowed_terminals().is_empty() {
         "".to_string()
     } else {
-        let count = acc.disallowed_terminals().values().map(|v| v.union.len()).sum::<usize>();
-        format!(", Disallowed({} total)", count)
+        let mut parts = Vec::new();
+        for (tokenizer_state_id, terminal_info_value) in acc.disallowed_terminals() {
+            if terminal_info_value.union.is_empty() {
+                continue;
+            }
+            let mut terminal_names = Vec::new();
+            for terminal_id_val in terminal_info_value.union.iter() {
+                let terminal_id = TerminalID(terminal_id_val);
+                if let Some(terminal) = terminal_map.get_by_right(&terminal_id) {
+                    terminal_names.push(terminal.0.clone());
+                } else {
+                    terminal_names.push(format!("<ID:{}>", terminal_id.0));
+                }
+            }
+            
+            const MAX_NAMES_TO_SHOW: usize = 3;
+            let names_str = if terminal_names.len() > MAX_NAMES_TO_SHOW {
+                format!("{}...", terminal_names.iter().take(MAX_NAMES_TO_SHOW).cloned().collect::<Vec<_>>().join(", "))
+            } else {
+                terminal_names.join(", ")
+            };
+
+            parts.push(format!("State {}: [{}]", tokenizer_state_id.0, names_str));
+        }
+        if parts.is_empty() {
+            "".to_string()
+        } else {
+            format!(", Disallowed({})", parts.join("; "))
+        }
     };
 
     format!("({}{})", llm_info, disallowed_info)
 }
 
 pub fn print_gss_forest(
-    roots: &[Arc<GSSNode>], 
-    max_nodes: usize
+    roots: &[Arc<GSSNode>],
+    max_nodes: usize,
+    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
 ) -> String {
     fn print_node_recursive(
         node_arc: &Arc<GSSNode>,
@@ -1453,6 +1482,7 @@ pub fn print_gss_forest(
         node_count: &mut usize,
         max_nodes: usize,
         output: &mut String,
+        terminal_map: &BiBTreeMap<Terminal, TerminalID>,
     ) -> Result<(), std::fmt::Error> {
         if *node_count >= max_nodes {
             return Ok(())
@@ -1462,7 +1492,7 @@ pub fn print_gss_forest(
         let node_ids_len = node_ids.len();
         let node_id = *node_ids.entry(node_ptr).or_insert(node_ids_len);
 
-        let acc_str = format_acc(node_arc.acc2());
+        let acc_str = format_acc(node_arc.acc2(), terminal_map);
         writeln!(output, "{}Node {} (depth {}) {}", prefix, node_id, node_arc.max_depth, acc_str)?;
 
         if visited_for_printing.contains(&node_ptr) {
@@ -1488,7 +1518,7 @@ pub fn print_gss_forest(
             let pred_id = *node_ids.entry(pred_ptr).or_insert(node_ids_len);
 
             // Print the edge and child node header
-            let acc_child = format_acc(pred_arc.acc2());
+            let acc_child = format_acc(pred_arc.acc2(), terminal_map);
             let child_depth = pred_arc.max_depth;
             if visited_for_printing.contains(&pred_ptr) {
                 // already shown
@@ -1523,6 +1553,7 @@ pub fn print_gss_forest(
                         node_count,
                         max_nodes,
                         output,
+                        terminal_map,
                     )?;
                 }
             }
@@ -1541,7 +1572,7 @@ pub fn print_gss_forest(
 
     for (i, root_arc) in roots.iter().enumerate() {
         writeln!(&mut out_str, "Root {}:", i).unwrap();
-        if print_node_recursive(root_arc, &mut node_ids, &mut visited_for_printing, "  ", &mut count, max_nodes, &mut out_str).is_err() {
+        if print_node_recursive(root_arc, &mut node_ids, &mut visited_for_printing, "  ", &mut count, max_nodes, &mut out_str, terminal_map).is_err() {
             return "Error writing GSS structure".to_string();
         }
         if count >= max_nodes && i < roots.len() - 1 {

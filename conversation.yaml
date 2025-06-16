@@ -4267,14 +4267,44 @@ local_system:
                   let node_ids_len = node_ids.len();
                   let pred_id = *node_ids.entry(pred_ptr).or_insert(node_ids_len);
 
-                  write!(output, "{}{}Edge {:?} -> ", prefix, connector, edge_val.state_id)?;
-                  
+                  // Print the edge and child node header
+                  let acc_child = format_acc(pred_arc.acc2());
+                  let child_depth = pred_arc.max_depth;
                   if visited_for_printing.contains(&pred_ptr) {
-                      writeln!(output, "Node {} (ref)", pred_id)?;
-                  } else if *node_count < max_nodes {
-                      print_node_recursive(pred_arc, node_ids, visited_for_printing, &new_prefix, node_count, max_nodes, output)?;
+                      // already shown
+                      writeln!(
+                          output,
+                          "{}{} Edge {:?} -> Node {} (ref)",
+                          prefix,
+                          connector,
+                          edge_val.state_id,
+                          pred_id
+                      )?;
                   } else {
-                      writeln!(output, "Node {} (truncated)", pred_id)?;
+                      // print child header
+                      writeln!(
+                          output,
+                          "{}{} Edge {:?} -> Node {} (depth {}) {}",
+                          prefix,
+                          connector,
+                          edge_val.state_id,
+                          pred_id,
+                          child_depth,
+                          acc_child
+                      )?;
+                      *node_count += 1;
+                      // recurse into grandchildren
+                      if *node_count < max_nodes {
+                          print_node_recursive(
+                              pred_arc,
+                              node_ids,
+                              visited_for_printing,
+                              &new_prefix,
+                              node_count,
+                              max_nodes,
+                              output,
+                          )?;
+                      }
                   }
               }
 
@@ -11787,14 +11817,44 @@ local_system:
                   let node_ids_len = node_ids.len();
                   let pred_id = *node_ids.entry(pred_ptr).or_insert(node_ids_len);
 
-                  write!(output, "{}{}Edge {:?} -> ", prefix, connector, edge_val.state_id)?;
-                  
+                  // Print the edge and child node header
+                  let acc_child = format_acc(pred_arc.acc2());
+                  let child_depth = pred_arc.max_depth;
                   if visited_for_printing.contains(&pred_ptr) {
-                      writeln!(output, "Node {} (ref)", pred_id)?;
-                  } else if *node_count < max_nodes {
-                      print_node_recursive(pred_arc, node_ids, visited_for_printing, &new_prefix, node_count, max_nodes, output)?;
+                      // already shown
+                      writeln!(
+                          output,
+                          "{}{} Edge {:?} -> Node {} (ref)",
+                          prefix,
+                          connector,
+                          edge_val.state_id,
+                          pred_id
+                      )?;
                   } else {
-                      writeln!(output, "Node {} (truncated)", pred_id)?;
+                      // print child header
+                      writeln!(
+                          output,
+                          "{}{} Edge {:?} -> Node {} (depth {}) {}",
+                          prefix,
+                          connector,
+                          edge_val.state_id,
+                          pred_id,
+                          child_depth,
+                          acc_child
+                      )?;
+                      *node_count += 1;
+                      // recurse into grandchildren
+                      if *node_count < max_nodes {
+                          print_node_recursive(
+                              pred_arc,
+                              node_ids,
+                              visited_for_printing,
+                              &new_prefix,
+                              node_count,
+                              max_nodes,
+                              output,
+                          )?;
+                      }
                   }
               }
 
@@ -15061,7 +15121,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - o4-mini
+    - copy-one/paste
   code_completion_model:
     - gemini/gemini-2.5-flash-preview-05-20
   commit_message_model:
@@ -19335,14 +19395,44 @@ messages:
                   let node_ids_len = node_ids.len();
                   let pred_id = *node_ids.entry(pred_ptr).or_insert(node_ids_len);
 
-                  write!(output, "{}{}Edge {:?} -> ", prefix, connector, edge_val.state_id)?;
-                  
+                  // Print the edge and child node header
+                  let acc_child = format_acc(pred_arc.acc2());
+                  let child_depth = pred_arc.max_depth;
                   if visited_for_printing.contains(&pred_ptr) {
-                      writeln!(output, "Node {} (ref)", pred_id)?;
-                  } else if *node_count < max_nodes {
-                      print_node_recursive(pred_arc, node_ids, visited_for_printing, &new_prefix, node_count, max_nodes, output)?;
+                      // already shown
+                      writeln!(
+                          output,
+                          "{}{} Edge {:?} -> Node {} (ref)",
+                          prefix,
+                          connector,
+                          edge_val.state_id,
+                          pred_id
+                      )?;
                   } else {
-                      writeln!(output, "Node {} (truncated)", pred_id)?;
+                      // print child header
+                      writeln!(
+                          output,
+                          "{}{} Edge {:?} -> Node {} (depth {}) {}",
+                          prefix,
+                          connector,
+                          edge_val.state_id,
+                          pred_id,
+                          child_depth,
+                          acc_child
+                      )?;
+                      *node_count += 1;
+                      // recurse into grandchildren
+                      if *node_count < max_nodes {
+                          print_node_recursive(
+                              pred_arc,
+                              node_ids,
+                              visited_for_printing,
+                              &new_prefix,
+                              node_count,
+                              max_nodes,
+                              output,
+                          )?;
+                      }
                   }
               }
 
@@ -22614,83 +22704,164 @@ messages:
     metadata:
       filename: src/constraint_extra.rs
   - user: |-
-      Fix the GSS printing. It looks like this:
-      ```
-      GSS Forest (Max Nodes: 50):
-      Root 0:
-        Node 0 (depth 0) (LLM(18446744073709551615 tokens))
-        ├──Edge StateID(0) ->     │ Node 1 (depth 0) (LLM(Any))
-          │ └──Edge StateID(3) ->     │     Node 2 (depth 0) (LLM(Any))
-        └──Edge StateID(2) ->       Node 3 (depth 0) (LLM(Any))
-            └──Edge StateID(1) ->           Node 4 (depth 0) (LLM(Any), Disallowed(1 total))
-                └──Edge StateID(0) ->               Node 5 (depth 0) (LLM(Any), Disallowed(1 total))
-                    └──Edge StateID(3) ->                   Node 6 (depth 0) (LLM(Any), Disallowed(1 total))
-      ```
+      Make the GSS output more informative but also pretty and clean.
+      For example, it's more helpful to show the names of disallowed tokens than how many there are (unless there are a lot, then it's more useful to just show a small number). And what states they're under. ie an actual description of the disallowed tokens.
     metadata:
-  - assistant: |
+  - assistant: |-
+      Of course! I've updated the GSS output to be more informative and readable, as you requested. Here are the patches for the modified files.
+
+      ### `src/datastructures/gss.rs`
+
+      I've updated `print_gss_forest` and its helper `format_acc` to provide a more detailed and cleaner description of the disallowed terminals, including their names and the tokenizer states they are associated with.
+
       ```diff
-      diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
-      index 1234567..89abcde 100644
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ fn print_node_recursive(
-      -            write!(output, "{}{}Edge {:?} -> ", prefix, connector, edge_val.state_id)?;
-      -            
-      -            if visited_for_printing.contains(&pred_ptr) {
-      -                writeln!(output, "Node {} (ref)", pred_id)?;
-      -            } else if *node_count < max_nodes {
-      -                print_node_recursive(pred_arc, node_ids, visited_for_printing, &new_prefix, node_count, max_nodes, output)?;
-      -            } else {
-      -                writeln!(output, "Node {} (truncated)", pred_id)?;
-      -            }
-      +            // Print the edge and child node header
-      +            let acc_child = format_acc(pred_arc.acc2());
-      +            let child_depth = pred_arc.max_depth;
-      +            if visited_for_printing.contains(&pred_ptr) {
-      +                // already shown
-      +                writeln!(
-      +                    output,
-      +                    "{}{} Edge {:?} -> Node {} (ref)",
-      +                    prefix,
-      +                    connector,
-      +                    edge_val.state_id,
-      +                    pred_id
-      +                )?;
-      +            } else {
-      +                // print child header
-      +                writeln!(
-      +                    output,
-      +                    "{}{} Edge {:?} -> Node {} (depth {}) {}",
-      +                    prefix,
-      +                    connector,
-      +                    edge_val.state_id,
-      +                    pred_id,
-      +                    child_depth,
-      +                    acc_child
-      +                )?;
-      +                *node_count += 1;
-      +                // recurse into grandchildren
-      +                if *node_count < max_nodes {
-      +                    print_node_recursive(
-      +                        pred_arc,
-      +                        node_ids,
-      +                        visited_for_printing,
-      +                        &new_prefix,
-      +                        node_count,
-      +                        max_nodes,
-      +                        output,
-      +                    )?;
+      @@ -5,6 +5,7 @@
+       use std::cmp::Ordering;
+       use std::collections::hash_map::DefaultHasher;
+       use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub, SubAssign};
+      +use bimap::BiBTreeMap;
+       use deterministic_hash::DeterministicHasher;
+       use std::any::{Any, TypeId};
+       use profiler_macro::{time_it, timeit};
+      @@ -1110,31 +1111,56 @@
+       }
+       
+       /// Formats the accumulator for concise display.
+      -fn format_acc(acc: &acc_mod::Acc) -> String {
+      +fn format_acc(acc: &acc_mod::Acc, terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> String {
+           let llm_info = match acc.acc() {
+               None => "LLM(Any)".to_string(),
+               Some(bv) if bv.is_empty() => "LLM(None)".to_string(),
+               Some(bv) => format!("LLM({} tokens)", bv.len()),
+           };
+       
+           let disallowed_info = if acc.disallowed_terminals().is_empty() {
+               "".to_string()
+           } else {
+      -        let count = acc.disallowed_terminals().values().map(|v| v.union.len()).sum::<usize>();
+      -        format!(", Disallowed({} total)", count)
+      +        let mut parts = Vec::new();
+      +        for (tokenizer_state_id, terminal_info_value) in acc.disallowed_terminals() {
+      +            if terminal_info_value.union.is_empty() {
+      +                continue;
+      +            }
+      +            let mut terminal_names = Vec::new();
+      +            for terminal_id_val in terminal_info_value.union.iter() {
+      +                let terminal_id = TerminalID(terminal_id_val);
+      +                if let Some(terminal) = terminal_map.get_by_right(&terminal_id) {
+      +                    terminal_names.push(terminal.0.clone());
+      +                } else {
+      +                    terminal_names.push(format!("<ID:{}>", terminal_id.0));
       +                }
       +            }
+      +            
+      +            const MAX_NAMES_TO_SHOW: usize = 3;
+      +            let names_str = if terminal_names.len() > MAX_NAMES_TO_SHOW {
+      +                format!("{}...", terminal_names.iter().take(MAX_NAMES_TO_SHOW).cloned().collect::<Vec<_>>().join(", "))
+      +            } else {
+      +                terminal_names.join(", ")
+      +            };
+      +
+      +            parts.push(format!("State {}: [{}]", tokenizer_state_id.0, names_str));
+      +        }
+      +        if parts.is_empty() {
+      +            "".to_string()
+      +        } else {
+      +            format!(", Disallowed({})", parts.join("; "))
+      +        }
+           };
+       
+           format!("({}{})", llm_info, disallowed_info)
+       }
+       
+       pub fn print_gss_forest(
+      -    roots: &[Arc<GSSNode>], 
+      -    max_nodes: usize
+      +    roots: &[Arc<GSSNode>],
+      +    max_nodes: usize,
+      +    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+       ) -> String {
+           fn print_node_recursive(
+               node_arc: &Arc<GSSNode>,
+      @@ -1144,6 +1170,7 @@
+               node_count: &mut usize,
+               max_nodes: usize,
+               output: &mut String,
+      +        terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+           ) -> Result<(), std::fmt::Error> {
+               if *node_count >= max_nodes {
+                   return Ok(())
+      @@ -1153,7 +1180,7 @@
+               let node_ids_len = node_ids.len();
+               let node_id = *node_ids.entry(node_ptr).or_insert(node_ids_len);
+       
+      -        let acc_str = format_acc(node_arc.acc2());
+      +        let acc_str = format_acc(node_arc.acc2(), terminal_map);
+               writeln!(output, "{}Node {} (depth {}) {}", prefix, node_id, node_arc.max_depth, acc_str)?;
+       
+               if visited_for_printing.contains(&node_ptr) {
+      @@ -1176,7 +1203,7 @@
+                   let pred_id = *node_ids.entry(pred_ptr).or_insert(node_ids_len);
+       
+                   // Print the edge and child node header
+      -            let acc_child = format_acc(pred_arc.acc2());
+      +            let acc_child = format_acc(pred_arc.acc2(), terminal_map);
+                   let child_depth = pred_arc.max_depth;
+                   if visited_for_printing.contains(&pred_ptr) {
+                       // already shown
+      @@ -1206,6 +1233,7 @@
+                               node_count,
+                               max_nodes,
+                               output,
+      +                        terminal_map,
+                           )?;
+                       }
+                   }
+      @@ -1223,7 +1251,7 @@
+       
+           for (i, root_arc) in roots.iter().enumerate() {
+               writeln!(&mut out_str, "Root {}:", i).unwrap();
+      -        if print_node_recursive(root_arc, &mut node_ids, &mut visited_for_printing, "  ", &mut count, max_nodes, &mut out_str).is_err() {
+      +        if print_node_recursive(root_arc, &mut node_ids, &mut visited_for_printing, "  ", &mut count, max_nodes, &mut out_str, terminal_map).is_err() {
+                   return "Error writing GSS structure".to_string();
+               }
+               if count >= max_nodes && i < roots.len() - 1 {
+
+      ```
+
+      ### `src/constraint.rs`
+
+      Here I've updated the `Display` implementation for `GrammarConstraintState` to pass the required `terminal_map` to the new `print_gss_forest` function.
+
+      ```diff
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -1000,7 +1000,7 @@
+       
+               if !gss_roots.is_empty() {
+                   writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
+      -            let gss_str = crate::datastructures::gss::print_gss_forest(&gss_roots, 50);
+      +            let gss_str = crate::datastructures::gss::print_gss_forest(&gss_roots, 50, &self.parent.parser.terminal_map);
+                   write!(f, "{}", gss_str)?;
+               }
+       
+
       ```
     metadata:
   - user: |
       Git apply result:
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/datastructures/gss.rs
       Applying patch to 'src/datastructures/gss.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/gss.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
     metadata:
 ...
