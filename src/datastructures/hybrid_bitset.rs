@@ -135,6 +135,9 @@ impl HybridBitset {
     pub fn is_subset(&self, other: &Self) -> bool {
         self.inner.is_subset(&other.inner)
     }
+    pub fn is_disjoint(&self, other: &Self) -> bool {
+        self.inner.is_disjoint(&other.inner)
+    }
 
     /// Inserts an index into the set. Returns true if the index was not already present.
     pub fn insert(&mut self, index: usize) -> bool {
