@@ -778,7 +778,7 @@ impl<'r> Precomputer<'r> {
             TokenizerStateID,
             OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
-        _no_go: HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>,
+        no_go: HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>,
 
     ) {
         self.pb.inc(1);
@@ -869,7 +869,7 @@ impl<'r> Precomputer<'r> {
             }
 
             if !next_level_assoc.is_empty() {
-                self.dfs(child_vocab_node, next_level_assoc, HashMap::new());
+                self.dfs(child_vocab_node, next_level_assoc, no_go.clone());
             }
         }
     }

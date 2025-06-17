@@ -1032,7 +1032,7 @@ where
         // This cache is passed down through all recursive calls originating from this top-level eq.
         // Type alias for pointer to Mutex<Trie<...>> for clarity.
         type NodeMutexPtr<EKK, EVV, TT> = *const Mutex<Trie<EKK, EVV, TT>>;
-        let mut comparison_cache: HashMap<(*const Mutex<Self>, *const Mutex<Self>), bool> = HashMap::new();
+        let mut comparison_cache: HashMap<(NodeMutexPtr<EK, EV, T>, NodeMutexPtr<EK, EV, T>), bool> = HashMap::new();
 
 
         // 3. Compare children for each edge key.
@@ -1408,59 +1408,67 @@ where
 }
 
 
-/// Creates an `EdgeInserter` to help add an edge starting from a source node.
-///
-/// This provides a convenient entry point for the chainable insertion pattern.
-///
-/// # Arguments
-/// * `source_arc`: The `Arc` to the source node where the edge originates.
-/// * `edge_key`: The key for the new edge.
-/// * `edge_value`: The value for the new edge.
-/// * `merge_edge_value`: A closure that merges a new edge value into an existing one.
-///
-/// # Example
-///
-/// ```ignore
-/// use std::sync::{Arc, Mutex};
-/// use crate::datastructures::trie::{Trie, insert_edge}; // Import the free function
-/// use crate::datastructures::hybrid_bitset::HybridBitset;
-/// use std::iter::FromIterator;
-///
-/// #[derive(Debug, Clone, Default)]
-/// struct NodeValue { /* ... */ }
-///
-/// fn merge_bitset_union(existing: &mut HybridBitset, new: HybridBitset) {
-///     *existing |= new;
-/// }
-///
-/// let root_node: Arc<Mutex<Trie<String, HybridBitset, NodeValue>>> = Arc::new(Mutex::new(Trie::new(NodeValue::default())));
-/// let new_edge_value: HybridBitset = vec![].into_iter().collect();
-/// let potential_destinations: Vec<Arc<Mutex<Trie<String, HybridBitset, NodeValue>>>> = vec![/* ... */];
-///
-/// let new_or_existing_node = insert_edge(
-///         root_node.clone(),
-///         "key".to_string(),
-///         new_edge_value.clone(),
-///         merge_bitset_union
-///     )
-///     .try_destinations(&potential_destinations)
-///     .else_create()
-///     .unwrap();
-/// ```
-pub fn insert_edge<EK, EV, T, FMergeEV>(
-    source_arc: Arc<Mutex<Trie<EK, EV, T>>>,
-    edge_key: EK,
-    edge_value: EV,
-    merge_edge_value: FMergeEV,
-) -> EdgeInserter<EK, EV, T, FMergeEV>
-where
-    EK: Ord + Clone + Debug,
-    EV: Clone,
-    T: Clone,
-    FMergeEV: FnMut(&mut EV, EV),
-{
-    EdgeInserter::new(source_arc, edge_key, edge_value, merge_edge_value)
-}
+// Optional: Add a convenience method to Trie to create an EdgeInserter easily.
+impl<EK: Ord + Clone + Debug, EV: Clone, T: Clone> Trie<EK, EV, T> {
+    /// Creates an `EdgeInserter` to help add an edge starting from this node.
+    ///
+    /// This provides a convenient entry point for the chainable insertion pattern.
+    ///
+    /// # Arguments
+    /// * `edge_key`: The key for the new edge.
+    /// * `edge_value`: The value for the new edge.
+    /// * `merge_edge_value`: A closure that takes the existing edge value and the new edge value,
+    ///   both by reference, returning `Some(merged_value)` if merging is possible/desired,
+    ///   or `None` otherwise. This is only called by `EdgeInserter::try_destination` if an edge
+    ///   with the same `edge_key` already points to the destination being tried.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::sync::{Arc, Mutex};
+    /// use crate::datastructures::trie::Trie; // Assuming Trie is in this module
+    /// use crate::datastructures::trie::EdgeInserter; // Also need EdgeInserter
+    /// use crate::datastructures::hybrid_bitset::HybridBitset; // Need HybridBitset
+    /// use std::iter::FromIterator; // For collect
+    ///
+    /// #[derive(Debug, Clone, Default)] // Need Default for else_create
+    /// struct NodeValue { /* ... */ }
+    ///
+    /// // Example merge function for edge values (e.g., HybridBitset)
+    /// fn merge_bitset_union(existing: &mut HybridBitset, new: HybridBitset) { // Note the &mut and move
+    ///     *existing |= new; // Use reference for the OR operation
+    /// }
+    ///
+    /// // Assuming root_node is Arc<Mutex<Trie<String, HybridBitset, NodeValue>>>
+    /// let root_node: Arc<Mutex<Trie<String, HybridBitset, NodeValue>>> = Arc::new(Mutex::new(Trie::new(NodeValue::default())));
+    ///
+    /// // Create a HybridBitset to use as edge value
+    /// let new_edge_value: HybridBitset = vec![].into_iter().collect();
+    ///
+    /// let potential_destinations: Vec<Arc<Mutex<Trie<String, HybridBitset, NodeValue>>>> = vec![/* ... */];
+    ///
+    /// let new_or_existing_node = { // Use a block to drop the temporary mutex guard
+    ///     let root_guard = root_node.lock().unwrap(); // Get a guard to call insert_edge
+    ///     // We must pass the merge function closure that takes &mut EV, EV
+    ///     root_guard.insert_edge("key".to_string(), new_edge_value.clone(), merge_bitset_union) // Clone edge_value for EdgeInserter to own
+    ///         .try_destinations(&potential_destinations) // potential_destinations is &[Arc<Mutex<...>>]
+    ///         .else_create() // Or else_create_with(...) or else_create_with_value(...)
+    ///         .unwrap()
+    /// };
+    /// // root_node (Arc<Mutex>) is an Arc<Mutex> and can be used further.
+    /// ```
+    pub fn insert_edge<FMergeEV>(
+        &self, // Note: This method takes &self, not &mut self. The EdgeInserter handles the mutation via Arc<Mutex>.
+        edge_key: EK,
+        edge_value: EV,
+        merge_edge_value: FMergeEV,
+    ) -> EdgeInserter<EK, EV, T, FMergeEV>
+    where
+         FMergeEV: FnMut(&mut EV, EV), // Changed signature
+    {
+            EdgeInserter::new(Arc::new(Mutex::new(self.clone())), edge_key, edge_value, merge_edge_value)
+        }
+    }
 
 /// Attempts to establish an edge from `source` to a single `destination`,
 /// optionally merging edge values if an edge already exists.

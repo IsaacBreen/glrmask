@@ -395,7 +395,8 @@ impl PathAccumulator for Option<LLMTokenBV> {
 }
 
 fn compute_max_depth(predecessors: &NodeMap) -> MaxDepth {
-    predecessors.keys().next_back().map_or(0, |max_pred_depth| max_pred_depth + 1)
+    // predecessors.keys().next_back().map_or(0, |max_pred_depth| max_pred_depth + 1)
+    0
 }
 
 fn compute_hash_key(predecessors: &NodeMap) -> u64 {
@@ -699,7 +700,7 @@ impl GSSNode {
         let mut predecessors_map = NodeMap::new();
         let mut inner_map = BTreeMap::new();
         inner_map.insert(edge_value, predecessor_arc.clone());
-        predecessors_map.insert(predecessor_arc.max_depth.saturating_add(1), inner_map);
+        predecessors_map.insert(predecessor_arc.max_depth, inner_map);
         Self::new_with_map(acc, predecessors_map)
     }
 
@@ -797,8 +798,8 @@ impl GSSNode {
 
     #[time_it]
     pub fn pop_iter(&self) -> Vec<(ParseStateEdgeContent, Arc<Self>)> {
-        self.predecessors.values().flat_map(|m| m.iter()).filter_map(|(edge_val, pred_arc_val)| {
-            let mut pred_arc = pred_arc_val.clone();
+        self.predecessors.values().flat_map(|m| m.iter()).filter_map(|(edge_val, pred_arc)| {
+            let mut pred_arc = pred_arc.clone();
             // The acc for the path ending at pred_arc (after popping self)
             // is self.acc intersected with pred_arc's original acc.
             let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
@@ -1391,8 +1392,8 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats { // Takes slice of refe
         }
 
         stats.unique_nodes += 1;
-        stats.max_depth = stats.max_depth.max(node.max_depth); // Use node's actual max_depth
-        total_depth += node.max_depth as u64; // Use node's actual max_depth for sum
+        stats.max_depth = stats.max_depth.max(depth);
+        total_depth += depth as u64;
 
         let num_preds = node.num_predecessors();
         stats.max_predecessors_with_values = stats.max_predecessors_with_values.max(num_preds);
@@ -1409,7 +1410,7 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats { // Takes slice of refe
             let pred_ptr = pred_arc_val.as_ref() as *const GSSNode;
              // Add to queue if not yet added for BFS processing from any path
             if !processed_pointers.contains(&pred_ptr) {
-                bfs_queue.push_back((pred_arc_val.as_ref(), pred_arc_val.max_depth)); // Use pred's actual depth
+                bfs_queue.push_back((pred_arc_val.as_ref(), depth + 1));
                 processed_pointers.insert(pred_ptr);
             }
         }
@@ -1572,7 +1573,7 @@ pub fn print_gss_forest(
         let acc_str = format_acc(root_arc.acc2(), terminal_map);
         
         if visited_nodes.contains(&root_ptr) {
-            writeln!(&mut out_str, "Root {}: Node {} (depth {}) {} (ref)", i, root_id, root_arc.max_depth, acc_str).unwrap();
+            writeln!(&mut out_str, "Root {}: Node {} (ref)", i, root_id).unwrap();
         } else {
             writeln!(&mut out_str, "Root {}: Node {} (depth {}) {}", i, root_id, root_arc.max_depth, acc_str).unwrap();
             count += 1;
