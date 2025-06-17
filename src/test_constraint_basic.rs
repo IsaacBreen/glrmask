@@ -68,7 +68,7 @@ fn test_constraint_simple() {
     ];
 
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone());
-    dbg!(&parser);
+    println!("{}", &parser);
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
