@@ -581,12 +581,12 @@ pub mod acc_mod {
         #[time_it]
         fn union_assign(&mut self, other: Self) {
             self.acc.union_assign(other.acc);
-            disallowed_terminals_intersect_assign(&mut self.disallowed_terminals, other.disallowed_terminals);
+            disallowed_terminals_union_assign(&mut self.disallowed_terminals, other.disallowed_terminals);
         }
         #[time_it]
         fn intersect_assign(&mut self, right: Self) {
             self.acc.intersect_assign(right.acc);
-            disallowed_terminals_union_assign(&mut self.disallowed_terminals, right.disallowed_terminals);
+            disallowed_terminals_intersect_assign(&mut self.disallowed_terminals, right.disallowed_terminals);
         }
         #[time_it]
         fn intersect_has_effect(&self, right: &Self) -> bool {
