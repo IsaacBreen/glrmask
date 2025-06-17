@@ -352,23 +352,23 @@ fn test_aborted_tokenizer_restart_equivalence() {
 
     // Grammar: S -> HASH_OPT_A_T | HASH_OPT_A_T A_T
     // Terminals in grammar:
-    // "A_GRAMMAR_T" maps to tokenizer group 0
-    // "HASH_OPT_A_GRAMMAR_T" maps to tokenizer group 1
+    // "A" maps to tokenizer group 0
+    // "HASH_OPT_A" maps to tokenizer group 1
     let productions = vec![
         prod("S'", vec![nt("S")]),
-        prod("S", vec![t("HASH_OPT_A_GRAMMAR_T")]),
-        prod("S", vec![t("HASH_OPT_A_GRAMMAR_T"), t("A_GRAMMAR_T")]),
+        prod("S", vec![t("HASH_OPT_A")]),
+        prod("S", vec![t("HASH_OPT_A"), t("A")]),
     ];
 
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    let terminal_a = Terminal("A_GRAMMAR_T".to_string());
-    let terminal_hash_opt_a = Terminal("HASH_OPT_A_GRAMMAR_T".to_string());
+    let terminal_a = Terminal("A".to_string());
+    let terminal_hash_opt_a = Terminal("HASH_OPT_A".to_string());
     grammar_token_map.insert(terminal_a.clone(), TerminalID(0)); // Maps to tokenizer group 0
     grammar_token_map.insert(terminal_hash_opt_a.clone(), TerminalID(1)); // Maps to tokenizer group 1
 
     let parser = generate_glr_parser_with_terminal_map(
         &productions,
-        0, // Assuming S -> HASH_OPT_A_GRAMMAR_T is the first rule for start_production_id if S' is not explicit.
+        0, // Assuming S -> HASH_OPT_A is the first rule for start_production_id if S' is not explicit.
            // generate_glr_parser adds S' -> S EOF, so the first user prod is 0.
         grammar_token_map.clone()
     );
@@ -386,8 +386,8 @@ fn test_aborted_tokenizer_restart_equivalence() {
 
     // Token name map for GrammarConstraint (maps grammar terminal name to tokenizer group ID)
     let mut token_name_map_for_constraint = BiBTreeMap::new();
-    token_name_map_for_constraint.insert("A_GRAMMAR_T".to_string(), 0);
-    token_name_map_for_constraint.insert("HASH_OPT_A_GRAMMAR_T".to_string(), 1);
+    token_name_map_for_constraint.insert("A".to_string(), 0);
+    token_name_map_for_constraint.insert("HASH_OPT_A".to_string(), 1);
 
     let constraint = GrammarConstraint::new(
         tokenizer,
@@ -444,13 +444,13 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
     // Grammar: S -> HASH_OPT_AA_T | HASH_OPT_AA_T A_T A_T
     let productions = vec![
         prod("S'", vec![nt("S")]),
-        prod("S", vec![t("HASH_OPT_AA_GRAMMAR_T")]),
-        prod("S", vec![t("HASH_OPT_AA_GRAMMAR_T"), t("A_GRAMMAR_T"), t("A_GRAMMAR_T")]),
+        prod("S", vec![t("HASH_OPT_AA")]),
+        prod("S", vec![t("HASH_OPT_AA"), t("A"), t("A")]),
     ];
 
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    let terminal_a = Terminal("A_GRAMMAR_T".to_string());
-    let terminal_hash_opt_aa = Terminal("HASH_OPT_AA_GRAMMAR_T".to_string());
+    let terminal_a = Terminal("A".to_string());
+    let terminal_hash_opt_aa = Terminal("HASH_OPT_AA".to_string());
     grammar_token_map.insert(terminal_a.clone(), TerminalID(0)); // Maps to tokenizer group 0
     grammar_token_map.insert(terminal_hash_opt_aa.clone(), TerminalID(1)); // Maps to tokenizer group 1
 
@@ -472,8 +472,8 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
     let max_original_llm_token_id = 2;
 
     let mut token_name_map_for_constraint = BiBTreeMap::new();
-    token_name_map_for_constraint.insert("A_GRAMMAR_T".to_string(), 0);
-    token_name_map_for_constraint.insert("HASH_OPT_AA_GRAMMAR_T".to_string(), 1);
+    token_name_map_for_constraint.insert("A".to_string(), 0);
+    token_name_map_for_constraint.insert("HASH_OPT_AA".to_string(), 1);
 
     let constraint = GrammarConstraint::new(
         tokenizer,
