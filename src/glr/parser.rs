@@ -440,8 +440,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
             match goto {
                 Goto::State(goto_state_id) => {
                     // crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
+                    println!("Popped peek parent node: {}", print_gss_forest(&[Arc::new(popped_peek.parent_node.clone())], 30, &self.parser.terminal_map, None, None));
+                    println!("Poppped peek predecessor node: {}", print_gss_forest(&[popped_peek.predecessor_node.clone()], 30, &self.parser.terminal_map, None, None));
                     let new_gss_node = popped_peek.to_node().push_with_existing_acc(ParseStateEdgeContent { state_id: goto_state_id });
-                    println!("Popped peek node: {}", print_gss_forest(&[Arc::new(popped_peek.to_node())], 30, &self.parser.terminal_map, None, None));
+                    println!("Popped peek node to_node: {}", print_gss_forest(&[Arc::new(popped_peek.to_node())], 30, &self.parser.terminal_map, None, None));
                     println!("New GSS node after reduction: {}", print_gss_forest(&[Arc::new(new_gss_node.clone())], 30, &self.parser.terminal_map, None, None));
                     out.push(new_gss_node);
                 }
