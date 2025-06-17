@@ -539,10 +539,20 @@ pub mod acc_mod {
             Self { acc: None, disallowed_terminals: BTreeMap::new() }
         }
 
-        pub fn new_for_merging() -> Self {
-            Self { acc: Some(LLMTokenBV::zeros()), disallowed_terminals: BTreeMap::new() }
+        pub fn union_many<I>(mut accs: I) -> Self
+        where
+            I: Iterator<Item = Self>,
+        {
+            if let Some(mut base) = accs.next() {
+                for acc in accs {
+                    base.union_assign(acc);
+                }
+                base
+            } else {
+                // Return the identity for union.
+                Self::new(Some(LLMTokenBV::zeros()), BTreeMap::new())
+            }
         }
-
         pub fn acc(&self) -> &LLMTokenInfo {
             &self.acc
         }
@@ -750,8 +760,8 @@ impl GSSNode {
 
     #[time_it]
     pub fn pop(&self) -> Self {
-        let mut result_acc = Acc::new_for_merging();
         let mut result_predecessors = NodeMap::new();
+        let mut live_path_accs = Vec::new();
 
         for pred_arc in self.predecessors.values().flat_map(|m| m.values()) {
             // The acc of the path *through* self to pred_arc is self.acc intersected with pred_arc.acc
@@ -759,7 +769,7 @@ impl GSSNode {
             if path_acc.is_dead() {
                 continue;
             }
-            result_acc.union_assign(path_acc.clone()); // Union accs of all popped paths
+            live_path_accs.push(path_acc.clone());
 
             // Merge predecessors of pred_arc into result_predecessors
             // Each merged predecessor needs its acc updated based on path_acc
@@ -783,6 +793,7 @@ impl GSSNode {
                 }
             }
         }
+        let result_acc = Acc::union_many(live_path_accs.into_iter());
         Self::new_with_map(result_acc, result_predecessors)
     }
 
@@ -1665,16 +1676,11 @@ fn simplify_node_recursive(
     // The acc of this cached_structural_node is the union of its predecessors' accs.
     let cached_structural_node = cache.entry(simplified_predecessors_map.clone())
         .or_insert_with(|| {
-            let unioned_acc = if simplified_predecessors_map.is_empty() {
-                Acc::new_for_merging()
-            } else {
-                let mut iter = simplified_predecessors_map.values().flat_map(|m| m.values());
-                let mut acc = iter.next().unwrap().acc2().clone();
-                for p_arc in iter { // Renamed p
-                    acc.union_assign(p_arc.acc2().clone());
-                }
-                acc
-            };
+            let unioned_acc = Acc::union_many(
+                simplified_predecessors_map.values()
+                    .flat_map(|m| m.values())
+                    .map(|p_arc| p_arc.acc2().clone())
+            );
             Arc::new(GSSNode::new_with_map(unioned_acc, simplified_predecessors_map))
         });
 
