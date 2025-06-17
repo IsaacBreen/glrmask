@@ -1474,64 +1474,57 @@ pub fn print_gss_forest(
     max_nodes: usize,
     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
 ) -> String {
-    fn print_node_recursive(
+    // The recursive helper function. It's responsible for printing the children (predecessors) of a given node.
+    fn print_predecessors_recursive(
         node_arc: &Arc<GSSNode>,
         node_ids: &mut HashMap<*const GSSNode, usize>,
-        visited_for_printing: &mut HashSet<*const GSSNode>,
+        visited_nodes: &mut HashSet<*const GSSNode>, // Nodes whose children have been printed
         prefix: &str,
         node_count: &mut usize,
         max_nodes: usize,
         output: &mut String,
         terminal_map: &BiBTreeMap<Terminal, TerminalID>,
     ) -> Result<(), std::fmt::Error> {
-        if *node_count >= max_nodes {
-            return Ok(())
-        }
-        
         let node_ptr = Arc::as_ptr(node_arc);
-        let node_ids_len = node_ids.len();
-        let node_id = *node_ids.entry(node_ptr).or_insert(node_ids_len);
-
-        let acc_str = format_acc(node_arc.acc2(), terminal_map);
-        writeln!(output, "{}Node {} (depth {}) {}", prefix, node_id, node_arc.max_depth, acc_str)?;
-
-        if visited_for_printing.contains(&node_ptr) {
-            writeln!(output, "{}  └─ (Predecessors already shown)", prefix)?;
-            return Ok(());
+        if visited_nodes.contains(&node_ptr) {
+            return Ok(()); // Already printed this node's children
         }
-        visited_for_printing.insert(node_ptr);
-        *node_count += 1;
+        visited_nodes.insert(node_ptr);
 
         let predecessors: Vec<_> = node_arc.predecessors()
             .values()
             .flat_map(|m| m.iter())
             .collect();
-        
+
         let num_preds = predecessors.len();
         for (i, (edge_val, pred_arc)) in predecessors.iter().enumerate() {
+            if *node_count >= max_nodes {
+                writeln!(output, "{}... (Truncated)", prefix)?;
+                return Ok(());
+            }
+
             let is_last = i == num_preds - 1;
             let connector = if is_last { "└──" } else { "├──" };
             let new_prefix = format!("{}  {}", prefix, if is_last { "  " } else { "│ " });
-            
+
             let pred_ptr = Arc::as_ptr(pred_arc);
             let node_ids_len = node_ids.len();
             let pred_id = *node_ids.entry(pred_ptr).or_insert(node_ids_len);
 
-            // Print the edge and child node header
-            let acc_child = format_acc(pred_arc.acc2(), terminal_map);
-            let child_depth = pred_arc.max_depth;
-            if visited_for_printing.contains(&pred_ptr) {
-                // already shown
+            // If the predecessor's children have already been printed, just show a reference.
+            if visited_nodes.contains(&pred_ptr) {
                 writeln!(
                     output,
                     "{}{} Edge {:?} -> Node {} (ref)",
                     prefix,
                     connector,
                     edge_val.state_id,
-                    pred_id
+                    pred_id,
                 )?;
             } else {
-                // print child header
+                // Otherwise, print full info and recurse.
+                let acc_child = format_acc(pred_arc.acc2(), terminal_map);
+                let child_depth = pred_arc.max_depth;
                 writeln!(
                     output,
                     "{}{} Edge {:?} -> Node {} (depth {}) {}",
@@ -1540,30 +1533,27 @@ pub fn print_gss_forest(
                     edge_val.state_id,
                     pred_id,
                     child_depth,
-                    acc_child
+                    acc_child,
                 )?;
                 *node_count += 1;
-                // recurse into grandchildren
-                if *node_count < max_nodes {
-                    print_node_recursive(
-                        pred_arc,
-                        node_ids,
-                        visited_for_printing,
-                        &new_prefix,
-                        node_count,
-                        max_nodes,
-                        output,
-                        terminal_map,
-                    )?;
-                }
+
+                print_predecessors_recursive(
+                    pred_arc,
+                    node_ids,
+                    visited_nodes,
+                    &new_prefix,
+                    node_count,
+                    max_nodes,
+                    output,
+                    terminal_map,
+                )?;
             }
         }
-
         Ok(())
     }
 
     let mut node_ids = HashMap::new();
-    let mut visited_for_printing = HashSet::new();
+    let mut visited_nodes = HashSet::new();
     let mut count = 0;
     let mut out_str = String::new();
 
@@ -1571,13 +1561,25 @@ pub fn print_gss_forest(
     writeln!(&mut out_str, "GSS Forest (Max Nodes: {}):", max_nodes).unwrap();
 
     for (i, root_arc) in roots.iter().enumerate() {
-        writeln!(&mut out_str, "Root {}:", i).unwrap();
-        if print_node_recursive(root_arc, &mut node_ids, &mut visited_for_printing, "  ", &mut count, max_nodes, &mut out_str, terminal_map).is_err() {
-            return "Error writing GSS structure".to_string();
-        }
-        if count >= max_nodes && i < roots.len() - 1 {
+        if count >= max_nodes {
             writeln!(&mut out_str, "... (Truncated)").unwrap();
             break;
+        }
+
+        let root_ptr = Arc::as_ptr(root_arc);
+        let node_ids_len = node_ids.len();
+        let root_id = *node_ids.entry(root_ptr).or_insert(node_ids_len);
+        
+        let acc_str = format_acc(root_arc.acc2(), terminal_map);
+        
+        if visited_nodes.contains(&root_ptr) {
+            writeln!(&mut out_str, "Root {}: Node {} (ref)", i, root_id).unwrap();
+        } else {
+            writeln!(&mut out_str, "Root {}: Node {} (depth {}) {}", i, root_id, root_arc.max_depth, acc_str).unwrap();
+            count += 1;
+            if print_predecessors_recursive(root_arc, &mut node_ids, &mut visited_nodes, "  ", &mut count, max_nodes, &mut out_str, terminal_map).is_err() {
+                return "Error writing GSS structure".to_string();
+            }
         }
     }
 
