@@ -98,7 +98,6 @@ def define_tokens() -> list[tuple[str, Any]]:
     eat_u8 = Regex.eat_u8
     eat_u8_seq = Regex.eat_u8_seq
     eat_u8_negation = Regex.eat_u8_negation
-    eat_string = Regex.eat_string
     seq = Regex.seq
     rep = Regex.rep
     rep1 = Regex.rep1
