@@ -578,11 +578,13 @@ fn test_a_plus_commit_equivalence() {
     state1.commit(llm_a);
     println!("Scenario 1: Committing 'a' (ID {}) a third time", llm_a.0);
     state1.commit(llm_a);
+    println!("{}", &state1);
 
     // Scenario 2: Commit "aaa" once
     let mut state2 = constraint.init();
     println!("\nScenario 2: Committing 'aaa' (ID {})", llm_aaa.0);
     state2.commit(llm_aaa);
+    println!("{}", &state2);
 
     // Assert equivalence
     assert_eq!(state1.state(), state2.state(), "States from (commit 'a' x3) and (commit 'aaa') should be equivalent.");
