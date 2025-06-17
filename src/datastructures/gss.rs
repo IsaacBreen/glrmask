@@ -750,7 +750,8 @@ impl GSSNode {
 
     #[time_it]
     pub fn pop(&self) -> Self {
-        let mut result_acc = Acc::new_for_merging();
+        // let mut result_acc = Acc::new_for_merging();
+        let mut result_accs = Vec::new();
         let mut result_predecessors = NodeMap::new();
 
         for pred_arc in self.predecessors.values().flat_map(|m| m.values()) {
@@ -759,7 +760,7 @@ impl GSSNode {
             if path_acc.is_dead() {
                 continue;
             }
-            result_acc.union_assign(path_acc.clone()); // Union accs of all popped paths
+            result_accs.push(path_acc.clone());
 
             // Merge predecessors of pred_arc into result_predecessors
             // Each merged predecessor needs its acc updated based on path_acc
@@ -783,6 +784,15 @@ impl GSSNode {
                 }
             }
         }
+        let result_acc = if result_accs.is_empty() {
+            Acc::new_for_merging()
+        } else {
+            let mut acc = result_accs.remove(0);
+            for acc_to_merge in result_accs {
+                acc.union_assign(acc_to_merge);
+            }
+            acc
+        };
         Self::new_with_map(result_acc, result_predecessors)
     }
 
