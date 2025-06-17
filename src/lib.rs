@@ -2,7 +2,7 @@ pub mod finite_automata;
 pub mod glr;
 pub mod constraint;
 mod constraint_extra;
-mod datastructures;
+pub mod datastructures;
 pub mod interface;
 mod r#macro;
 pub mod tokenizer;

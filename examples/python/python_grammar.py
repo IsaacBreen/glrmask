@@ -169,25 +169,27 @@ def define_tokens() -> list[tuple[str, Any]]:
         seq([f, r]),
         seq([r, f]),
     ])
-    tokens["FSTRING_START"] = seq([
-        fstring_prefix,
-        choice([
-            eat('"'),
-            eat("'"),
-            eat('"""'),
-            eat("'''"),
-        ])
-    ])
-    tokens["FSTRING_END"] = choice([
-        eat('"'),
-        eat("'"),
-        eat('"""'),
-        eat("'''"),
-    ])
-    tokens["FSTRING_MIDDLE"] = rep1(choice([
-        eat_u8_negation(ord("{")),
-        eat("{{"),
-    ]))
+#     tokens["FSTRING_START"] = seq([
+#         fstring_prefix,
+#         choice([
+#             eat('"'),
+#             eat("'"),
+#             eat('"""'),
+#             eat("'''"),
+#         ])
+#     ])
+#     tokens["FSTRING_END"] = choice([
+#         eat('"'),
+#         eat("'"),
+#         eat('"""'),
+#         eat("'''"),
+#     ])
+#     tokens["FSTRING_MIDDLE"] = rep1(choice([
+#         eat_u8_negation(ord("{")),
+#         eat("{{"),
+#     ]))
+    tokens["FSTRING_START_SINGLE_SINGLE"] = seq([fstring_prefix, eat('"')])
+    tokens["FSTRING_MIDDLE_SINGLE_SINGLE"] = rep1(choice([eat_u8_negation(ord("{")), eat("{{")]))
 #     # TODO: delete this
 #     tokens["STRING"] = eps()
 #     tokens["FSTRING_START"] = eps()
