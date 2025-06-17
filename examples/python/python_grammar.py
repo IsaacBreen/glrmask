@@ -117,6 +117,7 @@ def define_tokens() -> list[tuple[str, Any]]:
     ignore = ge.repeat(ge.choice([
         ge.regex(rep1(eat_u8(ord(" ")))),
         ge.regex(eat_u8(ord("\n"))),
+        ge.regex(eat_u8_seq(b"\\\n")),
         ge.regex(seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n")))])),
     ]))
     tokens["IGNORE"] = ignore
