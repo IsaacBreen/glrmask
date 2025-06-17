@@ -431,8 +431,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
     ) -> Arc<GSSNode> {
         let popped = peek.popn(len);
         crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
-        println!("Reducing with parent node: {}", print_gss_forest(&[Arc::new(peek.parent_node.clone())], 30, &self.parser.terminal_map, None, None));
-        println!("...and predecessor node: {}", print_gss_forest(&[peek.predecessor_node.clone()], 30, &self.parser.terminal_map, None, None));
+        crate::debug!(6, "Reducing with parent node: {}", print_gss_forest(&[Arc::new(peek.parent_node.clone())], 30, &self.parser.terminal_map, None, None));
+        crate::debug!(6, "...and predecessor node: {}", print_gss_forest(&[peek.predecessor_node.clone()], 30, &self.parser.terminal_map, None, None));
         // let mut out = GSSNode::new(Acc::new_for_merging()); // Start with a default acc
         let mut out = Vec::new();
         for popped_peek in popped.peek_iter() { // Renamed predecessor to predecessor_arc
@@ -440,11 +440,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
             match goto {
                 Goto::State(goto_state_id) => {
                     // crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
-                    println!("Popped peek parent node: {}", print_gss_forest(&[Arc::new(popped_peek.parent_node.clone())], 30, &self.parser.terminal_map, None, None));
-                    println!("Poppped peek predecessor node: {}", print_gss_forest(&[popped_peek.predecessor_node.clone()], 30, &self.parser.terminal_map, None, None));
+                    crate::debug!(6, "Popped peek parent node: {}", print_gss_forest(&[Arc::new(popped_peek.parent_node.clone())], 30, &self.parser.terminal_map, None, None));
+                    crate::debug!(6, "Poppped peek predecessor node: {}", print_gss_forest(&[popped_peek.predecessor_node.clone()], 30, &self.parser.terminal_map, None, None));
                     let new_gss_node = popped_peek.to_node().push_with_existing_acc(ParseStateEdgeContent { state_id: goto_state_id });
-                    println!("Popped peek node to_node: {}", print_gss_forest(&[Arc::new(popped_peek.to_node())], 30, &self.parser.terminal_map, None, None));
-                    println!("New GSS node after reduction: {}", print_gss_forest(&[Arc::new(new_gss_node.clone())], 30, &self.parser.terminal_map, None, None));
+                    crate::debug!(6, "Popped peek node to_node: {}", print_gss_forest(&[Arc::new(popped_peek.to_node())], 30, &self.parser.terminal_map, None, None));
+                    crate::debug!(6, "New GSS node after reduction: {}", print_gss_forest(&[Arc::new(new_gss_node.clone())], 30, &self.parser.terminal_map, None, None));
                     out.push(new_gss_node);
                 }
                 Goto::Accept => {
@@ -480,7 +480,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // let mut not_found = ParseState::new();
 
         while let Some(state) = todo.pop() {
-            println!("Processing state: {}", print_gss_forest(&[state.stack.clone()], 30, &self.parser.terminal_map, None, None));
+            crate::debug!(6, "Processing state: {}", print_gss_forest(&[state.stack.clone()], 30, &self.parser.terminal_map, None, None));
             for peek in state.stack.peek_iter() {
                 let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
 
@@ -489,12 +489,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         crate::debug!(4, "Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
                         let stack_for_push = peek.to_arc_node();
                         let new_content = ParseStateEdgeContent { state_id: *to };
-                        println!("Pushing to next state: {}", print_gss_forest(&[stack_for_push.clone()], 30, &self.parser.terminal_map, None, None));
+                        crate::debug!(6, "Pushing to next state: {}", print_gss_forest(&[stack_for_push.clone()], 30, &self.parser.terminal_map, None, None));
                         let new_parse_state = self.push_state(&stack_for_push, new_content);
-                        println!("Next state before shift: {}", print_gss_forest(&[next.stack.clone()], 30, &self.parser.terminal_map, None, None));
-                        println!("Merging next state with new parse state: {}", print_gss_forest(&[new_parse_state.stack.clone()], 30, &self.parser.terminal_map, None, None));
+                        crate::debug!(6, "Next state before shift: {}", print_gss_forest(&[next.stack.clone()], 30, &self.parser.terminal_map, None, None));
+                        crate::debug!(6, "Merging next state with new parse state: {}", print_gss_forest(&[new_parse_state.stack.clone()], 30, &self.parser.terminal_map, None, None));
                         next.merge(new_parse_state);
-                        println!("Next state after shift: {}", print_gss_forest(&[next.stack.clone()], 30, &self.parser.terminal_map, None, None));
+                        crate::debug!(6, "Next state after shift: {}", print_gss_forest(&[next.stack.clone()], 30, &self.parser.terminal_map, None, None));
                     }
 
                     Some(Stage7ShiftsAndReduces::Reduce {
