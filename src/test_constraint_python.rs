@@ -797,6 +797,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // let full_text_to_tokenize = "--------------------";
     // let full_text_to_tokenize = "{}";
 
+    let full_text_to_tokenize = "r\"C:\\raw\\string\\path\"\n\n{}";
+
     // Tokenize the full_text_to_tokenize using the VocabPrefixTree
     let mut test_token_sequence_ids = Vec::new();
     // This list will store the actual string content of tokens as produced by the vocab tree, primarily for logging.
