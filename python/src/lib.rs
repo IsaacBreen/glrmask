@@ -1,5 +1,5 @@
 use sep1::tokenizer::LLMTokenID;
-use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq, ExprGroups};
+use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq, ExprGroups, eat_u8_seq};
 use sep1::finite_automata::Regex;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict};
@@ -85,6 +85,11 @@ impl PyRegexExpr {
     #[staticmethod]
     fn eat_u8(c: u8) -> Self {
         Self { inner: eat_u8(c) }
+    }
+
+    #[staticmethod]
+    fn eat_u8_seq(s: &[u8]) -> Self {
+        Self { inner: eat_u8_seq(s.to_vec()) }
     }
 
     #[staticmethod]

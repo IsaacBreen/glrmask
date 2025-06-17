@@ -452,6 +452,10 @@ pub fn eat_u8(c: u8) -> Expr {
     Expr::U8Seq(vec![c])
 }
 
+pub fn eat_u8_seq(u8s: Vec<u8>) -> Expr {
+    Expr::U8Seq(u8s)
+}
+
 pub fn eat_u8_set(u8s: U8Set) -> Expr {
     Expr::U8Class(u8s)
 }

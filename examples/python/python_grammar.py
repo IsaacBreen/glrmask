@@ -96,7 +96,9 @@ def define_tokens() -> list[tuple[str, Any]]:
 
     choice = Regex.choice
     eat_u8 = Regex.eat_u8
+    eat_u8_seq = Regex.eat_u8_seq
     eat_u8_negation = Regex.eat_u8_negation
+    eat_string = Regex.eat_string
     seq = Regex.seq
     rep = Regex.rep
     rep1 = Regex.rep1
@@ -157,8 +159,8 @@ def define_tokens() -> list[tuple[str, Any]]:
     tokens["DEDENT"] = eps()
 
     tokens["STRING"] = choice([
-        seq([eat_u8(ord('"')), rep(choice([eat_u8_negation(ord('"')), eat('\\\"')])), eat_u8(ord('"'))]),
-        seq([eat_u8(ord("'")), rep(choice([eat_u8_negation(ord("'")), eat('\\\'')])), eat_u8(ord("'"))]),
+        seq([eat_u8(ord('"')), rep(choice([eat_u8_negation(ord('"')), eat_u8_seq(b'\\\"')])), eat_u8(ord('"'))]),
+        seq([eat_u8(ord("'")), rep(choice([eat_u8_negation(ord("'")), eat_u8_seq(b'\\\'')])), eat_u8(ord("'"))]),
         # TODO: why does this make a difference?? Fails when testing with `// let full_text_to_tokenize = "f\"{''}\"";`
 #         seq([eat_u8(ord('"')), rep(choice([eat_u8_negation(ord('"')), eat('\"')])), eat_u8(ord('"'))]),
 #         seq([eat_u8(ord("'")), rep(choice([eat_u8_negation(ord("'")), eat('\'')])), eat_u8(ord("'"))]),
