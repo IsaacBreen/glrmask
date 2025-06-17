@@ -9086,25 +9086,25 @@
             ]
         },
         {
-            "lhs": "fstring_middle",
+            "lhs": "fstring_middle_single_single",
             "rhs": [
                 {
-                    "value": "fstring_replacement_field",
+                    "value": "fstring_replacement_field_single_single",
                     "variant": "NonTerminal"
                 }
             ]
         },
         {
-            "lhs": "fstring_middle",
+            "lhs": "fstring_middle_single_single",
             "rhs": [
                 {
-                    "value": "FSTRING_MIDDLE",
+                    "value": "FSTRING_MIDDLE_SINGLE_SINGLE",
                     "variant": "NonTerminal"
                 }
             ]
         },
         {
-            "lhs": "fstring_replacement_field",
+            "lhs": "fstring_replacement_field_single_single",
             "rhs": [
                 {
                     "value": "IGNORE",
@@ -9119,15 +9119,15 @@
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "fstring_replacement_field[0]",
+                    "value": "fstring_replacement_field_single_single[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "fstring_replacement_field[1]",
+                    "value": "fstring_replacement_field_single_single[1]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "fstring_replacement_field[2]",
+                    "value": "fstring_replacement_field_single_single[2]",
                     "variant": "NonTerminal"
                 },
                 {
@@ -9141,7 +9141,7 @@
             ]
         },
         {
-            "lhs": "fstring_replacement_field[0]",
+            "lhs": "fstring_replacement_field_single_single[0]",
             "rhs": [
                 {
                     "value": "IGNORE",
@@ -9154,37 +9154,37 @@
             ]
         },
         {
-            "lhs": "fstring_replacement_field[0]",
+            "lhs": "fstring_replacement_field_single_single[0]",
             "rhs": []
         },
         {
-            "lhs": "fstring_replacement_field[1]",
+            "lhs": "fstring_replacement_field_single_single[1]",
             "rhs": [
                 {
-                    "value": "fstring_conversion",
+                    "value": "fstring_conversion_single_single",
                     "variant": "NonTerminal"
                 }
             ]
         },
         {
-            "lhs": "fstring_replacement_field[1]",
+            "lhs": "fstring_replacement_field_single_single[1]",
             "rhs": []
         },
         {
-            "lhs": "fstring_replacement_field[2]",
+            "lhs": "fstring_replacement_field_single_single[2]",
             "rhs": [
                 {
-                    "value": "fstring_full_format_spec",
+                    "value": "fstring_full_format_spec_single_single",
                     "variant": "NonTerminal"
                 }
             ]
         },
         {
-            "lhs": "fstring_replacement_field[2]",
+            "lhs": "fstring_replacement_field_single_single[2]",
             "rhs": []
         },
         {
-            "lhs": "fstring_replacement_field",
+            "lhs": "fstring_replacement_field_single_single",
             "rhs": [
                 {
                     "value": "invalid_replacement_field",
@@ -9193,7 +9193,7 @@
             ]
         },
         {
-            "lhs": "fstring_conversion",
+            "lhs": "fstring_conversion_single_single",
             "rhs": [
                 {
                     "value": "IGNORE",
@@ -9210,7 +9210,7 @@
             ]
         },
         {
-            "lhs": "fstring_full_format_spec",
+            "lhs": "fstring_full_format_spec_single_single",
             "rhs": [
                 {
                     "value": "IGNORE",
@@ -9221,42 +9221,715 @@
                     "variant": "Terminal"
                 },
                 {
-                    "value": "fstring_full_format_spec[0]",
+                    "value": "fstring_full_format_spec_single_single[0]",
                     "variant": "NonTerminal"
                 }
             ]
         },
         {
-            "lhs": "fstring_full_format_spec[0]",
+            "lhs": "fstring_full_format_spec_single_single[0]",
             "rhs": [
                 {
-                    "value": "fstring_full_format_spec[0]",
+                    "value": "fstring_full_format_spec_single_single[0]",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "fstring_format_spec",
+                    "value": "fstring_format_spec_single_single",
                     "variant": "NonTerminal"
                 }
             ]
         },
         {
-            "lhs": "fstring_full_format_spec[0]",
+            "lhs": "fstring_full_format_spec_single_single[0]",
             "rhs": []
         },
         {
-            "lhs": "fstring_format_spec",
+            "lhs": "fstring_format_spec_single_single",
             "rhs": [
                 {
-                    "value": "FSTRING_MIDDLE",
+                    "value": "FSTRING_MIDDLE_SINGLE_SINGLE",
                     "variant": "NonTerminal"
                 }
             ]
         },
         {
-            "lhs": "fstring_format_spec",
+            "lhs": "fstring_format_spec_single_single",
             "rhs": [
                 {
-                    "value": "fstring_replacement_field",
+                    "value": "fstring_replacement_field_single_single",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_single_single",
+            "rhs": [
+                {
+                    "value": "FSTRING_START_SINGLE_SINGLE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_single_single[0]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "FSTRING_END_SINGLE_SINGLE",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_single_single[0]",
+            "rhs": [
+                {
+                    "value": "fstring_single_single[0]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_middle_single_single",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_single_single[0]",
+            "rhs": []
+        },
+        {
+            "lhs": "fstring_middle_single_double",
+            "rhs": [
+                {
+                    "value": "fstring_replacement_field_single_double",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_middle_single_double",
+            "rhs": [
+                {
+                    "value": "FSTRING_MIDDLE_SINGLE_DOUBLE",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_replacement_field_single_double",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "\"{\"",
+                    "variant": "Terminal"
+                },
+                {
+                    "value": "annotated_rhs",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_replacement_field_single_double[0]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_replacement_field_single_double[1]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_replacement_field_single_double[2]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "\"}\"",
+                    "variant": "Terminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_replacement_field_single_double[0]",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "\"=\"",
+                    "variant": "Terminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_replacement_field_single_double[0]",
+            "rhs": []
+        },
+        {
+            "lhs": "fstring_replacement_field_single_double[1]",
+            "rhs": [
+                {
+                    "value": "fstring_conversion_single_double",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_replacement_field_single_double[1]",
+            "rhs": []
+        },
+        {
+            "lhs": "fstring_replacement_field_single_double[2]",
+            "rhs": [
+                {
+                    "value": "fstring_full_format_spec_single_double",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_replacement_field_single_double[2]",
+            "rhs": []
+        },
+        {
+            "lhs": "fstring_replacement_field_single_double",
+            "rhs": [
+                {
+                    "value": "invalid_replacement_field",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_conversion_single_double",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "\"!\"",
+                    "variant": "Terminal"
+                },
+                {
+                    "value": "NAME",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_full_format_spec_single_double",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "\":\"",
+                    "variant": "Terminal"
+                },
+                {
+                    "value": "fstring_full_format_spec_single_double[0]",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_full_format_spec_single_double[0]",
+            "rhs": [
+                {
+                    "value": "fstring_full_format_spec_single_double[0]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_format_spec_single_double",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_full_format_spec_single_double[0]",
+            "rhs": []
+        },
+        {
+            "lhs": "fstring_format_spec_single_double",
+            "rhs": [
+                {
+                    "value": "FSTRING_MIDDLE_SINGLE_DOUBLE",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_format_spec_single_double",
+            "rhs": [
+                {
+                    "value": "fstring_replacement_field_single_double",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_single_double",
+            "rhs": [
+                {
+                    "value": "FSTRING_START_SINGLE_DOUBLE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_single_double[0]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "FSTRING_END_SINGLE_DOUBLE",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_single_double[0]",
+            "rhs": [
+                {
+                    "value": "fstring_single_double[0]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_middle_single_double",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_single_double[0]",
+            "rhs": []
+        },
+        {
+            "lhs": "fstring_middle_triple_single",
+            "rhs": [
+                {
+                    "value": "fstring_replacement_field_triple_single",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_middle_triple_single",
+            "rhs": [
+                {
+                    "value": "FSTRING_MIDDLE_TRIPLE_SINGLE",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_replacement_field_triple_single",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "\"{\"",
+                    "variant": "Terminal"
+                },
+                {
+                    "value": "annotated_rhs",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_replacement_field_triple_single[0]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_replacement_field_triple_single[1]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_replacement_field_triple_single[2]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "\"}\"",
+                    "variant": "Terminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_replacement_field_triple_single[0]",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "\"=\"",
+                    "variant": "Terminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_replacement_field_triple_single[0]",
+            "rhs": []
+        },
+        {
+            "lhs": "fstring_replacement_field_triple_single[1]",
+            "rhs": [
+                {
+                    "value": "fstring_conversion_triple_single",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_replacement_field_triple_single[1]",
+            "rhs": []
+        },
+        {
+            "lhs": "fstring_replacement_field_triple_single[2]",
+            "rhs": [
+                {
+                    "value": "fstring_full_format_spec_triple_single",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_replacement_field_triple_single[2]",
+            "rhs": []
+        },
+        {
+            "lhs": "fstring_replacement_field_triple_single",
+            "rhs": [
+                {
+                    "value": "invalid_replacement_field",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_conversion_triple_single",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "\"!\"",
+                    "variant": "Terminal"
+                },
+                {
+                    "value": "NAME",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_full_format_spec_triple_single",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "\":\"",
+                    "variant": "Terminal"
+                },
+                {
+                    "value": "fstring_full_format_spec_triple_single[0]",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_full_format_spec_triple_single[0]",
+            "rhs": [
+                {
+                    "value": "fstring_full_format_spec_triple_single[0]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_format_spec_triple_single",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_full_format_spec_triple_single[0]",
+            "rhs": []
+        },
+        {
+            "lhs": "fstring_format_spec_triple_single",
+            "rhs": [
+                {
+                    "value": "FSTRING_MIDDLE_TRIPLE_SINGLE",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_format_spec_triple_single",
+            "rhs": [
+                {
+                    "value": "fstring_replacement_field_triple_single",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_triple_single",
+            "rhs": [
+                {
+                    "value": "FSTRING_START_TRIPLE_SINGLE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_triple_single[0]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "FSTRING_END_TRIPLE_SINGLE",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_triple_single[0]",
+            "rhs": [
+                {
+                    "value": "fstring_triple_single[0]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_middle_triple_single",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_triple_single[0]",
+            "rhs": []
+        },
+        {
+            "lhs": "fstring_middle_triple_double",
+            "rhs": [
+                {
+                    "value": "fstring_replacement_field_triple_double",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_middle_triple_double",
+            "rhs": [
+                {
+                    "value": "FSTRING_MIDDLE_TRIPLE_DOUBLE",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_replacement_field_triple_double",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "\"{\"",
+                    "variant": "Terminal"
+                },
+                {
+                    "value": "annotated_rhs",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_replacement_field_triple_double[0]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_replacement_field_triple_double[1]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_replacement_field_triple_double[2]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "\"}\"",
+                    "variant": "Terminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_replacement_field_triple_double[0]",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "\"=\"",
+                    "variant": "Terminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_replacement_field_triple_double[0]",
+            "rhs": []
+        },
+        {
+            "lhs": "fstring_replacement_field_triple_double[1]",
+            "rhs": [
+                {
+                    "value": "fstring_conversion_triple_double",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_replacement_field_triple_double[1]",
+            "rhs": []
+        },
+        {
+            "lhs": "fstring_replacement_field_triple_double[2]",
+            "rhs": [
+                {
+                    "value": "fstring_full_format_spec_triple_double",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_replacement_field_triple_double[2]",
+            "rhs": []
+        },
+        {
+            "lhs": "fstring_replacement_field_triple_double",
+            "rhs": [
+                {
+                    "value": "invalid_replacement_field",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_conversion_triple_double",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "\"!\"",
+                    "variant": "Terminal"
+                },
+                {
+                    "value": "NAME",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_full_format_spec_triple_double",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "\":\"",
+                    "variant": "Terminal"
+                },
+                {
+                    "value": "fstring_full_format_spec_triple_double[0]",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_full_format_spec_triple_double[0]",
+            "rhs": [
+                {
+                    "value": "fstring_full_format_spec_triple_double[0]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_format_spec_triple_double",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_full_format_spec_triple_double[0]",
+            "rhs": []
+        },
+        {
+            "lhs": "fstring_format_spec_triple_double",
+            "rhs": [
+                {
+                    "value": "FSTRING_MIDDLE_TRIPLE_DOUBLE",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_format_spec_triple_double",
+            "rhs": [
+                {
+                    "value": "fstring_replacement_field_triple_double",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_triple_double",
+            "rhs": [
+                {
+                    "value": "FSTRING_START_TRIPLE_DOUBLE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_triple_double[0]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "FSTRING_END_TRIPLE_DOUBLE",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_triple_double[0]",
+            "rhs": [
+                {
+                    "value": "fstring_triple_double[0]",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "fstring_middle_triple_double",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "fstring_triple_double[0]",
+            "rhs": []
+        },
+        {
+            "lhs": "fstring",
+            "rhs": [
+                {
+                    "value": "fstring_single_single",
                     "variant": "NonTerminal"
                 }
             ]
@@ -9265,35 +9938,28 @@
             "lhs": "fstring",
             "rhs": [
                 {
-                    "value": "FSTRING_START",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "fstring[0]",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "FSTRING_END",
+                    "value": "fstring_single_double",
                     "variant": "NonTerminal"
                 }
             ]
         },
         {
-            "lhs": "fstring[0]",
+            "lhs": "fstring",
             "rhs": [
                 {
-                    "value": "fstring[0]",
-                    "variant": "NonTerminal"
-                },
-                {
-                    "value": "fstring_middle",
+                    "value": "fstring_triple_single",
                     "variant": "NonTerminal"
                 }
             ]
         },
         {
-            "lhs": "fstring[0]",
-            "rhs": []
+            "lhs": "fstring",
+            "rhs": [
+                {
+                    "value": "fstring_triple_double",
+                    "variant": "NonTerminal"
+                }
+            ]
         },
         {
             "lhs": "string",
@@ -11863,40 +12529,157 @@
             ]
         },
         {
-            "lhs": "FSTRING_START",
+            "lhs": "FSTRING_START_SINGLE_SINGLE",
             "rhs": [
                 {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "FSTRING_START[0]",
+                    "value": "FSTRING_START_SINGLE_SINGLE[0]",
                     "variant": "Terminal"
                 }
             ]
         },
         {
-            "lhs": "FSTRING_END",
+            "lhs": "FSTRING_MIDDLE_SINGLE_SINGLE",
             "rhs": [
                 {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "FSTRING_END[0]",
+                    "value": "FSTRING_MIDDLE_SINGLE_SINGLE[0]",
                     "variant": "Terminal"
                 }
             ]
         },
         {
-            "lhs": "FSTRING_MIDDLE",
+            "lhs": "FSTRING_END_SINGLE_SINGLE",
             "rhs": [
                 {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "FSTRING_MIDDLE[0]",
+                    "value": "FSTRING_END_SINGLE_SINGLE[0]",
+                    "variant": "Terminal"
+                }
+            ]
+        },
+        {
+            "lhs": "FSTRING_START_SINGLE_DOUBLE",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "FSTRING_START_SINGLE_DOUBLE[0]",
+                    "variant": "Terminal"
+                }
+            ]
+        },
+        {
+            "lhs": "FSTRING_MIDDLE_SINGLE_DOUBLE",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "FSTRING_MIDDLE_SINGLE_DOUBLE[0]",
+                    "variant": "Terminal"
+                }
+            ]
+        },
+        {
+            "lhs": "FSTRING_END_SINGLE_DOUBLE",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "FSTRING_END_SINGLE_DOUBLE[0]",
+                    "variant": "Terminal"
+                }
+            ]
+        },
+        {
+            "lhs": "FSTRING_START_TRIPLE_SINGLE",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "FSTRING_START_TRIPLE_SINGLE[0]",
+                    "variant": "Terminal"
+                }
+            ]
+        },
+        {
+            "lhs": "FSTRING_MIDDLE_TRIPLE_SINGLE",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "FSTRING_MIDDLE_TRIPLE_SINGLE[0]Opt[0]",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "FSTRING_END_TRIPLE_SINGLE",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "FSTRING_END_TRIPLE_SINGLE[0]",
+                    "variant": "Terminal"
+                }
+            ]
+        },
+        {
+            "lhs": "FSTRING_START_TRIPLE_DOUBLE",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "FSTRING_START_TRIPLE_DOUBLE[0]",
+                    "variant": "Terminal"
+                }
+            ]
+        },
+        {
+            "lhs": "FSTRING_MIDDLE_TRIPLE_DOUBLE",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "FSTRING_MIDDLE_TRIPLE_DOUBLE[0]Opt[0]",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "FSTRING_END_TRIPLE_DOUBLE",
+            "rhs": [
+                {
+                    "value": "IGNORE",
+                    "variant": "NonTerminal"
+                },
+                {
+                    "value": "FSTRING_END_TRIPLE_DOUBLE[0]",
                     "variant": "Terminal"
                 }
             ]
@@ -11922,6 +12705,32 @@
                     "variant": "NonTerminal"
                 }
             ]
+        },
+        {
+            "lhs": "FSTRING_MIDDLE_TRIPLE_DOUBLE[0]Opt[0]",
+            "rhs": [
+                {
+                    "value": "FSTRING_MIDDLE_TRIPLE_DOUBLE[0]Opt[0]",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "FSTRING_MIDDLE_TRIPLE_DOUBLE[0]Opt[0]",
+            "rhs": []
+        },
+        {
+            "lhs": "FSTRING_MIDDLE_TRIPLE_SINGLE[0]Opt[0]",
+            "rhs": [
+                {
+                    "value": "FSTRING_MIDDLE_TRIPLE_SINGLE[0]Opt[0]",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "FSTRING_MIDDLE_TRIPLE_SINGLE[0]Opt[0]",
+            "rhs": []
         }
     ],
     "start_production_id": 0,
@@ -14216,10 +15025,382 @@
                         "variant": "Choice"
                     },
                     {
+                        "bytes": [
+                            39
+                        ],
+                        "variant": "U8Seq"
+                    }
+                ],
+                "variant": "Seq"
+            },
+            "group_id": 94,
+            "name": "FSTRING_START_SINGLE_SINGLE[0]"
+        },
+        {
+            "expr": {
+                "expr": {
+                    "exprs": [
+                        {
+                            "u8set": [
+                                [
+                                    0,
+                                    38
+                                ],
+                                [
+                                    40,
+                                    122
+                                ],
+                                [
+                                    124,
+                                    255
+                                ]
+                            ],
+                            "variant": "U8Class"
+                        },
+                        {
+                            "bytes": [
+                                123,
+                                123
+                            ],
+                            "variant": "U8Seq"
+                        },
+                        {
+                            "bytes": [
+                                92,
+                                39
+                            ],
+                            "variant": "U8Seq"
+                        }
+                    ],
+                    "variant": "Choice"
+                },
+                "q_type": "OneOrMore",
+                "variant": "Quantifier"
+            },
+            "group_id": 95,
+            "name": "FSTRING_MIDDLE_SINGLE_SINGLE[0]"
+        },
+        {
+            "expr": {
+                "bytes": [
+                    39
+                ],
+                "variant": "U8Seq"
+            },
+            "group_id": 96,
+            "name": "FSTRING_END_SINGLE_SINGLE[0]"
+        },
+        {
+            "expr": {
+                "exprs": [
+                    {
+                        "exprs": [
+                            {
+                                "exprs": [
+                                    {
+                                        "bytes": [
+                                            102
+                                        ],
+                                        "variant": "U8Seq"
+                                    },
+                                    {
+                                        "bytes": [
+                                            70
+                                        ],
+                                        "variant": "U8Seq"
+                                    }
+                                ],
+                                "variant": "Choice"
+                            },
+                            {
+                                "exprs": [
+                                    {
+                                        "bytes": [
+                                            114
+                                        ],
+                                        "variant": "U8Seq"
+                                    },
+                                    {
+                                        "bytes": [
+                                            82
+                                        ],
+                                        "variant": "U8Seq"
+                                    }
+                                ],
+                                "variant": "Choice"
+                            },
+                            {
+                                "exprs": [
+                                    {
+                                        "exprs": [
+                                            {
+                                                "bytes": [
+                                                    102
+                                                ],
+                                                "variant": "U8Seq"
+                                            },
+                                            {
+                                                "bytes": [
+                                                    70
+                                                ],
+                                                "variant": "U8Seq"
+                                            }
+                                        ],
+                                        "variant": "Choice"
+                                    },
+                                    {
+                                        "exprs": [
+                                            {
+                                                "bytes": [
+                                                    114
+                                                ],
+                                                "variant": "U8Seq"
+                                            },
+                                            {
+                                                "bytes": [
+                                                    82
+                                                ],
+                                                "variant": "U8Seq"
+                                            }
+                                        ],
+                                        "variant": "Choice"
+                                    }
+                                ],
+                                "variant": "Seq"
+                            },
+                            {
+                                "exprs": [
+                                    {
+                                        "exprs": [
+                                            {
+                                                "bytes": [
+                                                    114
+                                                ],
+                                                "variant": "U8Seq"
+                                            },
+                                            {
+                                                "bytes": [
+                                                    82
+                                                ],
+                                                "variant": "U8Seq"
+                                            }
+                                        ],
+                                        "variant": "Choice"
+                                    },
+                                    {
+                                        "exprs": [
+                                            {
+                                                "bytes": [
+                                                    102
+                                                ],
+                                                "variant": "U8Seq"
+                                            },
+                                            {
+                                                "bytes": [
+                                                    70
+                                                ],
+                                                "variant": "U8Seq"
+                                            }
+                                        ],
+                                        "variant": "Choice"
+                                    }
+                                ],
+                                "variant": "Seq"
+                            }
+                        ],
+                        "variant": "Choice"
+                    },
+                    {
+                        "bytes": [
+                            34
+                        ],
+                        "variant": "U8Seq"
+                    }
+                ],
+                "variant": "Seq"
+            },
+            "group_id": 97,
+            "name": "FSTRING_START_SINGLE_DOUBLE[0]"
+        },
+        {
+            "expr": {
+                "expr": {
+                    "exprs": [
+                        {
+                            "u8set": [
+                                [
+                                    0,
+                                    33
+                                ],
+                                [
+                                    35,
+                                    122
+                                ],
+                                [
+                                    124,
+                                    255
+                                ]
+                            ],
+                            "variant": "U8Class"
+                        },
+                        {
+                            "bytes": [
+                                123,
+                                123
+                            ],
+                            "variant": "U8Seq"
+                        },
+                        {
+                            "bytes": [
+                                92,
+                                34
+                            ],
+                            "variant": "U8Seq"
+                        }
+                    ],
+                    "variant": "Choice"
+                },
+                "q_type": "OneOrMore",
+                "variant": "Quantifier"
+            },
+            "group_id": 98,
+            "name": "FSTRING_MIDDLE_SINGLE_DOUBLE[0]"
+        },
+        {
+            "expr": {
+                "bytes": [
+                    34
+                ],
+                "variant": "U8Seq"
+            },
+            "group_id": 99,
+            "name": "FSTRING_END_SINGLE_DOUBLE[0]"
+        },
+        {
+            "expr": {
+                "exprs": [
+                    {
+                        "exprs": [
+                            {
+                                "exprs": [
+                                    {
+                                        "bytes": [
+                                            102
+                                        ],
+                                        "variant": "U8Seq"
+                                    },
+                                    {
+                                        "bytes": [
+                                            70
+                                        ],
+                                        "variant": "U8Seq"
+                                    }
+                                ],
+                                "variant": "Choice"
+                            },
+                            {
+                                "exprs": [
+                                    {
+                                        "bytes": [
+                                            114
+                                        ],
+                                        "variant": "U8Seq"
+                                    },
+                                    {
+                                        "bytes": [
+                                            82
+                                        ],
+                                        "variant": "U8Seq"
+                                    }
+                                ],
+                                "variant": "Choice"
+                            },
+                            {
+                                "exprs": [
+                                    {
+                                        "exprs": [
+                                            {
+                                                "bytes": [
+                                                    102
+                                                ],
+                                                "variant": "U8Seq"
+                                            },
+                                            {
+                                                "bytes": [
+                                                    70
+                                                ],
+                                                "variant": "U8Seq"
+                                            }
+                                        ],
+                                        "variant": "Choice"
+                                    },
+                                    {
+                                        "exprs": [
+                                            {
+                                                "bytes": [
+                                                    114
+                                                ],
+                                                "variant": "U8Seq"
+                                            },
+                                            {
+                                                "bytes": [
+                                                    82
+                                                ],
+                                                "variant": "U8Seq"
+                                            }
+                                        ],
+                                        "variant": "Choice"
+                                    }
+                                ],
+                                "variant": "Seq"
+                            },
+                            {
+                                "exprs": [
+                                    {
+                                        "exprs": [
+                                            {
+                                                "bytes": [
+                                                    114
+                                                ],
+                                                "variant": "U8Seq"
+                                            },
+                                            {
+                                                "bytes": [
+                                                    82
+                                                ],
+                                                "variant": "U8Seq"
+                                            }
+                                        ],
+                                        "variant": "Choice"
+                                    },
+                                    {
+                                        "exprs": [
+                                            {
+                                                "bytes": [
+                                                    102
+                                                ],
+                                                "variant": "U8Seq"
+                                            },
+                                            {
+                                                "bytes": [
+                                                    70
+                                                ],
+                                                "variant": "U8Seq"
+                                            }
+                                        ],
+                                        "variant": "Choice"
+                                    }
+                                ],
+                                "variant": "Seq"
+                            }
+                        ],
+                        "variant": "Choice"
+                    },
+                    {
                         "exprs": [
                             {
                                 "bytes": [
-                                    34
+                                    39
                                 ],
                                 "variant": "U8Seq"
                             },
@@ -14230,24 +15411,233 @@
                                 "variant": "U8Seq"
                             },
                             {
+                                "bytes": [
+                                    39
+                                ],
+                                "variant": "U8Seq"
+                            }
+                        ],
+                        "variant": "Seq"
+                    }
+                ],
+                "variant": "Seq"
+            },
+            "group_id": 100,
+            "name": "FSTRING_START_TRIPLE_SINGLE[0]"
+        },
+        {
+            "expr": {
+                "exprs": [
+                    {
+                        "expr": {
+                            "exprs": [
+                                {
+                                    "u8set": [
+                                        [
+                                            0,
+                                            38
+                                        ],
+                                        [
+                                            40,
+                                            122
+                                        ],
+                                        [
+                                            124,
+                                            255
+                                        ]
+                                    ],
+                                    "variant": "U8Class"
+                                },
+                                {
+                                    "bytes": [
+                                        123,
+                                        123
+                                    ],
+                                    "variant": "U8Seq"
+                                },
+                                {
+                                    "exprs": [
+                                        {
+                                            "bytes": [
+                                                39
+                                            ],
+                                            "variant": "U8Seq"
+                                        },
+                                        {
+                                            "u8set": [
+                                                [
+                                                    0,
+                                                    38
+                                                ],
+                                                [
+                                                    40,
+                                                    255
+                                                ]
+                                            ],
+                                            "variant": "U8Class"
+                                        }
+                                    ],
+                                    "variant": "Seq"
+                                },
+                                {
+                                    "exprs": [
+                                        {
+                                            "bytes": [
+                                                39,
+                                                39
+                                            ],
+                                            "variant": "U8Seq"
+                                        },
+                                        {
+                                            "u8set": [
+                                                [
+                                                    0,
+                                                    38
+                                                ],
+                                                [
+                                                    40,
+                                                    255
+                                                ]
+                                            ],
+                                            "variant": "U8Class"
+                                        }
+                                    ],
+                                    "variant": "Seq"
+                                }
+                            ],
+                            "variant": "Choice"
+                        },
+                        "q_type": "ZeroOrMore",
+                        "variant": "Quantifier"
+                    },
+                    {
+                        "expr": {
+                            "bytes": [
+                                39
+                            ],
+                            "variant": "U8Seq"
+                        },
+                        "q_type": "ZeroOrOne",
+                        "variant": "Quantifier"
+                    },
+                    {
+                        "expr": {
+                            "bytes": [
+                                39,
+                                39
+                            ],
+                            "variant": "U8Seq"
+                        },
+                        "q_type": "ZeroOrOne",
+                        "variant": "Quantifier"
+                    }
+                ],
+                "variant": "Seq"
+            },
+            "group_id": 101,
+            "name": "FSTRING_MIDDLE_TRIPLE_SINGLE[0]"
+        },
+        {
+            "expr": {
+                "exprs": [
+                    {
+                        "bytes": [
+                            39
+                        ],
+                        "variant": "U8Seq"
+                    },
+                    {
+                        "bytes": [
+                            39
+                        ],
+                        "variant": "U8Seq"
+                    },
+                    {
+                        "bytes": [
+                            39
+                        ],
+                        "variant": "U8Seq"
+                    }
+                ],
+                "variant": "Seq"
+            },
+            "group_id": 102,
+            "name": "FSTRING_END_TRIPLE_SINGLE[0]"
+        },
+        {
+            "expr": {
+                "exprs": [
+                    {
+                        "exprs": [
+                            {
                                 "exprs": [
                                     {
                                         "bytes": [
-                                            34
+                                            102
                                         ],
                                         "variant": "U8Seq"
                                     },
                                     {
                                         "bytes": [
-                                            34
+                                            70
+                                        ],
+                                        "variant": "U8Seq"
+                                    }
+                                ],
+                                "variant": "Choice"
+                            },
+                            {
+                                "exprs": [
+                                    {
+                                        "bytes": [
+                                            114
                                         ],
                                         "variant": "U8Seq"
                                     },
                                     {
                                         "bytes": [
-                                            34
+                                            82
                                         ],
                                         "variant": "U8Seq"
+                                    }
+                                ],
+                                "variant": "Choice"
+                            },
+                            {
+                                "exprs": [
+                                    {
+                                        "exprs": [
+                                            {
+                                                "bytes": [
+                                                    102
+                                                ],
+                                                "variant": "U8Seq"
+                                            },
+                                            {
+                                                "bytes": [
+                                                    70
+                                                ],
+                                                "variant": "U8Seq"
+                                            }
+                                        ],
+                                        "variant": "Choice"
+                                    },
+                                    {
+                                        "exprs": [
+                                            {
+                                                "bytes": [
+                                                    114
+                                                ],
+                                                "variant": "U8Seq"
+                                            },
+                                            {
+                                                "bytes": [
+                                                    82
+                                                ],
+                                                "variant": "U8Seq"
+                                            }
+                                        ],
+                                        "variant": "Choice"
                                     }
                                 ],
                                 "variant": "Seq"
@@ -14255,34 +15645,185 @@
                             {
                                 "exprs": [
                                     {
-                                        "bytes": [
-                                            39
+                                        "exprs": [
+                                            {
+                                                "bytes": [
+                                                    114
+                                                ],
+                                                "variant": "U8Seq"
+                                            },
+                                            {
+                                                "bytes": [
+                                                    82
+                                                ],
+                                                "variant": "U8Seq"
+                                            }
                                         ],
-                                        "variant": "U8Seq"
+                                        "variant": "Choice"
                                     },
                                     {
-                                        "bytes": [
-                                            39
+                                        "exprs": [
+                                            {
+                                                "bytes": [
+                                                    102
+                                                ],
+                                                "variant": "U8Seq"
+                                            },
+                                            {
+                                                "bytes": [
+                                                    70
+                                                ],
+                                                "variant": "U8Seq"
+                                            }
                                         ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            39
-                                        ],
-                                        "variant": "U8Seq"
+                                        "variant": "Choice"
                                     }
                                 ],
                                 "variant": "Seq"
                             }
                         ],
                         "variant": "Choice"
+                    },
+                    {
+                        "exprs": [
+                            {
+                                "bytes": [
+                                    34
+                                ],
+                                "variant": "U8Seq"
+                            },
+                            {
+                                "bytes": [
+                                    34
+                                ],
+                                "variant": "U8Seq"
+                            },
+                            {
+                                "bytes": [
+                                    34
+                                ],
+                                "variant": "U8Seq"
+                            }
+                        ],
+                        "variant": "Seq"
                     }
                 ],
                 "variant": "Seq"
             },
-            "group_id": 94,
-            "name": "FSTRING_START[0]"
+            "group_id": 103,
+            "name": "FSTRING_START_TRIPLE_DOUBLE[0]"
+        },
+        {
+            "expr": {
+                "exprs": [
+                    {
+                        "expr": {
+                            "exprs": [
+                                {
+                                    "u8set": [
+                                        [
+                                            0,
+                                            33
+                                        ],
+                                        [
+                                            35,
+                                            122
+                                        ],
+                                        [
+                                            124,
+                                            255
+                                        ]
+                                    ],
+                                    "variant": "U8Class"
+                                },
+                                {
+                                    "bytes": [
+                                        123,
+                                        123
+                                    ],
+                                    "variant": "U8Seq"
+                                },
+                                {
+                                    "exprs": [
+                                        {
+                                            "bytes": [
+                                                34
+                                            ],
+                                            "variant": "U8Seq"
+                                        },
+                                        {
+                                            "u8set": [
+                                                [
+                                                    0,
+                                                    33
+                                                ],
+                                                [
+                                                    35,
+                                                    255
+                                                ]
+                                            ],
+                                            "variant": "U8Class"
+                                        }
+                                    ],
+                                    "variant": "Seq"
+                                },
+                                {
+                                    "exprs": [
+                                        {
+                                            "bytes": [
+                                                34,
+                                                34
+                                            ],
+                                            "variant": "U8Seq"
+                                        },
+                                        {
+                                            "u8set": [
+                                                [
+                                                    0,
+                                                    33
+                                                ],
+                                                [
+                                                    35,
+                                                    255
+                                                ]
+                                            ],
+                                            "variant": "U8Class"
+                                        }
+                                    ],
+                                    "variant": "Seq"
+                                }
+                            ],
+                            "variant": "Choice"
+                        },
+                        "q_type": "ZeroOrMore",
+                        "variant": "Quantifier"
+                    },
+                    {
+                        "expr": {
+                            "bytes": [
+                                34
+                            ],
+                            "variant": "U8Seq"
+                        },
+                        "q_type": "ZeroOrOne",
+                        "variant": "Quantifier"
+                    },
+                    {
+                        "expr": {
+                            "bytes": [
+                                34,
+                                34
+                            ],
+                            "variant": "U8Seq"
+                        },
+                        "q_type": "ZeroOrOne",
+                        "variant": "Quantifier"
+                    }
+                ],
+                "variant": "Seq"
+            },
+            "group_id": 104,
+            "name": "FSTRING_MIDDLE_TRIPLE_DOUBLE[0]"
         },
         {
             "expr": {
@@ -14295,104 +15836,21 @@
                     },
                     {
                         "bytes": [
-                            39
+                            34
                         ],
                         "variant": "U8Seq"
                     },
                     {
-                        "exprs": [
-                            {
-                                "bytes": [
-                                    34
-                                ],
-                                "variant": "U8Seq"
-                            },
-                            {
-                                "bytes": [
-                                    34
-                                ],
-                                "variant": "U8Seq"
-                            },
-                            {
-                                "bytes": [
-                                    34
-                                ],
-                                "variant": "U8Seq"
-                            }
+                        "bytes": [
+                            34
                         ],
-                        "variant": "Seq"
-                    },
-                    {
-                        "exprs": [
-                            {
-                                "bytes": [
-                                    39
-                                ],
-                                "variant": "U8Seq"
-                            },
-                            {
-                                "bytes": [
-                                    39
-                                ],
-                                "variant": "U8Seq"
-                            },
-                            {
-                                "bytes": [
-                                    39
-                                ],
-                                "variant": "U8Seq"
-                            }
-                        ],
-                        "variant": "Seq"
+                        "variant": "U8Seq"
                     }
                 ],
-                "variant": "Choice"
+                "variant": "Seq"
             },
-            "group_id": 95,
-            "name": "FSTRING_END[0]"
-        },
-        {
-            "expr": {
-                "expr": {
-                    "exprs": [
-                        {
-                            "u8set": [
-                                [
-                                    0,
-                                    122
-                                ],
-                                [
-                                    124,
-                                    255
-                                ]
-                            ],
-                            "variant": "U8Class"
-                        },
-                        {
-                            "exprs": [
-                                {
-                                    "bytes": [
-                                        123
-                                    ],
-                                    "variant": "U8Seq"
-                                },
-                                {
-                                    "bytes": [
-                                        123
-                                    ],
-                                    "variant": "U8Seq"
-                                }
-                            ],
-                            "variant": "Seq"
-                        }
-                    ],
-                    "variant": "Choice"
-                },
-                "q_type": "OneOrMore",
-                "variant": "Quantifier"
-            },
-            "group_id": 96,
-            "name": "FSTRING_MIDDLE[0]"
+            "group_id": 105,
+            "name": "FSTRING_END_TRIPLE_DOUBLE[0]"
         },
         {
             "expr": {
@@ -14433,7 +15891,7 @@
                 ],
                 "variant": "Seq"
             },
-            "group_id": 97,
+            "group_id": 106,
             "name": "TYPE_COMMENT[0]"
         }
     ]
