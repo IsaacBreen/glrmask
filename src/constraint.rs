@@ -1224,6 +1224,12 @@ impl<'a> GrammarConstraintState<'a> {
 
         self.state = new_overall_state.clone();
 
+        // TODO: this shouldn't be necessary, but due to some order-dependent LLM token BV weirdness in GSS, it is necessary to ensure commit order invariance.
+        for state in self.state.values_mut() {
+            reset_llm_tokens(&mut state.active_state.stack, &mut gss_transformation_memo);
+        }
+        gss_transformation_memo.clear();
+
         // let mut roots_to_simplify_arcs = Vec::new();
         // for glr_parser_state in self.state.values_mut() {
         //     if !glr_parser_state.active_state.stack.is_empty() {
