@@ -432,6 +432,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let popped = peek.popn(len);
         crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
         println!("Reducing with parent node: {}", print_gss_forest(&[Arc::new(peek.parent_node.clone())], 30, &self.parser.terminal_map, None, None));
+        println!("...and predecessor node: {}", print_gss_forest(&[peek.predecessor_node.clone()], 30, &self.parser.terminal_map, None, None));
         // let mut out = GSSNode::new(Acc::new_for_merging()); // Start with a default acc
         let mut out = Vec::new();
         for popped_peek in popped.peek_iter() { // Renamed predecessor to predecessor_arc
@@ -440,6 +441,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Goto::State(goto_state_id) => {
                     // crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
                     let new_gss_node = popped_peek.to_node().push_with_existing_acc(ParseStateEdgeContent { state_id: goto_state_id });
+                    println!("Popped peek node: {}", print_gss_forest(&[Arc::new(popped_peek.to_node())], 30, &self.parser.terminal_map, None, None));
                     println!("New GSS node after reduction: {}", print_gss_forest(&[Arc::new(new_gss_node.clone())], 30, &self.parser.terminal_map, None, None));
                     out.push(new_gss_node);
                 }
