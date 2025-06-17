@@ -3361,12 +3361,12 @@ local_system:
               #[time_it]
               fn union_assign(&mut self, other: Self) {
                   self.acc.union_assign(other.acc);
-                  disallowed_terminals_intersect_assign(&mut self.disallowed_terminals, other.disallowed_terminals);
+                  disallowed_terminals_union_assign(&mut self.disallowed_terminals, other.disallowed_terminals);
               }
               #[time_it]
               fn intersect_assign(&mut self, right: Self) {
                   self.acc.intersect_assign(right.acc);
-                  disallowed_terminals_union_assign(&mut self.disallowed_terminals, right.disallowed_terminals);
+                  disallowed_terminals_intersect_assign(&mut self.disallowed_terminals, right.disallowed_terminals);
               }
               #[time_it]
               fn intersect_has_effect(&self, right: &Self) -> bool {
@@ -4243,27 +4243,47 @@ local_system:
           } else {
               let mut parts = Vec::new();
               for (tokenizer_state_id, terminal_info_value) in acc.disallowed_terminals() {
-                  if terminal_info_value.union.is_empty() {
+                  if terminal_info_value.union.is_empty() && terminal_info_value.intersection.is_empty() {
                       continue;
                   }
-                  let mut terminal_names = Vec::new();
-                  for terminal_id_val in terminal_info_value.union.iter() {
-                      let terminal_id = TerminalID(terminal_id_val);
-                      if let Some(terminal) = terminal_map.get_by_right(&terminal_id) {
-                          terminal_names.push(terminal.0.clone());
-                      } else {
-                          terminal_names.push(format!("<ID:{}>", terminal_id.0));
+
+                  let format_names = |bv: &TerminalBV| -> String {
+                      if bv.is_empty() {
+                          return "[]".to_string();
                       }
-                  }
-                  
-                  const MAX_NAMES_TO_SHOW: usize = 3;
-                  let names_str = if terminal_names.len() > MAX_NAMES_TO_SHOW {
-                      format!("{}...", terminal_names.iter().take(MAX_NAMES_TO_SHOW).cloned().collect::<Vec<_>>().join(", "))
-                  } else {
-                      terminal_names.join(", ")
+                      let mut terminal_names = Vec::new();
+                      for terminal_id_val in bv.iter() {
+                          let terminal_id = TerminalID(terminal_id_val);
+                          if let Some(terminal) = terminal_map.get_by_right(&terminal_id) {
+                              terminal_names.push(terminal.0.clone());
+                          } else {
+                              terminal_names.push(format!("<ID:{}>", terminal_id.0));
+                          }
+                      }
+                      
+                      const MAX_NAMES_TO_SHOW: usize = 3;
+                      let names_str = if terminal_names.len() > MAX_NAMES_TO_SHOW {
+                          format!("{}...", terminal_names.iter().take(MAX_NAMES_TO_SHOW).cloned().collect::<Vec<_>>().join(", "))
+                      } else {
+                          terminal_names.join(", ")
+                      };
+                      format!("[{}]", names_str)
                   };
 
-                  parts.push(format!("State {}: [{}]", tokenizer_state_id.0, names_str));
+                  let mut part_str = String::new();
+                  if !terminal_info_value.union.is_empty() {
+                      part_str.push_str(&format!("U: {}", format_names(&terminal_info_value.union)));
+                      if !part_str.is_empty() {
+                          part_str.push_str(", ");
+                      }
+                      part_str.push_str(&format!("I: {}", format_names(&terminal_info_value.intersection)));
+                  } else if !terminal_info_value.intersection.is_empty() {
+                      part_str.push_str(&format!("I: {}", format_names(&terminal_info_value.intersection)));
+                  }
+
+                  if !part_str.is_empty() {
+                      parts.push(format!("State {}: {}", tokenizer_state_id.0, part_str));
+                  }
               }
               if parts.is_empty() {
                   "".to_string()
@@ -10988,12 +11008,12 @@ local_system:
               #[time_it]
               fn union_assign(&mut self, other: Self) {
                   self.acc.union_assign(other.acc);
-                  disallowed_terminals_intersect_assign(&mut self.disallowed_terminals, other.disallowed_terminals);
+                  disallowed_terminals_union_assign(&mut self.disallowed_terminals, other.disallowed_terminals);
               }
               #[time_it]
               fn intersect_assign(&mut self, right: Self) {
                   self.acc.intersect_assign(right.acc);
-                  disallowed_terminals_union_assign(&mut self.disallowed_terminals, right.disallowed_terminals);
+                  disallowed_terminals_intersect_assign(&mut self.disallowed_terminals, right.disallowed_terminals);
               }
               #[time_it]
               fn intersect_has_effect(&self, right: &Self) -> bool {
@@ -11870,27 +11890,47 @@ local_system:
           } else {
               let mut parts = Vec::new();
               for (tokenizer_state_id, terminal_info_value) in acc.disallowed_terminals() {
-                  if terminal_info_value.union.is_empty() {
+                  if terminal_info_value.union.is_empty() && terminal_info_value.intersection.is_empty() {
                       continue;
                   }
-                  let mut terminal_names = Vec::new();
-                  for terminal_id_val in terminal_info_value.union.iter() {
-                      let terminal_id = TerminalID(terminal_id_val);
-                      if let Some(terminal) = terminal_map.get_by_right(&terminal_id) {
-                          terminal_names.push(terminal.0.clone());
-                      } else {
-                          terminal_names.push(format!("<ID:{}>", terminal_id.0));
+
+                  let format_names = |bv: &TerminalBV| -> String {
+                      if bv.is_empty() {
+                          return "[]".to_string();
                       }
-                  }
-                  
-                  const MAX_NAMES_TO_SHOW: usize = 3;
-                  let names_str = if terminal_names.len() > MAX_NAMES_TO_SHOW {
-                      format!("{}...", terminal_names.iter().take(MAX_NAMES_TO_SHOW).cloned().collect::<Vec<_>>().join(", "))
-                  } else {
-                      terminal_names.join(", ")
+                      let mut terminal_names = Vec::new();
+                      for terminal_id_val in bv.iter() {
+                          let terminal_id = TerminalID(terminal_id_val);
+                          if let Some(terminal) = terminal_map.get_by_right(&terminal_id) {
+                              terminal_names.push(terminal.0.clone());
+                          } else {
+                              terminal_names.push(format!("<ID:{}>", terminal_id.0));
+                          }
+                      }
+                      
+                      const MAX_NAMES_TO_SHOW: usize = 3;
+                      let names_str = if terminal_names.len() > MAX_NAMES_TO_SHOW {
+                          format!("{}...", terminal_names.iter().take(MAX_NAMES_TO_SHOW).cloned().collect::<Vec<_>>().join(", "))
+                      } else {
+                          terminal_names.join(", ")
+                      };
+                      format!("[{}]", names_str)
                   };
 
-                  parts.push(format!("State {}: [{}]", tokenizer_state_id.0, names_str));
+                  let mut part_str = String::new();
+                  if !terminal_info_value.union.is_empty() {
+                      part_str.push_str(&format!("U: {}", format_names(&terminal_info_value.union)));
+                      if !part_str.is_empty() {
+                          part_str.push_str(", ");
+                      }
+                      part_str.push_str(&format!("I: {}", format_names(&terminal_info_value.intersection)));
+                  } else if !terminal_info_value.intersection.is_empty() {
+                      part_str.push_str(&format!("I: {}", format_names(&terminal_info_value.intersection)));
+                  }
+
+                  if !part_str.is_empty() {
+                      parts.push(format!("State {}: {}", tokenizer_state_id.0, part_str));
+                  }
               }
               if parts.is_empty() {
                   "".to_string()
@@ -15261,7 +15301,7 @@ local_system:
               println!("--- Finished dump_precomputed test output ---");
           }
       }
-  diffs_applied_this_send: true
+  diffs_applied_this_send: false
 system:
   message: |2
 
@@ -15275,6 +15315,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
+    - copy-all/paste
     - copy-one/paste
   code_completion_model:
     - gemini/gemini-2.5-flash-preview-05-20
@@ -18643,12 +18684,12 @@ messages:
               #[time_it]
               fn union_assign(&mut self, other: Self) {
                   self.acc.union_assign(other.acc);
-                  disallowed_terminals_intersect_assign(&mut self.disallowed_terminals, other.disallowed_terminals);
+                  disallowed_terminals_union_assign(&mut self.disallowed_terminals, other.disallowed_terminals);
               }
               #[time_it]
               fn intersect_assign(&mut self, right: Self) {
                   self.acc.intersect_assign(right.acc);
-                  disallowed_terminals_union_assign(&mut self.disallowed_terminals, right.disallowed_terminals);
+                  disallowed_terminals_intersect_assign(&mut self.disallowed_terminals, right.disallowed_terminals);
               }
               #[time_it]
               fn intersect_has_effect(&self, right: &Self) -> bool {
@@ -19525,27 +19566,47 @@ messages:
           } else {
               let mut parts = Vec::new();
               for (tokenizer_state_id, terminal_info_value) in acc.disallowed_terminals() {
-                  if terminal_info_value.union.is_empty() {
+                  if terminal_info_value.union.is_empty() && terminal_info_value.intersection.is_empty() {
                       continue;
                   }
-                  let mut terminal_names = Vec::new();
-                  for terminal_id_val in terminal_info_value.union.iter() {
-                      let terminal_id = TerminalID(terminal_id_val);
-                      if let Some(terminal) = terminal_map.get_by_right(&terminal_id) {
-                          terminal_names.push(terminal.0.clone());
-                      } else {
-                          terminal_names.push(format!("<ID:{}>", terminal_id.0));
+
+                  let format_names = |bv: &TerminalBV| -> String {
+                      if bv.is_empty() {
+                          return "[]".to_string();
                       }
-                  }
-                  
-                  const MAX_NAMES_TO_SHOW: usize = 3;
-                  let names_str = if terminal_names.len() > MAX_NAMES_TO_SHOW {
-                      format!("{}...", terminal_names.iter().take(MAX_NAMES_TO_SHOW).cloned().collect::<Vec<_>>().join(", "))
-                  } else {
-                      terminal_names.join(", ")
+                      let mut terminal_names = Vec::new();
+                      for terminal_id_val in bv.iter() {
+                          let terminal_id = TerminalID(terminal_id_val);
+                          if let Some(terminal) = terminal_map.get_by_right(&terminal_id) {
+                              terminal_names.push(terminal.0.clone());
+                          } else {
+                              terminal_names.push(format!("<ID:{}>", terminal_id.0));
+                          }
+                      }
+                      
+                      const MAX_NAMES_TO_SHOW: usize = 3;
+                      let names_str = if terminal_names.len() > MAX_NAMES_TO_SHOW {
+                          format!("{}...", terminal_names.iter().take(MAX_NAMES_TO_SHOW).cloned().collect::<Vec<_>>().join(", "))
+                      } else {
+                          terminal_names.join(", ")
+                      };
+                      format!("[{}]", names_str)
                   };
 
-                  parts.push(format!("State {}: [{}]", tokenizer_state_id.0, names_str));
+                  let mut part_str = String::new();
+                  if !terminal_info_value.union.is_empty() {
+                      part_str.push_str(&format!("U: {}", format_names(&terminal_info_value.union)));
+                      if !part_str.is_empty() {
+                          part_str.push_str(", ");
+                      }
+                      part_str.push_str(&format!("I: {}", format_names(&terminal_info_value.intersection)));
+                  } else if !terminal_info_value.intersection.is_empty() {
+                      part_str.push_str(&format!("I: {}", format_names(&terminal_info_value.intersection)));
+                  }
+
+                  if !part_str.is_empty() {
+                      parts.push(format!("State {}: {}", tokenizer_state_id.0, part_str));
+                  }
               }
               if parts.is_empty() {
                   "".to_string()
@@ -22934,95 +22995,8 @@ messages:
       ```
     metadata:
       filename: src/constraint_extra.rs
-  - user: Modify `format_acc` so that the formatting of 'disallowed' shows both union
-      and intersection.
-    metadata:
-  - assistant: |-
-      Of course! As a helpful assistant, I'd be happy to help you with your code. Here are the requested changes.
-
-      I've updated the `format_acc` function in `src/datastructures/gss.rs` to display both the `union` and `intersection` of disallowed terminals for each tokenizer state. This will provide more detailed information when debugging the GSS structure.
-
-      Here is the git diff patch for the modified file:
-
-      ```diff
-      --- a/src/datastructures/gss.rs
-      +++ b/src/datastructures/gss.rs
-      @@ -1347,30 +1347,46 @@
-           } else {
-               let mut parts = Vec::new();
-               for (tokenizer_state_id, terminal_info_value) in acc.disallowed_terminals() {
-      -            if terminal_info_value.union.is_empty() {
-      +            if terminal_info_value.union.is_empty() && terminal_info_value.intersection.is_empty() {
-                       continue;
-                   }
-      -            let mut terminal_names = Vec::new();
-      -            for terminal_id_val in terminal_info_value.union.iter() {
-      -                let terminal_id = TerminalID(terminal_id_val);
-      -                if let Some(terminal) = terminal_map.get_by_right(&terminal_id) {
-      -                    terminal_names.push(terminal.0.clone());
-      +
-      +            let format_names = |bv: &TerminalBV| -> String {
-      +                if bv.is_empty() {
-      +                    return "[]".to_string();
-      +                }
-      +                let mut terminal_names = Vec::new();
-      +                for terminal_id_val in bv.iter() {
-      +                    let terminal_id = TerminalID(terminal_id_val);
-      +                    if let Some(terminal) = terminal_map.get_by_right(&terminal_id) {
-      +                        terminal_names.push(terminal.0.clone());
-      +                    } else {
-      +                        terminal_names.push(format!("<ID:{}>", terminal_id.0));
-      +                    }
-      +                }
-      +                
-      +                const MAX_NAMES_TO_SHOW: usize = 3;
-      +                let names_str = if terminal_names.len() > MAX_NAMES_TO_SHOW {
-      +                    format!("{}...", terminal_names.iter().take(MAX_NAMES_TO_SHOW).cloned().collect::<Vec<_>>().join(", "))
-                       } else {
-      -                    terminal_names.push(format!("<ID:{}>", terminal_id.0));
-      -                }
-      -            }
-      -            
-      -            const MAX_NAMES_TO_SHOW: usize = 3;
-      -            let names_str = if terminal_names.len() > MAX_NAMES_TO_SHOW {
-      -                format!("{}...", terminal_names.iter().take(MAX_NAMES_TO_SHOW).cloned().collect::<Vec<_>>().join(", "))
-      -            } else {
-      -                terminal_names.join(", ")
-      +                    terminal_names.join(", ")
-      +                };
-      +                format!("[{}]", names_str)
-                   };
-       
-      -            parts.push(format!("State {}: [{}]", tokenizer_state_id.0, names_str));
-      +            let mut part_str = String::new();
-      +            if !terminal_info_value.union.is_empty() {
-      +                part_str.push_str(&format!("U: {}", format_names(&terminal_info_value.union)));
-      +            }
-      +            if !terminal_info_value.intersection.is_empty() {
-      +                if !part_str.is_empty() {
-      +                    part_str.push_str(", ");
-      +                }
-      +                part_str.push_str(&format!("I: {}", format_names(&terminal_info_value.intersection)));
-      +            }
-      +
-      +            if !part_str.is_empty() {
-      +                parts.push(format!("State {}: {}", tokenizer_state_id.0, part_str));
-      +            }
-               }
-               if parts.is_empty() {
-                   "".to_string()
-
-      ```
-
-      This change refactors the formatting logic to be more detailed and readable, which should aid in your debugging efforts. Let me know if you have any other questions
-    metadata:
-  - user: |
-      Git apply result:
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/gss.rs
-      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss.rs.
+  - user: |-
+      I want to get rid of `new_for_merging`. Merging shouldn't be done this way, by creating an accumulated values and using `union` or `union_assign` to merge into it repeatedly.
+      Rather, we should have a function that takes a sequence of values and merges them all at once.
     metadata:
 ...

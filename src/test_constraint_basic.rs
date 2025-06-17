@@ -574,8 +574,10 @@ fn test_a_plus_commit_equivalence() {
     let mut state1 = constraint.init();
     println!("Scenario 1: Committing 'a' (ID {})", llm_a.0);
     state1.commit(llm_a);
+    println!("{}", &state1);
     println!("Scenario 1: Committing 'a' (ID {}) again", llm_a.0);
     state1.commit(llm_a);
+    println!("{}", &state1);
     println!("Scenario 1: Committing 'a' (ID {}) a third time", llm_a.0);
     state1.commit(llm_a);
     println!("{}", &state1);
