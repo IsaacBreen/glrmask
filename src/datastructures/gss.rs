@@ -1493,11 +1493,11 @@ fn format_acc(
             let mut part_str = String::new();
             if !terminal_info_value.union.is_empty() {
                 part_str.push_str(&format!("U: {}", format_names(&terminal_info_value.union)));
-            }
-            if !terminal_info_value.intersection.is_empty() {
                 if !part_str.is_empty() {
                     part_str.push_str(", ");
                 }
+                part_str.push_str(&format!("I: {}", format_names(&terminal_info_value.intersection)));
+            } else if !terminal_info_value.intersection.is_empty() {
                 part_str.push_str(&format!("I: {}", format_names(&terminal_info_value.intersection)));
             }
 
