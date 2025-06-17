@@ -826,13 +826,14 @@ impl GSSNode {
     pub fn merge(&mut self, other: &Self) {
         if self == other { return; }
 
-        if !other.predecessors.is_empty() {
-            if !self.predecessors.is_empty() {
-                self.acc.union_assign(other.acc.clone());
-            } else {
-                self.acc = other.acc.clone();
-            }
+        if other.predecessors.is_empty() {
+            return;
         }
+        if self.predecessors.is_empty() {
+            *self = other.clone();
+            return;
+        }
+        self.acc.union_assign(other.acc.clone());
 
         for (other_depth, other_preds_for_depth) in &other.predecessors {
             let self_preds_for_depth = self.predecessors.entry(*other_depth).or_default();
