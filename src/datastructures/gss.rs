@@ -456,7 +456,7 @@ pub fn disallow_terminals_assign(left: &mut TerminalInfo, right: &TerminalInfo) 
 
 #[derive(Clone, Copy)]
 pub struct GSSPeek<'a> {
-    parent_node: &'a GSSNode,
+    pub(crate) parent_node: &'a GSSNode,
     edge_value: &'a ParseStateEdgeContent,
     predecessor_node: &'a Arc<GSSNode>,
 }
