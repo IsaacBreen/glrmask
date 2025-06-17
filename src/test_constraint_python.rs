@@ -792,7 +792,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // let full_text_to_tokenize = "message = f\"\nProcessing {value} (type: {\n    'integer' if isinstance(value, int) else\n    ('float' if isinstance(value, float) else 'other')\n}) at index {i}\"\n";
     // let full_text_to_tokenize = "f\"{''}\"";
     // let full_text_to_tokenize = "f\"{'float'}\"";
-    let full_text_to_tokenize = "'float'";
+    // let full_text_to_tokenize = "'float'";
+    let full_text_to_tokenize = "'";
 
     // Tokenize the full_text_to_tokenize using the VocabPrefixTree
     let mut test_token_sequence_ids = Vec::new();
