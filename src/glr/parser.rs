@@ -417,6 +417,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         stack: &Arc<GSSNode>, 
         new_content: ParseStateEdgeContent,
     ) -> ParseState {
+        crate::debug!(4, "Pushing new state with content: {:?} and acc: {:?}", new_content, stack.acc2());
         let new_gss_node_instance = stack.push_with_acc(new_content, stack.acc2().clone());
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
