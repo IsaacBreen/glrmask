@@ -15,7 +15,7 @@ use crate::constraint::{LLMTokenBV, TerminalBV};
 use crate::datastructures::gss::acc_mod::Acc;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::glr::grammar::Terminal;
-use crate::tokenizer::{LLMTokenID, TokenizerStateID};
+use crate::tokenizer::TokenizerStateID;
 use crate::types::TerminalID;
 
 // Type aliases for cleaner signatures, now concrete
@@ -1425,34 +1425,11 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats { // Takes slice of refe
 }
 
 /// Formats the accumulator for concise display.
-fn format_acc(
-    acc: &acc_mod::Acc,
-    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-    llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-    original_to_internal_id_bimap: &BiBTreeMap<usize, usize>,
-) -> String {
+fn format_acc(acc: &acc_mod::Acc, terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> String {
     let llm_info = match acc.acc() {
         None => "LLM(Any)".to_string(),
         Some(bv) if bv.is_empty() => "LLM(None)".to_string(),
-        Some(bv) => {
-            let mut token_samples = Vec::new();
-            const MAX_SAMPLES: usize = 3;
-            for internal_id in bv.iter().take(MAX_SAMPLES) {
-                if let Some(original_id) = original_to_internal_id_bimap.get_by_right(&internal_id) {
-                    if let Some(token_bytes) = llm_token_map.get_by_right(&LLMTokenID(*original_id)) {
-                        token_samples.push(format!("{:?}", String::from_utf8_lossy(token_bytes)));
-                    } else {
-                        token_samples.push(format!("<OrigID:{}>", original_id));
-                    }
-                } else {
-                    token_samples.push(format!("<IntID:{}>", internal_id));
-                }
-            }
-            let total_tokens = bv.len();
-            let samples_str = token_samples.join(", ");
-            let ellipsis = if total_tokens > MAX_SAMPLES { ", ..." } else { "" };
-            format!("LLM({} tokens: [{}{}])", total_tokens, samples_str, ellipsis)
-        }
+        Some(bv) => format!("LLM({} tokens)", bv.len()),
     };
 
     let disallowed_info = if acc.disallowed_terminals().is_empty() {
@@ -1496,8 +1473,6 @@ pub fn print_gss_forest(
     roots: &[Arc<GSSNode>],
     max_nodes: usize,
     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-    llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-    original_to_internal_id_bimap: &BiBTreeMap<usize, usize>,
 ) -> String {
     // The recursive helper function. It's responsible for printing the children (predecessors) of a given node.
     fn print_predecessors_recursive(
@@ -1509,8 +1484,6 @@ pub fn print_gss_forest(
         max_nodes: usize,
         output: &mut String,
         terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-        llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-        original_to_internal_id_bimap: &BiBTreeMap<usize, usize>,
     ) -> Result<(), std::fmt::Error> {
         let node_ptr = Arc::as_ptr(node_arc);
         if visited_nodes.contains(&node_ptr) {
@@ -1550,7 +1523,7 @@ pub fn print_gss_forest(
                 )?;
             } else {
                 // Otherwise, print full info and recurse.
-                let acc_child = format_acc(pred_arc.acc2(), terminal_map, llm_token_map, original_to_internal_id_bimap);
+                let acc_child = format_acc(pred_arc.acc2(), terminal_map);
                 let child_depth = pred_arc.max_depth;
                 writeln!(
                     output,
@@ -1573,8 +1546,6 @@ pub fn print_gss_forest(
                     max_nodes,
                     output,
                     terminal_map,
-                    llm_token_map,
-                    original_to_internal_id_bimap,
                 )?;
             }
         }
@@ -1599,14 +1570,14 @@ pub fn print_gss_forest(
         let node_ids_len = node_ids.len();
         let root_id = *node_ids.entry(root_ptr).or_insert(node_ids_len);
         
-        let acc_str = format_acc(root_arc.acc2(), terminal_map, llm_token_map, original_to_internal_id_bimap);
+        let acc_str = format_acc(root_arc.acc2(), terminal_map);
         
         if visited_nodes.contains(&root_ptr) {
             writeln!(&mut out_str, "Root {}: Node {} (ref)", i, root_id).unwrap();
         } else {
             writeln!(&mut out_str, "Root {}: Node {} (depth {}) {}", i, root_id, root_arc.max_depth, acc_str).unwrap();
             count += 1;
-            if print_predecessors_recursive(root_arc, &mut node_ids, &mut visited_nodes, "  ", &mut count, max_nodes, &mut out_str, terminal_map, llm_token_map, original_to_internal_id_bimap).is_err() {
+            if print_predecessors_recursive(root_arc, &mut node_ids, &mut visited_nodes, "  ", &mut count, max_nodes, &mut out_str, terminal_map).is_err() {
                 return "Error writing GSS structure".to_string();
             }
         }
