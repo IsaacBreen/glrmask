@@ -961,7 +961,12 @@ impl<'a> Display for GrammarConstraintState<'a> {
 
         if !gss_roots.is_empty() {
             writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
-            let gss_str = crate::datastructures::gss::print_gss_forest(&gss_roots, 50, &self.parent.parser.terminal_map);
+            let gss_str = crate::datastructures::gss::print_gss_forest(
+                &gss_roots, 50,
+                &self.parent.parser.terminal_map,
+                &self.parent.llm_token_map,
+                &self.parent.original_to_internal_id_bimap
+            );
             write!(f, "{}", gss_str)?;
         }
 
