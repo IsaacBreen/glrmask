@@ -160,9 +160,6 @@ def define_tokens() -> list[tuple[str, Any]]:
     tokens["STRING"] = choice([
         seq([eat_u8(ord('"')), rep(choice([eat_u8_negation(ord('"')), eat_u8_seq(b'\\\"')])), eat_u8(ord('"'))]),
         seq([eat_u8(ord("'")), rep(choice([eat_u8_negation(ord("'")), eat_u8_seq(b'\\\'')])), eat_u8(ord("'"))]),
-        # TODO: why does this make a difference?? Fails when testing with `// let full_text_to_tokenize = "f\"{''}\"";`
-#         seq([eat_u8(ord('"')), rep(choice([eat_u8_negation(ord('"')), eat('\"')])), eat_u8(ord('"'))]),
-#         seq([eat_u8(ord("'")), rep(choice([eat_u8_negation(ord("'")), eat('\'')])), eat_u8(ord("'"))]),
     ])
     f = choice([eat('f'), eat('F')])
     r = choice([eat('r'), eat('R')])
