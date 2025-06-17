@@ -1463,27 +1463,47 @@ fn format_acc(
     } else {
         let mut parts = Vec::new();
         for (tokenizer_state_id, terminal_info_value) in acc.disallowed_terminals() {
-            if terminal_info_value.union.is_empty() {
+            if terminal_info_value.union.is_empty() && terminal_info_value.intersection.is_empty() {
                 continue;
             }
-            let mut terminal_names = Vec::new();
-            for terminal_id_val in terminal_info_value.union.iter() {
-                let terminal_id = TerminalID(terminal_id_val);
-                if let Some(terminal) = terminal_map.get_by_right(&terminal_id) {
-                    terminal_names.push(terminal.0.clone());
-                } else {
-                    terminal_names.push(format!("<ID:{}>", terminal_id.0));
+
+            let format_names = |bv: &TerminalBV| -> String {
+                if bv.is_empty() {
+                    return "[]".to_string();
                 }
-            }
-            
-            const MAX_NAMES_TO_SHOW: usize = 3;
-            let names_str = if terminal_names.len() > MAX_NAMES_TO_SHOW {
-                format!("{}...", terminal_names.iter().take(MAX_NAMES_TO_SHOW).cloned().collect::<Vec<_>>().join(", "))
-            } else {
-                terminal_names.join(", ")
+                let mut terminal_names = Vec::new();
+                for terminal_id_val in bv.iter() {
+                    let terminal_id = TerminalID(terminal_id_val);
+                    if let Some(terminal) = terminal_map.get_by_right(&terminal_id) {
+                        terminal_names.push(terminal.0.clone());
+                    } else {
+                        terminal_names.push(format!("<ID:{}>", terminal_id.0));
+                    }
+                }
+                
+                const MAX_NAMES_TO_SHOW: usize = 3;
+                let names_str = if terminal_names.len() > MAX_NAMES_TO_SHOW {
+                    format!("{}...", terminal_names.iter().take(MAX_NAMES_TO_SHOW).cloned().collect::<Vec<_>>().join(", "))
+                } else {
+                    terminal_names.join(", ")
+                };
+                format!("[{}]", names_str)
             };
 
-            parts.push(format!("State {}: [{}]", tokenizer_state_id.0, names_str));
+            let mut part_str = String::new();
+            if !terminal_info_value.union.is_empty() {
+                part_str.push_str(&format!("U: {}", format_names(&terminal_info_value.union)));
+            }
+            if !terminal_info_value.intersection.is_empty() {
+                if !part_str.is_empty() {
+                    part_str.push_str(", ");
+                }
+                part_str.push_str(&format!("I: {}", format_names(&terminal_info_value.intersection)));
+            }
+
+            if !part_str.is_empty() {
+                parts.push(format!("State {}: {}", tokenizer_state_id.0, part_str));
+            }
         }
         if parts.is_empty() {
             "".to_string()
