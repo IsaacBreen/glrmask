@@ -27,7 +27,7 @@ use crate::finite_automata::Regex;
 use crate::glr::parser::{
     GLRParser, GLRParserState, ParseState, ParseStateEdgeContent,
 };
-use crate::tokenizer::{LLMToken, LLMTokenID, Token, TokenizerStateID};
+use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
