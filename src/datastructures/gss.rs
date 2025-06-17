@@ -540,7 +540,7 @@ pub mod acc_mod {
         }
 
         pub fn new_for_merging() -> Self {
-            Self { acc: Some(LLMTokenBV::zeros()), disallowed_terminals: BTreeMap::new() }
+            Self { acc: None, disallowed_terminals: BTreeMap::new() }
         }
 
         pub fn acc(&self) -> &LLMTokenInfo {
@@ -826,7 +826,13 @@ impl GSSNode {
     pub fn merge(&mut self, other: &Self) {
         if self == other { return; }
 
-        self.acc.union_assign(other.acc.clone());
+        if !other.predecessors.is_empty() {
+            if !self.predecessors.is_empty() {
+                self.acc.union_assign(other.acc.clone());
+            } else {
+                self.acc = other.acc.clone();
+            }
+        }
 
         for (other_depth, other_preds_for_depth) in &other.predecessors {
             let self_preds_for_depth = self.predecessors.entry(*other_depth).or_default();
