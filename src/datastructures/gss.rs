@@ -15,7 +15,7 @@ use crate::constraint::{LLMTokenBV, TerminalBV};
 use crate::datastructures::gss::acc_mod::Acc;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::glr::grammar::Terminal;
-use crate::tokenizer::TokenizerStateID;
+use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID;
 
 // Type aliases for cleaner signatures, now concrete

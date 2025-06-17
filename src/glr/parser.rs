@@ -594,7 +594,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let make_msg = |print_full_forest, max_nodes_to_print| {
             if print_full_forest {
                 format!("GSS ({} nodes):\n{}", stats.unique_nodes,
-                        print_gss_forest(&roots, max_nodes_to_print, &self.parser.terminal_map))
+                        print_gss_forest(&roots, max_nodes_to_print, &self.parser.terminal_map, None, None))
             } else {
                 match find_longest_path(&self.active_state.stack) {
                     Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
