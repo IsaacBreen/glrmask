@@ -395,8 +395,7 @@ impl PathAccumulator for Option<LLMTokenBV> {
 }
 
 fn compute_max_depth(predecessors: &NodeMap) -> MaxDepth {
-    // predecessors.keys().next_back().map_or(0, |max_pred_depth| max_pred_depth + 1)
-    0
+    predecessors.keys().next_back().map_or(0, |max_pred_depth| max_pred_depth + 1)
 }
 
 fn compute_hash_key(predecessors: &NodeMap) -> u64 {
@@ -1425,11 +1424,25 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats { // Takes slice of refe
 }
 
 /// Formats the accumulator for concise display.
-fn format_acc(acc: &acc_mod::Acc, terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> String {
+fn format_acc(
+    acc: &acc_mod::Acc,
+    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+    internal_max_llm_token: Option<usize>,
+) -> String {
     let llm_info = match acc.acc() {
         None => "LLM(Any)".to_string(),
         Some(bv) if bv.is_empty() => "LLM(None)".to_string(),
-        Some(bv) => format!("LLM({} tokens)", bv.len()),
+        Some(bv) => {
+            if let Some(max_tokens) = internal_max_llm_token {
+                if bv.len() > max_tokens { // If it's all tokens (or more)
+                    "LLM(Any)".to_string()
+                } else {
+                    format!("LLM({} tokens)", bv.len())
+                }
+            } else {
+                format!("LLM({} tokens)", bv.len())
+            }
+        }
     };
 
     let disallowed_info = if acc.disallowed_terminals().is_empty() {
@@ -1473,6 +1486,7 @@ pub fn print_gss_forest(
     roots: &[Arc<GSSNode>],
     max_nodes: usize,
     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+    internal_max_llm_token: Option<usize>,
 ) -> String {
     // The recursive helper function. It's responsible for printing the children (predecessors) of a given node.
     fn print_predecessors_recursive(
@@ -1484,6 +1498,7 @@ pub fn print_gss_forest(
         max_nodes: usize,
         output: &mut String,
         terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+        internal_max_llm_token: Option<usize>,
     ) -> Result<(), std::fmt::Error> {
         let node_ptr = Arc::as_ptr(node_arc);
         if visited_nodes.contains(&node_ptr) {
@@ -1523,17 +1538,22 @@ pub fn print_gss_forest(
                 )?;
             } else {
                 // Otherwise, print full info and recurse.
-                let acc_child = format_acc(pred_arc.acc2(), terminal_map);
+                let acc_child = format_acc(pred_arc.acc2(), terminal_map, internal_max_llm_token);
+                let acc_child_str = if acc_child == "(LLM(Any))" {
+                    "".to_string()
+                } else {
+                    format!(" {}", acc_child)
+                };
                 let child_depth = pred_arc.max_depth;
                 writeln!(
                     output,
-                    "{}{} Edge {:?} -> Node {} (depth {}) {}",
+                    "{}{} Edge {:?} -> Node {} (depth {}){}",
                     prefix,
                     connector,
                     edge_val.state_id,
                     pred_id,
                     child_depth,
-                    acc_child,
+                    acc_child_str,
                 )?;
                 *node_count += 1;
 
@@ -1546,6 +1566,7 @@ pub fn print_gss_forest(
                     max_nodes,
                     output,
                     terminal_map,
+                    internal_max_llm_token,
                 )?;
             }
         }
@@ -1570,14 +1591,19 @@ pub fn print_gss_forest(
         let node_ids_len = node_ids.len();
         let root_id = *node_ids.entry(root_ptr).or_insert(node_ids_len);
         
-        let acc_str = format_acc(root_arc.acc2(), terminal_map);
+        let acc_str = format_acc(root_arc.acc2(), terminal_map, internal_max_llm_token);
+        let acc_str_display = if acc_str == "(LLM(Any))" {
+            "".to_string()
+        } else {
+            format!(" {}", acc_str)
+        };
         
         if visited_nodes.contains(&root_ptr) {
             writeln!(&mut out_str, "Root {}: Node {} (ref)", i, root_id).unwrap();
         } else {
-            writeln!(&mut out_str, "Root {}: Node {} (depth {}) {}", i, root_id, root_arc.max_depth, acc_str).unwrap();
+            writeln!(&mut out_str, "Root {}: Node {} (depth {}){}", i, root_id, root_arc.max_depth, acc_str_display).unwrap();
             count += 1;
-            if print_predecessors_recursive(root_arc, &mut node_ids, &mut visited_nodes, "  ", &mut count, max_nodes, &mut out_str, terminal_map).is_err() {
+            if print_predecessors_recursive(root_arc, &mut node_ids, &mut visited_nodes, "  ", &mut count, max_nodes, &mut out_str, terminal_map, internal_max_llm_token).is_err() {
                 return "Error writing GSS structure".to_string();
             }
         }
