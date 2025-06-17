@@ -97,6 +97,7 @@ fn test_constraint_simple() {
     assert!(constraint_state.is_active());
     
     // Mask after committing "ab"
+    println!("Constraint state:\n{}", &constraint_state);
     let mask_after_commit = constraint_state.get_mask();
     assert_eq!(mask_after_commit, HybridBitset::from_iter(vec![2])); // Expect "$" (EOF)
 
