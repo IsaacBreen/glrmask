@@ -27,7 +27,7 @@ use crate::finite_automata::Regex;
 use crate::glr::parser::{
     GLRParser, GLRParserState, ParseState, ParseStateEdgeContent,
 };
-use crate::tokenizer::{LLMToken, LLMTokenID, LLMTokenMap, Token, TokenizerStateID};
+use crate::tokenizer::{LLMToken, LLMTokenID, Token, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
@@ -778,7 +778,7 @@ impl<'r> Precomputer<'r> {
             TokenizerStateID,
             OrderedHashSet<ArcPtrWrapper<Mutex<PrecomputeNode>>>,
         >,
-        no_go: HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>,
+        _no_go: HashMap<ArcPtrWrapper<Mutex<PrecomputeNode>>, LLMTokenBV>,
 
     ) {
         self.pb.inc(1);
@@ -869,7 +869,7 @@ impl<'r> Precomputer<'r> {
             }
 
             if !next_level_assoc.is_empty() {
-                self.dfs(child_vocab_node, next_level_assoc, no_go.clone());
+                self.dfs(child_vocab_node, next_level_assoc, HashMap::new());
             }
         }
     }
@@ -961,7 +961,7 @@ impl<'a> Display for GrammarConstraintState<'a> {
 
         if !gss_roots.is_empty() {
             writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
-            let gss_str = crate::datastructures::gss::print_gss_forest(&gss_roots, 50, &self.parent.parser.terminal_map, Some(self.parent.internal_max_llm_token));
+            let gss_str = crate::datastructures::gss::print_gss_forest(&gss_roots, 50, &self.parent.parser.terminal_map);
             write!(f, "{}", gss_str)?;
         }
 
