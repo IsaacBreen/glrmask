@@ -335,9 +335,9 @@ impl GrammarConstraint {
         );
 
         helper.run_dfs();
-        helper.prune_on_no_terminal_follow();
-        helper.prune_dead_paths();
-        helper.merge_nodes();
+        // helper.prune_on_no_terminal_follow();
+        // helper.prune_dead_paths();
+        // helper.merge_nodes();
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
     }
 
@@ -811,6 +811,7 @@ impl<'r> Precomputer<'r> {
                         let terminal_id = GrammarTokenID(match_info.id);
                         let next_pos = pos + match_info.width;
 
+                        // TODO: could make this so much faster by moving loop down...
                         for src_node_wrapper in &precompute_nodes {
                             if next_pos == segment_bytes.len() {
                                 let llm_token_id = child_vocab_node.token_id();
@@ -864,10 +865,29 @@ impl<'r> Precomputer<'r> {
                     }
 
                     if let Some(end_state_val) = exec_result.end_state {
+                        let possible_final_tokens = self.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_val));
+                        for terminal_id in possible_final_tokens {
+                            for src_node_wrapper in &precompute_nodes {
+                                let llm_token_id = child_vocab_node.token_id();
+                                let mut edge_bv = HybridBitset::zeros();
+                                edge_bv.insert(llm_token_id);
+                                let inserter = EdgeInserter::new(
+                                    src_node_wrapper.as_arc().clone(),
+                                    Some(terminal_id),
+                                    edge_bv,
+                                    |e, n| *e |= n,
+                                );
+                                // Print the source node.
+                                // dump_precompute_trie_recursive(src_node_wrapper, String::new(), &mut HashSet::new(), None);
+                                inserter.try_destination(self.end_node.as_arc().clone()).unwrap();
+                            }
+                        }
                         next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes.iter().cloned());
                     }
                 }
             }
+
+
 
             if !next_level_assoc.is_empty() {
                 self.dfs(child_vocab_node, next_level_assoc, no_go.clone());
