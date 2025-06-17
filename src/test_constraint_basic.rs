@@ -459,6 +459,7 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
         0, // start_production_id
         grammar_token_map.clone()
     );
+    println!("Parser: {}", parser);
 
     // LLM Tokens
     let mut llm_token_map = LLMTokenMap::new();
@@ -482,7 +483,7 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
         token_name_map_for_constraint,
         max_original_llm_token_id,
     );
-    
+
     // Scenario 1: Commit "#", then "a"
     let mut constraint_state3 = constraint.init();
     println!("Scenario 1: Committing LLM Token '#' (ID {})", llm_hash.0);
