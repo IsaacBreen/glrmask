@@ -1222,7 +1222,7 @@ pub fn map_allowed_terminals_tokenizer_states(
                 changed = true; // A state was removed, which is a change.
             }
         }
-        // new_allowed_terminals.retain(|_, bv| bv != &TerminalBV::max_ones());
+        new_disallowed_terminals.retain(|_, bv| !bv.is_empty()); // Remove empty entries
         if !changed && current_acc.disallowed_terminals().len() == new_disallowed_terminals.len() { // No structural change
              // No change in content or structure of allowed_terminals
         } else {
