@@ -1004,6 +1004,11 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
         let t0 = std::time::Instant::now();
         crate::debug!(2, "Computing mask with {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
+        let stats = gather_gss_stats(
+            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        );
+        crate::debug!(3, "GSS stats: {:#?}", stats);
+
         let final_mask_internal = RefCell::new(HybridBitset::zeros());
 
         if self.state.is_empty() {
@@ -1131,11 +1136,6 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(2, "Done main part of get_mask");
         let t1 = std::time::Instant::now();
         println!("after special_map: {:>15?}", t1.duration_since(t0));
-
-        let stats = gather_gss_stats(
-            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-        );
-        crate::debug!(3, "GSS stats: {:#?}", stats);
 
         crate::profiler::print_summary_flat();
         crate::profiler::print_summary();
