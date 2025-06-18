@@ -37,13 +37,6 @@ impl TerminalInfoValue {
         Self { union, intersection }
     }
 
-    pub fn zeros() -> Self {
-        Self {
-            union: TerminalBV::zeros(),
-            intersection: TerminalBV::zeros(),
-        }
-    }
-
     pub fn identity_for_union_or_intersection() -> Self {
         Self {
             union: TerminalBV::zeros(),
@@ -442,8 +435,8 @@ pub fn disallowed_terminals_intersect_assign(left: &mut TerminalInfo, right: Ter
     all_keys.extend(right.keys());
     for tokenizer_state_id in all_keys {
         // An absent key means "no terminals disallowed" -> zeros()
-        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
-        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
+        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
         let intersection = &left_value & &right_value;
         if !intersection.is_empty() {
             left.insert(tokenizer_state_id, intersection);
@@ -460,8 +453,8 @@ pub fn disallowed_terminals_union_assign(left: &mut TerminalInfo, right: Termina
     all_keys.extend(right.keys());
     for tokenizer_state_id in all_keys {
         // An absent key means "no terminals disallowed" -> zeros()
-        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
-        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+        let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
+        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
         let union = &left_value | &right_value;
         if !union.is_empty() {
             left.insert(tokenizer_state_id, union);
@@ -473,7 +466,7 @@ pub fn disallowed_terminals_union_assign(left: &mut TerminalInfo, right: Termina
 
 pub fn disallow_terminals_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
     for (tokenizer_state_id, terminals_to_disallow) in right {
-        let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalInfoValue::zeros);
+        let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalInfoValue::identity_for_union_or_intersection);
         *entry |= terminals_to_disallow;
     }
 }
@@ -1219,8 +1212,7 @@ pub fn map_allowed_terminals_tokenizer_states(
 
         for (old_id, bv) in current_acc.disallowed_terminals() {
             if let Some(new_id) = map.get(old_id) {
-                *new_disallowed_terminals.entry(*new_id)
-                    .or_insert_with(TerminalInfoValue::zeros) |= bv;
+                *new_disallowed_terminals.entry(*new_id).or_insert_with(TerminalInfoValue::identity_for_union_or_intersection) |= bv;
                 if new_disallowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
                     changed = true;
                 }
