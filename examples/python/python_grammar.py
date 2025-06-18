@@ -118,7 +118,7 @@ def define_tokens() -> list[tuple[str, Any]]:
         ge.regex(rep1(eat_u8(ord(" ")))),
         ge.regex(eat_u8(ord("\n"))),
         ge.regex(eat_u8_seq(b"\\\n")),
-        ge.regex(seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n")))])),
+        ge.regex(seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))])),
     ]))
     tokens["IGNORE"] = ignore
 #     # TODO: delete this
@@ -154,7 +154,10 @@ def define_tokens() -> list[tuple[str, Any]]:
 #     tokens["NUMBER"] = eps()
 # #     tokens["NAME"] = eat("f")
 # #     tokens["NUMBER"] = rep(eat("1"))
-    tokens["NEWLINE"] = eat("\n")
+    tokens["NEWLINE"] = choice([
+        eat("\n"),
+        seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]),
+    ])
     tokens["INDENT"] = rep1(eat(" "))
     tokens["DEDENT"] = eps()
 
