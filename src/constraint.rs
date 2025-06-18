@@ -1150,6 +1150,20 @@ impl<'a> GrammarConstraintState<'a> {
             crate::debug!(3, "{}", log_msg);
         }
 
+        // Log the GSSs
+        crate::debug!(3, "Final GSS states after get_mask:");
+        let stats = gather_gss_stats(
+            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        );
+        crate::debug!(3, "GSS stats: {:?}", stats);
+        print!("{}", print_gss_forest(
+            &self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>(),
+            50,
+            &self.parent.parser.terminal_map,
+            Some(&self.parent.original_to_internal_id_bimap),
+            Some(&self.parent.llm_token_map),
+        ));
+
         let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
 
         crate::debug!(2, "Done computing mask");
