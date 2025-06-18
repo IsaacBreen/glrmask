@@ -1132,6 +1132,11 @@ impl<'a> GrammarConstraintState<'a> {
         let t1 = std::time::Instant::now();
         println!("after special_map: {:>15?}", t1.duration_since(t0));
 
+        let stats = gather_gss_stats(
+            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        );
+        crate::debug!(3, "GSS stats: {:#?}", stats);
+
         crate::profiler::print_summary_flat();
         crate::profiler::print_summary();
         crate::profiler::reset();
@@ -1153,10 +1158,6 @@ impl<'a> GrammarConstraintState<'a> {
 
         // Log the GSSs
         crate::debug!(3, "Final GSS states after get_mask:");
-        let stats = gather_gss_stats(
-            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-        );
-        crate::debug!(3, "GSS stats: {:#?}", stats);
         let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
         let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
         print!("{}", print_gss_forest(
