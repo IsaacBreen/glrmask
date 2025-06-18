@@ -1007,7 +1007,13 @@ impl<'a> GrammarConstraintState<'a> {
             return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
         }
 
-        let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, usize>::new()));
+        #[derive(Default, Clone, Copy, Debug)]
+        struct StepCount {
+            total: usize,
+            successful: usize,
+        }
+
+        let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, StepCount>::new()));
 
         let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
         for (tokenizer_state_id, glr_state) in &self.state {
@@ -1072,8 +1078,15 @@ impl<'a> GrammarConstraintState<'a> {
                         crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
                         glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
                         if let Some(gtid) = grammar_token_opt {
-                            *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
+                            let mut counts_guard = step_counts_clone1.lock().unwrap();
+                            let entry = counts_guard.entry(*gtid).or_default();
+                            entry.total += 1;
+
                             glr_s.step(*gtid);
+
+                            if glr_s.is_ok() {
+                                entry.successful += 1;
+                            }
                         }
                         crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
                         // subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
@@ -1123,14 +1136,14 @@ impl<'a> GrammarConstraintState<'a> {
         let counts = step_counts.lock().unwrap();
         if !counts.is_empty() {
             let mut sorted_counts: Vec<_> = counts.iter().collect();
-            sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(*count));
+            sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(count.total));
 
             let mut log_msg = String::from("get_mask step() counts:");
             for (terminal_id, count) in sorted_counts {
                 let terminal_name = self.parent.parser.terminal_map.get_by_right(terminal_id)
                     .map(|s| s.0.as_str())
                     .unwrap_or("UNKNOWN_TERMINAL");
-                log_msg.push_str(&format!("\n  - '{}': {}", terminal_name, count));
+                log_msg.push_str(&format!("\n  - '{}': {}/{} successful", terminal_name, count.successful, count.total));
             }
             crate::debug!(3, "{}", log_msg);
         }
