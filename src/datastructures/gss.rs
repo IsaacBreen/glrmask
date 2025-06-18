@@ -1193,7 +1193,7 @@ pub fn prune_disallowed_terminals(
                 }
             }
         }
-        Some((new_acc, true))
+        Some((new_acc, continue_recursion))
     };
 
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
