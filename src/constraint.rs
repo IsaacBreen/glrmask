@@ -1156,7 +1156,7 @@ impl<'a> GrammarConstraintState<'a> {
         let stats = gather_gss_stats(
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
-        crate::debug!(3, "GSS stats: {:?}", stats);
+        crate::debug!(3, "GSS stats: {:#?}", stats);
         let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
         let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
         print!("{}", print_gss_forest(
