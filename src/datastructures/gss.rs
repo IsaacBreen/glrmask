@@ -44,6 +44,13 @@ impl TerminalInfoValue {
         }
     }
 
+    pub fn identity_for_union_or_intersection() -> Self {
+        Self {
+            union: TerminalBV::zeros(),
+            intersection: TerminalBV::max_ones(),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.union.is_empty()
     }
@@ -1191,7 +1198,7 @@ pub fn prune_disallowed_terminals(
                 }
             }
         }
-        Some((new_acc, continue_recursion))
+        Some((new_acc, true))
     };
 
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
