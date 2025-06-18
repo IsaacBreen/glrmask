@@ -1383,11 +1383,40 @@ impl GSSNode {
 pub struct GSSStats {
     pub num_roots: usize,
     pub unique_nodes: usize,
+    pub structurally_unique_nodes: usize,
+    pub structural_redundancy: f64,
     pub max_depth: usize,
     pub average_depth: f64,
     pub merge_points: usize,
     pub max_predecessors_with_values: usize,
     pub average_predecessors_with_values: f64,
+}
+
+fn get_structural_id(
+    node: &GSSNode,
+    memo: &mut HashMap<*const GSSNode, usize>,
+    structural_cache: &mut BTreeMap<BTreeMap<MaxDepth, BTreeMap<ParseStateEdgeContent, usize>>, usize>,
+) -> usize {
+    let node_ptr = node as *const GSSNode;
+    if let Some(id) = memo.get(&node_ptr) {
+        return *id;
+    }
+
+    let mut pred_structural_ids = BTreeMap::new();
+    for (depth, preds_for_depth) in &node.predecessors {
+        let mut inner_map = BTreeMap::new();
+        for (edge_val, pred_arc) in preds_for_depth {
+            let pred_id = get_structural_id(pred_arc.as_ref(), memo, structural_cache);
+            inner_map.insert(edge_val.clone(), pred_id);
+        }
+        pred_structural_ids.insert(*depth, inner_map);
+    }
+
+    let next_id = structural_cache.len();
+    let id = *structural_cache.entry(pred_structural_ids).or_insert(next_id);
+    
+    memo.insert(node_ptr, id);
+    id
 }
 
 pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats { // Takes slice of references
@@ -1460,6 +1489,17 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats { // Takes slice of refe
     if stats.unique_nodes > 0 {
         stats.average_depth = total_depth as f64 / stats.unique_nodes as f64;
         stats.average_predecessors_with_values = total_preds as f64 / stats.unique_nodes as f64;
+    }
+
+    // --- Calculate structural uniqueness ---
+    let mut structural_memo = HashMap::new();
+    let mut structural_cache = BTreeMap::new();
+    for root_node_ref in roots {
+        get_structural_id(*root_node_ref, &mut structural_memo, &mut structural_cache);
+    }
+    stats.structurally_unique_nodes = structural_cache.len();
+    if stats.unique_nodes > 0 {
+        stats.structural_redundancy = 1.0 - (stats.structurally_unique_nodes as f64 / stats.unique_nodes as f64);
     }
     stats
 }
