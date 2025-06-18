@@ -95,6 +95,23 @@ impl BitOrAssign<&TerminalBV> for TerminalInfoValue {
     }
 }
 
+impl Sub<&TerminalBV> for &TerminalInfoValue {
+    type Output = TerminalInfoValue;
+    fn sub(self, rhs: &TerminalBV) -> Self::Output {
+        TerminalInfoValue {
+            union: &self.union - rhs,
+            intersection: &self.intersection - rhs,
+        }
+    }
+}
+
+impl SubAssign<&TerminalBV> for TerminalInfoValue {
+    fn sub_assign(&mut self, rhs: &TerminalBV) {
+        self.union -= rhs;
+        self.intersection -= rhs;
+    }
+}
+
 impl BitAnd<&TerminalInfoValue> for &TerminalInfoValue {
     type Output = TerminalInfoValue;
     fn bitand(self, rhs: &TerminalInfoValue) -> Self::Output {
@@ -1159,17 +1176,22 @@ pub fn prune_disallowed_terminals(
 ) {
     // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-        for (gss_state_id, gss_disallowed_bv) in current_acc.disallowed_terminals() {
+        let mut continue_recursion = false;
+        let mut new_acc = current_acc.clone();
+        for (gss_state_id, gss_disallowed_bv) in new_acc.disallowed_terminals_mut() {
             if let Some(actual_bv_for_state) = terminals_map.get(gss_state_id) {
                 // If any terminal disallowed by GSS is also matched by current segment, prune.
                 // This means (gss_disallowed_bv AND actual_bv_for_state) must be empty.
-                if !gss_disallowed_bv.is_disjoint(actual_bv_for_state) {
+                if !gss_disallowed_bv.intersection.is_disjoint(actual_bv_for_state) {
                     return None;
+                }
+                if !gss_disallowed_bv.union.is_disjoint(actual_bv_for_state) {
+                    continue_recursion = true;
+                    *gss_disallowed_bv -= actual_bv_for_state;
                 }
             }
         }
-        let continue_recursion = !current_acc.disallowed_terminals().is_empty();
-        Some((current_acc.clone(), continue_recursion))
+        Some((new_acc, continue_recursion))
     };
 
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
