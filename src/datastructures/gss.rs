@@ -464,6 +464,22 @@ pub fn disallowed_terminals_union_assign(left: &mut TerminalInfo, right: Termina
     }
 }
 
+#[time_it]
+pub fn disallowed_terminals_add(left: &mut TerminalInfo, right: BTreeMap<TokenizerStateID, TerminalBV>) {
+    let mut all_keys = BTreeSet::new();
+    all_keys.extend(left.keys());
+    all_keys.extend(right.keys());
+    for tokenizer_state_id in all_keys {
+        // An absent key means "no terminals disallowed" -> zeros()
+        let mut left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
+        let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
+        // Proper union
+        left_value.union |= &right_value;
+        left_value.intersection |= &right_value;
+        left.insert(tokenizer_state_id, left_value);
+    }
+}
+
 pub fn disallow_terminals_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
     for (tokenizer_state_id, terminals_to_disallow) in right {
         let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalInfoValue::identity_for_union_or_intersection);
@@ -1150,10 +1166,9 @@ pub fn disallow_terminals_and_prune_arc(
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
     // TODO: shouldn't be necessary to do this...
-    let disallowed_terminals: TerminalInfo = disallowed_terminals.iter().map(|(k, v)| (*k, TerminalInfoValue { union: v.clone(), intersection: v.clone() })).collect();
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
-        disallowed_terminals_union_assign(new_acc.disallowed_terminals_mut(), disallowed_terminals.clone());
+        disallowed_terminals_add(new_acc.disallowed_terminals_mut(), disallowed_terminals.clone());
         if new_acc.is_alive() {
             // let continue_recursion = *current_acc != new_acc;
             // let continue_recursion = !current_acc.disallowed_terminals().is_empty();

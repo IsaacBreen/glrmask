@@ -2,7 +2,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::datastructures::ordered_hash_map::Retain;
-use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, subtract_llm_tokens_and_prune_arc, TerminalInfoValue};
+use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, subtract_llm_tokens_and_prune_arc, verify_gss, TerminalInfoValue};
 use ordered_hash_map::OrderedHashMap;
 use ordered_hash_map::OrderedHashSet;
 use std::cmp::Ordering;
@@ -1008,6 +1008,9 @@ impl<'a> GrammarConstraintState<'a> {
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
         crate::debug!(3, "GSS stats: {:#?}", stats);
+        verify_gss(&self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>()).expect(
+            "GSS verification failed. This indicates a serious issue with the GSS structure."
+        );
 
         let final_mask_internal = RefCell::new(HybridBitset::zeros());
 
