@@ -37,6 +37,13 @@ impl TerminalInfoValue {
         Self { union, intersection }
     }
 
+    fn zeros() -> Self {
+        Self {
+            union: TerminalBV::zeros(),
+            intersection: TerminalBV::zeros(),
+        }
+    }
+
     pub fn identity_for_union_or_intersection() -> Self {
         Self {
             union: TerminalBV::zeros(),
@@ -471,7 +478,7 @@ pub fn disallowed_terminals_add(left: &mut TerminalInfo, right: BTreeMap<Tokeniz
     all_keys.extend(right.keys());
     for tokenizer_state_id in all_keys {
         // An absent key means "no terminals disallowed" -> zeros()
-        let mut left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
+        let mut left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
         let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalBV::zeros);
         // Proper union
         left_value.union |= &right_value;
@@ -1172,7 +1179,7 @@ pub fn disallow_terminals_and_prune_arc(
         if new_acc.is_alive() {
             // let continue_recursion = *current_acc != new_acc;
             // let continue_recursion = !current_acc.disallowed_terminals().is_empty();
-            let continue_recursion = false;
+            let continue_recursion = true;
             Some((new_acc, continue_recursion))
         } else {
             None // Prune this node
