@@ -1557,6 +1557,7 @@ fn format_acc(
 
 pub fn print_gss_forest(
     roots: &[Arc<GSSNode>],
+    labels: Option<&[String]>,
     max_nodes: usize,
     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
@@ -1649,6 +1650,12 @@ pub fn print_gss_forest(
     let mut count = 0;
     let mut out_str = String::new();
 
+    if let Some(labels) = labels {
+        if roots.len() != labels.len() {
+            assert_eq!(roots.len(), labels.len(), "Number of roots and labels must match for print_gss_forest");
+        }
+    }
+
     if roots.is_empty() { return "GSS Forest: (No roots)".to_string(); }
     writeln!(&mut out_str, "GSS Forest (Max Nodes: {}):", max_nodes).unwrap();
 
@@ -1664,10 +1671,16 @@ pub fn print_gss_forest(
         
         let acc_str = format_acc(root_arc.acc2(), terminal_map, original_internal_bimap, llm_token_map);
         
-        if visited_nodes.contains(&root_ptr) {
-            writeln!(&mut out_str, "Root {}: Node {} (ref)", i, root_id).unwrap();
+        let root_label = if let Some(labels) = labels {
+            labels[i].clone()
         } else {
-            writeln!(&mut out_str, "Root {}: Node {} (depth {}) {}", i, root_id, root_arc.max_depth, acc_str).unwrap();
+            format!("Root {}", i)
+        };
+
+        if visited_nodes.contains(&root_ptr) {
+            writeln!(&mut out_str, "{}: Node {} (ref)", root_label, root_id).unwrap();
+        } else {
+            writeln!(&mut out_str, "{}: Node {} (depth {}) {}", root_label, root_id, root_arc.max_depth, acc_str).unwrap();
             count += 1;
             if print_predecessors_recursive(root_arc, &mut node_ids, &mut visited_nodes, "  ", &mut count, max_nodes, &mut out_str, terminal_map, original_internal_bimap, llm_token_map).is_err() {
                 return "Error writing GSS structure".to_string();

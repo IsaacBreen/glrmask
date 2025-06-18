@@ -346,8 +346,10 @@ local_system:
               );
 
               helper.run_dfs();
+              helper.prune_dead_paths();
               helper.prune_on_no_terminal_follow();
               helper.prune_dead_paths();
+              helper.prune_on_no_terminal_follow();
               helper.merge_nodes();
               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
           }
@@ -1018,7 +1020,13 @@ local_system:
                   return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
               }
 
-              let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, usize>::new()));
+              #[derive(Default, Clone, Copy, Debug)]
+              struct StepCount {
+                  total: usize,
+                  successful: usize,
+              }
+
+              let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, StepCount>::new()));
 
               let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
               for (tokenizer_state_id, glr_state) in &self.state {
@@ -1083,8 +1091,15 @@ local_system:
                               crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
                               glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
                               if let Some(gtid) = grammar_token_opt {
-                                  *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
+                                  let mut counts_guard = step_counts_clone1.lock().unwrap();
+                                  let entry = counts_guard.entry(*gtid).or_default();
+                                  entry.total += 1;
+
                                   glr_s.step(*gtid);
+
+                                  if glr_s.is_ok() {
+                                      entry.successful += 1;
+                                  }
                               }
                               crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
                               // subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
@@ -1134,17 +1149,31 @@ local_system:
               let counts = step_counts.lock().unwrap();
               if !counts.is_empty() {
                   let mut sorted_counts: Vec<_> = counts.iter().collect();
-                  sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(*count));
+                  sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(count.total));
 
                   let mut log_msg = String::from("get_mask step() counts:");
                   for (terminal_id, count) in sorted_counts {
                       let terminal_name = self.parent.parser.terminal_map.get_by_right(terminal_id)
                           .map(|s| s.0.as_str())
                           .unwrap_or("UNKNOWN_TERMINAL");
-                      log_msg.push_str(&format!("\n  - '{}': {}", terminal_name, count));
+                      log_msg.push_str(&format!("\n  - '{}': {}/{} successful", terminal_name, count.successful, count.total));
                   }
                   crate::debug!(3, "{}", log_msg);
               }
+
+              // Log the GSSs
+              crate::debug!(3, "Final GSS states after get_mask:");
+              let stats = gather_gss_stats(
+                  &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+              );
+              crate::debug!(3, "GSS stats: {:?}", stats);
+              print!("{}", print_gss_forest(
+                  &self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>(),
+                  50,
+                  &self.parent.parser.terminal_map,
+                  Some(&self.parent.original_to_internal_id_bimap),
+                  Some(&self.parent.llm_token_map),
+              ));
 
               let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
 
@@ -4762,10 +4791,10 @@ local_system:
               Self { union, intersection }
           }
 
-          pub fn zeros() -> Self {
+          pub fn identity_for_union_or_intersection() -> Self {
               Self {
                   union: TerminalBV::zeros(),
-                  intersection: TerminalBV::zeros(),
+                  intersection: TerminalBV::max_ones(),
               }
           }
 
@@ -4817,6 +4846,23 @@ local_system:
           fn bitor_assign(&mut self, rhs: &TerminalBV) {
               self.union |= rhs;
               self.intersection &= rhs;
+          }
+      }
+
+      impl Sub<&TerminalBV> for &TerminalInfoValue {
+          type Output = TerminalInfoValue;
+          fn sub(self, rhs: &TerminalBV) -> Self::Output {
+              TerminalInfoValue {
+                  union: &self.union - rhs,
+                  intersection: &self.intersection - rhs,
+              }
+          }
+      }
+
+      impl SubAssign<&TerminalBV> for TerminalInfoValue {
+          fn sub_assign(&mut self, rhs: &TerminalBV) {
+              self.union -= rhs;
+              self.intersection -= rhs;
           }
       }
 
@@ -5143,8 +5189,8 @@ local_system:
           all_keys.extend(right.keys());
           for tokenizer_state_id in all_keys {
               // An absent key means "no terminals disallowed" -> zeros()
-              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
-              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
+              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
               let intersection = &left_value & &right_value;
               if !intersection.is_empty() {
                   left.insert(tokenizer_state_id, intersection);
@@ -5161,8 +5207,8 @@ local_system:
           all_keys.extend(right.keys());
           for tokenizer_state_id in all_keys {
               // An absent key means "no terminals disallowed" -> zeros()
-              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
-              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
+              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
               let union = &left_value | &right_value;
               if !union.is_empty() {
                   left.insert(tokenizer_state_id, union);
@@ -5174,7 +5220,7 @@ local_system:
 
       pub fn disallow_terminals_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
           for (tokenizer_state_id, terminals_to_disallow) in right {
-              let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalInfoValue::zeros);
+              let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalInfoValue::identity_for_union_or_intersection);
               *entry |= terminals_to_disallow;
           }
       }
@@ -5863,7 +5909,9 @@ local_system:
               let mut new_acc = current_acc.clone();
               disallowed_terminals_union_assign(new_acc.disallowed_terminals_mut(), disallowed_terminals.clone());
               if new_acc.is_alive() {
-                  let continue_recursion = *current_acc != new_acc;
+                  // let continue_recursion = *current_acc != new_acc;
+                  // let continue_recursion = !current_acc.disallowed_terminals().is_empty();
+                  let continue_recursion = false;
                   Some((new_acc, continue_recursion))
               } else {
                   None // Prune this node
@@ -5884,17 +5932,22 @@ local_system:
       ) {
           // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-              for (gss_state_id, gss_disallowed_bv) in current_acc.disallowed_terminals() {
+              let mut continue_recursion = false;
+              let mut new_acc = current_acc.clone();
+              for (gss_state_id, gss_disallowed_bv) in new_acc.disallowed_terminals_mut() {
                   if let Some(actual_bv_for_state) = terminals_map.get(gss_state_id) {
                       // If any terminal disallowed by GSS is also matched by current segment, prune.
                       // This means (gss_disallowed_bv AND actual_bv_for_state) must be empty.
-                      if !gss_disallowed_bv.is_disjoint(actual_bv_for_state) {
+                      if !gss_disallowed_bv.intersection.is_disjoint(actual_bv_for_state) {
                           return None;
+                      }
+                      if !gss_disallowed_bv.union.is_disjoint(actual_bv_for_state) {
+                          continue_recursion = true;
+                          *gss_disallowed_bv -= actual_bv_for_state;
                       }
                   }
               }
-              let continue_recursion = !current_acc.disallowed_terminals().is_empty();
-              Some((current_acc.clone(), continue_recursion))
+              Some((new_acc, continue_recursion))
           };
 
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
@@ -5915,8 +5968,7 @@ local_system:
 
               for (old_id, bv) in current_acc.disallowed_terminals() {
                   if let Some(new_id) = map.get(old_id) {
-                      *new_disallowed_terminals.entry(*new_id)
-                          .or_insert_with(TerminalInfoValue::zeros) |= bv;
+                      *new_disallowed_terminals.entry(*new_id).or_insert_with(TerminalInfoValue::identity_for_union_or_intersection) |= bv;
                       if new_disallowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
                           changed = true;
                       }
@@ -7936,8 +7988,10 @@ local_system:
               );
 
               helper.run_dfs();
+              helper.prune_dead_paths();
               helper.prune_on_no_terminal_follow();
               helper.prune_dead_paths();
+              helper.prune_on_no_terminal_follow();
               helper.merge_nodes();
               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
           }
@@ -8608,7 +8662,13 @@ local_system:
                   return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
               }
 
-              let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, usize>::new()));
+              #[derive(Default, Clone, Copy, Debug)]
+              struct StepCount {
+                  total: usize,
+                  successful: usize,
+              }
+
+              let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, StepCount>::new()));
 
               let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
               for (tokenizer_state_id, glr_state) in &self.state {
@@ -8673,8 +8733,15 @@ local_system:
                               crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
                               glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
                               if let Some(gtid) = grammar_token_opt {
-                                  *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
+                                  let mut counts_guard = step_counts_clone1.lock().unwrap();
+                                  let entry = counts_guard.entry(*gtid).or_default();
+                                  entry.total += 1;
+
                                   glr_s.step(*gtid);
+
+                                  if glr_s.is_ok() {
+                                      entry.successful += 1;
+                                  }
                               }
                               crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
                               // subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
@@ -8724,17 +8791,31 @@ local_system:
               let counts = step_counts.lock().unwrap();
               if !counts.is_empty() {
                   let mut sorted_counts: Vec<_> = counts.iter().collect();
-                  sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(*count));
+                  sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(count.total));
 
                   let mut log_msg = String::from("get_mask step() counts:");
                   for (terminal_id, count) in sorted_counts {
                       let terminal_name = self.parent.parser.terminal_map.get_by_right(terminal_id)
                           .map(|s| s.0.as_str())
                           .unwrap_or("UNKNOWN_TERMINAL");
-                      log_msg.push_str(&format!("\n  - '{}': {}", terminal_name, count));
+                      log_msg.push_str(&format!("\n  - '{}': {}/{} successful", terminal_name, count.successful, count.total));
                   }
                   crate::debug!(3, "{}", log_msg);
               }
+
+              // Log the GSSs
+              crate::debug!(3, "Final GSS states after get_mask:");
+              let stats = gather_gss_stats(
+                  &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+              );
+              crate::debug!(3, "GSS stats: {:?}", stats);
+              print!("{}", print_gss_forest(
+                  &self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>(),
+                  50,
+                  &self.parent.parser.terminal_map,
+                  Some(&self.parent.original_to_internal_id_bimap),
+                  Some(&self.parent.llm_token_map),
+              ));
 
               let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
 
@@ -12352,10 +12433,10 @@ local_system:
               Self { union, intersection }
           }
 
-          pub fn zeros() -> Self {
+          pub fn identity_for_union_or_intersection() -> Self {
               Self {
                   union: TerminalBV::zeros(),
-                  intersection: TerminalBV::zeros(),
+                  intersection: TerminalBV::max_ones(),
               }
           }
 
@@ -12407,6 +12488,23 @@ local_system:
           fn bitor_assign(&mut self, rhs: &TerminalBV) {
               self.union |= rhs;
               self.intersection &= rhs;
+          }
+      }
+
+      impl Sub<&TerminalBV> for &TerminalInfoValue {
+          type Output = TerminalInfoValue;
+          fn sub(self, rhs: &TerminalBV) -> Self::Output {
+              TerminalInfoValue {
+                  union: &self.union - rhs,
+                  intersection: &self.intersection - rhs,
+              }
+          }
+      }
+
+      impl SubAssign<&TerminalBV> for TerminalInfoValue {
+          fn sub_assign(&mut self, rhs: &TerminalBV) {
+              self.union -= rhs;
+              self.intersection -= rhs;
           }
       }
 
@@ -12733,8 +12831,8 @@ local_system:
           all_keys.extend(right.keys());
           for tokenizer_state_id in all_keys {
               // An absent key means "no terminals disallowed" -> zeros()
-              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
-              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
+              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
               let intersection = &left_value & &right_value;
               if !intersection.is_empty() {
                   left.insert(tokenizer_state_id, intersection);
@@ -12751,8 +12849,8 @@ local_system:
           all_keys.extend(right.keys());
           for tokenizer_state_id in all_keys {
               // An absent key means "no terminals disallowed" -> zeros()
-              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
-              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
+              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
               let union = &left_value | &right_value;
               if !union.is_empty() {
                   left.insert(tokenizer_state_id, union);
@@ -12764,7 +12862,7 @@ local_system:
 
       pub fn disallow_terminals_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
           for (tokenizer_state_id, terminals_to_disallow) in right {
-              let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalInfoValue::zeros);
+              let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalInfoValue::identity_for_union_or_intersection);
               *entry |= terminals_to_disallow;
           }
       }
@@ -13453,7 +13551,9 @@ local_system:
               let mut new_acc = current_acc.clone();
               disallowed_terminals_union_assign(new_acc.disallowed_terminals_mut(), disallowed_terminals.clone());
               if new_acc.is_alive() {
-                  let continue_recursion = *current_acc != new_acc;
+                  // let continue_recursion = *current_acc != new_acc;
+                  // let continue_recursion = !current_acc.disallowed_terminals().is_empty();
+                  let continue_recursion = false;
                   Some((new_acc, continue_recursion))
               } else {
                   None // Prune this node
@@ -13474,17 +13574,22 @@ local_system:
       ) {
           // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-              for (gss_state_id, gss_disallowed_bv) in current_acc.disallowed_terminals() {
+              let mut continue_recursion = false;
+              let mut new_acc = current_acc.clone();
+              for (gss_state_id, gss_disallowed_bv) in new_acc.disallowed_terminals_mut() {
                   if let Some(actual_bv_for_state) = terminals_map.get(gss_state_id) {
                       // If any terminal disallowed by GSS is also matched by current segment, prune.
                       // This means (gss_disallowed_bv AND actual_bv_for_state) must be empty.
-                      if !gss_disallowed_bv.is_disjoint(actual_bv_for_state) {
+                      if !gss_disallowed_bv.intersection.is_disjoint(actual_bv_for_state) {
                           return None;
+                      }
+                      if !gss_disallowed_bv.union.is_disjoint(actual_bv_for_state) {
+                          continue_recursion = true;
+                          *gss_disallowed_bv -= actual_bv_for_state;
                       }
                   }
               }
-              let continue_recursion = !current_acc.disallowed_terminals().is_empty();
-              Some((current_acc.clone(), continue_recursion))
+              Some((new_acc, continue_recursion))
           };
 
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
@@ -13505,8 +13610,7 @@ local_system:
 
               for (old_id, bv) in current_acc.disallowed_terminals() {
                   if let Some(new_id) = map.get(old_id) {
-                      *new_disallowed_terminals.entry(*new_id)
-                          .or_insert_with(TerminalInfoValue::zeros) |= bv;
+                      *new_disallowed_terminals.entry(*new_id).or_insert_with(TerminalInfoValue::identity_for_union_or_intersection) |= bv;
                       if new_disallowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
                           changed = true;
                       }
@@ -15549,8 +15653,10 @@ messages:
               );
 
               helper.run_dfs();
+              helper.prune_dead_paths();
               helper.prune_on_no_terminal_follow();
               helper.prune_dead_paths();
+              helper.prune_on_no_terminal_follow();
               helper.merge_nodes();
               helper.finish(token_name_map, possible_matches, internal_max_llm_token)
           }
@@ -16221,7 +16327,13 @@ messages:
                   return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
               }
 
-              let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, usize>::new()));
+              #[derive(Default, Clone, Copy, Debug)]
+              struct StepCount {
+                  total: usize,
+                  successful: usize,
+              }
+
+              let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, StepCount>::new()));
 
               let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
               for (tokenizer_state_id, glr_state) in &self.state {
@@ -16286,8 +16398,15 @@ messages:
                               crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
                               glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
                               if let Some(gtid) = grammar_token_opt {
-                                  *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
+                                  let mut counts_guard = step_counts_clone1.lock().unwrap();
+                                  let entry = counts_guard.entry(*gtid).or_default();
+                                  entry.total += 1;
+
                                   glr_s.step(*gtid);
+
+                                  if glr_s.is_ok() {
+                                      entry.successful += 1;
+                                  }
                               }
                               crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
                               // subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
@@ -16337,17 +16456,31 @@ messages:
               let counts = step_counts.lock().unwrap();
               if !counts.is_empty() {
                   let mut sorted_counts: Vec<_> = counts.iter().collect();
-                  sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(*count));
+                  sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(count.total));
 
                   let mut log_msg = String::from("get_mask step() counts:");
                   for (terminal_id, count) in sorted_counts {
                       let terminal_name = self.parent.parser.terminal_map.get_by_right(terminal_id)
                           .map(|s| s.0.as_str())
                           .unwrap_or("UNKNOWN_TERMINAL");
-                      log_msg.push_str(&format!("\n  - '{}': {}", terminal_name, count));
+                      log_msg.push_str(&format!("\n  - '{}': {}/{} successful", terminal_name, count.successful, count.total));
                   }
                   crate::debug!(3, "{}", log_msg);
               }
+
+              // Log the GSSs
+              crate::debug!(3, "Final GSS states after get_mask:");
+              let stats = gather_gss_stats(
+                  &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+              );
+              crate::debug!(3, "GSS stats: {:?}", stats);
+              print!("{}", print_gss_forest(
+                  &self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>(),
+                  50,
+                  &self.parent.parser.terminal_map,
+                  Some(&self.parent.original_to_internal_id_bimap),
+                  Some(&self.parent.llm_token_map),
+              ));
 
               let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
 
@@ -19980,10 +20113,10 @@ messages:
               Self { union, intersection }
           }
 
-          pub fn zeros() -> Self {
+          pub fn identity_for_union_or_intersection() -> Self {
               Self {
                   union: TerminalBV::zeros(),
-                  intersection: TerminalBV::zeros(),
+                  intersection: TerminalBV::max_ones(),
               }
           }
 
@@ -20035,6 +20168,23 @@ messages:
           fn bitor_assign(&mut self, rhs: &TerminalBV) {
               self.union |= rhs;
               self.intersection &= rhs;
+          }
+      }
+
+      impl Sub<&TerminalBV> for &TerminalInfoValue {
+          type Output = TerminalInfoValue;
+          fn sub(self, rhs: &TerminalBV) -> Self::Output {
+              TerminalInfoValue {
+                  union: &self.union - rhs,
+                  intersection: &self.intersection - rhs,
+              }
+          }
+      }
+
+      impl SubAssign<&TerminalBV> for TerminalInfoValue {
+          fn sub_assign(&mut self, rhs: &TerminalBV) {
+              self.union -= rhs;
+              self.intersection -= rhs;
           }
       }
 
@@ -20361,8 +20511,8 @@ messages:
           all_keys.extend(right.keys());
           for tokenizer_state_id in all_keys {
               // An absent key means "no terminals disallowed" -> zeros()
-              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
-              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
+              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
               let intersection = &left_value & &right_value;
               if !intersection.is_empty() {
                   left.insert(tokenizer_state_id, intersection);
@@ -20379,8 +20529,8 @@ messages:
           all_keys.extend(right.keys());
           for tokenizer_state_id in all_keys {
               // An absent key means "no terminals disallowed" -> zeros()
-              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
-              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::zeros);
+              let left_value = left.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
+              let right_value = right.get(&tokenizer_state_id).cloned().unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
               let union = &left_value | &right_value;
               if !union.is_empty() {
                   left.insert(tokenizer_state_id, union);
@@ -20392,7 +20542,7 @@ messages:
 
       pub fn disallow_terminals_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
           for (tokenizer_state_id, terminals_to_disallow) in right {
-              let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalInfoValue::zeros);
+              let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalInfoValue::identity_for_union_or_intersection);
               *entry |= terminals_to_disallow;
           }
       }
@@ -21081,7 +21231,9 @@ messages:
               let mut new_acc = current_acc.clone();
               disallowed_terminals_union_assign(new_acc.disallowed_terminals_mut(), disallowed_terminals.clone());
               if new_acc.is_alive() {
-                  let continue_recursion = *current_acc != new_acc;
+                  // let continue_recursion = *current_acc != new_acc;
+                  // let continue_recursion = !current_acc.disallowed_terminals().is_empty();
+                  let continue_recursion = false;
                   Some((new_acc, continue_recursion))
               } else {
                   None // Prune this node
@@ -21102,17 +21254,22 @@ messages:
       ) {
           // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
           let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
-              for (gss_state_id, gss_disallowed_bv) in current_acc.disallowed_terminals() {
+              let mut continue_recursion = false;
+              let mut new_acc = current_acc.clone();
+              for (gss_state_id, gss_disallowed_bv) in new_acc.disallowed_terminals_mut() {
                   if let Some(actual_bv_for_state) = terminals_map.get(gss_state_id) {
                       // If any terminal disallowed by GSS is also matched by current segment, prune.
                       // This means (gss_disallowed_bv AND actual_bv_for_state) must be empty.
-                      if !gss_disallowed_bv.is_disjoint(actual_bv_for_state) {
+                      if !gss_disallowed_bv.intersection.is_disjoint(actual_bv_for_state) {
                           return None;
+                      }
+                      if !gss_disallowed_bv.union.is_disjoint(actual_bv_for_state) {
+                          continue_recursion = true;
+                          *gss_disallowed_bv -= actual_bv_for_state;
                       }
                   }
               }
-              let continue_recursion = !current_acc.disallowed_terminals().is_empty();
-              Some((current_acc.clone(), continue_recursion))
+              Some((new_acc, continue_recursion))
           };
 
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
@@ -21133,8 +21290,7 @@ messages:
 
               for (old_id, bv) in current_acc.disallowed_terminals() {
                   if let Some(new_id) = map.get(old_id) {
-                      *new_disallowed_terminals.entry(*new_id)
-                          .or_insert_with(TerminalInfoValue::zeros) |= bv;
+                      *new_disallowed_terminals.entry(*new_id).or_insert_with(TerminalInfoValue::identity_for_union_or_intersection) |= bv;
                       if new_disallowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
                           changed = true;
                       }
@@ -22824,83 +22980,189 @@ messages:
       ```
     metadata:
       filename: src/datastructures/hybrid_bitset.rs
-  - user: Modify this code so the report on step counts at the end of `get_mask` reports
-      not only the call counts, but also the successful call counts - calls for which
-      the parse state afterwards is still active.
+  - user: |-
+      Modify `print_gss_forest`  to take an optional slice of strings - labels for the passed roots.
+      Pass labels in `get_mask`.
+      In most other calls, it's not necessary, so pass `None`. Only pass labels where it makes sense.
+      Modify all other calls accordingly
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your code. Modifying the logging to include successful call counts is a great way to get more insight into your parser's behavior. Here are the necessary changes for `src/constraint.rs`:
+      Hello! As a helpful assistant, I'm here to help you with your code. Here are the patches for the requested changes.
 
-      I'll adjust the `get_mask` function to track both total and successful `step` calls and then report these statistics at the end.
+      I've modified `print_gss_forest` to accept an optional slice of labels for the GSS roots. This will be useful for debugging, especially in `get_mask` where you can now see which tokenizer state corresponds to which GSS root in the log. I've updated all call sites accordingly, passing labels where it's most informative and `None` otherwise.
 
-      ### `src/constraint.rs`
+      Here are the diffs for the modified files:
 
-      I'll introduce a small helper struct `StepCount` inside `get_mask` to hold the counts, update the logic within the `special_map_grouped` closure to populate these counts, and finally adjust the logging to display the new information.
+      In `src/datastructures/gss.rs`, I'll update `print_gss_forest` to accept and display labels for the roots.
+
+      ```diff
+      --- a/src/datastructures/gss.rs
+      +++ b/src/datastructures/gss.rs
+      @@ -1001,6 +1001,7 @@
+       
+       pub fn print_gss_forest(
+           roots: &[Arc<GSSNode>],
+      +    labels: Option<&[String]>,
+           max_nodes: usize,
+           terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+           original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+      @@ -1080,6 +1081,12 @@
+           let mut count = 0;
+           let mut out_str = String::new();
+       
+      +    if let Some(labels) = labels {
+      +        if roots.len() != labels.len() {
+      +            assert_eq!(roots.len(), labels.len(), "Number of roots and labels must match for print_gss_forest");
+      +        }
+      +    }
+      +
+           if roots.is_empty() { return "GSS Forest: (No roots)".to_string(); }
+           writeln!(&mut out_str, "GSS Forest (Max Nodes: {}):", max_nodes).unwrap();
+       
+      @@ -1094,11 +1101,17 @@
+               
+               let acc_str = format_acc(root_arc.acc2(), terminal_map, original_internal_bimap, llm_token_map);
+               
+      +        let root_label = if let Some(labels) = labels {
+      +            labels[i].clone()
+      +        } else {
+      +            format!("Root {}", i)
+      +        };
+      +
+               if visited_nodes.contains(&root_ptr) {
+      -            writeln!(&mut out_str, "Root {}: Node {} (ref)", i, root_id).unwrap();
+      +            writeln!(&mut out_str, "{}: Node {} (ref)", root_label, root_id).unwrap();
+               } else {
+      -            writeln!(&mut out_str, "Root {}: Node {} (depth {}) {}", i, root_id, root_arc.max_depth, acc_str).unwrap();
+      +            writeln!(&mut out_str, "{}: Node {} (depth {}) {}", root_label, root_id, root_arc.max_depth, acc_str).unwrap();
+                   count += 1;
+                   if print_predecessors_recursive(root_arc, &mut node_ids, &mut visited_nodes, "  ", &mut count, max_nodes, &mut out_str, terminal_map, original_internal_bimap, llm_token_map).is_err() {
+                       return "Error writing GSS structure".to_string();
+
+      ```
+
+      Next, in `src/constraint.rs`, I'll update the calls to `print_gss_forest`. The `Display` implementation will pass `None` for labels, while `get_mask` will pass labels corresponding to the tokenizer states.
 
       ```diff
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -1277,7 +1277,14 @@
-                   return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
-               }
-       
-      -        let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, usize>::new()));
-      +        #[derive(Default, Clone, Copy, Debug)]
-      +        struct StepCount {
-      +            total: usize,
-      +            successful: usize,
-      +        }
-      +
-      +        let step_counts = Arc::new(Mutex::new(BTreeMap::<TerminalID, StepCount>::new()));
-       
-               let mut initial_values_for_map: Vec<(Arc<Mutex<PrecomputeNode>>, GLRParserState<'a>)> = Vec::new();
-               for (tokenizer_state_id, glr_state) in &self.state {
-      @@ -1331,8 +1338,15 @@
-                               crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
-                               glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
-                               if let Some(gtid) = grammar_token_opt {
-      -                            *step_counts_clone1.lock().unwrap().entry(*gtid).or_insert(0) += 1;
-      +                            let mut counts_guard = step_counts_clone1.lock().unwrap();
-      +                            let entry = counts_guard.entry(*gtid).or_default();
-      +                            entry.total += 1;
-      +
-                                   glr_s.step(*gtid);
-      +
-      +                            if glr_s.is_ok() {
-      +                                entry.successful += 1;
-      +                            }
-                               }
-                               crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
-                               // subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
-      @@ -1376,14 +1390,14 @@
-               let counts = step_counts.lock().unwrap();
-               if !counts.is_empty() {
-                   let mut sorted_counts: Vec<_> = counts.iter().collect();
-      -            sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(*count));
-      +            sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(count.total));
-       
-                   let mut log_msg = String::from("get_mask step() counts:");
-                   for (terminal_id, count) in sorted_counts {
-                       let terminal_name = self.parent.parser.terminal_map.get_by_right(terminal_id)
-                           .map(|s| s.0.as_str())
-                           .unwrap_or("UNKNOWN_TERMINAL");
-      -                log_msg.push_str(&format!("\n  - '{}': {}", terminal_name, count));
-      +                log_msg.push_str(&format!("\n  - '{}': {}/{} successful", terminal_name, count.successful, count.total));
-                   }
-                   crate::debug!(3, "{}", log_msg);
-               }
+      @@ -1218,6 +1218,7 @@
+               if !gss_roots.is_empty() {
+                   writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
+                   let gss_str = crate::datastructures::gss::print_gss_forest(
+                       &gss_roots,
+      +                None,
+                       50,
+                       &self.parent.parser.terminal_map,
+                       Some(&self.parent.original_to_internal_id_bimap),
+      @@ -1348,8 +1349,10 @@
+                   &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+               );
+               crate::debug!(3, "GSS stats: {:?}", stats);
+      +        let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
+      +        let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
+               print!("{}", print_gss_forest(
+      -            &self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>(),
+      +            &roots, Some(&labels),
+                   50,
+                   &self.parent.parser.terminal_map,
+                   Some(&self.parent.original_to_internal_id_bimap),
 
       ```
 
-      These changes should give you the more detailed report you're looking for. Let me know if you have any other questions
+      Finally, in `src/glr/parser.rs`, I'll update the debugging calls to `print_gss_forest` to pass `None` for the new labels parameter.
+
+      ```diff
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -561,14 +561,14 @@
+               len: usize,
+           ) -> Arc<GSSNode> {
+               let popped = peek.popn(len);
+      -        crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
+      -        crate::debug!(6, "Reducing with parent node: {}", print_gss_forest(&[Arc::new(peek.parent_node.clone())], 30, &self.parser.terminal_map, None, None));
+      -        crate::debug!(6, "...and predecessor node: {}", print_gss_forest(&[peek.predecessor_node.clone()], 30, &self.parser.terminal_map, None, None));
+      +        crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
+      +        crate::debug!(6, "Reducing with parent node: {}", print_gss_forest(&[Arc::new(peek.parent_node.clone())], None, 30, &self.parser.terminal_map, None, None));
+      +        crate::debug!(6, "...and predecessor node: {}", print_gss_forest(&[peek.predecessor_node.clone()], None, 30, &self.parser.terminal_map, None, None));
+               // let mut out = GSSNode::new(Acc::new_for_merging()); // Start with a default acc
+               let mut out = Vec::new();
+               for popped_peek in popped.peek_iter() { // Renamed predecessor to predecessor_arc
+                   let goto = self.parser.stage_7_table.get(&popped_peek.edge_value().state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", popped_peek.edge_value().state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor ??)", nt.0, popped_peek.edge_value().state_id)), |state_id| Ok(*state_id))).unwrap();
+                   match goto {
+                       Goto::State(goto_state_id) => {
+      -                    // crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
+      -                    crate::debug!(6, "Popped peek parent node: {}", print_gss_forest(&[Arc::new(popped_peek.parent_node.clone())], 30, &self.parser.terminal_map, None, None));
+      -                    crate::debug!(6, "Poppped peek predecessor node: {}", print_gss_forest(&[popped_peek.predecessor_node.clone()], 30, &self.parser.terminal_map, None, None));
+      +                    // crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
+      +                    crate::debug!(6, "Popped peek parent node: {}", print_gss_forest(&[Arc::new(popped_peek.parent_node.clone())], None, 30, &self.parser.terminal_map, None, None));
+      +                    crate::debug!(6, "Poppped peek predecessor node: {}", print_gss_forest(&[popped_peek.predecessor_node.clone()], None, 30, &self.parser.terminal_map, None, None));
+                           let new_gss_node = popped_peek.to_node().push_with_existing_acc(ParseStateEdgeContent { state_id: goto_state_id });
+      -                    crate::debug!(6, "Popped peek node to_node: {}", print_gss_forest(&[Arc::new(popped_peek.to_node())], 30, &self.parser.terminal_map, None, None));
+      -                    crate::debug!(6, "New GSS node after reduction: {}", print_gss_forest(&[Arc::new(new_gss_node.clone())], 30, &self.parser.terminal_map, None, None));
+      +                    crate::debug!(6, "Popped peek node to_node: {}", print_gss_forest(&[Arc::new(popped_peek.to_node())], None, 30, &self.parser.terminal_map, None, None));
+      +                    crate::debug!(6, "New GSS node after reduction: {}", print_gss_forest(&[Arc::new(new_gss_node.clone())], None, 30, &self.parser.terminal_map, None, None));
+                           out.push(new_gss_node);
+                       }
+                       Goto::Accept => {
+      @@ -601,17 +601,17 @@
+               // let mut not_found = ParseState::new();
+       
+               while let Some(state) = todo.pop() {
+      -            crate::debug!(6, "Processing state: {}", print_gss_forest(&[state.stack.clone()], 30, &self.parser.terminal_map, None, None));
+      +            crate::debug!(6, "Processing state: {}", print_gss_forest(&[state.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
+                   for peek in state.stack.peek_iter() {
+                       let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+       
+                       match row.shifts_and_reduces.get(&token_id) {
+                           Some(Stage7ShiftsAndReduces::Shift(to)) => {
+                               crate::debug!(4, "Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
+                               let stack_for_push = peek.to_arc_node();
+                               let new_content = ParseStateEdgeContent { state_id: *to };
+      -                        crate::debug!(6, "Pushing to next state: {}", print_gss_forest(&[stack_for_push.clone()], 30, &self.parser.terminal_map, None, None));
+      +                        crate::debug!(6, "Pushing to next state: {}", print_gss_forest(&[stack_for_push.clone()], None, 30, &self.parser.terminal_map, None, None));
+                               let new_parse_state = self.push_state(&stack_for_push, new_content);
+      -                        crate::debug!(6, "Next state before shift: {}", print_gss_forest(&[next.stack.clone()], 30, &self.parser.terminal_map, None, None));
+      -                        crate::debug!(6, "Merging next state with new parse state: {}", print_gss_forest(&[new_parse_state.stack.clone()], 30, &self.parser.terminal_map, None, None));
+      +                        crate::debug!(6, "Next state before shift: {}", print_gss_forest(&[next.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
+      +                        crate::debug!(6, "Merging next state with new parse state: {}", print_gss_forest(&[new_parse_state.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
+                               next.merge(new_parse_state);
+      -                        crate::debug!(6, "Next state after shift: {}", print_gss_forest(&[next.stack.clone()], 30, &self.parser.terminal_map, None, None));
+      +                        crate::debug!(6, "Next state after shift: {}", print_gss_forest(&[next.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
+                           }
+       
+                           Some(Stage7ShiftsAndReduces::Reduce {
+      @@ -710,7 +710,7 @@
+               let make_msg = |print_full_forest, max_nodes_to_print| {
+                   if print_full_forest {
+                       format!("GSS ({} nodes):\n{}", stats.unique_nodes,
+      -                        print_gss_forest(&roots, max_nodes_to_print, &self.parser.terminal_map, None, None))
+      +                        print_gss_forest(&roots, None, max_nodes_to_print, &self.parser.terminal_map, None, None))
+                   } else {
+                       match find_longest_path(&self.active_state.stack) {
+                           Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
+
+      ```
+
+      Let me know if you have any other questions
     metadata:
   - user: |
       Git apply result:
-      Found 1 diff block(s) to process using custom patcher.
+      Found 3 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/gss.rs
+      Applying patch to 'src/datastructures/gss.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/gss.rs.
+
+      --- Processing Diff Block 2 ---
       Identified target file: src/constraint.rs
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
 ...

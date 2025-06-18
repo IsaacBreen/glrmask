@@ -986,6 +986,7 @@ impl<'a> Display for GrammarConstraintState<'a> {
             writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
             let gss_str = crate::datastructures::gss::print_gss_forest(
                 &gss_roots,
+                None,
                 50,
                 &self.parent.parser.terminal_map,
                 Some(&self.parent.original_to_internal_id_bimap),
@@ -1156,8 +1157,10 @@ impl<'a> GrammarConstraintState<'a> {
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
         crate::debug!(3, "GSS stats: {:?}", stats);
+        let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
+        let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
         print!("{}", print_gss_forest(
-            &self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>(),
+            &roots, Some(&labels),
             50,
             &self.parent.parser.terminal_map,
             Some(&self.parent.original_to_internal_id_bimap),
