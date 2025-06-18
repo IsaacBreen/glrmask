@@ -1830,6 +1830,100 @@ impl GSSNode {
     }
 }
 
+/// Verifies the integrity of the GSS structure, checking accumulator properties.
+///
+/// It checks that for each node, its accumulator value is a "subset" of the
+/// union of the accumulators of its predecessors. This ensures that the
+/// accumulated information is consistent across the graph.
+///
+/// The verification traverses the GSS from the given roots and checks each
+/// reachable node only once.
+///
+/// # Arguments
+///
+/// * `roots`: A slice of `Arc<GSSNode>` representing the roots of the GSS forest.
+///
+/// # Returns
+///
+/// * `Ok(())` if the GSS is valid.
+/// * `Err(String)` with a descriptive message if a violation is found.
+pub fn verify_gss(roots: &[Arc<GSSNode>]) -> Result<(), String> {
+    let mut visited = HashSet::new();
+    for root in roots {
+        verify_node_recursive(root, &mut visited)?;
+    }
+    Ok(())
+}
+
+fn verify_node_recursive(
+    node: &Arc<GSSNode>,
+    visited: &mut HashSet<*const GSSNode>,
+) -> Result<(), String> {
+    let node_ptr = Arc::as_ptr(node);
+    if !visited.insert(node_ptr) {
+        return Ok(()); // Already visited and verified
+    }
+
+    if node.predecessors.is_empty() {
+        return Ok(()); // Leaf node is valid by definition
+    }
+
+    // 1. Compute the union of predecessor accumulators.
+    let mut union_pred_acc = Acc::new_for_merging();
+    let predecessors: Vec<_> = node.predecessors.values().flat_map(|m| m.values()).collect();
+    if predecessors.is_empty() {
+        return Ok(());
+    }
+
+    for pred_arc in &predecessors {
+        union_pred_acc.union_assign(pred_arc.acc2().clone());
+    }
+
+    // 2. Check if the node's accumulator is a "subset" of the union.
+    let self_acc = node.acc2();
+    if !is_acc_subset(self_acc, &union_pred_acc) {
+        return Err(format!(
+            "GSS verification failed for node {:p}: Accumulator is not a subset of predecessors' union.\n  Node acc: {:?}\n  Preds union acc: {:?}",
+            node_ptr, self_acc, union_pred_acc
+        ));
+    }
+
+    // 3. Recurse on predecessors.
+    for pred_arc in predecessors {
+        verify_node_recursive(pred_arc, visited)?;
+    }
+
+    Ok(())
+}
+
+fn is_acc_subset(subset_acc: &Acc, superset_acc: &Acc) -> bool {
+    // Check LLMTokenInfo part
+    let llm_ok = match (subset_acc.acc(), superset_acc.acc()) {
+        (Some(s), Some(u)) => s.is_subset(u),
+        (Some(_), None) => true, // Any specific set is a subset of "all" (None).
+        (None, Some(u)) => &LLMTokenBV::max_ones() == u, // "all" is only subset of "all".
+        (None, None) => true,
+    };
+
+    if !llm_ok { return false; }
+
+    // Check TerminalInfo part
+    for (state_id, subset_val) in subset_acc.disallowed_terminals() {
+        let superset_val = superset_acc.disallowed_terminals().get(state_id)
+            .cloned()
+            .unwrap_or_else(TerminalInfoValue::identity_for_union_or_intersection);
+
+        if !subset_val.union.is_subset(&superset_val.union) {
+            return false;
+        }
+        if !superset_val.intersection.is_subset(&subset_val.intersection) {
+            return false;
+        }
+    }
+
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use crate::constraint::LLMTokenBV;
