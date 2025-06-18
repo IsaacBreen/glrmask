@@ -12497,7 +12497,7 @@
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "IGNORE[0][0][1]",
+                    "value": "NEWLINE[0]",
                     "variant": "Terminal"
                 }
             ]
@@ -12716,19 +12716,6 @@
             ]
         },
         {
-            "lhs": "FSTRING_MIDDLE_TRIPLE_SINGLE[0]Opt[0]",
-            "rhs": [
-                {
-                    "value": "FSTRING_MIDDLE_TRIPLE_SINGLE[0]Opt[0]",
-                    "variant": "NonTerminal"
-                }
-            ]
-        },
-        {
-            "lhs": "FSTRING_MIDDLE_TRIPLE_SINGLE[0]Opt[0]",
-            "rhs": []
-        },
-        {
             "lhs": "FSTRING_MIDDLE_TRIPLE_DOUBLE[0]Opt[0]",
             "rhs": [
                 {
@@ -12739,6 +12726,19 @@
         },
         {
             "lhs": "FSTRING_MIDDLE_TRIPLE_DOUBLE[0]Opt[0]",
+            "rhs": []
+        },
+        {
+            "lhs": "FSTRING_MIDDLE_TRIPLE_SINGLE[0]Opt[0]",
+            "rhs": [
+                {
+                    "value": "FSTRING_MIDDLE_TRIPLE_SINGLE[0]Opt[0]",
+                    "variant": "NonTerminal"
+                }
+            ]
+        },
+        {
+            "lhs": "FSTRING_MIDDLE_TRIPLE_SINGLE[0]Opt[0]",
             "rhs": []
         }
     ],
@@ -13833,6 +13833,12 @@
                         },
                         "q_type": "ZeroOrMore",
                         "variant": "Quantifier"
+                    },
+                    {
+                        "bytes": [
+                            10
+                        ],
+                        "variant": "U8Seq"
                     }
                 ],
                 "variant": "Seq"
@@ -14818,9 +14824,58 @@
         },
         {
             "expr": {
-                "variant": "Epsilon"
+                "exprs": [
+                    {
+                        "bytes": [
+                            10
+                        ],
+                        "variant": "U8Seq"
+                    },
+                    {
+                        "exprs": [
+                            {
+                                "bytes": [
+                                    35
+                                ],
+                                "variant": "U8Seq"
+                            },
+                            {
+                                "expr": {
+                                    "u8set": [
+                                        [
+                                            0,
+                                            9
+                                        ],
+                                        [
+                                            11,
+                                            255
+                                        ]
+                                    ],
+                                    "variant": "U8Class"
+                                },
+                                "q_type": "ZeroOrMore",
+                                "variant": "Quantifier"
+                            },
+                            {
+                                "bytes": [
+                                    10
+                                ],
+                                "variant": "U8Seq"
+                            }
+                        ],
+                        "variant": "Seq"
+                    }
+                ],
+                "variant": "Choice"
             },
             "group_id": 93,
+            "name": "NEWLINE[0]"
+        },
+        {
+            "expr": {
+                "variant": "Epsilon"
+            },
+            "group_id": 94,
             "name": "DEDENT[0]"
         },
         {
@@ -14921,7 +14976,7 @@
                 ],
                 "variant": "Choice"
             },
-            "group_id": 94,
+            "group_id": 95,
             "name": "STRING[0]"
         },
         {
@@ -15053,7 +15108,7 @@
                 ],
                 "variant": "Seq"
             },
-            "group_id": 95,
+            "group_id": 96,
             "name": "FSTRING_START_SINGLE_SINGLE[0]"
         },
         {
@@ -15097,7 +15152,7 @@
                 "q_type": "OneOrMore",
                 "variant": "Quantifier"
             },
-            "group_id": 96,
+            "group_id": 97,
             "name": "FSTRING_MIDDLE_SINGLE_SINGLE[0]"
         },
         {
@@ -15107,7 +15162,7 @@
                 ],
                 "variant": "U8Seq"
             },
-            "group_id": 97,
+            "group_id": 98,
             "name": "FSTRING_END_SINGLE_SINGLE[0]"
         },
         {
@@ -15239,7 +15294,7 @@
                 ],
                 "variant": "Seq"
             },
-            "group_id": 98,
+            "group_id": 99,
             "name": "FSTRING_START_SINGLE_DOUBLE[0]"
         },
         {
@@ -15283,7 +15338,7 @@
                 "q_type": "OneOrMore",
                 "variant": "Quantifier"
             },
-            "group_id": 99,
+            "group_id": 100,
             "name": "FSTRING_MIDDLE_SINGLE_DOUBLE[0]"
         },
         {
@@ -15293,7 +15348,7 @@
                 ],
                 "variant": "U8Seq"
             },
-            "group_id": 100,
+            "group_id": 101,
             "name": "FSTRING_END_SINGLE_DOUBLE[0]"
         },
         {
@@ -15442,7 +15497,7 @@
                 ],
                 "variant": "Seq"
             },
-            "group_id": 101,
+            "group_id": 102,
             "name": "FSTRING_START_TRIPLE_SINGLE[0]"
         },
         {
@@ -15554,7 +15609,7 @@
                 ],
                 "variant": "Seq"
             },
-            "group_id": 102,
+            "group_id": 103,
             "name": "FSTRING_MIDDLE_TRIPLE_SINGLE[0]"
         },
         {
@@ -15581,7 +15636,7 @@
                 ],
                 "variant": "Seq"
             },
-            "group_id": 103,
+            "group_id": 104,
             "name": "FSTRING_END_TRIPLE_SINGLE[0]"
         },
         {
@@ -15730,7 +15785,7 @@
                 ],
                 "variant": "Seq"
             },
-            "group_id": 104,
+            "group_id": 105,
             "name": "FSTRING_START_TRIPLE_DOUBLE[0]"
         },
         {
@@ -15842,7 +15897,7 @@
                 ],
                 "variant": "Seq"
             },
-            "group_id": 105,
+            "group_id": 106,
             "name": "FSTRING_MIDDLE_TRIPLE_DOUBLE[0]"
         },
         {
@@ -15869,7 +15924,7 @@
                 ],
                 "variant": "Seq"
             },
-            "group_id": 106,
+            "group_id": 107,
             "name": "FSTRING_END_TRIPLE_DOUBLE[0]"
         },
         {
@@ -15911,7 +15966,7 @@
                 ],
                 "variant": "Seq"
             },
-            "group_id": 107,
+            "group_id": 108,
             "name": "TYPE_COMMENT[0]"
         }
     ]
