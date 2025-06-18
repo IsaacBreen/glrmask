@@ -1161,7 +1161,7 @@ impl<'a> GrammarConstraintState<'a> {
         let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
         print!("{}", print_gss_forest(
             &roots, Some(&labels),
-            50,
+            300,
             &self.parent.parser.terminal_map,
             Some(&self.parent.original_to_internal_id_bimap),
             Some(&self.parent.llm_token_map),
