@@ -965,9 +965,8 @@ impl<'a> Display for GrammarConstraintState<'a> {
             if !glr_state.active_state.stack.is_empty() {
                 gss_roots.push(glr_state.active_state.stack.clone());
                 tokenizer_state_info.push(format!(
-                    "  - Tokenizer State {:>3}: GSS Root @ {:p} ({} predecessors)",
+                    "  - Tokenizer State {:>3}: GSS Root ({} predecessors)",
                     tokenizer_state_id.0,
-                    Arc::as_ptr(&glr_state.active_state.stack),
                     glr_state.active_state.stack.num_predecessors()
                 ));
             } else {
