@@ -1013,9 +1013,18 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
                 .flat_map(|id| llm_token_map.get_by_right(id).unwrap())
                 .cloned()
                 .collect();
-            // Print token contents
-            todo!();
+            println!("  Committing prefix of length {}: {:?}", full_prefix.len(), String::from_utf8_lossy(&full_prefix));
+            print_token_context(
+                &full_text_to_tokenize,
+                &all_code_lines,
+                0, // The prefix always starts at byte 0
+                full_prefix.len(),
+                2, // Context lines
+            );
             other_constraint_state.commit_bytes(&full_prefix);
+            assert_eq!(constraint_state_for_comp, other_constraint_state,
+                "State after committing tokens one-by-one should match state after committing prefix bytes at step {}", i
+            );
         }
     }
 
