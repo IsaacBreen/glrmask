@@ -999,6 +999,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
             let test_token_sequence_ids_prefix = &test_token_sequence_ids[..=i];
             let current_token_str = &tokenized_strs_for_logging[i];
+            let current_token_bytes = current_token_str.as_bytes();
+            let current_token_length = current_token_bytes.len();
             println!("\nProcessing token {}/{}: {:?} (LLMTokenID({}))",
                 i + 1, // 1-indexed for display
                 test_token_sequence_ids.len(),
@@ -1015,12 +1017,13 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
                 .flat_map(|id| llm_token_map.get_by_right(id).unwrap())
                 .cloned()
                 .collect();
+            let current_text_byte_offset = full_prefix.len() - current_token_bytes.len(); // Adjust to the start of the current token
             println!("  Committing prefix of length {}: {:?}", full_prefix.len(), String::from_utf8_lossy(&full_prefix));
             print_token_context(
                 &full_text_to_tokenize,
                 &all_code_lines,
-                0, // The prefix always starts at byte 0
-                full_prefix.len(),
+                current_text_byte_offset,
+                current_text_byte_offset + current_token_length, // End at the current byte offset plus the length of the prefix
                 2, // Context lines
             );
             other_constraint_state.commit_bytes(&full_prefix);
