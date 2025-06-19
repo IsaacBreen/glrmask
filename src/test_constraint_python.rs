@@ -991,6 +991,34 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         }
     }
 
+    if true {
+        let mut constraint_state_for_comp = grammar_constraint.init();
+        // Ensure the parse state after stepping the constraint with a prefix of LLM tokens and committing an LLM token is the same as the parse state after stepping the parser itself tokens emitted by the tokenizer for that same LLM token.
+        for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
+            let test_token_sequence_ids_prefix = &test_token_sequence_ids[..=i];
+            let current_token_str = &tokenized_strs_for_logging[i];
+            println!("\nProcessing token {}/{}: {:?} (LLMTokenID({}))",
+                i + 1, // 1-indexed for display
+                test_token_sequence_ids.len(),
+                current_token_str,
+                llm_token_id.0
+            );
+            println!("  Current token string: '{}'", current_token_str);
+            constraint_state_for_comp.commit(llm_token_id);
+            println!("  Committed LLMTokenID({}) for '{}'.", llm_token_id.0, current_token_str);
+            println!("  Committing whole prefix of LLM tokens up to this point to freshconstraint state for comparison.");
+            let mut other_constraint_state = grammar_constraint.init();
+            let full_prefix: Vec<u8> = test_token_sequence_ids_prefix
+                .iter()
+                .flat_map(|id| llm_token_map.get_by_right(id).unwrap())
+                .cloned()
+                .collect();
+            // Print token contents
+            todo!();
+            other_constraint_state.commit_bytes(&full_prefix);
+        }
+    }
+
     // assert_eq!(constraint_state_for_comp.state().len(), 1, "Constraint state for comparison should have one tokenizer state");
     // let initial_tokenizer_state_id = constraint_state_for_comp.parent.tokenizer.initial_state_id();
     // let mut actual_constraint_parser_state_comp = constraint_state_for_comp.state()[&initial_tokenizer_state_id].clone();
