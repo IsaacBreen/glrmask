@@ -221,11 +221,11 @@ impl PathAccumulator for TerminalInfoValue {
         self.intersection |= &right.intersection;
     }
 
-    fn intersect_has_effect(&self, right: &Self) -> bool {
-        let new_union = &self.union & &right.union;
-        let new_intersection = &self.intersection & &right.intersection;
-        new_union != self.union || new_intersection != self.intersection
-    }
+    // fn intersect_has_effect(&self, right: &Self) -> bool {
+    //     let new_union = &self.union & &right.union;
+    //     let new_intersection = &self.intersection & &right.intersection;
+    //     new_union != self.union || new_intersection != self.intersection
+    // }
 }
 
 impl PathAccumulator for Option<LLMTokenBV> {
@@ -911,6 +911,8 @@ impl GSSNode {
             *self = other.clone();
             return;
         }
+        // TODO: AH this makes no sense. What if there's a new disallowed terminal (just added to this node)?
+        //  When we do merge, it'll get erased!
         self.acc.union_assign(other.acc.clone());
 
         for (other_depth, other_preds_for_depth) in &other.predecessors {
