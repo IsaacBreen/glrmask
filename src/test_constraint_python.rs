@@ -1033,6 +1033,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
                 // Print text diff between Display representation of states
                 let left_str = format!("{}", constraint_state_for_comp);
                 let right_str = format!("{}", other_constraint_state);
+                println!("\n--- Left State ---\n{}", left_str);
+                println!("\n--- Right State ---\n{}", right_str);
                 let diff = TextDiff::from_lines(&left_str, &right_str);
 
                 println!("\n--- Text Diff ---");
