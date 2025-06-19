@@ -1,6 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
+use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::gss::{subtract_llm_tokens_and_prune_arc, TerminalInfoValue};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use ordered_hash_map::OrderedHashMap;
@@ -1036,7 +1037,7 @@ impl<'a> GrammarConstraintState<'a> {
                 for (tokenizer_state_id, disallowed_terminals_for_state) in disallowed_terminals_for_gss {
                     let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
                     for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
-                        if disallowed_terminals_for_state.contains(terminal_id.0) {
+                        if disallowed_terminals_for_state.union.contains(terminal_id.0) {
                             // This terminal is disallowed, so the LLM tokens that produce it are forbidden.
                             forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
                         }
