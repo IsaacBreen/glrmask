@@ -1028,11 +1028,11 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
                 2, // Context lines
             );
             other_constraint_state.commit_bytes(&full_prefix);
+            let left_str = format!("{}", constraint_state_for_comp);
+            let right_str = format!("{}", other_constraint_state);
             if constraint_state_for_comp != other_constraint_state {
                 println!("  Constraint states differ after committing prefix bytes at step {}.", i);
                 // Print text diff between Display representation of states
-                let left_str = format!("{}", constraint_state_for_comp);
-                let right_str = format!("{}", other_constraint_state);
                 println!("\n--- Left State ---\n{}", left_str);
                 println!("\n--- Right State ---\n{}", right_str);
                 let diff = TextDiff::from_lines(&left_str, &right_str);
@@ -1048,8 +1048,12 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
                 }
                 println!("--- End Diff ---\n");
             }
-            assert_eq!(constraint_state_for_comp, other_constraint_state,
+            assert_eq!(left_str, right_str,
                 "State after committing tokens one-by-one should match state after committing prefix bytes at step {}", i
+            );
+            assert_eq!(constraint_state_for_comp, other_constraint_state,
+                "Constraint state after committing tokens one-by-one should match state after committing prefix bytes at step {}",
+                i
             );
         }
     }
