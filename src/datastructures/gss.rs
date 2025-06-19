@@ -911,8 +911,6 @@ impl GSSNode {
             *self = other.clone();
             return;
         }
-        // TODO: AH this makes no sense. What if there's a new disallowed terminal (just added to this node)?
-        //  When we do merge, it'll get erased!
         self.acc.union_assign(other.acc.clone());
 
         for (other_depth, other_preds_for_depth) in &other.predecessors {
