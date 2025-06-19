@@ -1283,6 +1283,8 @@ impl<'a> GrammarConstraintState<'a> {
         }
         gss_transformation_memo.clear();
 
+        self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
+
         // let mut roots_to_simplify_arcs = Vec::new();
         // for glr_parser_state in self.state.values_mut() {
         //     if !glr_parser_state.active_state.stack.is_empty() {
