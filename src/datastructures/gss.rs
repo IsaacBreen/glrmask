@@ -1272,7 +1272,7 @@ pub fn map_allowed_terminals_tokenizer_states(
 
         for (old_id, bv) in current_acc.disallowed_terminals() {
             if let Some(new_id) = map.get(old_id) {
-                // *new_disallowed_terminals.entry(*new_id).or_insert_with(TerminalInfoValue::identity_for_union_or_intersection) |= bv;
+                *new_disallowed_terminals.entry(*new_id).or_insert_with(TerminalInfoValue::identity_for_union_or_intersection) ^= bv;
 
                 if new_disallowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
                     changed = true;
