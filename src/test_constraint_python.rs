@@ -862,84 +862,84 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // return Ok(());
 
     if false {
-        println!("\nStepping through the token sequence with GrammarConstraint:");
-        for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
-            // Use tokenized_strs_for_logging for logging, as it corresponds to the llm_token_id
-            let current_token_str = &tokenized_strs_for_logging[i];
-            println!(
-                "Processing token {}/{}: {:?} (LLMTokenID({}))",
-                i + 1, // 1-indexed for display
-                test_token_sequence_ids.len(),
-                current_token_str,
-                llm_token_id.0
-            );
+    println!("\nStepping through the token sequence with GrammarConstraint:");
+    for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
+        // Use tokenized_strs_for_logging for logging, as it corresponds to the llm_token_id
+        let current_token_str = &tokenized_strs_for_logging[i];
+        println!(
+            "Processing token {}/{}: {:?} (LLMTokenID({}))",
+            i + 1, // 1-indexed for display
+            test_token_sequence_ids.len(),
+            current_token_str,
+            llm_token_id.0
+        );
 
-            // Display context
-            let token_start_byte_in_full_text = current_text_byte_offset;
-            let token_end_byte_in_full_text = current_text_byte_offset + current_token_str.as_bytes().len();
-            print_token_context(
-                &full_text_to_tokenize,
-                &all_code_lines,
-                token_start_byte_in_full_text,
-                token_end_byte_in_full_text,
-                2, // Show 2 lines before and 2 lines after
-            );
+        // Display context
+        let token_start_byte_in_full_text = current_text_byte_offset;
+        let token_end_byte_in_full_text = current_text_byte_offset + current_token_str.as_bytes().len();
+        print_token_context(
+            &full_text_to_tokenize,
+            &all_code_lines,
+            token_start_byte_in_full_text,
+            token_end_byte_in_full_text,
+            2, // Show 2 lines before and 2 lines after
+        );
 
 
-            assert!(
-                constraint_state.is_active(),
-                "Constraint state should be active before processing token {} ('{}')",
-                i + 1, current_token_str
-            );
+        assert!(
+            constraint_state.is_active(),
+            "Constraint state should be active before processing token {} ('{}')",
+            i + 1, current_token_str
+        );
 
-            let step_start = Instant::now();
-            let current_mask = constraint_state.get_mask();
-            let step_duration = step_start.elapsed();
-            println!("  get_mask took: {:?}", step_duration);
+        let step_start = Instant::now();
+        let current_mask = constraint_state.get_mask();
+        let step_duration = step_start.elapsed();
+        println!("  get_mask took: {:?}", step_duration);
 
-            println!(
-                "  Mask (after get_mask) allows {} tokens. Checking for current token LLMTokenID({})...",
-                current_mask.iter_bits().count(),
-                llm_token_id.0
-            );
+        println!(
+            "  Mask (after get_mask) allows {} tokens. Checking for current token LLMTokenID({})...",
+            current_mask.iter_bits().count(),
+            llm_token_id.0
+        );
 
-            assert!(
-                current_mask.contains(llm_token_id.0),
-                "Expected LLMTokenID({}) for '{}' to be in the mask. Mask: {:?}",
-                llm_token_id.0, current_token_str, current_mask
-            );
-            println!("  LLMTokenID({}) for '{}' is in the mask.", llm_token_id.0, current_token_str);
+        assert!(
+            current_mask.contains(llm_token_id.0),
+            "Expected LLMTokenID({}) for '{}' to be in the mask. Mask: {:?}",
+            llm_token_id.0, current_token_str, current_mask
+        );
+        println!("  LLMTokenID({}) for '{}' is in the mask.", llm_token_id.0, current_token_str);
 
-            let commit_start = Instant::now();
-            constraint_state.commit(llm_token_id);
-            let commit_duration = commit_start.elapsed();
-            println!("  commit LLMTokenID({}) took: {:?}", llm_token_id.0, commit_duration);
-            println!("  Committed LLMTokenID({}) for '{:?}'.", llm_token_id.0, current_token_str);
+        let commit_start = Instant::now();
+        constraint_state.commit(llm_token_id);
+        let commit_duration = commit_start.elapsed();
+        println!("  commit LLMTokenID({}) took: {:?}", llm_token_id.0, commit_duration);
+        println!("  Committed LLMTokenID({}) for '{:?}'.", llm_token_id.0, current_token_str);
 
-            assert!(
-                constraint_state.is_active(),
-                "Constraint state should be active after committing token {} ('{}')",
-                i + 1, current_token_str
-            );
-            println!("  Constraint state is active after commit.");
+        assert!(
+            constraint_state.is_active(),
+            "Constraint state should be active after committing token {} ('{}')",
+            i + 1, current_token_str
+        );
+        println!("  Constraint state is active after commit.");
 
-            // Update current_text_byte_offset for the next iteration
-            current_text_byte_offset = token_end_byte_in_full_text;
-        }
-
-        println!("\nFinished processing token sequence with GrammarConstraint.");
-        if !test_token_sequence_ids.is_empty() { // Only assert if there were tokens to process
-            assert!(
-                constraint_state.is_active(),
-                "Constraint state should still be active after processing the entire sequence."
-            );
-            println!("Constraint state is active after the full sequence.");
-        } else if full_text_to_tokenize.is_empty() {
-            println!("Constraint state was not stepped as the input string was empty and produced no tokens.");
-        }
+        // Update current_text_byte_offset for the next iteration
+        current_text_byte_offset = token_end_byte_in_full_text;
     }
 
-    if true {
+    println!("\nFinished processing token sequence with GrammarConstraint.");
+    if !test_token_sequence_ids.is_empty() { // Only assert if there were tokens to process
+        assert!(
+            constraint_state.is_active(),
+            "Constraint state should still be active after processing the entire sequence."
+        );
+        println!("Constraint state is active after the full sequence.");
+    } else if full_text_to_tokenize.is_empty() {
+         println!("Constraint state was not stepped as the input string was empty and produced no tokens.");
+    }
+        }
+
+    if false {
         println!("\n--- Testing commit equivalence for 'if x: ' and 'print(x)' ---");
 
         let b1 = b"if x: ";
