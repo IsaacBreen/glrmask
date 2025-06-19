@@ -183,7 +183,8 @@ impl PathAccumulator for TerminalInfoValue {
 
     fn intersect_assign(&mut self, right: Self) {
         self.union &= &right.union;
-        self.intersection &= &right.intersection;
+        self.union |= &right.intersection;
+        self.intersection |= &right.intersection;
     }
 
     fn intersect_has_effect(&self, right: &Self) -> bool {
@@ -1179,7 +1180,8 @@ pub fn disallow_terminals_and_prune_arc(
         if new_acc.is_alive() {
             // let continue_recursion = *current_acc != new_acc;
             // let continue_recursion = !current_acc.disallowed_terminals().is_empty();
-            let continue_recursion = true;
+            // let continue_recursion = true;
+            let continue_recursion = false;
             Some((new_acc, continue_recursion))
         } else {
             None // Prune this node
