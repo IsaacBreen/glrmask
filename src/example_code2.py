@@ -1,4 +1,3 @@
-# Top-level comment, challenging parser start
 import os, sys # Multiple imports on one line
 from collections import (defaultdict,
                          deque) # Multi-line import with parens
