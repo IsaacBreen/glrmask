@@ -4,7 +4,7 @@ use std::fmt::{Debug, Write};
 use std::hash::{Hash, Hasher};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
-use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub, SubAssign};
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Sub, SubAssign};
 use bimap::BiBTreeMap;
 use deterministic_hash::DeterministicHasher;
 use std::any::{Any, TypeId};
@@ -102,6 +102,23 @@ impl BitOrAssign<&TerminalBV> for TerminalInfoValue {
     }
 }
 
+impl BitXor<&TerminalBV> for &TerminalInfoValue {
+    type Output = TerminalInfoValue;
+    fn bitxor(self, rhs: &TerminalBV) -> Self::Output {
+        TerminalInfoValue {
+            union: &self.union | rhs,
+            intersection: &self.intersection | rhs,
+        }
+    }
+}
+
+impl BitXorAssign<&TerminalBV> for TerminalInfoValue {
+    fn bitxor_assign(&mut self, rhs: &TerminalBV) {
+        self.union |= rhs;
+        self.intersection |= rhs;
+    }
+}
+
 impl Sub<&TerminalBV> for &TerminalInfoValue {
     type Output = TerminalInfoValue;
     fn sub(self, rhs: &TerminalBV) -> Self::Output {
@@ -150,6 +167,23 @@ impl BitOrAssign<&TerminalInfoValue> for TerminalInfoValue {
     fn bitor_assign(&mut self, rhs: &TerminalInfoValue) {
         self.union |= &rhs.union;
         self.intersection &= &rhs.intersection;
+    }
+}
+
+impl BitXor<&TerminalInfoValue> for &TerminalInfoValue {
+    type Output = TerminalInfoValue;
+    fn bitxor(self, rhs: &TerminalInfoValue) -> Self::Output {
+        TerminalInfoValue {
+            union: &self.union | &rhs.union,
+            intersection: &self.intersection | &rhs.intersection,
+        }
+    }
+}
+
+impl BitXorAssign<&TerminalInfoValue> for TerminalInfoValue {
+    fn bitxor_assign(&mut self, rhs: &TerminalInfoValue) {
+        self.union |= &rhs.union;
+        self.intersection |= &rhs.intersection;
     }
 }
 
@@ -1238,7 +1272,8 @@ pub fn map_allowed_terminals_tokenizer_states(
 
         for (old_id, bv) in current_acc.disallowed_terminals() {
             if let Some(new_id) = map.get(old_id) {
-                *new_disallowed_terminals.entry(*new_id).or_insert_with(TerminalInfoValue::identity_for_union_or_intersection) |= bv;
+                // *new_disallowed_terminals.entry(*new_id).or_insert_with(TerminalInfoValue::identity_for_union_or_intersection) |= bv;
+
                 if new_disallowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
                     changed = true;
                 }
