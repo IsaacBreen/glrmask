@@ -1,8 +1,8 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use crate::datastructures::ordered_hash_map::Retain;
-use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, subtract_llm_tokens_and_prune_arc, TerminalInfoValue};
+use crate::datastructures::gss::{subtract_llm_tokens_and_prune_arc, TerminalInfoValue};
+use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use ordered_hash_map::OrderedHashMap;
 use ordered_hash_map::OrderedHashSet;
 use std::cmp::Ordering;
@@ -18,7 +18,7 @@ use bitvec::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, TerminalInfo, prune_disallowed_terminals};
+use crate::datastructures::gss::{print_gss_forest, GSSNode, PathAccumulator, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, TerminalInfo};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -1032,7 +1032,7 @@ impl<'a> GrammarConstraintState<'a> {
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
                 let mut forbidden_llm_tokens = LLMTokenBV::zeros();
                 forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.internal_max_llm_token + 1);
-                let disallowed_terminals_for_gss = glr_state.active_state.stack.acc2().disallowed_terminals();
+                let disallowed_terminals_for_gss = glr_state.active_state.stack.acc().disallowed_terminals();
                 for (tokenizer_state_id, disallowed_terminals_for_state) in disallowed_terminals_for_gss {
                     let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
                     for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
@@ -1100,7 +1100,7 @@ impl<'a> GrammarConstraintState<'a> {
                         // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
 
                         if glr_s.is_ok() && child_node_trie_data.as_arc().lock().unwrap().value.end {
-                            let glr_active_tokens = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                            let glr_active_tokens = glr_s.active_state.stack.llm_token_info().clone().unwrap_or_else(LLMTokenBV::max_ones);
                             *final_mask_internal.borrow_mut() |= glr_active_tokens;
                         }
 
@@ -1121,7 +1121,7 @@ impl<'a> GrammarConstraintState<'a> {
             |precomputed_node_data, glr_s| {
                 timeit!("get_mask process_fn", {
                     if precomputed_node_data.value.end {
-                        let glr_active_tokens = glr_s.active_state.stack.acc_acc().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                        let glr_active_tokens = glr_s.active_state.stack.llm_token_info().clone().unwrap_or_else(LLMTokenBV::max_ones);
                         *final_mask_internal.borrow_mut() |= glr_active_tokens;
                         false
                     } else {

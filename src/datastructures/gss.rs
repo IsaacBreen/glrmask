@@ -346,6 +346,11 @@ pub mod acc_mod {
             Self { llm_token_info: None, disallowed_terminals: BTreeMap::new() }
         }
 
+        /// Creates a fresh, unconstrained accumulator. Alias for `new_fresh`.
+        pub fn new_for_merging() -> Self {
+            Self::new_fresh()
+        }
+
         pub fn llm_token_info(&self) -> &LLMTokenInfo { &self.llm_token_info }
         pub fn llm_token_info_mut(&mut self) -> &mut LLMTokenInfo { &mut self.llm_token_info }
         pub fn disallowed_terminals(&self) -> &TerminalInfo { &self.disallowed_terminals }
@@ -564,6 +569,11 @@ impl GSSNode {
         Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, acc_for_new_node)
     }
 
+    /// Consumes the node to push a new state, useful for chaining.
+    pub fn push_with_acc(self, edge_value: ParseStateEdgeContent, acc_for_new_node: Acc) -> Self {
+        Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, acc_for_new_node)
+    }
+
     /// Pops the top state from the stack(s), returning a new node representing the merged predecessors.
     /// The accumulator of the new node is the union of the accumulators of all valid predecessor paths.
     pub fn pop(&self) -> Self {
@@ -656,6 +666,10 @@ impl GSSNode {
         self
     }
 
+    pub fn push_with_existing_acc(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+        self.push(edge_value, self.acc().clone())
+    }
+    
     /// Returns an iterator over all direct predecessor paths (`GSSPeek`s).
     pub fn peek_iter(&self) -> impl Iterator<Item = GSSPeek<'_>> {
         self.predecessors.values().flat_map(|m| m.iter()).map(|(edge_val, pred_arc)| {
@@ -700,25 +714,6 @@ impl Ord for GSSNode {
         self.hash_key_cache.cmp(&other.hash_key_cache)
             .then_with(|| self.acc.cmp(&other.acc))
             .then_with(|| self.predecessors.cmp(&other.predecessors))
-    }
-}
-
-// --- GSS Operations on Arc<GSSNode> ---
-
-impl Arc<GSSNode> {
-    /// Pushes a new state, creating a new node with `self` as the predecessor.
-    pub fn push(&self, edge_value: ParseStateEdgeContent, acc_for_new_node: Acc) -> GSSNode {
-        GSSNode::new_with_single_predecessor(self.clone(), edge_value, acc_for_new_node)
-    }
-
-    /// Pops the top state from the stacks represented by the node inside the `Arc`.
-    pub fn pop(&self) -> GSSNode {
-        self.as_ref().pop()
-    }
-
-    /// Pops `n` elements from the stack.
-    pub fn popn(&self, n: usize) -> GSSNode {
-        self.as_ref().popn(n)
     }
 }
 
@@ -884,6 +879,70 @@ pub fn disallow_terminals_and_prune_arc(
     }
 }
 
+pub fn prune_disallowed_terminals(
+    root_arc: &mut Arc<GSSNode>,
+    terminals_map: &BTreeMap<TokenizerStateID, TerminalBV>,
+    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
+) {
+    // terminals_map: For each TokenizerStateID, a TerminalBV of terminals that are disallowed.
+    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
+        let mut continue_recursion = false;
+        let mut new_acc = current_acc.clone();
+        for (gss_state_id, gss_disallowed_bv) in new_acc.disallowed_terminals_mut().iter_mut() {
+            if let Some(actual_bv_for_state) = terminals_map.get(gss_state_id) {
+                // If any terminal disallowed by GSS is also matched by current segment, prune.
+                // This means (gss_disallowed_bv AND actual_bv_for_state) must be empty.
+                if !gss_disallowed_bv.intersection.is_disjoint(actual_bv_for_state) {
+                    return None;
+                }
+                if !gss_disallowed_bv.union.is_disjoint(actual_bv_for_state) {
+                    continue_recursion = true;
+                    *gss_disallowed_bv -= actual_bv_for_state;
+                }
+            }
+        }
+        Some((new_acc, continue_recursion))
+    };
+
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
+        *root_arc = new_root;
+    } else {
+        *root_arc = Arc::new(GSSNode::new(root_arc.acc().clone()));
+    }
+}
+
+pub fn map_allowed_terminals_tokenizer_states(
+    root_arc: &mut Arc<GSSNode>,
+    map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
+    memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
+) {
+    let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
+        let mut new_disallowed_terminals = BTreeMap::new();
+        let mut changed = false;
+
+        for (old_id, bv) in current_acc.disallowed_terminals() {
+            if let Some(&new_id) = map.get(old_id) {
+                *new_disallowed_terminals.entry(new_id).or_insert_with(TerminalInfoValue::zeros) ^= bv;
+                if new_disallowed_terminals.get(&new_id) != Some(bv) || old_id != &new_id {
+                    changed = true;
+                }
+            } else {
+                changed = true; // A state was removed, which is a change.
+            }
+        }
+        new_disallowed_terminals.retain(|_, bv| !bv.is_empty());
+
+        let new_acc = Acc::new(current_acc.llm_token_info().clone(), new_disallowed_terminals);
+        let continue_recursion = changed || !current_acc.disallowed_terminals().is_empty();
+        Some((new_acc, continue_recursion))
+    };
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
+        *root_arc = new_root;
+    } else {
+        *root_arc = Arc::new(GSSNode::new(root_arc.acc().clone()));
+    }
+}
+
 
 // --- Simplification ---
 
@@ -956,7 +1015,7 @@ impl GSSNode {
         let mut cache = NodeCache::new();
         for node_arc_ref_mut in nodes {
             let current_arc = (*node_arc_ref_mut).clone();
-            let simplified_arc = simplify_node_recursive(¤t_arc, &mut memo, &mut cache);
+            let simplified_arc = simplify_node_recursive(&current_arc, &mut memo, &mut cache);
             **node_arc_ref_mut = simplified_arc;
         }
     }
@@ -964,6 +1023,15 @@ impl GSSNode {
 
 
 // --- Analysis and Debugging ---
+
+impl GSSNode {
+    pub fn reset_llm_tokens(&mut self) {
+        let mut node_arc = Arc::new(self.clone());
+        let mut memo = HashMap::new();
+        reset_llm_tokens(&mut node_arc, &mut memo);
+        *self = Arc::try_unwrap(node_arc).unwrap_or_else(|arc| (*arc).clone());
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct GSSStats {

@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::cmp::Ordering;
-use crate::datastructures::gss::{print_gss_forest, LLMTokenInfo};
-use crate::datastructures::gss::{gather_gss_stats, find_longest_path, PathAccumulator, GSSNode, GSSTrait, GSSStats, GSSPeek};
+use crate::datastructures::gss::{print_gss_forest};
+use crate::datastructures::gss::{gather_gss_stats, find_longest_path, PathAccumulator, GSSNode, GSSStats, GSSPeek};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID};
 use crate::constraint::{LLMTokenBV}; // Import LLMTokenInfo
@@ -279,7 +279,7 @@ impl GLRParser {
         };
         let root = Arc::new(GSSNode::new(initial_acc.clone())); // initial_acc for the root
         // Push creates a new node. Its acc should be derived from the parent (root in this case).
-        let stack = Arc::new(root.push_with_acc(initial_content, initial_acc));
+        let stack = Arc::new(root.as_ref().push(initial_content, initial_acc));
         ParseState { stack }
     }
 
@@ -417,8 +417,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         stack: &Arc<GSSNode>, 
         new_content: ParseStateEdgeContent,
     ) -> ParseState {
-        crate::debug!(4, "Pushing new state with content: {:?} and acc: {:?}", new_content, stack.acc2());
-        let new_gss_node_instance = stack.push_with_acc(new_content, stack.acc2().clone());
+        crate::debug!(4, "Pushing new state with content: {:?} and acc: {:?}", new_content, stack.acc());
+        let new_gss_node_instance = stack.as_ref().push(new_content, stack.acc().clone());
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
@@ -588,7 +588,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     pub fn is_ok(&self) -> bool {
-        !self.active_state.stack.is_empty() && self.active_state.stack.acc2().is_alive()
+        !self.active_state.stack.is_empty() && self.active_state.stack.acc().is_alive()
     }
 
     // #[time_it("GLRParserState::log_gss")]
