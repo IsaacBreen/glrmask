@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use bimap::BiBTreeMap;
 use reqwest::blocking;
 use serde_json;
+use similar::TextDiff;
 use crate::constraint::{GrammarConstraint};
 use crate::datastructures::trie::Trie;
 use crate::json_serialization::{JSONConvertible, JSONNode};
@@ -1029,8 +1030,21 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             other_constraint_state.commit_bytes(&full_prefix);
             if constraint_state_for_comp != other_constraint_state {
                 println!("  Constraint states differ after committing prefix bytes at step {}.", i);
-                println!("left:\n{}", constraint_state_for_comp);
-                println!("right:\n{}", other_constraint_state);
+                // Print text diff between Display representation of states
+                let left_str = format!("{}", constraint_state_for_comp);
+                let right_str = format!("{}", other_constraint_state);
+                let diff = TextDiff::from_lines(&left_str, &right_str);
+
+                println!("\n--- Text Diff ---");
+                for change in diff.iter_all_changes() {
+                    let sign = match change.tag() {
+                        similar::ChangeTag::Delete => "-",
+                        similar::ChangeTag::Insert => "+",
+                        similar::ChangeTag::Equal => " ",
+                    };
+                    print!("{}{}", sign, change);
+                }
+                println!("--- End Diff ---\n");
             }
             assert_eq!(constraint_state_for_comp, other_constraint_state,
                 "State after committing tokens one-by-one should match state after committing prefix bytes at step {}", i
