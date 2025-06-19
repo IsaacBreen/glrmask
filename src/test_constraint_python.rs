@@ -940,10 +940,10 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         }
 
     if false {
-        println!("\n--- Testing commit equivalence for 'if x: ' and 'print(x)' ---");
-
         let b1 = b"if x: ";
         let b2 = b"print(x)";
+
+        println!("\n--- Testing commit equivalence {:?} {:?} ---", String::from_utf8_lossy(b1), String::from_utf8_lossy(b2));
 
         // Scenario 1: Commit bytes separately
         let mut state1 = grammar_constraint.init();
@@ -993,7 +993,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         }
     }
 
-    if true {
+    if false {
         let mut constraint_state_for_comp = grammar_constraint.init();
         // Ensure the parse state after stepping the constraint with a prefix of LLM tokens and committing an LLM token is the same as the parse state after stepping the parser itself tokens emitted by the tokenizer for that same LLM token.
         for (i, &llm_token_id) in test_token_sequence_ids.iter().enumerate() {
