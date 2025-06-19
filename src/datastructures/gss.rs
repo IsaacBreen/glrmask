@@ -1214,8 +1214,8 @@ pub fn disallow_terminals_and_prune_arc(
         if new_acc.is_alive() {
             // let continue_recursion = *current_acc != new_acc;
             // let continue_recursion = !current_acc.disallowed_terminals().is_empty();
-            // let continue_recursion = true;
-            let continue_recursion = false;
+            let continue_recursion = true;
+            // let continue_recursion = false;
             Some((new_acc, continue_recursion))
         } else {
             None // Prune this node
@@ -1273,7 +1273,6 @@ pub fn map_allowed_terminals_tokenizer_states(
         for (old_id, bv) in current_acc.disallowed_terminals() {
             if let Some(new_id) = map.get(old_id) {
                 *new_disallowed_terminals.entry(*new_id).or_insert_with(TerminalInfoValue::identity_for_union_or_intersection) ^= bv;
-
                 if new_disallowed_terminals.get(new_id) != Some(bv) || old_id != new_id { // Basic change check
                     changed = true;
                 }
