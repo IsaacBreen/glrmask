@@ -1027,6 +1027,11 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
                 2, // Context lines
             );
             other_constraint_state.commit_bytes(&full_prefix);
+            if constraint_state_for_comp != other_constraint_state {
+                println!("  Constraint states differ after committing prefix bytes at step {}.", i);
+                println!("{}", constraint_state_for_comp);
+                println!("{}", other_constraint_state);
+            }
             assert_eq!(constraint_state_for_comp, other_constraint_state,
                 "State after committing tokens one-by-one should match state after committing prefix bytes at step {}", i
             );
