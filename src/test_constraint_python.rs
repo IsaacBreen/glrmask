@@ -1047,14 +1047,14 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
                     print!("{}{}", sign, change);
                 }
                 println!("--- End Diff ---\n");
+                assert_eq!(left_str, right_str,
+                    "State after committing tokens one-by-one should match state after committing prefix bytes at step {}", i
+                );
+                assert_eq!(constraint_state_for_comp, other_constraint_state,
+                    "Constraint state after committing tokens one-by-one should match state after committing prefix bytes at step {}",
+                    i
+                );
             }
-            assert_eq!(left_str, right_str,
-                "State after committing tokens one-by-one should match state after committing prefix bytes at step {}", i
-            );
-            assert_eq!(constraint_state_for_comp, other_constraint_state,
-                "Constraint state after committing tokens one-by-one should match state after committing prefix bytes at step {}",
-                i
-            );
         }
     }
 
