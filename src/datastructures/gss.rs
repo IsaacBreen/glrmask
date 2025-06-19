@@ -522,13 +522,6 @@ pub fn disallowed_terminals_add(left: &mut TerminalInfo, right: BTreeMap<Tokeniz
     }
 }
 
-pub fn disallow_terminals_assign(left: &mut TerminalInfo, right: &TerminalInfo) {
-    for (tokenizer_state_id, terminals_to_disallow) in right {
-        let entry = left.entry(*tokenizer_state_id).or_insert_with(TerminalInfoValue::identity_for_union_or_intersection);
-        *entry |= terminals_to_disallow;
-    }
-}
-
 #[derive(Clone, Copy)]
 pub struct GSSPeek<'a> {
     pub(crate) parent_node: &'a GSSNode,
