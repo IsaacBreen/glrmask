@@ -1214,8 +1214,8 @@ pub fn disallow_terminals_and_prune_arc(
         if new_acc.is_alive() {
             // let continue_recursion = *current_acc != new_acc;
             // let continue_recursion = !current_acc.disallowed_terminals().is_empty();
-            let continue_recursion = true;
-            // let continue_recursion = false;
+            // let continue_recursion = true;
+            let continue_recursion = false;
             Some((new_acc, continue_recursion))
         } else {
             None // Prune this node
