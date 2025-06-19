@@ -67,6 +67,10 @@ impl TerminalInfoValue {
     pub fn is_empty(&self) -> bool {
         self.union.is_empty()
     }
+
+    pub fn contains(&self, terminal: usize) -> bool {
+        self.union.contains(terminal)
+    }
 }
 
 // Bitwise operations for combining TerminalInfoValue with other bitsets.
