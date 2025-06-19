@@ -986,7 +986,7 @@ impl<'a> Display for GrammarConstraintState<'a> {
             let gss_str = crate::datastructures::gss::print_gss_forest(
                 &gss_roots,
                 None,
-                50,
+                usize::MAX,
                 &self.parent.parser.terminal_map,
                 Some(&self.parent.original_to_internal_id_bimap),
                 Some(&self.parent.llm_token_map),
