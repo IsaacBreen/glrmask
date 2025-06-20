@@ -288,6 +288,7 @@ fn compute_hash_key(predecessors: &NodeMap, acc_manager: &AccManager) -> u64 {
 
 /// Processes a set of incoming predecessors, grouping them by depth and edge,
 /// and merging nodes that share the same edge to create a canonical `NodeMap`.
+#[time_it]
 fn process_predecessors(incoming: &NodeSet) -> NodeMap {
     let mut grouped_by_depth: BTreeMap<MaxDepth, BTreeMap<ParseStateEdgeContent, Vec<Arc<GSSNode>>>> = BTreeMap::new();
 
@@ -327,6 +328,7 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
 }
 
 /// Merges the `source` NodeMap into the `target` NodeMap.
+#[time_it]
 fn merge_node_maps(target: &mut NodeMap, source: NodeMap) {
     for (depth, source_preds_for_depth) in source {
         let target_preds_for_depth = target.entry(depth).or_default();
