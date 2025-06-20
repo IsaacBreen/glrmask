@@ -778,7 +778,7 @@ impl GSSPop<'_> {
             .reduce(|mut acc, next| {
                 acc.union_assign(next);
                 acc
-            }).unwrap_or(Acc::new_fresh(None));
+            }).unwrap_or(Acc::new_fresh(self.parent_node.acc.llm_vocab()));
 
         GSSNode::new_with_map(result_acc, self.node_map.clone())
     }
