@@ -792,10 +792,11 @@ impl<'a> GSSPeek<'a> {
     /// Returns a GSS node representing the stack for this specific peeked path.
     /// This is equivalent to popping 0 elements.
     pub fn to_node(&self) -> GSSNode {
+        let path_acc = self.parent_node.acc.clone().intersect(self.predecessor_node.acc.clone());
         GSSNode::new_with_single_predecessor(
             self.predecessor_node.clone(),
             self.edge_value.clone(),
-            self.parent_node.acc.clone(),
+            path_acc,
         )
     }
 
@@ -806,20 +807,7 @@ impl<'a> GSSPeek<'a> {
     /// Pops `n` elements from the stack represented by this peek.
     /// The accumulator of the returned node is correctly adjusted for the path.
     pub fn popn(&self, n: usize) -> Arc<GSSNode> {
-        if n == 0 {
-            return self.to_arc_node();
-        }
-
-        // For n >= 1, the result is based on the predecessor.
-        // First, calculate the accumulator for the path to the predecessor.
-        let path_acc = self.parent_node.acc.clone().intersect(self.predecessor_node.acc.clone());
-        let pred_with_path_acc = Arc::new(self.predecessor_node.as_ref().clone().with_acc(path_acc));
-
-        if n == 1 {
-            pred_with_path_acc
-        } else { // n > 1
-            Arc::new(pred_with_path_acc.popn(n - 1))
-        }
+        Arc::new(self.to_arc_node().popn(n))
     }
 }
 
