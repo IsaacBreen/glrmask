@@ -33,7 +33,6 @@ use crate::glr::analyze::{filter_productions_by_reachability, remove_productions
 use std::panic::{self, AssertUnwindSafe}; // Added for panic catching
 use std::collections::HashMap;
 use crate::datastructures::gss::{gather_gss_stats, reset_llm_tokens};
-use crate::datastructures::gss::acc_mod::Acc;
 // For the symbol removal helper
 
 #[test]
