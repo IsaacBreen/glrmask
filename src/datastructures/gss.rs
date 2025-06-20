@@ -505,7 +505,8 @@ pub struct GSSNode {
 /// It contains a map of predecessor nodes, where each node's accumulator has been
 /// adjusted for the path it was reached through.
 #[derive(Debug, Clone)]
-pub struct GSSPop {
+pub struct GSSPop<'a> {
+    pub parent_node: &'a GSSNode,
     pub node_map: NodeMap,
 }
 
@@ -676,7 +677,7 @@ impl GSSNode {
             }
         }
 
-        GSSPop { node_map: new_node_map }
+        GSSPop { parent_node: self, node_map: new_node_map }
     }
 
     /// Pops `n` levels from the GSS, returning a new node representing the merged
@@ -740,18 +741,20 @@ impl GSSNode {
     }
 }
 
-impl GSSPop {
-    /// Pops from each node in the current set, returning a new `GSSPop`
-    /// representing the combined set of grand-predecessors.
-    pub fn pop(&self) -> GSSPop {
+impl GSSPop<'_> {
+    fn _pop(node_map: &NodeMap) -> NodeMap {
         let mut combined_node_map = NodeMap::new();
-
-        for node_arc in self.node_map.values().flat_map(|m| m.values()) {
+        for node_arc in node_map.values().flat_map(|m| m.values()) {
             let popped = node_arc.pop(); // GSSNode::pop() -> GSSPop
             merge_node_maps(&mut combined_node_map, popped.node_map);
         }
-
-        GSSPop { node_map: combined_node_map }
+        combined_node_map
+    }
+    /// Pops from each node in the current set, returning a new `GSSPop`
+    /// representing the combined set of grand-predecessors.
+    pub fn pop(&self) -> GSSPop {
+        let node_map = Self::_pop(&self.node_map);
+        GSSPop { parent_node: self.parent_node, node_map }
     }
 
     /// Pops `n` times from the current set of nodes.
@@ -759,11 +762,11 @@ impl GSSPop {
         if n == 0 {
             return self.clone();
         }
-        let mut current = self.clone();
+        let mut current = self.node_map.clone();
         for _ in 0..n {
-            current = current.pop();
+            current = Self::_pop(&current);
         }
-        current
+        GSSPop { parent_node: self.parent_node, node_map: current }
     }
 
     /// Converts the `GSSPop` into a single `GSSNode`.
