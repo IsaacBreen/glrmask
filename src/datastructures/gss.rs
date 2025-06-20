@@ -872,7 +872,7 @@ pub fn intersect_llm_tokens_and_prune_arc(
 ) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
-        let newly_disallowed = LLMTokenBV::max_ones() - allowed_tokens;
+        let newly_disallowed = LLMTokenBV::max_ones() - allowed_tokens.clone();
 
         if let Some(bv) = new_acc.disallowed_llm_tokens_mut() {
             *bv |= &newly_disallowed;
