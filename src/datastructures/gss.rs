@@ -879,7 +879,7 @@ impl GSSNode {
     }
 }
 
-fn fuse_predecessors_recursive(
+pub fn fuse_predecessors_recursive(
     node_arc: &Arc<GSSNode>,
     levels: usize,
     memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
