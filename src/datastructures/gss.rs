@@ -395,11 +395,13 @@ impl GSSNode {
     pub fn acc_manager(&self) -> &AccManager { &self.acc_manager }
 
     /// Returns the full union of constraints for any path ending at this node.
+    #[time_it]
     pub fn full_union_acc(&self) -> Acc {
         self.acc_manager.union.accumulate_seq(&self.acc_manager.local)
     }
 
     /// Returns the full intersection of constraints for all paths ending at this node.
+    #[time_it]
     pub fn full_intersection_acc(&self) -> Acc {
         self.acc_manager.intersection.accumulate_seq(&self.acc_manager.local)
     }
@@ -412,12 +414,14 @@ impl GSSNode {
 // Core GSS operations
 impl GSSNode {
     /// Pushes a new state onto the stack(s) represented by this node.
+    #[time_it]
     pub fn push(&self, edge_value: ParseStateEdgeContent, local_acc_for_new_node: Acc) -> Self {
         Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, local_acc_for_new_node)
     }
 
     /// Pops the top state from the stack(s), returning a `GSSPop` structure.
     /// The accumulators of predecessors are adjusted to include this node's local constraints.
+    #[time_it]
     pub fn pop(&self) -> GSSPop {
         let mut new_node_map = NodeMap::new();
         let parent_local_acc = &self.acc_manager.local;
@@ -451,6 +455,7 @@ impl GSSNode {
     }
 
     /// Pops `n` levels from the GSS.
+    #[time_it]
     pub fn popn(&self, n: usize) -> Self {
         if n == 0 {
             return self.clone();
@@ -459,6 +464,7 @@ impl GSSNode {
     }
 
     /// Merges another `GSSNode` into this one.
+    #[time_it]
     pub fn merge(&mut self, other: &Self) {
         if self == other { return; }
 
@@ -513,11 +519,13 @@ impl GSSPop<'_> {
         combined_node_map
     }
 
+    #[time_it]
     pub fn pop(&self) -> GSSPop {
         let node_map = Self::_pop(&self.node_map);
         GSSPop { parent_node: self.parent_node, node_map }
     }
 
+    #[time_it]
     pub fn popn(&self, n: usize) -> GSSPop {
         if n == 0 {
             return self.clone();
@@ -542,6 +550,7 @@ impl<'a> GSSPeek<'a> {
     pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
     pub fn predecessor(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
 
+    #[time_it]
     pub fn to_node(&self) -> GSSNode {
         let local_acc = self.parent_node.acc_manager.local.accumulate_seq(&self.predecessor_node.full_union_acc());
         GSSNode::new_with_single_predecessor(
