@@ -13,6 +13,7 @@ use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::glr::grammar::Terminal;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID;
+use std::ops::{BitOr, BitOrAssign};
 
 // --- Type Aliases ---
 
@@ -60,6 +61,32 @@ impl LLMTokenInfo {
     }
     pub fn max_llm_token_id(&self) -> usize {
         self.llm_vocab.as_ref().map_or(usize::MAX, |vocab| vocab.internal_max_llm_token)
+    }
+}
+
+impl BitOr<&LLMTokenBV> for LLMTokenInfo {
+    type Output = Self;
+    fn bitor(mut self, rhs: &LLMTokenBV) -> Self::Output {
+        if self.llm_tokens.is_none() {
+            if !rhs.is_empty() {
+                self.llm_tokens = Some(rhs.clone());
+            }
+        } else {
+            self.llm_tokens.as_mut().unwrap().bitor_assign(rhs);
+        }
+        self
+    }
+}
+
+impl BitOrAssign<&LLMTokenBV> for LLMTokenInfo {
+    fn bitor_assign(&mut self, rhs: &LLMTokenBV) {
+        if self.llm_tokens.is_none() {
+            if !rhs.is_empty() {
+                self.llm_tokens = Some(rhs.clone());
+            }
+        } else {
+            self.llm_tokens.as_mut().unwrap().bitor_assign(rhs);
+        }
     }
 }
 
@@ -120,7 +147,7 @@ impl Acc {
         // Terminals: union of disallowed sets
         let mut new_disallowed_terminals = self.disallowed_terminals.clone();
         for (state_id, other_bv) in &other.disallowed_terminals {
-            new_disallowed_terminals.entry(*state_id).or_default() |= other_bv;
+            *new_disallowed_terminals.entry(*state_id).or_insert_with(HybridBitset::zeros) |= other_bv;
         }
         new_disallowed_terminals.retain(|_, v| !v.is_empty());
 
@@ -132,8 +159,8 @@ impl Acc {
 
     /// Merges constraints from parallel paths (union of paths).
     pub fn merge_parallel<'a>(accs: impl IntoIterator<Item = &'a Acc>, llm_vocab: Option<Arc<LLMVocab>>) -> Self {
-        let mut iter = accs.into_iter().peekable();
-        if iter.peek().is_none() {
+        let accs_vec: Vec<&'a Acc> = accs.into_iter().collect();
+        if accs_vec.is_empty() {
             return Acc::new_fresh(llm_vocab);
         }
 
@@ -141,7 +168,7 @@ impl Acc {
         // If path A disallows DA and path B disallows DB, the merged path allows (!DA | !DB),
         // which means it disallows (DA & DB).
         let mut merged_llm_bv = LLMTokenBV::max_ones();
-        for acc in iter.clone() {
+        for acc in &accs_vec {
             merged_llm_bv &= &acc.llm_token_info.disallowed();
         }
         let merged_llm_info = LLMTokenInfo {
@@ -151,9 +178,9 @@ impl Acc {
 
         // Terminals: union of disallowed sets.
         let mut merged_terminals = BTreeMap::new();
-        for acc in iter {
+        for acc in &accs_vec {
             for (state_id, bv) in &acc.disallowed_terminals {
-                merged_terminals.entry(*state_id).or_default() |= bv;
+                *merged_terminals.entry(*state_id).or_insert_with(HybridBitset::zeros) |= bv;
             }
         }
         merged_terminals.retain(|_, v| !v.is_empty());
@@ -166,14 +193,14 @@ impl Acc {
 
     /// Intersects constraints from parallel paths.
     pub fn intersect_parallel<'a>(accs: impl IntoIterator<Item = &'a Acc>, llm_vocab: Option<Arc<LLMVocab>>) -> Self {
-        let mut iter = accs.into_iter().peekable();
-        if iter.peek().is_none() {
+        let accs_vec: Vec<&'a Acc> = accs.into_iter().collect();
+        if accs_vec.is_empty() {
             return Acc::new_fresh(llm_vocab);
         }
 
         // LLM tokens: union of disallowed sets.
         let mut intersected_llm_bv = LLMTokenBV::zeros();
-        for acc in iter.clone() {
+        for acc in &accs_vec {
             intersected_llm_bv |= &acc.llm_token_info.disallowed();
         }
         let intersected_llm_info = LLMTokenInfo {
@@ -182,7 +209,7 @@ impl Acc {
         };
 
         // Terminals: intersection of disallowed sets.
-        let mut acc_iter = iter.into_iter();
+        let mut acc_iter = accs_vec.into_iter();
         let mut intersected_terminals = acc_iter.next().unwrap().disallowed_terminals.clone();
         for acc in acc_iter {
             intersected_terminals.retain(|key, self_bv| {
@@ -621,7 +648,7 @@ pub fn intersect_llm_tokens_and_prune_arc(
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_local_acc = (*node.acc_manager.local).clone();
         let newly_disallowed = LLMTokenBV::max_ones() - allowed_tokens.clone();
-        *new_local_acc.llm_tokens_mut() = new_local_acc.llm_tokens().clone() | &newly_disallowed;
+        new_local_acc.llm_tokens_mut().bitor_assign(&newly_disallowed);
 
         let temp_full_acc = node.full_union_acc().accumulate_seq(&new_local_acc);
         if temp_full_acc.is_alive() {
@@ -645,7 +672,7 @@ pub fn subtract_llm_tokens_and_prune_arc(
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_local_acc = (*node.acc_manager.local).clone();
-        *new_local_acc.llm_tokens_mut() = new_local_acc.llm_tokens().clone() | tokens_to_disallow;
+        new_local_acc.llm_tokens_mut().bitor_assign(tokens_to_disallow);
         
         let temp_full_acc = node.full_union_acc().accumulate_seq(&new_local_acc);
         if temp_full_acc.is_alive() {
@@ -686,7 +713,7 @@ pub fn disallow_terminals_and_prune_arc(
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_local_acc = (*node.acc_manager.local).clone();
         for (state_id, bv) in disallowed_terminals {
-            new_local_acc.disallowed_terminals_mut().entry(*state_id).or_default() |= bv;
+            *new_local_acc.disallowed_terminals_mut().entry(*state_id).or_insert_with(HybridBitset::zeros) |= bv;
         }
         Some((new_local_acc, false))
     };
@@ -745,7 +772,7 @@ pub fn map_allowed_terminals_tokenizer_states(
 
         for (old_id, bv) in new_local_acc.disallowed_terminals() {
             if let Some(&new_id) = map.get(old_id) {
-                *new_disallowed.entry(new_id).or_default() |= bv;
+                *new_disallowed.entry(new_id).or_insert_with(HybridBitset::zeros) |= bv;
                 if old_id != &new_id {
                     changed = true;
                 }

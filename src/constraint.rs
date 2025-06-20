@@ -1037,8 +1037,9 @@ impl<'a> GrammarConstraintState<'a> {
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
                 let mut forbidden_llm_tokens = LLMTokenBV::zeros();
                 forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.llm_vocab.internal_max_llm_token + 1);
-                let disallowed_terminals_for_gss = glr_state.active_state.stack.full_union_acc().disallowed_terminals();
-                for (tokenizer_state_id, disallowed_terminals_for_state) in disallowed_terminals_for_gss {
+                let full_union_acc = glr_state.active_state.stack.full_union_acc();
+                let disallowed_terminals_for_gss = full_union_acc.disallowed_terminals();
+                for (tokenizer_state_id, disallowed_terminals_for_state) in disallowed_terminals_for_gss.iter() {
                     let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
                     for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
                         if disallowed_terminals_for_state.contains(terminal_id.0) {
