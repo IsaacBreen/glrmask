@@ -36,22 +36,31 @@ impl DisallowedLLMTokenInfo {
         Self { llm_tokens: None, llm_vocab }
     }
     pub fn all(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
-        todo!()
+        let mut this = Self::none(llm_vocab);
+        let max_llm_token_id = this.max_llm_token_id();
+        this.llm_tokens = Some(LLMTokenBV::ones(max_llm_token_id + 1));
+        this
     }
     pub fn disallowed(&self) -> LLMTokenBV {
         self.llm_tokens.clone().unwrap_or_else(LLMTokenBV::zeros)
     }
     pub fn allowed(&self) -> LLMTokenBV {
-        todo!()
+        let max_llm_token_id = self.max_llm_token_id();
+        let all_tokens = LLMTokenBV::ones(max_llm_token_id + 1);
+        all_tokens - self.disallowed()
     }
     pub fn is_empty(&self) -> bool {
         self.llm_tokens.is_none() || self.llm_tokens.as_ref().unwrap().is_empty()
     }
     pub fn is_all(&self) -> bool {
-        todo!()
+        let max_llm_token_id = self.max_llm_token_id();
+        self.disallowed() == LLMTokenBV::ones(max_llm_token_id + 1)
     }
     pub fn llm_vocab(&self) -> Option<Arc<LLMVocab>> {
         self.llm_vocab.clone()
+    }
+    pub fn max_llm_token_id(&self) -> usize {
+        self.llm_vocab.as_ref().map_or(0, |vocab| vocab.internal_max_llm_token)
     }
 }
 impl Acc {
