@@ -183,7 +183,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
                 println!("  (Root already visited)");
             } else {
                 visited.insert(root_ptr);
-                dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.original_to_internal_id_bimap), Some(&self.token_name_map), Some(&self.llm_token_map));
+                dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(&self.llm_vocab.original_to_internal_id_bimap), Some(&self.token_name_map), Some(&self.llm_vocab.llm_token_map));
             }
         }
         println!("\n===================================");

@@ -697,7 +697,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     grammar_constraint.dump_precomputed();
     println!("GrammarConstraint constructed successfully.");
     println!("GrammarConstraint original to internal ID map:");
-    let mut temp = grammar_constraint.original_to_internal_id_bimap.iter().collect::<Vec<_>>();
+    let mut temp = grammar_constraint.llm_vocab.original_to_internal_id_bimap.iter().collect::<Vec<_>>();
     temp.sort_by_key(|(original_id, internal_id)| *internal_id);
     for (original_id, internal_id) in temp {
         let token = llm_token_map.get_by_right(&LLMTokenID(*original_id)).unwrap();
@@ -718,10 +718,10 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
 
         // 3. Get the LLMTokenID for the newline character.
         let newline_bytes = b"\n";
-        let newline_llm_token_id = grammar_constraint.llm_token_map
+        let newline_llm_token_id = grammar_constraint.llm_vocab.llm_token_map
             .get_by_left(&newline_bytes.to_vec())
             .unwrap_or_else(|| panic!("LLM token for newline '{:?}' not found in token map.", String::from_utf8_lossy(newline_bytes)));
-        let newline_llm_token_id = grammar_constraint.original_to_internal_id_bimap.get_by_left(&newline_llm_token_id.0).unwrap();
+        let newline_llm_token_id = grammar_constraint.llm_vocab.original_to_internal_id_bimap.get_by_left(&newline_llm_token_id.0).unwrap();
 
         // 4. Check for the edge in the precompute root node.
         // The edge key is Option<TerminalID>.
@@ -754,7 +754,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     // --- TOKENIZATION AND SEQUENCE TESTING ---
 
     // Build a VocabPrefixTree from the LLM token map for tokenization
-    let vocab_tokens_for_tree: Vec<(usize, Vec<u8>)> = grammar_constraint.llm_token_map
+    let vocab_tokens_for_tree: Vec<(usize, Vec<u8>)> = grammar_constraint.llm_vocab.llm_token_map
         .iter()
         .map(|(bytes, llm_id)| (llm_id.0, bytes.clone()))
         .collect();

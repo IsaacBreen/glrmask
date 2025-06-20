@@ -85,15 +85,20 @@ pub type PrecomputeNode =
 pub type Precomputed = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>;
 
 #[derive(Debug, Clone)]
+pub struct LLMVocab {
+    pub(crate) llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
+    pub(crate) max_original_llm_token_id: usize,
+    pub(crate) original_to_internal_id_bimap: BiBTreeMap<usize, usize>,
+    pub(crate) internal_max_llm_token: usize
+}
+
+#[derive(Debug, Clone)]
 pub struct GrammarConstraint {
     pub(crate) tokenizer:        Regex,
     pub(crate) parser:           GLRParser,
     pub(crate) precomputed:      Precomputed,
-    pub(crate) llm_token_map:    BiBTreeMap<Vec<u8>, LLMTokenID>, 
+    pub(crate) llm_vocab:        LLMVocab,
     pub(crate) token_name_map:   BiBTreeMap<String, usize>,
-    pub(crate) max_original_llm_token_id: usize, 
-    pub(crate) original_to_internal_id_bimap: BiBTreeMap<usize, usize>, 
-    pub(crate) internal_max_llm_token: usize,
     pub(crate) possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
 }
 
@@ -108,11 +113,11 @@ impl GrammarConstraint {
             let node2 = arc2.lock().unwrap();
             assert_eq!(*node1, *node2);
         }
-        assert_eq!(self.llm_token_map, other.llm_token_map);
+        assert_eq!(self.llm_vocab.llm_token_map, other.llm_vocab.llm_token_map);
         assert_eq!(self.token_name_map, other.token_name_map);
-        assert_eq!(self.max_original_llm_token_id, other.max_original_llm_token_id);
-        assert_eq!(self.original_to_internal_id_bimap, other.original_to_internal_id_bimap);
-        assert_eq!(self.internal_max_llm_token, other.internal_max_llm_token);
+        assert_eq!(self.llm_vocab.max_original_llm_token_id, other.llm_vocab.max_original_llm_token_id);
+        assert_eq!(self.llm_vocab.original_to_internal_id_bimap, other.llm_vocab.original_to_internal_id_bimap);
+        assert_eq!(self.llm_vocab.internal_max_llm_token, other.llm_vocab.internal_max_llm_token);
         assert_eq!(self.possible_matches, other.possible_matches);
     }
 }
@@ -123,11 +128,11 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("tokenizer".to_string(), self.tokenizer.to_json());
         obj.insert("parser".to_string(), self.parser.to_json());
         obj.insert("precomputed".to_string(), self.precomputed.to_json());
-        obj.insert("llm_token_map".to_string(), self.llm_token_map.to_json());
+        obj.insert("llm_token_map".to_string(), self.llm_vocab.llm_token_map.to_json());
         obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
-        obj.insert("max_original_llm_token_id".to_string(), self.max_original_llm_token_id.to_json());
-        obj.insert("original_to_internal_id_bimap".to_string(), self.original_to_internal_id_bimap.to_json());
-        obj.insert("internal_max_llm_token".to_string(), self.internal_max_llm_token.to_json());
+        obj.insert("max_original_llm_token_id".to_string(), self.llm_vocab.max_original_llm_token_id.to_json());
+        obj.insert("original_to_internal_id_bimap".to_string(), self.llm_vocab.original_to_internal_id_bimap.to_json());
+        obj.insert("internal_max_llm_token".to_string(), self.llm_vocab.internal_max_llm_token.to_json());
         obj.insert("possible_matches".to_string(), self.possible_matches.to_json());
         JSONNode::Object(obj)
     }
@@ -158,11 +163,8 @@ impl JSONConvertible for GrammarConstraint {
                     tokenizer,
                     parser,
                     precomputed,
-                    llm_token_map,
+                    llm_vocab: LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_id_bimap, internal_max_llm_token },
                     token_name_map,
-                    max_original_llm_token_id,
-                    original_to_internal_id_bimap,
-                    internal_max_llm_token,
                     possible_matches,
                 })
             }
@@ -310,11 +312,13 @@ impl GrammarConstraint {
             tokenizer, // This is the tokenizer parameter being moved into the struct
             parser,
             precomputed,
-            llm_token_map, 
+            llm_vocab: LLMVocab {
+                llm_token_map,
+                max_original_llm_token_id,
+                original_to_internal_id_bimap,
+                internal_max_llm_token,
+            },
             token_name_map,
-            max_original_llm_token_id,
-            original_to_internal_id_bimap,
-            internal_max_llm_token,
             possible_matches: computed_possible_matches, // Add this line
         }
     }
@@ -356,19 +360,19 @@ impl GrammarConstraint {
 
     #[inline]
     pub(crate) fn original_id_to_internal(&self, original_id: LLMTokenID) -> Option<LLMTokenID> {
-        self.original_to_internal_id_bimap.get_by_left(&original_id.0).map(|internal_val| LLMTokenID(*internal_val))
+        self.llm_vocab.original_to_internal_id_bimap.get_by_left(&original_id.0).map(|internal_val| LLMTokenID(*internal_val))
     }
 
     #[inline]
     pub(crate) fn internal_id_to_original(&self, internal_id: LLMTokenID) -> Option<LLMTokenID> {
-        self.original_to_internal_id_bimap.get_by_right(&internal_id.0).map(|original_val| LLMTokenID(*original_val))
+        self.llm_vocab.original_to_internal_id_bimap.get_by_right(&internal_id.0).map(|original_val| LLMTokenID(*original_val))
     }
 
     #[allow(dead_code)] 
     pub(crate) fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
         let mut internal_bv = HybridBitset::zeros();
         for original_id_val in original_bv.iter() {
-            let internal_id_val = self.original_to_internal_id_bimap.get_by_left(&(original_id_val as usize)).expect(format!("Original ID {} not found in original_to_internal_id_bimap", original_id_val).as_str());
+            let internal_id_val = self.llm_vocab.original_to_internal_id_bimap.get_by_left(&(original_id_val as usize)).expect(format!("Original ID {} not found in original_to_internal_id_bimap", original_id_val).as_str());
             internal_bv.insert(*internal_id_val as usize);
         }
         internal_bv
@@ -376,17 +380,17 @@ impl GrammarConstraint {
 
     #[time_it]
     fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
-        let internal_bv = internal_bv & &LLMTokenBV::ones(self.internal_max_llm_token + 1);
+        let internal_bv = internal_bv & &LLMTokenBV::ones(self.llm_vocab.internal_max_llm_token + 1);
         let mut original_bv = HybridBitset::zeros();
         for internal_id_val in internal_bv.iter() {
-            let original_id_val = self.original_to_internal_id_bimap.get_by_right(&(internal_id_val as usize)).expect(format!("Internal ID {} not found in original_to_internal_id_bimap while converting to original BV from internal BV: {:?}", internal_id_val, internal_bv).as_str());
+            let original_id_val = self.llm_vocab.original_to_internal_id_bimap.get_by_right(&(internal_id_val as usize)).expect(format!("Internal ID {} not found in original_to_internal_id_bimap while converting to original BV from internal BV: {:?}", internal_id_val, internal_bv).as_str());
             original_bv.insert(*original_id_val as usize);
         }
         original_bv
     }
 
     pub(crate) fn all_internal_llm_tokens_bitset(&self) -> LLMTokenBV {
-        HybridBitset::ones(self.internal_max_llm_token + 1)
+        HybridBitset::ones(self.llm_vocab.internal_max_llm_token + 1)
     }
 
     fn compute_possible_matches_for_vocab_node(
@@ -989,8 +993,8 @@ impl<'a> Display for GrammarConstraintState<'a> {
                 None,
                 usize::MAX,
                 &self.parent.parser.terminal_map,
-                Some(&self.parent.original_to_internal_id_bimap),
-                Some(&self.parent.llm_token_map),
+                Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                Some(&self.parent.llm_vocab.llm_token_map),
             );
             write!(f, "{}", gss_str)?;
         }
@@ -1032,7 +1036,7 @@ impl<'a> GrammarConstraintState<'a> {
             }
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
                 let mut forbidden_llm_tokens = LLMTokenBV::zeros();
-                forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.internal_max_llm_token + 1);
+                forbidden_llm_tokens |= LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.llm_vocab.internal_max_llm_token + 1);
                 let disallowed_terminals_for_gss = glr_state.active_state.stack.acc().disallowed_terminals();
                 for (tokenizer_state_id, disallowed_terminals_for_state) in disallowed_terminals_for_gss {
                     let possible_matches_for_state = &self.parent.possible_matches[&tokenizer_state_id];
@@ -1044,7 +1048,7 @@ impl<'a> GrammarConstraintState<'a> {
                     }
                 }
                 let mut glr_state = glr_state.clone();
-                if forbidden_llm_tokens != (LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.internal_max_llm_token + 1)) {
+                if forbidden_llm_tokens != (LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.llm_vocab.internal_max_llm_token + 1)) {
                     // glr_state.log_gss(format!("Subtracting forbidden LLM tokens: {:?}", forbidden_llm_tokens).as_str(), TerminalID(0));
                     subtract_llm_tokens_and_prune_arc(&mut glr_state.active_state.stack, &forbidden_llm_tokens, &mut HashMap::new());
                     // glr_state.log_gss("Done subtracting forbidden LLM tokens.", TerminalID(0));
@@ -1164,8 +1168,8 @@ impl<'a> GrammarConstraintState<'a> {
             &roots, Some(&labels),
             300,
             &self.parent.parser.terminal_map,
-            Some(&self.parent.original_to_internal_id_bimap),
-            Some(&self.parent.llm_token_map),
+            Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+            Some(&self.parent.llm_vocab.llm_token_map),
         ));
 
         let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
@@ -1178,7 +1182,7 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
-        let llm_token_bytes = self.parent.llm_token_map.get_by_right(&llm_token_id).unwrap();
+        let llm_token_bytes = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id).unwrap();
         self.commit_bytes(llm_token_bytes);
     }
 
