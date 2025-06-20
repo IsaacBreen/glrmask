@@ -9,7 +9,7 @@ use bimap::BiBTreeMap;
 use deterministic_hash::DeterministicHasher;
 
 use crate::glr::parser::ParseStateEdgeContent;
-use crate::constraint::{LLMTokenBV, TerminalBV};
+use crate::constraint::{LLMTokenBV, LLMVocab, TerminalBV};
 use crate::datastructures::gss::acc_mod::Acc;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::glr::grammar::Terminal;
@@ -29,6 +29,7 @@ type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DisallowedLLMTokenInfo {
     llm_tokens: Option<LLMTokenBV>,
+    llm_vocab: Option<Arc<LLMVocab>>,
 }
 impl DisallowedLLMTokenInfo {
     pub fn none() -> Self {

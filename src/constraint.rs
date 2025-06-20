@@ -84,7 +84,7 @@ pub type PrecomputeNode =
 
 pub type Precomputed = BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LLMVocab {
     pub(crate) llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
     pub(crate) max_original_llm_token_id: usize,
