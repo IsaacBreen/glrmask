@@ -728,8 +728,7 @@ pub fn prune_disallowed_terminals(
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
-        let full_acc = node.full_intersection_acc();
-        for (state_id, disallowed_by_gss) in full_acc.disallowed_terminals() {
+        for (state_id, disallowed_by_gss) in node.full_intersection_acc().disallowed_terminals() {
             if let Some(matched) = matched_terminals.get(state_id) {
                 if !disallowed_by_gss.is_disjoint(matched) {
                     return None; // All paths to this node disallow a terminal that was just matched. Prune.
@@ -738,9 +737,8 @@ pub fn prune_disallowed_terminals(
         }
         // If we can't prune the whole node, we might need to recurse to prune sub-paths.
         // This is determined by checking the union accumulator.
-        let full_union_acc = node.full_union_acc();
         let mut needs_recursion = false;
-        for (state_id, disallowed_by_gss_union) in full_union_acc.disallowed_terminals() {
+        for (state_id, disallowed_by_gss_union) in node.full_union_acc().disallowed_terminals() {
              if let Some(matched) = matched_terminals.get(state_id) {
                 if !disallowed_by_gss_union.is_disjoint(matched) {
                     needs_recursion = true;
