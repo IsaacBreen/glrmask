@@ -60,7 +60,7 @@ impl LLMTokenInfo {
         self.llm_vocab.clone()
     }
     pub fn max_llm_token_id(&self) -> usize {
-        self.llm_vocab.as_ref().map_or(0, |vocab| vocab.internal_max_llm_token)
+        self.llm_vocab.as_ref().map_or(usize::MAX, |vocab| vocab.internal_max_llm_token)
     }
 }
 impl Acc {
