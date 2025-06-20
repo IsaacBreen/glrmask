@@ -685,11 +685,7 @@ impl GSSNode {
         if n == 0 {
             return self.clone();
         }
-        let mut pop_result = self.pop();
-        for _ in 1..n {
-            pop_result = pop_result.pop();
-        }
-        pop_result.to_node()
+        self.pop().popn(n).to_node()
     }
 
     /// Merges another `GSSNode` into this one.
