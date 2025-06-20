@@ -525,6 +525,8 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
     println!("{}", &constraint_state2);
 
     // Assert equivalence
+    println!("constraint_state1 state: {}", constraint_state1);
+    println!("constraint_state2 state: {}", constraint_state2);
     assert_eq!(constraint_state1.state(), constraint_state2.state(), "States from (commit '#' then 'a' then 'a') and (commit '#aa') should be equivalent.");
     println!("\nAssertion passed: States are equivalent for multi-commit scenario.");
 }
