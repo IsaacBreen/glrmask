@@ -289,13 +289,11 @@ pub trait PathAccumulator<Other=Self>: Sized + Clone + Debug + Eq + PartialEq + 
         self.intersect_assign(right);
         self
     }
-    fn intersect_has_effect(&self, right: &Other) -> bool;
 }
 
 impl PathAccumulator for () {
     fn union_assign(&mut self, _other: Self) { }
     fn intersect_assign(&mut self, _right: Self) { }
-    fn intersect_has_effect(&self, _right: &Self) -> bool { false }
 }
 
 impl PathAccumulator for TerminalInfoValue {
@@ -308,11 +306,6 @@ impl PathAccumulator for TerminalInfoValue {
         self.union &= &right.union;
         self.union |= &right.intersection;
         self.intersection |= &right.intersection;
-    }
-
-    fn intersect_has_effect(&self, right: &Self) -> bool {
-        // A full comparison is needed as the logic is complex.
-        self.clone().intersect(right.clone()) != *self
     }
 }
 
@@ -353,16 +346,6 @@ impl PathAccumulator for Option<LLMTokenBV> {
             (None, None) => { /* self remains None */ },
         }
     }
-
-    /// Checks if `intersect_assign` (a union) would have an effect.
-    /// This happens if `right` disallows tokens that `self` does not already disallow.
-    fn intersect_has_effect(&self, right: &Self) -> bool {
-        match (self, right) {
-            (Some(self_bv), Some(right_bv)) => !right_bv.is_subset(self_bv),
-            (None, Some(right_bv)) => !right_bv.is_empty(),
-            _ => false, // Intersecting with `None` (nothing disallowed) has no effect.
-        }
-    }
 }
 
 
@@ -372,9 +355,6 @@ impl PathAccumulator for LLMTokenInfo {
     }
     fn intersect_assign(&mut self, right: Self) {
         self.llm_tokens.intersect_assign(right.llm_tokens);
-    }
-    fn intersect_has_effect(&self, right: &Self) -> bool {
-        self.llm_tokens.intersect_has_effect(&right.llm_tokens)
     }
 }
 
@@ -495,11 +475,6 @@ pub mod acc_mod {
         fn intersect_assign(&mut self, right: Self) {
             self.llm_token_info.intersect_assign(right.llm_token_info);
             disallowed_terminals_intersect_assign(&mut self.disallowed_terminals, right.disallowed_terminals);
-        }
-
-        fn intersect_has_effect(&self, right: &Self) -> bool {
-            self.llm_token_info.intersect_has_effect(&right.llm_token_info) ||
-            self.clone().intersect(right.clone()).disallowed_terminals != self.disallowed_terminals
         }
     }
 }
