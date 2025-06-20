@@ -26,6 +26,7 @@ type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 /// A temporary set of predecessors used during node construction and simplification.
 type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 /// Represents the set of disallowed LLM tokens for a path. `None` means no tokens are disallowed.
+// pub type DisallowedLLMTokenInfo = Option<LLMTokenBV>;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DisallowedLLMTokenInfo {
     llm_tokens: Option<LLMTokenBV>,
@@ -1421,28 +1422,28 @@ fn format_acc(
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
 ) -> String {
-    let llm_info = match acc.disallowed_llm_tokens() {
-        None => "Disallowed LLM(None)".to_string(),
-        Some(bv) if bv.is_empty() => "Disallowed LLM(None)".to_string(), // Should be normalized to None
-        Some(bv) => {
-            if let (Some(bimap), Some(token_map)) = (original_internal_bimap, llm_token_map) {
-                const MAX_SAMPLES: usize = 3;
-                let token_samples: Vec<_> = bv.iter().take(MAX_SAMPLES)
-                    .filter_map(|internal_id| bimap.get_by_right(&internal_id))
-                    .filter_map(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
-                    .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
-                    .collect();
+    let disallowed_llm_info = acc.disallowed_llm_tokens();
+    let llm_info = if disallowed_llm_info.is_empty() {
+        "Disallowed LLM(None)".to_string()
+    } else {
+        let bv = disallowed_llm_info.disallowed();
+        if let (Some(bimap), Some(token_map)) = (original_internal_bimap, llm_token_map) {
+            const MAX_SAMPLES: usize = 3;
+            let token_samples: Vec<_> = bv.iter().take(MAX_SAMPLES)
+                .filter_map(|internal_id| bimap.get_by_right(&internal_id))
+                .filter_map(|original_id| token_map.get_by_right(&LLMTokenID(*original_id)))
+                .map(|token_bytes| format!("{:?}", String::from_utf8_lossy(token_bytes)))
+                .collect();
 
-                let samples_str = token_samples.join(", ");
-                let total_tokens = bv.len();
-                if total_tokens > MAX_SAMPLES {
-                    format!("Disallowed LLM({} tokens: [{}, ...])", total_tokens, samples_str)
-                } else {
-                    format!("Disallowed LLM({} tokens: [{}])", total_tokens, samples_str)
-                }
+            let samples_str = token_samples.join(", ");
+            let total_tokens = bv.len();
+            if total_tokens > MAX_SAMPLES {
+                format!("Disallowed LLM({} tokens: [{}, ...])", total_tokens, samples_str)
             } else {
-                format!("Disallowed LLM({} tokens)", bv.len())
+                format!("Disallowed LLM({} tokens: [{}])", total_tokens, samples_str)
             }
+        } else {
+            format!("Disallowed LLM({} tokens)", bv.len())
         }
     };
 
@@ -1478,7 +1479,8 @@ mod tests {
     fn mock_acc(val: usize) -> Acc {
         let mut bv = LLMTokenBV::zeros();
         bv.insert(val);
-        Acc::new(Some(bv), Default::default())
+        let disallowed_info = DisallowedLLMTokenInfo { llm_tokens: Some(bv) };
+        Acc::new(disallowed_info, Default::default())
     }
 
     fn mock_edge(id: usize) -> ParseStateEdgeContent {
