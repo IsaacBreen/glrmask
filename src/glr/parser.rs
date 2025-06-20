@@ -476,7 +476,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // timeit!(format!("GLRParserState::step({} ({:?})", token_id.0, self.parser.terminal_map.get_by_right(&token_id)), {
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
         self.log_gss("Step-start", token_id);
-        self.cycled_states = ParseState::from_existing(self.active_state.clone());
 
         let mut todo: Vec<ParseState> = Vec::new();
         todo.push(ParseState { stack: self.active_state.stack.clone() });
