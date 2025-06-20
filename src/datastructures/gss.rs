@@ -14,7 +14,7 @@ use crate::glr::grammar::Terminal;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID;
 use std::ops::{BitOr, BitOrAssign};
-
+use profiler_macro::time_it;
 // --- Type Aliases ---
 
 pub type MaxDepth = usize;
@@ -638,6 +638,7 @@ fn prune_and_transform_recursive(
     }
 }
 
+#[time_it]
 pub fn allow_only_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     allowed_tokens: &LLMTokenBV,
@@ -651,6 +652,7 @@ pub fn allow_only_llm_tokens_and_prune_arc(
     );
 }
 
+#[time_it]
 pub fn disallow_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     tokens_to_disallow: &LLMTokenBV,
@@ -662,7 +664,7 @@ pub fn disallow_llm_tokens_and_prune_arc(
 
         let temp_full_acc = node.full_union_acc().accumulate_seq(&new_local_acc);
         if temp_full_acc.is_alive() {
-            Some((new_local_acc, true))
+            Some((new_local_acc, false))
         } else {
             None
         }
@@ -674,6 +676,7 @@ pub fn disallow_llm_tokens_and_prune_arc(
     }
 }
 
+#[time_it]
 pub fn reset_llm_tokens(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
@@ -691,6 +694,7 @@ pub fn reset_llm_tokens(
     }
 }
 
+#[time_it]
 pub fn disallow_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     disallowed_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
@@ -710,6 +714,7 @@ pub fn disallow_terminals_and_prune_arc(
     }
 }
 
+#[time_it]
 pub fn prune_disallowed_terminals(
     root_arc: &mut Arc<GSSNode>,
     matched_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
@@ -734,7 +739,7 @@ pub fn prune_disallowed_terminals(
                 }
             }
         }
-        Some(((*node.acc_manager.local).clone(), needs_recursion))
+        Some(((*node.acc_manager.local).clone(), true))
     };
 
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
@@ -744,6 +749,7 @@ pub fn prune_disallowed_terminals(
     }
 }
 
+#[time_it]
 pub fn map_allowed_terminals_tokenizer_states(
     root_arc: &mut Arc<GSSNode>,
     map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
@@ -866,6 +872,7 @@ pub struct GSSStats {
 }
 
 /// Gathers statistics about the structure and complexity of a GSS forest.
+#[time_it]
 pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
     let mut stats = GSSStats::default();
     stats.num_roots = roots.len();
@@ -997,6 +1004,7 @@ pub fn find_longest_path(root_node: &Arc<GSSNode>) -> Option<Vec<(ParseStateEdge
 }
 
 /// Pretty-prints a GSS forest for debugging.
+#[time_it]
 pub fn print_gss_forest(
     roots: &[Arc<GSSNode>],
     labels: Option<&[String]>,
