@@ -1105,7 +1105,7 @@ impl<'a> GrammarConstraintState<'a> {
                         // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
 
                         if glr_s.is_ok() && child_node_trie_data.as_arc().lock().unwrap().value.end {
-                            let glr_active_tokens = glr_s.active_state.stack.acc().disallowed_llm_tokens().disallowed();
+                            let glr_active_tokens = glr_s.active_state.stack.acc().disallowed_llm_tokens().allowed();
                             *final_mask_internal.borrow_mut() |= glr_active_tokens;
                         }
 
