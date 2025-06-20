@@ -166,7 +166,7 @@ impl Acc {
         // which means it disallows (DA & DB).
         let mut merged_llm_bv = LLMTokenBV::max_ones();
         for acc in &accs_vec {
-            merged_llm_bv &= &acc.llm_token_info.disallowed();
+            merged_llm_bv |= &acc.llm_token_info.disallowed();
         }
         let merged_llm_info = LLMTokenInfo {
             llm_tokens: if merged_llm_bv.is_empty() { None } else { Some(merged_llm_bv) },
@@ -198,7 +198,7 @@ impl Acc {
         // LLM tokens: union of disallowed sets.
         let mut intersected_llm_bv = LLMTokenBV::zeros();
         for acc in &accs_vec {
-            intersected_llm_bv |= &acc.llm_token_info.disallowed();
+            intersected_llm_bv &= &acc.llm_token_info.disallowed();
         }
         let intersected_llm_info = LLMTokenInfo {
             llm_tokens: if intersected_llm_bv.is_empty() { None } else { Some(intersected_llm_bv) },
@@ -209,12 +209,13 @@ impl Acc {
         let mut acc_iter = accs_vec.into_iter();
         let mut intersected_terminals = acc_iter.next().unwrap().disallowed_terminals.clone();
         for acc in acc_iter {
-            intersected_terminals.retain(|key, self_bv| {
-                if let Some(other_bv) = acc.disallowed_terminals.get(key) {
-                    *self_bv &= other_bv;
-                    !self_bv.is_empty()
+            intersected_terminals.retain(|state_id, bv| {
+                if let Some(other_bv) = acc.disallowed_terminals.get(state_id) {
+                    // Keep only those terminals that are disallowed in both accumulators.
+                    *bv &= other_bv;
+                    !bv.is_empty() // Retain only non-empty bitsets
                 } else {
-                    false // Other map disallows nothing for this key, so intersection is empty.
+                    false // If the state_id is not present in the other accumulator, remove it
                 }
             });
         }
