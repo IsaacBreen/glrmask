@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::cmp::Ordering;
 use crate::datastructures::gss::{print_gss_forest};
-use crate::datastructures::gss::{gather_gss_stats, find_longest_path, PathAccumulator, GSSNode, GSSStats, GSSPeek};
+use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID};
 use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
@@ -15,7 +15,7 @@ use crate::debug;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use profiler_macro::{time_it, timeit};
-use crate::datastructures::gss::acc_mod::Acc;
+use crate::datastructures::gss::Acc;
 use crate::glr::items::Item;
 
 pub trait DynEq {
@@ -100,10 +100,10 @@ pub struct ParseState { // No longer generic
 
 impl ParseState {
     pub fn new(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
-        ParseState { stack: Arc::new(GSSNode::new(Acc::new_for_merging(llm_vocab))) }
+        ParseState { stack: Arc::new(GSSNode::new(Acc::new_fresh(llm_vocab))) }
     }
     pub fn from_existing(existing: Self) -> Self {
-        ParseState::new(existing.stack.acc().llm_tokens().llm_vocab().clone())
+        ParseState::new(existing.stack.llm_tokens().llm_vocab())
     }
 }
 
@@ -280,9 +280,9 @@ impl GLRParser {
         let initial_content = ParseStateEdgeContent {
             state_id: self.start_state_id,
         };
-        let root = Arc::new(GSSNode::new(initial_acc.clone())); // initial_acc for the root
-        // Push creates a new node. Its acc should be derived from the parent (root in this case).
-        let stack = Arc::new(root.as_ref().push(initial_content, initial_acc));
+        let llm_vocab = initial_acc.llm_tokens().llm_vocab();
+        let root = Arc::new(GSSNode::new(Acc::new_fresh(llm_vocab))); // root has empty acc
+        let stack = Arc::new(root.as_ref().push(initial_content, initial_acc)); // pushed node has initial_acc
         ParseState { stack }
     }
 
@@ -420,8 +420,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         stack: &Arc<GSSNode>, 
         new_content: ParseStateEdgeContent,
     ) -> ParseState {
-        crate::debug!(4, "Pushing new state with content: {:?} and acc: {:?}", new_content, stack.acc());
-        let new_gss_node_instance = stack.as_ref().push(new_content, stack.acc().clone());
+        let llm_vocab = stack.llm_tokens().llm_vocab();
+        crate::debug!(4, "Pushing new state with content: {:?}", new_content);
+        let new_gss_node_instance = stack.as_ref().push(new_content, Acc::new_fresh(llm_vocab));
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
@@ -457,8 +458,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
         }
         if out.is_empty() {
-            let llm_vocab = self.active_state.stack.acc().llm_tokens().llm_vocab();
-            Arc::new(GSSNode::new(Acc::new_for_merging(llm_vocab)))
+            let llm_vocab = self.active_state.stack.llm_tokens().llm_vocab();
+            Arc::new(GSSNode::new(Acc::new_fresh(llm_vocab)))
         } else if out.len() == 1 {
             Arc::new(out.into_iter().next().unwrap())
         } else {
@@ -592,7 +593,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     pub fn is_ok(&self) -> bool {
-        !self.active_state.stack.is_empty() && self.active_state.stack.acc().is_alive()
+        !self.active_state.stack.is_empty() && self.active_state.stack.full_union_acc().is_alive()
     }
 
     // #[time_it("GLRParserState::log_gss")]
