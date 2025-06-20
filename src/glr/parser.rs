@@ -436,7 +436,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
         crate::debug!(6, "Reducing with parent node: {}", print_gss_forest(&[Arc::new(peek.parent_node.clone())], None, 30, &self.parser.terminal_map, None, None));
         crate::debug!(6, "...and predecessor node: {}", print_gss_forest(&[peek.predecessor_node.clone()], None, 30, &self.parser.terminal_map, None, None));
-        crate::debug!(6, "Popped peek node: {}", print_gss_forest(&[popped.clone()], None, 30, &self.parser.terminal_map, None, None));
+        crate::debug!(6, "...and popped peek node: {}", print_gss_forest(&[popped.clone()], None, 30, &self.parser.terminal_map, None, None));
         // let mut out = GSSNode::new(Acc::new_for_merging()); // Start with a default acc
         let mut out = Vec::new();
         for popped_peek in popped.peek_iter() { // Renamed predecessor to predecessor_arc
@@ -445,7 +445,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Goto::State(goto_state_id) => {
                     // crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
                     crate::debug!(6, "Popped peek parent node: {}", print_gss_forest(&[Arc::new(popped_peek.parent_node.clone())], None, 30, &self.parser.terminal_map, None, None));
-                    crate::debug!(6, "Poppped peek predecessor node: {}", print_gss_forest(&[popped_peek.predecessor_node.clone()], None, 30, &self.parser.terminal_map, None, None));
+                    crate::debug!(6, "Popped peek predecessor node: {}", print_gss_forest(&[popped_peek.predecessor_node.clone()], None, 30, &self.parser.terminal_map, None, None));
                     let new_gss_node = popped_peek.to_node().push_with_existing_acc(ParseStateEdgeContent { state_id: goto_state_id });
                     crate::debug!(6, "Popped peek node to_node: {}", print_gss_forest(&[Arc::new(popped_peek.to_node())], None, 30, &self.parser.terminal_map, None, None));
                     crate::debug!(6, "New GSS node after reduction: {}", print_gss_forest(&[Arc::new(new_gss_node.clone())], None, 30, &self.parser.terminal_map, None, None));
