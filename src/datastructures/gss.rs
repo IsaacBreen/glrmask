@@ -164,7 +164,7 @@ impl Acc {
         // LLM tokens: intersection of disallowed sets.
         // If path A disallows DA and path B disallows DB, the merged path allows (!DA | !DB),
         // which means it disallows (DA & DB).
-        let mut merged_llm_bv = LLMTokenBV::max_ones();
+        let mut merged_llm_bv = LLMTokenBV::zeros();
         for acc in &accs_vec {
             merged_llm_bv |= &acc.llm_token_info.disallowed();
         }
