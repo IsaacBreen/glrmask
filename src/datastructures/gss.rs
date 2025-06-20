@@ -25,8 +25,8 @@ type NodeMap = BTreeMap<MaxDepth, BTreeMap<ParseStateEdgeContent, Arc<GSSNode>>>
 type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 /// A temporary set of predecessors used during node construction and simplification.
 type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
-/// Represents the set of allowed LLM tokens for a path. `None` means all tokens are allowed.
-pub type LLMTokenInfo = Option<LLMTokenBV>;
+/// Represents the set of disallowed LLM tokens for a path. `None` means no tokens are disallowed.
+pub type DisallowedLLMTokenInfo = Option<LLMTokenBV>;
 /// For a given tokenizer state, holds the union and intersection of disallowed terminals from different paths.
 pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalInfoValue>;
 
@@ -243,29 +243,50 @@ impl PathAccumulator for TerminalInfoValue {
 }
 
 impl PathAccumulator for Option<LLMTokenBV> {
+    /// `union_assign` on disallowed sets means taking the intersection.
+    /// If path A allows `!DA` and path B allows `!DB`, the merged path allows `!DA | !DB`,
+    /// which is `!(DA & DB)`. So the new disallowed set is the intersection of the old ones.
     fn union_assign(&mut self, other: Self) {
-        match (self.as_mut(), other) {
-            (Some(self_bv), Some(other_bv)) => *self_bv |= other_bv,
-            (None, Some(other_bv)) => *self = Some(other_bv),
-            (Some(_), None) => { /* self remains Some, representing the union */ },
-            (None, None) => { /* self remains None */ },
+        if self.is_none() {
+            // self already disallows nothing, so the intersection will be nothing.
+            return;
+        }
+        if other.is_none() {
+            // other disallows nothing, so the intersection is nothing.
+            *self = None;
+            return;
+        }
+
+        // Both are Some. Intersect them.
+        let self_bv = self.as_mut().unwrap();
+        let other_bv = other.unwrap();
+        *self_bv &= &other_bv;
+
+        // Normalize: an empty set of disallowed tokens is the same as `None`.
+        if self_bv.is_empty() {
+            *self = None;
         }
     }
 
+    /// `intersect_assign` on disallowed sets means taking the union.
+    /// If a path to node U disallows `DU` and the predecessor V disallows `DV`,
+    /// the combined path disallows `DU | DV`.
     fn intersect_assign(&mut self, right: Self) {
         match (self.as_mut(), right) {
-            (Some(self_bv), Some(right_bv)) => *self_bv &= right_bv,
+            (Some(self_bv), Some(right_bv)) => *self_bv |= &right_bv,
             (None, Some(right_bv)) => *self = Some(right_bv),
-            (Some(_), None) => { /* self remains Some, representing the intersection */ },
+            (Some(_), None) => { /* self remains Some, union with empty set is self */ },
             (None, None) => { /* self remains None */ },
         }
     }
 
+    /// Checks if `intersect_assign` (a union) would have an effect.
+    /// This happens if `right` disallows tokens that `self` does not already disallow.
     fn intersect_has_effect(&self, right: &Self) -> bool {
         match (self, right) {
-            (Some(self_bv), Some(right_bv)) => !self_bv.is_subset(right_bv),
-            (None, Some(_)) => true, // `None` (all) intersecting with `Some` will change.
-            _ => false, // Intersecting with `None` (all) has no effect.
+            (Some(self_bv), Some(right_bv)) => !right_bv.is_subset(self_bv),
+            (None, Some(right_bv)) => !right_bv.is_empty(),
+            _ => false, // Intersecting with `None` (nothing disallowed) has no effect.
         }
     }
 }
@@ -334,20 +355,20 @@ pub mod acc_mod {
     /// The accumulator for a GSS node, containing all path-dependent information.
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Acc {
-        /// The set of valid LLM tokens for this path. `None` means unconstrained.
-        llm_token_info: LLMTokenInfo,
+        /// The set of disallowed LLM tokens for this path. `None` means unconstrained (none disallowed).
+        disallowed_llm_tokens: DisallowedLLMTokenInfo,
         /// A map from tokenizer state to terminals that are disallowed on this path.
         disallowed_terminals: TerminalInfo,
     }
 
     impl Acc {
-        pub fn new(llm_token_info: LLMTokenInfo, disallowed_terminals: TerminalInfo) -> Self {
-            Self { llm_token_info, disallowed_terminals }
+        pub fn new(disallowed_llm_tokens: DisallowedLLMTokenInfo, disallowed_terminals: TerminalInfo) -> Self {
+            Self { disallowed_llm_tokens, disallowed_terminals }
         }
 
         /// Creates a fresh, unconstrained accumulator.
         pub fn new_fresh() -> Self {
-            Self { llm_token_info: None, disallowed_terminals: BTreeMap::new() }
+            Self { disallowed_llm_tokens: None, disallowed_terminals: BTreeMap::new() }
         }
 
         /// Creates a fresh, unconstrained accumulator. Alias for `new_fresh`.
@@ -355,22 +376,25 @@ pub mod acc_mod {
             Self::new_fresh()
         }
 
-        pub fn llm_token_info(&self) -> &LLMTokenInfo { &self.llm_token_info }
-        pub fn llm_token_info_mut(&mut self) -> &mut LLMTokenInfo { &mut self.llm_token_info }
+        pub fn disallowed_llm_tokens(&self) -> &DisallowedLLMTokenInfo { &self.disallowed_llm_tokens }
+        pub fn disallowed_llm_tokens_mut(&mut self) -> &mut DisallowedLLMTokenInfo { &mut self.disallowed_llm_tokens }
         pub fn disallowed_terminals(&self) -> &TerminalInfo { &self.disallowed_terminals }
         pub fn disallowed_terminals_mut(&mut self) -> &mut TerminalInfo { &mut self.disallowed_terminals }
 
         /// Checks if the accumulator is in its default, unconstrained state.
         pub fn is_default(&self) -> bool {
-            self.llm_token_info.is_none() && self.disallowed_terminals.is_empty()
+            self.disallowed_llm_tokens.is_none() && self.disallowed_terminals.is_empty()
         }
 
         /// Checks if the path is dead (e.g., allows no LLM tokens).
         pub fn is_dead(&self) -> bool {
-            if let Some(acc) = &self.llm_token_info {
-                if acc.is_empty() {
-                    return true;
-                }
+            // TODO: This check is difficult without knowing the vocabulary size to determine if the
+            // disallowed set contains all possible tokens. For now, we assume paths are never
+            // considered dead solely based on the disallowed token set at this level.
+            // Pruning might still occur if a transformation function returns `None`.
+            if let Some(disallowed) = &self.disallowed_llm_tokens {
+                // A potential implementation would be `disallowed.is_universe()`, if such a
+                // method existed on LLMTokenBV.
             }
             false
         }
@@ -382,17 +406,17 @@ pub mod acc_mod {
 
     impl PathAccumulator for Acc {
         fn union_assign(&mut self, other: Self) {
-            self.llm_token_info.union_assign(other.llm_token_info);
+            self.disallowed_llm_tokens.union_assign(other.disallowed_llm_tokens);
             disallowed_terminals_union_assign(&mut self.disallowed_terminals, other.disallowed_terminals);
         }
 
         fn intersect_assign(&mut self, right: Self) {
-            self.llm_token_info.intersect_assign(right.llm_token_info);
+            self.disallowed_llm_tokens.intersect_assign(right.disallowed_llm_tokens);
             disallowed_terminals_intersect_assign(&mut self.disallowed_terminals, right.disallowed_terminals);
         }
 
         fn intersect_has_effect(&self, right: &Self) -> bool {
-            self.llm_token_info.intersect_has_effect(&right.llm_token_info) ||
+            self.disallowed_llm_tokens.intersect_has_effect(&right.disallowed_llm_tokens) ||
             self.clone().intersect(right.clone()).disallowed_terminals != self.disallowed_terminals
         }
     }
@@ -554,8 +578,8 @@ impl GSSNode {
     pub fn is_empty(&self) -> bool { self.predecessors.is_empty() }
     pub fn acc(&self) -> &Acc { &self.acc }
     pub fn acc_mut(&mut self) -> &mut Acc { &mut self.acc }
-    pub fn llm_token_info(&self) -> &LLMTokenInfo { self.acc.llm_token_info() }
-    pub fn llm_token_info_mut(&mut self) -> &mut LLMTokenInfo { self.acc.llm_token_info_mut() }
+    pub fn disallowed_llm_tokens(&self) -> &DisallowedLLMTokenInfo { self.acc.disallowed_llm_tokens() }
+    pub fn disallowed_llm_tokens_mut(&mut self) -> &mut DisallowedLLMTokenInfo { self.acc.disallowed_llm_tokens_mut() }
 
     /// Helper to clone the node and set a new accumulator.
     fn with_acc(mut self, acc: Acc) -> Self {
@@ -783,19 +807,22 @@ fn prune_and_transform_recursive(
     }
 }
 
-/// Intersects the `LLMTokenBV` of all nodes in the GSS with a given set of tokens and prunes dead paths.
+/// Constrains the GSS paths to a specific set of allowed LLM tokens and prunes dead paths.
+/// This is equivalent to adding all other tokens to the disallowed set for each node.
 pub fn intersect_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
-    tokens_to_intersect: &LLMTokenBV,
+    allowed_tokens: &LLMTokenBV,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
-        if let Some(bv) = new_acc.llm_token_info_mut() {
-            *bv &= tokens_to_intersect;
+        let newly_disallowed = LLMTokenBV::max_ones() - allowed_tokens;
+
+        if let Some(bv) = new_acc.disallowed_llm_tokens_mut() {
+            *bv |= &newly_disallowed;
         } else {
-            // If unconstrained, it becomes constrained to the intersection set.
-            *new_acc.llm_token_info_mut() = Some(tokens_to_intersect.clone());
+            // If unconstrained (none disallowed), it becomes constrained to the new disallowed set.
+            *new_acc.disallowed_llm_tokens_mut() = Some(newly_disallowed);
         }
 
         if new_acc.is_alive() {
@@ -815,19 +842,19 @@ pub fn intersect_llm_tokens_and_prune_arc(
     }
 }
 
-/// Subtracts a set of LLM tokens from all nodes in the GSS and prunes dead paths.
+/// Adds a set of LLM tokens to the disallowed set for all nodes in the GSS and prunes dead paths.
 pub fn subtract_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
-    llm_tokens: &LLMTokenBV,
+    tokens_to_disallow: &LLMTokenBV,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
-        if let Some(bv) = new_acc.llm_token_info_mut() {
-            *bv -= llm_tokens;
+        if let Some(bv) = new_acc.disallowed_llm_tokens_mut() {
+            *bv |= tokens_to_disallow;
         } else {
-            // If unconstrained (all tokens), it becomes all tokens minus the given set.
-            *new_acc.llm_token_info_mut() = Some(LLMTokenBV::max_ones() - llm_tokens.clone());
+            // If unconstrained (none disallowed), it becomes constrained to the given disallowed set.
+            *new_acc.disallowed_llm_tokens_mut() = Some(tokens_to_disallow.clone());
         }
         if new_acc.is_alive() {
             let continue_recursion = false;
@@ -843,7 +870,7 @@ pub fn subtract_llm_tokens_and_prune_arc(
     }
 }
 
-/// Resets the LLM token constraints on all nodes, making them unconstrained (`None`).
+/// Resets the LLM token constraints on all nodes, making them unconstrained (no tokens disallowed).
 pub fn reset_llm_tokens(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
@@ -936,7 +963,7 @@ pub fn map_allowed_terminals_tokenizer_states(
         }
         new_disallowed_terminals.retain(|_, bv| !bv.is_empty());
 
-        let new_acc = Acc::new(current_acc.llm_token_info().clone(), new_disallowed_terminals);
+        let new_acc = Acc::new(current_acc.disallowed_llm_tokens().clone(), new_disallowed_terminals);
         let continue_recursion = changed || !current_acc.disallowed_terminals().is_empty();
         Some((new_acc, continue_recursion))
     };
@@ -1284,9 +1311,9 @@ fn format_acc(
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
 ) -> String {
-    let llm_info = match acc.llm_token_info() {
-        None => "LLM(Any)".to_string(),
-        Some(bv) if bv.is_empty() => "LLM(None)".to_string(),
+    let llm_info = match acc.disallowed_llm_tokens() {
+        None => "Disallowed LLM(None)".to_string(),
+        Some(bv) if bv.is_empty() => "Disallowed LLM(None)".to_string(), // Should be normalized to None
         Some(bv) => {
             if let (Some(bimap), Some(token_map)) = (original_internal_bimap, llm_token_map) {
                 const MAX_SAMPLES: usize = 3;
@@ -1299,12 +1326,12 @@ fn format_acc(
                 let samples_str = token_samples.join(", ");
                 let total_tokens = bv.len();
                 if total_tokens > MAX_SAMPLES {
-                    format!("LLM({} tokens: [{}, ...])", total_tokens, samples_str)
+                    format!("Disallowed LLM({} tokens: [{}, ...])", total_tokens, samples_str)
                 } else {
-                    format!("LLM({} tokens: [{}])", total_tokens, samples_str)
+                    format!("Disallowed LLM({} tokens: [{}])", total_tokens, samples_str)
                 }
             } else {
-                format!("LLM({} tokens)", bv.len())
+                format!("Disallowed LLM({} tokens)", bv.len())
             }
         }
     };
@@ -1350,8 +1377,9 @@ mod tests {
 
     #[test]
     fn test_gss_simplification_basic() {
-        let acc_base = mock_acc(0);
-        let acc_other = mock_acc(1);
+        // With the new logic, mock_acc(0) creates an Acc that disallows token 0.
+        let acc_base = mock_acc(0); // Disallows {0}
+        let acc_other = mock_acc(1); // Disallows {1}
 
         // Node N4 (leaf)
         let n4_v1 = Arc::new(GSSNode::new(acc_base.clone()));
@@ -1374,7 +1402,11 @@ mod tests {
         a1_preds_set.insert((b1_orig.clone(), mock_edge(10)));
         a1_preds_set.insert((d2_orig.clone(), mock_edge(10)));
 
+        // The union of two paths results in the intersection of their disallowed sets.
+        // Disallowed({0}) & Disallowed({1}) = Disallowed({}), which is `None`.
         let acc_a1 = acc_base.clone().union(acc_other.clone());
+        assert!(acc_a1.disallowed_llm_tokens().is_none());
+
         let a1_preds_map = process_predecessors(&a1_preds_set);
         let mut a1_orig = Arc::new(GSSNode::new_with_map(acc_a1.clone(), a1_preds_map));
 
