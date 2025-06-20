@@ -436,6 +436,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(4, "Popped with {} results...", popped.num_predecessors());
         crate::debug!(6, "Reducing with parent node: {}", print_gss_forest(&[Arc::new(peek.parent_node.clone())], None, 30, &self.parser.terminal_map, None, None));
         crate::debug!(6, "...and predecessor node: {}", print_gss_forest(&[peek.predecessor_node.clone()], None, 30, &self.parser.terminal_map, None, None));
+        crate::debug!(6, "Popped peek node: {}", print_gss_forest(&[popped.clone()], None, 30, &self.parser.terminal_map, None, None));
         // let mut out = GSSNode::new(Acc::new_for_merging()); // Start with a default acc
         let mut out = Vec::new();
         for popped_peek in popped.peek_iter() { // Renamed predecessor to predecessor_arc
