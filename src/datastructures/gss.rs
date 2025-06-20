@@ -132,6 +132,7 @@ impl Acc {
 
     /// Accumulates constraints sequentially (e.g., adding a new constraint to a path).
     /// This is a union of constraints.
+    #[time_it]
     pub fn accumulate_seq(&self, other: &Self) -> Self {
         // LLM tokens: union of disallowed sets
         let mut new_llm_tokens = self.llm_token_info.disallowed();
@@ -155,6 +156,7 @@ impl Acc {
     }
 
     /// Merges constraints from parallel paths (union of paths).
+    #[time_it]
     pub fn merge_parallel<'a>(accs: impl IntoIterator<Item = &'a Acc>, llm_vocab: Option<Arc<LLMVocab>>) -> Self {
         let accs_vec: Vec<&'a Acc> = accs.into_iter().collect();
         if accs_vec.is_empty() {
@@ -189,6 +191,7 @@ impl Acc {
     }
 
     /// Intersects constraints from parallel paths.
+    #[time_it]
     pub fn intersect_parallel<'a>(accs: impl IntoIterator<Item = &'a Acc>, llm_vocab: Option<Arc<LLMVocab>>) -> Self {
         let accs_vec: Vec<&'a Acc> = accs.into_iter().collect();
         if accs_vec.is_empty() {
