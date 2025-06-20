@@ -193,10 +193,10 @@ def define_tokens() -> list[tuple[str, Any]]:
 #         eat("{{"),
 #     ]))
     tokens["FSTRING_START_SINGLE_SINGLE"] = seq([fstring_prefix, eat("'")])
-    tokens["FSTRING_MIDDLE_SINGLE_SINGLE"] = rep1(choice([Regex.eat_u8_set_negation([ord("{"), ord("'")]), eat_u8_seq(b'{{'), eat_u8_seq(b'\\\'')]))
+    tokens["FSTRING_MIDDLE_SINGLE_SINGLE"] = rep1(choice([Regex.eat_u8_set_negation([ord("{"), ord("'"), ord("\n")]), eat_u8_seq(b'{{'), eat_u8_seq(b'\\\'')]))
     tokens["FSTRING_END_SINGLE_SINGLE"] = eat("'")
     tokens["FSTRING_START_SINGLE_DOUBLE"] = seq([fstring_prefix, eat('"')])
-    tokens["FSTRING_MIDDLE_SINGLE_DOUBLE"] = rep1(choice([Regex.eat_u8_set_negation([ord("{"), ord('"')]), eat_u8_seq(b'{{'), eat_u8_seq(b'\\\"')]))
+    tokens["FSTRING_MIDDLE_SINGLE_DOUBLE"] = rep1(choice([Regex.eat_u8_set_negation([ord("{"), ord('"'), ord("\n")]), eat_u8_seq(b'{{'), eat_u8_seq(b'\\\"')]))
     tokens["FSTRING_END_SINGLE_DOUBLE"] = eat('"')
     tokens["FSTRING_START_TRIPLE_SINGLE"] = seq([fstring_prefix, eat("'''")])
     tokens["FSTRING_MIDDLE_TRIPLE_SINGLE"] = seq([

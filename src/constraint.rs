@@ -1095,7 +1095,12 @@ impl<'a> GrammarConstraintState<'a> {
                             let entry = counts_guard.entry(*gtid).or_default();
                             entry.total += 1;
 
-                            glr_s.step(*gtid);
+                            let terminal_name = self.parent.parser.terminal_map.get_by_right(gtid)
+                                .map(|s| s.0.as_str())
+                                .unwrap_or("UNKNOWN_TERMINAL");
+                            timeit!(format!("get_mask step for terminal '{}'", terminal_name), {
+                                glr_s.step(*gtid);
+                            });
 
                             if glr_s.is_ok() {
                                 entry.successful += 1;
