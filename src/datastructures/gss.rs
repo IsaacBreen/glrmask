@@ -444,50 +444,20 @@ pub struct GSSNode {
     max_depth: MaxDepth,
 }
 
+/// Represents the result of a `pop` operation on a `GSSNode` or another `GSSPop`.
+/// It contains a map of predecessor nodes, where each node's accumulator has been
+/// adjusted for the path it was reached through.
+#[derive(Debug, Clone)]
+pub struct GSSPop {
+    pub node_map: NodeMap,
+}
+
 /// A read-only view into a single path segment of the GSS, from a parent to a predecessor.
 #[derive(Clone, Copy)]
 pub struct GSSPeek<'a> {
     pub(crate) parent_node: &'a GSSNode,
     edge_value: &'a ParseStateEdgeContent,
     pub(crate) predecessor_node: &'a Arc<GSSNode>,
-}
-
-impl<'a> GSSPeek<'a> {
-    pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
-    pub fn predecessor(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
-
-    /// Returns a GSS node representing the stack for this specific peeked path.
-    /// This is equivalent to popping 0 elements.
-    pub fn to_node(&self) -> GSSNode {
-        GSSNode::new_with_single_predecessor(
-            self.predecessor_node.clone(),
-            self.edge_value.clone(),
-            self.parent_node.acc.clone(),
-        )
-    }
-
-    pub fn to_arc_node(&self) -> Arc<GSSNode> {
-        Arc::new(self.to_node())
-    }
-
-    /// Pops `n` elements from the stack represented by this peek.
-    /// The accumulator of the returned node is correctly adjusted for the path.
-    pub fn popn(&self, n: usize) -> Arc<GSSNode> {
-        if n == 0 {
-            return self.to_arc_node();
-        }
-
-        // For n >= 1, the result is based on the predecessor.
-        // First, calculate the accumulator for the path to the predecessor.
-        let path_acc = self.parent_node.acc.clone().intersect(self.predecessor_node.acc.clone());
-        let pred_with_path_acc = Arc::new(self.predecessor_node.as_ref().clone().with_acc(path_acc));
-
-        if n == 1 {
-            pred_with_path_acc
-        } else { // n > 1
-            Arc::new(pred_with_path_acc.popn(n - 1))
-        }
-    }
 }
 
 // Helper functions for GSSNode construction
@@ -547,6 +517,25 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
     result
 }
 
+/// Merges the `source` NodeMap into the `target` NodeMap.
+/// If nodes with the same depth and edge value exist, they are merged.
+fn merge_node_maps(target: &mut NodeMap, source: NodeMap) {
+    for (depth, source_preds_for_depth) in source {
+        let target_preds_for_depth = target.entry(depth).or_default();
+        for (edge_val, source_pred_arc) in source_preds_for_depth {
+            match target_preds_for_depth.entry(edge_val.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(source_pred_arc);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    // A merge point. Ensure the node is mutable and merge the other into it.
+                    Arc::make_mut(entry.get_mut()).merge(&source_pred_arc);
+                }
+            }
+        }
+    }
+}
+
 // Basic node creation and manipulation
 impl GSSNode {
     /// Creates a new GSS root node with no predecessors.
@@ -602,60 +591,48 @@ impl GSSNode {
         Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, acc_for_new_node)
     }
 
-    /// Pops the top state from the stack(s), returning a new node representing the merged predecessors.
-    /// The accumulator of the new node is the union of the accumulators of all valid predecessor paths.
-    pub fn pop(&self) -> Self {
-        let mut result_accs = Vec::new();
-        let mut result_predecessors = NodeMap::new();
+    /// Pops the top state from the stack(s), returning a `GSSPop` structure
+    /// containing all direct predecessors. The accumulator of each predecessor
+    /// is adjusted to reflect the path through this node.
+    pub fn pop(&self) -> GSSPop {
+        let mut new_node_map = NodeMap::new();
 
-        for pred_arc in self.predecessors.values().flat_map(|m| m.values()) {
-            // The acc of the path *through* self to pred_arc is self.acc intersected with pred_arc.acc
-            let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
-            if path_acc.is_dead() {
-                continue;
-            }
-            result_accs.push(path_acc.clone());
+        for (depth, preds_for_depth) in &self.predecessors {
+            let mut new_preds_for_depth = BTreeMap::new();
+            for (edge_val, pred_arc) in preds_for_depth {
+                // Create a new node with the accumulator updated for this specific path.
+                // The path accumulator is the intersection of the parent's (self) and the child's.
+                let path_acc = self.acc.clone().intersect(pred_arc.acc.clone());
 
-            // Merge predecessors of pred_arc into result_predecessors.
-            // Each merged predecessor needs its acc updated based on the path_acc.
-            for (inner_depth, inner_preds_for_depth) in &pred_arc.predecessors {
-                let result_preds_for_depth = result_predecessors.entry(*inner_depth).or_default();
-                for (inner_edge, inner_pred_arc) in inner_preds_for_depth {
-                    let mut new_inner_pred_node_data = (**inner_pred_arc).clone();
-                    new_inner_pred_node_data.acc = path_acc.clone().intersect(inner_pred_arc.acc.clone());
-                    if new_inner_pred_node_data.acc.is_dead() {
-                        continue;
-                    }
-
-                    match result_preds_for_depth.entry(inner_edge.clone()) {
-                        std::collections::btree_map::Entry::Vacant(entry) => {
-                            entry.insert(Arc::new(new_inner_pred_node_data));
-                        }
-                        std::collections::btree_map::Entry::Occupied(mut entry) => {
-                            // If an entry already exists, merge the new one into it.
-                            Arc::make_mut(entry.get_mut()).merge(&Arc::new(new_inner_pred_node_data));
-                        }
-                    }
+                if path_acc.is_dead() {
+                    continue;
                 }
+
+                let mut new_pred_node = (**pred_arc).clone();
+                new_pred_node.acc = path_acc;
+
+                let new_pred_arc = Arc::new(new_pred_node);
+                new_preds_for_depth.insert(edge_val.clone(), new_pred_arc);
+            }
+            if !new_preds_for_depth.is_empty() {
+                new_node_map.insert(*depth, new_preds_for_depth);
             }
         }
 
-        // The final accumulator is the union of all valid path accumulators.
-        let result_acc = result_accs.into_iter().reduce(|mut acc, next| {
-            acc.union_assign(next);
-            acc
-        }).unwrap_or_else(Acc::new_fresh);
-
-        Self::new_with_map(result_acc, result_predecessors)
+        GSSPop { node_map: new_node_map }
     }
 
-    /// Pops `n` elements from the stack.
+    /// Pops `n` levels from the GSS, returning a new node representing the merged
+    /// set of resulting predecessors.
     pub fn popn(&self, n: usize) -> Self {
         if n == 0 {
-            self.clone()
-        } else {
-            self.pop().popn(n - 1)
+            return self.clone();
         }
+        let mut pop_result = self.pop();
+        for _ in 1..n {
+            pop_result = pop_result.pop();
+        }
+        pop_result.to_node()
     }
 
     /// Merges another `GSSNode` into this one.
@@ -707,6 +684,85 @@ impl GSSNode {
                 predecessor_node: pred_arc,
             }
         })
+    }
+}
+
+impl GSSPop {
+    /// Pops from each node in the current set, returning a new `GSSPop`
+    /// representing the combined set of grand-predecessors.
+    pub fn pop(&self) -> GSSPop {
+        let mut combined_node_map = NodeMap::new();
+
+        for node_arc in self.node_map.values().flat_map(|m| m.values()) {
+            let popped = node_arc.pop(); // GSSNode::pop() -> GSSPop
+            merge_node_maps(&mut combined_node_map, popped.node_map);
+        }
+
+        GSSPop { node_map: combined_node_map }
+    }
+
+    /// Pops `n` times from the current set of nodes.
+    pub fn popn(&self, n: usize) -> GSSPop {
+        if n == 0 {
+            return self.clone();
+        }
+        let mut current = self.clone();
+        for _ in 0..n {
+            current = current.pop();
+        }
+        current
+    }
+
+    /// Converts the `GSSPop` into a single `GSSNode`.
+    /// The new node's predecessors are the nodes contained in this `GSSPop`.
+    /// The new node's accumulator is the union of the accumulators of all nodes in this `GSSPop`.
+    pub fn to_node(&self) -> GSSNode {
+        let result_acc = self.node_map.values().flat_map(|m| m.values())
+            .map(|node_arc| node_arc.acc().clone())
+            .reduce(|mut acc, next| {
+                acc.union_assign(next);
+                acc
+            }).unwrap_or_else(Acc::new_fresh);
+
+        GSSNode::new_with_map(result_acc, self.node_map.clone())
+    }
+}
+
+impl<'a> GSSPeek<'a> {
+    pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
+    pub fn predecessor(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
+
+    /// Returns a GSS node representing the stack for this specific peeked path.
+    /// This is equivalent to popping 0 elements.
+    pub fn to_node(&self) -> GSSNode {
+        GSSNode::new_with_single_predecessor(
+            self.predecessor_node.clone(),
+            self.edge_value.clone(),
+            self.parent_node.acc.clone(),
+        )
+    }
+
+    pub fn to_arc_node(&self) -> Arc<GSSNode> {
+        Arc::new(self.to_node())
+    }
+
+    /// Pops `n` elements from the stack represented by this peek.
+    /// The accumulator of the returned node is correctly adjusted for the path.
+    pub fn popn(&self, n: usize) -> Arc<GSSNode> {
+        if n == 0 {
+            return self.to_arc_node();
+        }
+
+        // For n >= 1, the result is based on the predecessor.
+        // First, calculate the accumulator for the path to the predecessor.
+        let path_acc = self.parent_node.acc.clone().intersect(self.predecessor_node.acc.clone());
+        let pred_with_path_acc = Arc::new(self.predecessor_node.as_ref().clone().with_acc(path_acc));
+
+        if n == 1 {
+            pred_with_path_acc
+        } else { // n > 1
+            Arc::new(pred_with_path_acc.popn(n - 1))
+        }
     }
 }
 
@@ -816,7 +872,7 @@ pub fn intersect_llm_tokens_and_prune_arc(
 ) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
-        let newly_disallowed = LLMTokenBV::max_ones() - allowed_tokens.clone();
+        let newly_disallowed = LLMTokenBV::max_ones() - allowed_tokens;
 
         if let Some(bv) = new_acc.disallowed_llm_tokens_mut() {
             *bv |= &newly_disallowed;
