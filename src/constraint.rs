@@ -1101,7 +1101,7 @@ impl<'a> GrammarConstraintState<'a> {
                         // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
 
                         if glr_s.is_ok() && child_node_trie_data.as_arc().lock().unwrap().value.end {
-                            let glr_active_tokens = glr_s.active_state.stack.llm_token_info().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                            let glr_active_tokens = glr_s.active_state.stack.acc().disallowed_llm_tokens().clone().unwrap_or_else(LLMTokenBV::max_ones);
                             *final_mask_internal.borrow_mut() |= glr_active_tokens;
                         }
 
@@ -1122,7 +1122,7 @@ impl<'a> GrammarConstraintState<'a> {
             |precomputed_node_data, glr_s| {
                 timeit!("get_mask process_fn", {
                     if precomputed_node_data.value.end {
-                        let glr_active_tokens = glr_s.active_state.stack.llm_token_info().clone().unwrap_or_else(LLMTokenBV::max_ones);
+                        let glr_active_tokens = glr_s.active_state.stack.acc().disallowed_llm_tokens().clone().unwrap_or_else(LLMTokenBV::max_ones);
                         *final_mask_internal.borrow_mut() |= glr_active_tokens;
                         false
                     } else {
