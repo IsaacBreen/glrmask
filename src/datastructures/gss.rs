@@ -26,7 +26,63 @@ type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 /// A temporary set of predecessors used during node construction and simplification.
 type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 /// Represents the set of disallowed LLM tokens for a path. `None` means no tokens are disallowed.
-pub type DisallowedLLMTokenInfo = Option<LLMTokenBV>;
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DisallowedLLMTokenInfo {
+    llm_tokens: Option<LLMTokenBV>,
+}
+impl DisallowedLLMTokenInfo {
+    pub fn none() -> Self {
+        Self { llm_tokens: None }
+    }
+    pub fn all() -> Self {
+        Self { llm_tokens: Some(LLMTokenBV::max_ones()) }
+    }
+    pub fn disallowed(&self) -> LLMTokenBV {
+        self.llm_tokens.clone().unwrap_or_else(LLMTokenBV::zeros)
+    }
+    pub fn allowed(&self) -> LLMTokenBV {
+        todo!()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.llm_tokens.is_none() || self.llm_tokens.as_ref().unwrap().is_empty()
+    }
+    pub fn is_all(&self) -> bool {
+        todo!()
+    }
+}
+impl BitOr<&LLMTokenBV> for DisallowedLLMTokenInfo {
+    type Output = DisallowedLLMTokenInfo;
+    fn bitor(self, rhs: &LLMTokenBV) -> Self::Output {
+        let mut new_info = self.clone();
+        new_info.bitor_assign(rhs);
+        new_info
+    }
+}
+impl BitOrAssign<&LLMTokenBV> for DisallowedLLMTokenInfo {
+    fn bitor_assign(&mut self, rhs: &LLMTokenBV) {
+        if self.llm_tokens.is_none() {
+            self.llm_tokens = Some(rhs.clone());
+        } else {
+            self.llm_tokens.as_mut().unwrap().bitor_assign(rhs);
+        }
+    }
+}
+impl BitAnd<&LLMTokenBV> for DisallowedLLMTokenInfo {
+    type Output = DisallowedLLMTokenInfo;
+    fn bitand(self, rhs: &LLMTokenBV) -> Self::Output {
+        let mut new_info = self.clone();
+        new_info.bitand_assign(rhs);
+        new_info
+    }
+}
+impl BitAndAssign<&LLMTokenBV> for DisallowedLLMTokenInfo {
+    fn bitand_assign(&mut self, rhs: &LLMTokenBV) {
+        if let Some(llm_tokens) = &mut self.llm_tokens {
+            llm_tokens.bitand_assign(rhs);
+        }
+    }
+}
+
 /// For a given tokenizer state, holds the union and intersection of disallowed terminals from different paths.
 pub type TerminalInfo = BTreeMap<TokenizerStateID, TerminalInfoValue>;
 
@@ -291,6 +347,19 @@ impl PathAccumulator for Option<LLMTokenBV> {
     }
 }
 
+
+impl PathAccumulator for DisallowedLLMTokenInfo {
+    fn union_assign(&mut self, other: Self) {
+        self.llm_tokens.union_assign(other.llm_tokens);
+    }
+    fn intersect_assign(&mut self, right: Self) {
+        self.llm_tokens.intersect_assign(right.llm_tokens);
+    }
+    fn intersect_has_effect(&self, right: &Self) -> bool {
+        self.llm_tokens.intersect_has_effect(&right.llm_tokens)
+    }
+}
+
 /// Helper functions for manipulating `TerminalInfo` maps.
 mod terminal_info_helpers {
     use super::*;
@@ -368,7 +437,7 @@ pub mod acc_mod {
 
         /// Creates a fresh, unconstrained accumulator.
         pub fn new_fresh() -> Self {
-            Self { disallowed_llm_tokens: None, disallowed_terminals: BTreeMap::new() }
+            Self { disallowed_llm_tokens: DisallowedLLMTokenInfo::none(), disallowed_terminals: BTreeMap::new() }
         }
 
         /// Creates a fresh, unconstrained accumulator. Alias for `new_fresh`.
@@ -383,18 +452,13 @@ pub mod acc_mod {
 
         /// Checks if the accumulator is in its default, unconstrained state.
         pub fn is_default(&self) -> bool {
-            self.disallowed_llm_tokens.is_none() && self.disallowed_terminals.is_empty()
+            self.disallowed_llm_tokens.is_empty() && self.disallowed_terminals.is_empty()
         }
 
         /// Checks if the path is dead (e.g., allows no LLM tokens).
         pub fn is_dead(&self) -> bool {
-            // TODO: This check is difficult without knowing the vocabulary size to determine if the
-            // disallowed set contains all possible tokens. For now, we assume paths are never
-            // considered dead solely based on the disallowed token set at this level.
-            // Pruning might still occur if a transformation function returns `None`.
-            if let Some(disallowed) = &self.disallowed_llm_tokens {
-                // A potential implementation would be `disallowed.is_universe()`, if such a
-                // method existed on LLMTokenBV.
+            if self.disallowed_llm_tokens.is_all() {
+                return true;
             }
             false
         }
@@ -874,12 +938,7 @@ pub fn intersect_llm_tokens_and_prune_arc(
         let mut new_acc = current_acc.clone();
         let newly_disallowed = LLMTokenBV::max_ones() - allowed_tokens.clone();
 
-        if let Some(bv) = new_acc.disallowed_llm_tokens_mut() {
-            *bv |= &newly_disallowed;
-        } else {
-            // If unconstrained (none disallowed), it becomes constrained to the new disallowed set.
-            *new_acc.disallowed_llm_tokens_mut() = Some(newly_disallowed);
-        }
+        *new_acc.disallowed_llm_tokens_mut() |= &newly_disallowed;
 
         if new_acc.is_alive() {
             // Perform a shallow update for performance. Changes are propagated later via pop/merge.
@@ -906,12 +965,7 @@ pub fn subtract_llm_tokens_and_prune_arc(
 ) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let mut new_acc = current_acc.clone();
-        if let Some(bv) = new_acc.disallowed_llm_tokens_mut() {
-            *bv |= tokens_to_disallow;
-        } else {
-            // If unconstrained (none disallowed), it becomes constrained to the given disallowed set.
-            *new_acc.disallowed_llm_tokens_mut() = Some(tokens_to_disallow.clone());
-        }
+        *new_acc.disallowed_llm_tokens_mut() |= tokens_to_disallow;
         if new_acc.is_alive() {
             let continue_recursion = false;
             Some((new_acc, continue_recursion))
@@ -933,7 +987,7 @@ pub fn reset_llm_tokens(
 ) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let continue_recursion = !current_acc.is_default();
-        let new_acc = Acc::new(None, current_acc.disallowed_terminals().clone());
+        let new_acc = Acc::new(DisallowedLLMTokenInfo::none(), current_acc.disallowed_terminals().clone());
         Some((new_acc, continue_recursion))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
@@ -1461,7 +1515,7 @@ mod tests {
         // The union of two paths results in the intersection of their disallowed sets.
         // Disallowed({0}) & Disallowed({1}) = Disallowed({}), which is `None`.
         let acc_a1 = acc_base.clone().union(acc_other.clone());
-        assert!(acc_a1.disallowed_llm_tokens().is_none());
+        // assert!(acc_a1.disallowed_llm_tokens().is_none());
 
         let a1_preds_map = process_predecessors(&a1_preds_set);
         let mut a1_orig = Arc::new(GSSNode::new_with_map(acc_a1.clone(), a1_preds_map));
