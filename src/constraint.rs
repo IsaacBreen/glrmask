@@ -1219,10 +1219,16 @@ impl<'a> GrammarConstraintState<'a> {
             terminals_map.insert(*tokenizer_state_id, terminals);
         }
 
+        crate::debug!(3, "GSS stats before pruning disallowed terminals: {:#?}", gather_gss_stats(
+            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        ));
         for state in self.state.values_mut() {
             prune_disallowed_terminals(&mut state.active_state.stack, &terminals_map, &mut gss_transformation_memo);
         }
         gss_transformation_memo.clear();
+        crate::debug!(3, "GSS stats after pruning disallowed terminals: {:#?}", gather_gss_stats(
+            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        ));
 
         for state in self.state.values_mut() {
             map_allowed_terminals_tokenizer_states(&mut state.active_state.stack, &state_map, &mut gss_transformation_memo);
