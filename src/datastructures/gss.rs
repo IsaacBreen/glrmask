@@ -26,7 +26,6 @@ type NodeCache = HashMap<NodeMap, Arc<GSSNode>>;
 /// A temporary set of predecessors used during node construction and simplification.
 type NodeSet = BTreeSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 /// Represents the set of disallowed LLM tokens for a path. `None` means no tokens are disallowed.
-// pub type DisallowedLLMTokenInfo = Option<LLMTokenBV>;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DisallowedLLMTokenInfo {
     llm_tokens: Option<LLMTokenBV>,
