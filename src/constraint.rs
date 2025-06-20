@@ -2,7 +2,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::datastructures::ordered_hash_map::Retain;
-use crate::datastructures::gss::{subtract_llm_tokens_and_prune_arc, LLMTokenInfo};
+use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, LLMTokenInfo};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use ordered_hash_map::OrderedHashMap;
 use ordered_hash_map::OrderedHashSet;
@@ -19,7 +19,7 @@ use bitvec::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-use crate::datastructures::gss::{print_gss_forest, GSSNode, intersect_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, TerminalInfo};
+use crate::datastructures::gss::{print_gss_forest, GSSNode, allow_only_llm_tokens_and_prune_arc, gather_gss_stats, reset_llm_tokens, disallow_terminals_and_prune_arc, TerminalInfo};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -1051,7 +1051,7 @@ impl<'a> GrammarConstraintState<'a> {
                 let mut glr_state = glr_state.clone();
                 if forbidden_llm_tokens != (LLMTokenBV::max_ones() - LLMTokenBV::ones(self.parent.llm_vocab.internal_max_llm_token + 1)) {
                     // glr_state.log_gss(format!("Subtracting forbidden LLM tokens: {:?}", forbidden_llm_tokens).as_str(), TerminalID(0));
-                    subtract_llm_tokens_and_prune_arc(&mut glr_state.active_state.stack, &forbidden_llm_tokens, &mut HashMap::new());
+                    disallow_llm_tokens_and_prune_arc(&mut glr_state.active_state.stack, &forbidden_llm_tokens, &mut HashMap::new());
                     // glr_state.log_gss("Done subtracting forbidden LLM tokens.", TerminalID(0));
                 }
                 initial_values_for_map.push((precomputed_trie_root_arc.clone(), glr_state));
@@ -1082,12 +1082,12 @@ impl<'a> GrammarConstraintState<'a> {
                     let mut results = Vec::new();
                     let mut glr_s = glr_s.clone();
                     // glr_s.log_gss("After stepping", grammar_token_opt.unwrap_or(TerminalID(0)));
-                    subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                    disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
 
                     crate::debug!(4, "After stepping with grammar_token_opt: {:?}", glr_s.is_ok());
                     for (child_node_trie_data, edge_llm_tokens_bv) in dest_map.iter() {
                         let mut glr_s = glr_s.clone();
-                        intersect_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
+                        allow_only_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
                         crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
                         glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)));
                         if let Some(gtid) = grammar_token_opt {
@@ -1131,7 +1131,7 @@ impl<'a> GrammarConstraintState<'a> {
                         *final_mask_internal.borrow_mut() |= glr_active_tokens;
                         false
                     } else {
-                        subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                        disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
                         !glr_s.active_state.stack.is_empty()
                     }
                 })

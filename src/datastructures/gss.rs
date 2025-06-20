@@ -51,7 +51,7 @@ impl LLMTokenInfo {
         self.llm_tokens.is_none() || self.llm_tokens.as_ref().unwrap().is_empty()
     }
     pub fn is_all(&self) -> bool {
-        self.disallowed() == LLMTokenBV::ones(self.max_num_llm_tokens() + 1)
+        self.disallowed() == LLMTokenBV::ones(self.max_num_llm_tokens())
     }
     pub fn llm_vocab(&self) -> Option<Arc<LLMVocab>> {
         self.llm_vocab.clone()
@@ -638,32 +638,20 @@ fn prune_and_transform_recursive(
     }
 }
 
-pub fn intersect_llm_tokens_and_prune_arc(
+pub fn allow_only_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     allowed_tokens: &LLMTokenBV,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
 ) {
-    let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
-        let mut new_local_acc = (*node.acc_manager.local).clone();
-        let newly_disallowed = LLMTokenBV::max_ones() - allowed_tokens.clone();
-        new_local_acc.llm_tokens_mut().bitor_assign(&newly_disallowed);
-
-        let temp_full_acc = node.full_union_acc().accumulate_seq(&new_local_acc);
-        if temp_full_acc.is_alive() {
-            Some((new_local_acc, false))
-        } else {
-            None
-        }
-    };
-
-    if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
-        *root_arc = new_root;
-    } else {
-        *root_arc = Arc::new(GSSNode::new(Acc::new_fresh(root_arc.llm_tokens().llm_vocab())));
-    }
+    let newly_disallowed = LLMTokenBV::ones(root_arc.llm_tokens().max_num_llm_tokens()) - allowed_tokens.clone();
+    disallow_llm_tokens_and_prune_arc(
+        root_arc,
+        &newly_disallowed,
+        memo,
+    );
 }
 
-pub fn subtract_llm_tokens_and_prune_arc(
+pub fn disallow_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     tokens_to_disallow: &LLMTokenBV,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
@@ -671,10 +659,10 @@ pub fn subtract_llm_tokens_and_prune_arc(
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_local_acc = (*node.acc_manager.local).clone();
         new_local_acc.llm_tokens_mut().bitor_assign(tokens_to_disallow);
-        
+
         let temp_full_acc = node.full_union_acc().accumulate_seq(&new_local_acc);
         if temp_full_acc.is_alive() {
-            Some((new_local_acc, false))
+            Some((new_local_acc, true))
         } else {
             None
         }
@@ -782,7 +770,7 @@ pub fn map_allowed_terminals_tokenizer_states(
         }
 
         new_local_acc.disallowed_terminals = new_disallowed;
-        Some((new_local_acc, changed))
+        Some((new_local_acc, true))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
