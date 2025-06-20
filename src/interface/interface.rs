@@ -809,7 +809,7 @@ pub struct IncrementalParser<'a> {
 
 impl<'a> IncrementalParser<'a> {
     pub fn new(grammar: &'a CompiledGrammar) -> Self {
-        let initial_glr_state = grammar.glr_parser().init_glr_parser();
+        let initial_glr_state = grammar.glr_parser().init_glr_parser(None);
         let initial_tokenizer_state = grammar.tokenizer().initial_state_id();
         let state = BTreeMap::from([(initial_tokenizer_state, initial_glr_state)]);
         Self { grammar, state }

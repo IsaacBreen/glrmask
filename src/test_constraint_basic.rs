@@ -117,9 +117,9 @@ fn test_constraint_simple() {
     let _mask_before = constraint_state_for_comp.get_mask();
     constraint_state_for_comp.commit(*llm_token_id_for_comp);
 
-    let mut parser_state_for_comp = parser.init_glr_parser_null();
+    let mut parser_state_for_comp = parser.init_glr_parser_null(Some(constraint.llm_vocab.clone()));
     for grammar_tokens in grammar_tokenss {
-        let mut parser_state = parser.init_glr_parser();
+        let mut parser_state = parser.init_glr_parser(Some(constraint.llm_vocab.clone()));
         for grammar_token in grammar_tokens {
             let grammar_token_id = grammar_token_map.get_by_left(&Terminal(grammar_token.to_string())).unwrap();
             parser_state.step(*grammar_token_id);
@@ -229,7 +229,7 @@ fn test_constraint_expression() {
     let _mask_before = constraint_state_for_comp.get_mask(); // Optional, for debugging
     constraint_state_for_comp.commit(*llm_token_id_for_comp);
 
-    let mut parser_state_for_comp = parser.init_glr_parser();
+    let mut parser_state_for_comp = parser.init_glr_parser(Some(constraint.llm_vocab.clone()));
     for grammar_token_id in grammar_token_ids {
         parser_state_for_comp.step(*grammar_token_id);
     }

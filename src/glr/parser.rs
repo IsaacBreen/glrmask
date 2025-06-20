@@ -4,7 +4,7 @@ use crate::datastructures::gss::{print_gss_forest};
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, PathAccumulator, GSSNode, GSSStats, GSSPeek};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7Table, StateID, TerminalID};
-use crate::constraint::{LLMTokenBV}; // Import LLMTokenInfo
+use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};
@@ -99,8 +99,11 @@ pub struct ParseState { // No longer generic
 }
 
 impl ParseState {
-    pub fn new() -> Self {
-        ParseState { stack: Arc::new(GSSNode::new(Acc::new_for_merging())) }
+    pub fn new(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
+        ParseState { stack: Arc::new(GSSNode::new(Acc::new_for_merging(llm_vocab))) }
+    }
+    pub fn from_existing(existing: Self) -> Self {
+        ParseState::new(existing.stack.acc().disallowed_llm_tokens().llm_vocab().clone())
     }
 }
 
@@ -237,16 +240,16 @@ impl GLRParser {
         }
     }
 
-    pub fn init_glr_parser(&self) -> GLRParserState { // No longer generic
-        self.init_glr_parser_with_acc(Acc::new_fresh())
+    pub fn init_glr_parser(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
+        self.init_glr_parser_with_acc(Acc::new_fresh(llm_vocab))
     }
 
-    pub fn init_glr_parser_null(&self) -> GLRParserState { // No longer generic
+    pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
         GLRParserState {
             parser: self,
-            active_state: ParseState::new(),
-            action_not_found_states: ParseState::new(),
-            cycled_states: ParseState::new(),
+            active_state: ParseState::new(llm_vocab.clone()),
+            action_not_found_states: ParseState::new(None),
+            cycled_states: ParseState::new(None),
         }
     }
 
@@ -255,21 +258,21 @@ impl GLRParser {
         GLRParserState {
             parser: self,
             active_state: initial_parse_state,
-            action_not_found_states: ParseState::new(),
-            cycled_states: ParseState::new(),
+            action_not_found_states: ParseState::new(None),
+            cycled_states: ParseState::new(None),
         }
     }
     pub fn init_glr_parser_from_parse_state(&self, parse_state: ParseState) -> GLRParserState { // No longer generic
         GLRParserState {
             parser: self,
             active_state: parse_state,
-            action_not_found_states: ParseState::new(),
-            cycled_states: ParseState::new(),
+            action_not_found_states: ParseState::new(None),
+            cycled_states: ParseState::new(None),
         }
     }
 
-    pub fn init_parse_state(&self) -> ParseState { // No longer generic
-        self.init_parse_state_with_acc(Acc::new_fresh())
+    pub fn init_parse_state(&self, llm_vocab: Option<Arc<LLMVocab>>) -> ParseState { // No longer generic
+        self.init_parse_state_with_acc(Acc::new_fresh(llm_vocab))
     }
 
     pub fn init_parse_state_with_acc(&self, initial_acc: Acc) -> ParseState { // No longer generic
@@ -283,8 +286,8 @@ impl GLRParser {
         ParseState { stack }
     }
 
-    pub fn parse(&self, input: &[TerminalID]) -> GLRParserState { // No longer generic
-        let mut state = self.init_glr_parser();
+    pub fn parse(&self, input: &[TerminalID], llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
+        let mut state = self.init_glr_parser(llm_vocab);
         state.parse(input);
         state
     }
@@ -453,7 +456,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
         }
         if out.is_empty() {
-            Arc::new(GSSNode::new(Acc::new_for_merging()))
+            let llm_vocab = self.active_state.stack.acc().disallowed_llm_tokens().llm_vocab();
+            Arc::new(GSSNode::new(Acc::new_for_merging(llm_vocab)))
         } else if out.len() == 1 {
             Arc::new(out.into_iter().next().unwrap())
         } else {
@@ -471,13 +475,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // timeit!(format!("GLRParserState::step({} ({:?})", token_id.0, self.parser.terminal_map.get_by_right(&token_id)), {
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
         self.log_gss("Step-start", token_id);
-        self.cycled_states = ParseState::new();
+        self.cycled_states = ParseState::from_existing(self.active_state.clone());
 
         let mut todo: Vec<ParseState> = Vec::new();
         todo.push(ParseState { stack: self.active_state.stack.clone() });
 
-        let mut next = ParseState::new();
-        // let mut not_found = ParseState::new();
+        let mut next = ParseState::from_existing(self.active_state.clone());
+        // let mut not_found = ParseState::new(llm_vocab.clone());
 
         while let Some(state) = todo.pop() {
             crate::debug!(6, "Processing state: {}", print_gss_forest(&[state.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
@@ -549,7 +553,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         if !self.active_state.stack.is_empty() {
             self.log_gss("Step-end", token_id);
         }
-        // self.action_not_found_states = ParseState::new(); // Reset if not needed beyond the step
+        // self.action_not_found_states = ParseState::new(llm_vocab.clone()); // Reset if not needed beyond the step
 
         crate::debug!(4, "----------------------------------------------------------------");
         // })

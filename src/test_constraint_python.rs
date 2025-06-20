@@ -33,6 +33,7 @@ use rand::seq::SliceRandom;
 use crate::glr::analyze::{filter_productions_by_reachability, remove_productions_with_undefined_nonterminals};
 use std::panic::{self, AssertUnwindSafe}; // Added for panic catching
 use std::collections::HashMap;
+use serde::__private::ser::constrain;
 use crate::datastructures::gss::{gather_gss_stats, reset_llm_tokens};
 use crate::datastructures::gss::acc_mod::Acc;
 // For the symbol removal helper
@@ -464,7 +465,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         // Initialize GLRParserState with a dummy accumulator.
         // For this test, we are focused on the GLR parser's grammar rule processing,
         // not LLM token constraints, so the accumulator's content is not critical.
-        let mut glr_state = compiled_grammar.glr_parser.init_glr_parser();
+        let mut glr_state = compiled_grammar.glr_parser.init_glr_parser(None);
 
         let seq_names_display = seq_terminal_names.join(" → ");
         print!(
@@ -522,7 +523,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             if i % 100 == 0 { // Log progress
                 println!("  Fuzz test iteration {}/{}", i, num_fuzz_iterations);
             }
-            let mut glr_state = compiled_grammar.glr_parser.init_glr_parser();
+            let mut glr_state = compiled_grammar.glr_parser.init_glr_parser(None);
 
             let num_tokens_this_attempt = rng.gen_range(0..=max_tokens_per_fuzz_attempt);
             let mut current_fuzz_sequence_names: Vec<String> = Vec::new();
@@ -973,9 +974,9 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         let grammar_tokenss_for_comp = vec![vec!["\"from\"", "NAME[0]"]];
         let llm_token_ids_for_comp = llm_tokens_for_comp.iter().map(|llm_token| llm_token_map.get_by_left(*llm_token).expect(format!("LLM token '{}' not found in llm_token_map", String::from_utf8_lossy(*llm_token)).as_str())).collect::<Vec<_>>();
 
-        let mut parser_state_for_comp = grammar_constraint.parser.init_glr_parser();
+        let mut parser_state_for_comp = grammar_constraint.parser.init_glr_parser(Some(constraint_state.parent.llm_vocab.clone()));
         for grammar_tokens in grammar_tokenss_for_comp {
-            let mut this_parser_state = grammar_constraint.parser.init_glr_parser();
+            let mut this_parser_state = grammar_constraint.parser.init_glr_parser(Some(constraint_state.parent.llm_vocab.clone()));
             for grammar_token in &grammar_tokens {
                 let grammar_token_id = grammar_constraint.parser.terminal_map.get_by_left(&Terminal(grammar_token.to_string())).unwrap();
                 this_parser_state.step(*grammar_token_id);
@@ -1435,7 +1436,7 @@ fn causes_specific_panic(
             BTreeMap::new(), // No actions
         );
 
-        let mut glr_state = parser.init_glr_parser();
+        let mut glr_state = parser.init_glr_parser(None);
 
         for &terminal_id in &sequence_terminal_ids {
             glr_state.step(terminal_id);
@@ -1817,7 +1818,7 @@ fn test_minimized_grammar_causes_panic() -> Result<(), Box<dyn std::error::Error
     println!("Parser: {}", parser);
 
     // Initialize GLRParserState (accumulator type `()` is fine for this test)
-    let mut glr_state = parser.init_glr_parser();
+    let mut glr_state = parser.init_glr_parser(None);
 
     // Step through the input sequence
     for (idx, &terminal_id) in input_sequence_ids.iter().enumerate() {

@@ -32,11 +32,11 @@ pub struct DisallowedLLMTokenInfo {
     llm_vocab: Option<Arc<LLMVocab>>,
 }
 impl DisallowedLLMTokenInfo {
-    pub fn none() -> Self {
-        Self { llm_tokens: None }
+    pub fn none(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
+        Self { llm_tokens: None, llm_vocab }
     }
-    pub fn all() -> Self {
-        Self { llm_tokens: Some(LLMTokenBV::max_ones()) }
+    pub fn all(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
+        todo!()
     }
     pub fn disallowed(&self) -> LLMTokenBV {
         self.llm_tokens.clone().unwrap_or_else(LLMTokenBV::zeros)
@@ -49,6 +49,14 @@ impl DisallowedLLMTokenInfo {
     }
     pub fn is_all(&self) -> bool {
         todo!()
+    }
+    pub fn llm_vocab(&self) -> Option<Arc<LLMVocab>> {
+        self.llm_vocab.clone()
+    }
+}
+impl Acc {
+    pub fn llm_vocab(&self) -> Option<Arc<LLMVocab>> {
+        self.disallowed_llm_tokens().llm_vocab.clone()
     }
 }
 impl BitOr<&LLMTokenBV> for DisallowedLLMTokenInfo {
@@ -437,13 +445,13 @@ pub mod acc_mod {
         }
 
         /// Creates a fresh, unconstrained accumulator.
-        pub fn new_fresh() -> Self {
-            Self { disallowed_llm_tokens: DisallowedLLMTokenInfo::none(), disallowed_terminals: BTreeMap::new() }
+        pub fn new_fresh(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
+            Self { disallowed_llm_tokens: DisallowedLLMTokenInfo::none(llm_vocab), disallowed_terminals: BTreeMap::new() }
         }
 
         /// Creates a fresh, unconstrained accumulator. Alias for `new_fresh`.
-        pub fn new_for_merging() -> Self {
-            Self::new_fresh()
+        pub fn new_for_merging(llm_vocab: Option<Arc<LLMVocab>>) -> Self {
+            Self::new_fresh(llm_vocab)
         }
 
         pub fn disallowed_llm_tokens(&self) -> &DisallowedLLMTokenInfo { &self.disallowed_llm_tokens }
@@ -787,7 +795,7 @@ impl GSSPop {
             .reduce(|mut acc, next| {
                 acc.union_assign(next);
                 acc
-            }).unwrap_or_else(Acc::new_fresh);
+            }).unwrap_or(Acc::new_fresh(None));
 
         GSSNode::new_with_map(result_acc, self.node_map.clone())
     }
@@ -988,7 +996,7 @@ pub fn reset_llm_tokens(
 ) {
     let closure = |current_acc: &Acc| -> Option<(Acc, bool)> {
         let continue_recursion = !current_acc.is_default();
-        let new_acc = Acc::new(DisallowedLLMTokenInfo::none(), current_acc.disallowed_terminals().clone());
+        let new_acc = Acc::new(DisallowedLLMTokenInfo::none(current_acc.llm_vocab()), current_acc.disallowed_terminals().clone());
         Some((new_acc, continue_recursion))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
@@ -1122,7 +1130,7 @@ fn simplify_node_recursive(
                 .reduce(|mut acc, next| {
                     acc.union_assign(next);
                     acc
-                }).unwrap_or_else(Acc::new_fresh);
+                }).unwrap_or_else(|| Acc::new_fresh(node_arc.acc.llm_vocab()));
 
             Arc::new(GSSNode::new_with_map(unioned_acc, simplified_predecessors_map))
         });
@@ -1479,7 +1487,7 @@ mod tests {
     fn mock_acc(val: usize) -> Acc {
         let mut bv = LLMTokenBV::zeros();
         bv.insert(val);
-        let disallowed_info = DisallowedLLMTokenInfo { llm_tokens: Some(bv) };
+        let disallowed_info = DisallowedLLMTokenInfo { llm_tokens: Some(bv), llm_vocab: None };
         Acc::new(disallowed_info, Default::default())
     }
 

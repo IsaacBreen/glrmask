@@ -352,7 +352,7 @@ impl GrammarConstraint {
         let mut state = BTreeMap::new();
         state.insert(
             self.tokenizer.initial_state_id(),
-            self.parser.init_glr_parser(),
+            self.parser.init_glr_parser(Some(self.llm_vocab.clone())),
         );
 
         GrammarConstraintState { parent: self, state }
