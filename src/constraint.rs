@@ -97,7 +97,7 @@ pub struct GrammarConstraint {
     pub(crate) tokenizer:        Regex,
     pub(crate) parser:           GLRParser,
     pub(crate) precomputed:      Precomputed,
-    pub(crate) llm_vocab:        LLMVocab,
+    pub(crate) llm_vocab:        Arc<LLMVocab>,
     pub(crate) token_name_map:   BiBTreeMap<String, usize>,
     pub(crate) possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
 }
@@ -163,7 +163,7 @@ impl JSONConvertible for GrammarConstraint {
                     tokenizer,
                     parser,
                     precomputed,
-                    llm_vocab: LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_id_bimap, internal_max_llm_token },
+                    llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_id_bimap, internal_max_llm_token }),
                     token_name_map,
                     possible_matches,
                 })
@@ -312,12 +312,12 @@ impl GrammarConstraint {
             tokenizer, // This is the tokenizer parameter being moved into the struct
             parser,
             precomputed,
-            llm_vocab: LLMVocab {
+            llm_vocab: Arc::new(LLMVocab {
                 llm_token_map,
                 max_original_llm_token_id,
                 original_to_internal_id_bimap,
                 internal_max_llm_token,
-            },
+            }),
             token_name_map,
             possible_matches: computed_possible_matches, // Add this line
         }
