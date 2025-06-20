@@ -866,7 +866,7 @@ impl GSSNode {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct GSSStats {
     pub num_roots: usize,
     pub unique_nodes: usize,
