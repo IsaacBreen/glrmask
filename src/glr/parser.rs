@@ -103,7 +103,7 @@ impl ParseState {
         ParseState { stack: Arc::new(GSSNode::new(Acc::new_for_merging(llm_vocab))) }
     }
     pub fn from_existing(existing: Self) -> Self {
-        ParseState::new(existing.stack.acc().disallowed_llm_tokens().llm_vocab().clone())
+        ParseState::new(existing.stack.acc().llm_tokens().llm_vocab().clone())
     }
 }
 
@@ -456,7 +456,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
         }
         if out.is_empty() {
-            let llm_vocab = self.active_state.stack.acc().disallowed_llm_tokens().llm_vocab();
+            let llm_vocab = self.active_state.stack.acc().llm_tokens().llm_vocab();
             Arc::new(GSSNode::new(Acc::new_for_merging(llm_vocab)))
         } else if out.len() == 1 {
             Arc::new(out.into_iter().next().unwrap())

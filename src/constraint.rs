@@ -2,7 +2,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::datastructures::ordered_hash_map::Retain;
-use crate::datastructures::gss::{subtract_llm_tokens_and_prune_arc, DisallowedLLMTokenInfo, TerminalInfoValue};
+use crate::datastructures::gss::{subtract_llm_tokens_and_prune_arc, LLMTokenInfo, TerminalInfoValue};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use ordered_hash_map::OrderedHashMap;
 use ordered_hash_map::OrderedHashSet;
@@ -1105,7 +1105,7 @@ impl<'a> GrammarConstraintState<'a> {
                         // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
 
                         if glr_s.is_ok() && child_node_trie_data.as_arc().lock().unwrap().value.end {
-                            let glr_active_tokens = glr_s.active_state.stack.acc().disallowed_llm_tokens().allowed();
+                            let glr_active_tokens = glr_s.active_state.stack.acc().llm_tokens().allowed();
                             *final_mask_internal.borrow_mut() |= glr_active_tokens;
                         }
 
@@ -1126,7 +1126,7 @@ impl<'a> GrammarConstraintState<'a> {
             |precomputed_node_data, glr_s| {
                 timeit!("get_mask process_fn", {
                     if precomputed_node_data.value.end {
-                        let glr_active_tokens = glr_s.active_state.stack.acc().disallowed_llm_tokens().allowed();
+                        let glr_active_tokens = glr_s.active_state.stack.acc().llm_tokens().allowed();
                         *final_mask_internal.borrow_mut() |= glr_active_tokens;
                         false
                     } else {
