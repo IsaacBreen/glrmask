@@ -238,9 +238,9 @@ dotted_name[expr_ty]:
 # ---------------
 
 block[asdl_stmt_seq*] (memo):
-    | NEWLINE INDENT a=statements DEDENT { a }
     | simple_stmts
     | invalid_block
+    |
 
 decorators[asdl_expr_seq*]: a[asdl_expr_seq*]=('@' f=named_expression NEWLINE { f })+ { a }
 
