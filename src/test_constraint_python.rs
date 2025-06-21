@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::finite_automata::{eat_u8, Match};
 use crate::{choice, choice_fast, groups, seq, seq_fast};
 use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
+use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, StateID};
 use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
 use std::hash::{Hash, Hasher};
 use crate::interface::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast, eat_any_fast, eat_string_fast, choice_fast, eat_bytestring_fast, repeat1_fast, CompiledGrammar, GrammarDefinition, display_productions, opt_fast}; // Added eat_any_fast, CompiledGrammar, repeat01_fast
@@ -34,7 +34,7 @@ use crate::glr::analyze::{filter_productions_by_reachability, remove_productions
 use std::panic::{self, AssertUnwindSafe}; // Added for panic catching
 use std::collections::HashMap;
 use serde::__private::ser::constrain;
-use crate::datastructures::gss::{gather_gss_stats, reset_llm_tokens};
+use crate::datastructures::gss::{gather_gss_stats, GSSNode, reset_llm_tokens, sample_path};
 // For the symbol removal helper
 
 
@@ -924,7 +924,37 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             );
             println!("  Constraint state is active after commit.");
 
-            todo!("Sample 10 parse stacks and 'explain' them");
+            println!("    Sampling and explaining up to 10 parse stacks:");
+            let gss_roots: Vec<&GSSNode> = constraint_state.state.values()
+                .map(|glr_state| glr_state.active_state.stack.as_ref())
+                .collect();
+
+            if gss_roots.is_empty() {
+                println!("      No active GSS roots to sample from.");
+            } else {
+                for sample_idx in 0..10 {
+                    // Create a unique seed for each sample
+                    let seed = (i as u64).wrapping_mul(100) + (sample_idx as u64);
+                    if let Some(sampled_path_edges) = sample_path(&gss_roots, seed) {
+                        let mut sampled_stack: Vec<StateID> = sampled_path_edges.iter()
+                            .map(|edge| edge.state_id)
+                            .collect();
+                        // The path is from leaf to root, so we reverse to get stack order (bottom to top)
+                        sampled_stack.reverse();
+
+                        println!("    --- Sample {} (seed {}) ---", sample_idx + 1, seed);
+                        let explanation = grammar_constraint.parser.explain_stack(&sampled_stack);
+                        // Indent the explanation for readability
+                        for line in explanation.lines() {
+                            println!("      {}", line);
+                        }
+                    } else {
+                        println!("    Sample {}: No path found (GSS might be empty or just a root).", sample_idx + 1);
+                        // If one sample fails, others might too. Break to avoid redundant messages.
+                        break;
+                    }
+                }
+            }
 
             // Update current_text_byte_offset for the next iteration
             current_text_byte_offset = token_end_byte_in_full_text;
