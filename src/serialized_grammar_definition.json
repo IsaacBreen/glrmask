@@ -24,10 +24,6 @@
                 {
                     "value": "statements",
                     "variant": "NonTerminal"
-                },
-                {
-                    "value": "ENDMARKER",
-                    "variant": "NonTerminal"
                 }
             ]
         },
