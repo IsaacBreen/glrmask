@@ -295,6 +295,7 @@ local_system:
 
       /// Processes a set of incoming predecessors, grouping them by depth and edge,
       /// and merging nodes that share the same edge to create a canonical `NodeMap`.
+      #[time_it]
       fn process_predecessors(incoming: &NodeSet) -> NodeMap {
           let mut grouped_by_depth: BTreeMap<MaxDepth, BTreeMap<ParseStateEdgeContent, Vec<Arc<GSSNode>>>> = BTreeMap::new();
 
@@ -334,6 +335,7 @@ local_system:
       }
 
       /// Merges the `source` NodeMap into the `target` NodeMap.
+      #[time_it]
       fn merge_node_maps(target: &mut NodeMap, source: NodeMap) {
           for (depth, source_preds_for_depth) in source {
               let target_preds_for_depth = target.entry(depth).or_default();
@@ -863,8 +865,85 @@ local_system:
                   **node_arc_ref_mut = simplified_arc;
               }
           }
+
+          /// Fuses predecessor nodes that share the same edge value, even if they are at different depths.
+          /// This can simplify the GSS by reducing path diversity. The fusion process is applied
+          /// recursively for `levels` number of levels down from this node.
+          ///
+          /// For example, if a node has predecessors `(A, edgeX)` at depth 5 and `(B, edgeX)` at depth 3,
+          /// they will be merged into a single predecessor `(merged(A,B), edgeX)`. This process
+          /// continues recursively down the graph structure.
+          ///
+          /// The process is post-order: children are fused before their parents. This means that
+          /// deeper parts of the graph are simplified first.
+          #[time_it]
+          pub fn fuse_predecessors(&mut self, levels: usize) {
+              if levels == 0 {
+                  return;
+              }
+              let temp_arc = Arc::new(self.clone());
+              let mut memo = HashMap::new();
+              let fused_arc = fuse_predecessors_recursive(&temp_arc, levels, &mut memo);
+              *self = Arc::try_unwrap(fused_arc).unwrap_or_else(|arc| (*arc).clone());
+          }
       }
 
+      pub fn fuse_predecessors_recursive(
+          node_arc: &Arc<GSSNode>,
+          levels: usize,
+          memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
+      ) -> Arc<GSSNode> {
+          if levels == 0 {
+              return node_arc.clone();
+          }
+          let node_ptr = Arc::as_ptr(node_arc);
+          if let Some(fused_arc) = memo.get(&node_ptr) {
+              return fused_arc.clone();
+          }
+
+          // 1. Recursively fuse the predecessors first (post-order traversal).
+          let mut recursively_fused_predecessors = Vec::new();
+          for (_, preds_for_depth) in &node_arc.predecessors {
+              for (edge_val, pred_arc) in preds_for_depth {
+                  let fused_pred_arc = fuse_predecessors_recursive(pred_arc, levels - 1, memo);
+                  recursively_fused_predecessors.push((edge_val.clone(), fused_pred_arc));
+              }
+          }
+
+          // 2. Group the now-fused predecessors by their edge value.
+          let mut grouped_by_edge = BTreeMap::<ParseStateEdgeContent, Vec<Arc<GSSNode>>>::new();
+          for (edge_val, pred_arc) in recursively_fused_predecessors {
+              grouped_by_edge.entry(edge_val).or_default().push(pred_arc);
+          }
+
+          // 3. For each edge value, merge all predecessors associated with it into a single node.
+          let mut new_predecessors_set = NodeSet::new();
+          for (edge_val, pred_arcs_to_merge) in grouped_by_edge {
+              if pred_arcs_to_merge.is_empty() { continue; }
+
+              let mut iter = pred_arcs_to_merge.into_iter();
+              let first = iter.next().unwrap();
+
+              let final_pred_arc = if iter.len() == 0 {
+                  first
+              } else {
+                  let mut merged_node = (*first).clone();
+                  for other_arc in iter {
+                      merged_node.merge(&other_arc);
+                  }
+                  Arc::new(merged_node)
+              };
+              new_predecessors_set.insert((final_pred_arc, edge_val));
+          }
+
+          // 4. Rebuild the current node with the new, fused set of predecessors.
+          let new_predecessors_map = process_predecessors(&new_predecessors_set);
+          let fused_node = GSSNode::new_with_map(node_arc.acc_manager.local.clone(), new_predecessors_map);
+
+          let result_arc = Arc::new(fused_node);
+          memo.insert(node_ptr, result_arc.clone());
+          result_arc
+      }
 
       // --- Analysis and Debugging ---
 
@@ -1340,6 +1419,45 @@ local_system:
               
               // The structures leading to the leaves should be distinct, not shared.
               assert!(!Arc::ptr_eq(s_d1, s_d2));
+          }
+
+          #[test]
+          fn test_gss_fuse_predecessors() {
+              // Structure:
+              // root -> (B, edge 100) at depth 1
+              // root -> (C, edge 100) at depth 3
+              let leaf1 = Arc::new(GSSNode::new(mock_acc(1)));
+              let leaf2 = Arc::new(GSSNode::new(mock_acc(2)));
+              let b = Arc::new(leaf1.push(mock_edge(1), empty_acc()));
+              let c_tmp = Arc::new(leaf2.push(mock_edge(2), empty_acc()));
+              let c_tmp2 = Arc::new(c_tmp.push(mock_edge(3), empty_acc()));
+              let c = Arc::new(c_tmp2.push(mock_edge(4), empty_acc()));
+
+              assert_eq!(b.max_depth, 1);
+              assert_eq!(c.max_depth, 3);
+
+              let mut preds_map = BTreeMap::new();
+              let mut b_map = BTreeMap::new();
+              b_map.insert(mock_edge(100), b.clone());
+              preds_map.insert(b.max_depth, b_map);
+
+              let mut c_map = BTreeMap::new();
+              c_map.insert(mock_edge(100), c.clone());
+              preds_map.insert(c.max_depth, c_map);
+
+              let mut root = GSSNode::new_with_map(Arc::new(empty_acc()), preds_map);
+              assert_eq!(root.num_predecessors(), 2);
+
+              // Fuse predecessors of root (levels=1)
+              root.fuse_predecessors(1);
+
+              assert_eq!(root.num_predecessors(), 1);
+              let fused_pred_arc = root.predecessors().values().next().unwrap().values().next().unwrap();
+
+              let mut disallowed_vec: Vec<_> = fused_pred_arc.full_union_acc().llm_tokens().disallowed().iter().collect();
+              disallowed_vec.sort();
+              assert_eq!(disallowed_vec, vec![1, 2]);
+              assert_eq!(fused_pred_arc.num_predecessors(), 2);
           }
       }
   prev_file_contents:
@@ -1634,6 +1752,7 @@ local_system:
 
       /// Processes a set of incoming predecessors, grouping them by depth and edge,
       /// and merging nodes that share the same edge to create a canonical `NodeMap`.
+      #[time_it]
       fn process_predecessors(incoming: &NodeSet) -> NodeMap {
           let mut grouped_by_depth: BTreeMap<MaxDepth, BTreeMap<ParseStateEdgeContent, Vec<Arc<GSSNode>>>> = BTreeMap::new();
 
@@ -1673,6 +1792,7 @@ local_system:
       }
 
       /// Merges the `source` NodeMap into the `target` NodeMap.
+      #[time_it]
       fn merge_node_maps(target: &mut NodeMap, source: NodeMap) {
           for (depth, source_preds_for_depth) in source {
               let target_preds_for_depth = target.entry(depth).or_default();
@@ -2202,8 +2322,85 @@ local_system:
                   **node_arc_ref_mut = simplified_arc;
               }
           }
+
+          /// Fuses predecessor nodes that share the same edge value, even if they are at different depths.
+          /// This can simplify the GSS by reducing path diversity. The fusion process is applied
+          /// recursively for `levels` number of levels down from this node.
+          ///
+          /// For example, if a node has predecessors `(A, edgeX)` at depth 5 and `(B, edgeX)` at depth 3,
+          /// they will be merged into a single predecessor `(merged(A,B), edgeX)`. This process
+          /// continues recursively down the graph structure.
+          ///
+          /// The process is post-order: children are fused before their parents. This means that
+          /// deeper parts of the graph are simplified first.
+          #[time_it]
+          pub fn fuse_predecessors(&mut self, levels: usize) {
+              if levels == 0 {
+                  return;
+              }
+              let temp_arc = Arc::new(self.clone());
+              let mut memo = HashMap::new();
+              let fused_arc = fuse_predecessors_recursive(&temp_arc, levels, &mut memo);
+              *self = Arc::try_unwrap(fused_arc).unwrap_or_else(|arc| (*arc).clone());
+          }
       }
 
+      pub fn fuse_predecessors_recursive(
+          node_arc: &Arc<GSSNode>,
+          levels: usize,
+          memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
+      ) -> Arc<GSSNode> {
+          if levels == 0 {
+              return node_arc.clone();
+          }
+          let node_ptr = Arc::as_ptr(node_arc);
+          if let Some(fused_arc) = memo.get(&node_ptr) {
+              return fused_arc.clone();
+          }
+
+          // 1. Recursively fuse the predecessors first (post-order traversal).
+          let mut recursively_fused_predecessors = Vec::new();
+          for (_, preds_for_depth) in &node_arc.predecessors {
+              for (edge_val, pred_arc) in preds_for_depth {
+                  let fused_pred_arc = fuse_predecessors_recursive(pred_arc, levels - 1, memo);
+                  recursively_fused_predecessors.push((edge_val.clone(), fused_pred_arc));
+              }
+          }
+
+          // 2. Group the now-fused predecessors by their edge value.
+          let mut grouped_by_edge = BTreeMap::<ParseStateEdgeContent, Vec<Arc<GSSNode>>>::new();
+          for (edge_val, pred_arc) in recursively_fused_predecessors {
+              grouped_by_edge.entry(edge_val).or_default().push(pred_arc);
+          }
+
+          // 3. For each edge value, merge all predecessors associated with it into a single node.
+          let mut new_predecessors_set = NodeSet::new();
+          for (edge_val, pred_arcs_to_merge) in grouped_by_edge {
+              if pred_arcs_to_merge.is_empty() { continue; }
+
+              let mut iter = pred_arcs_to_merge.into_iter();
+              let first = iter.next().unwrap();
+
+              let final_pred_arc = if iter.len() == 0 {
+                  first
+              } else {
+                  let mut merged_node = (*first).clone();
+                  for other_arc in iter {
+                      merged_node.merge(&other_arc);
+                  }
+                  Arc::new(merged_node)
+              };
+              new_predecessors_set.insert((final_pred_arc, edge_val));
+          }
+
+          // 4. Rebuild the current node with the new, fused set of predecessors.
+          let new_predecessors_map = process_predecessors(&new_predecessors_set);
+          let fused_node = GSSNode::new_with_map(node_arc.acc_manager.local.clone(), new_predecessors_map);
+
+          let result_arc = Arc::new(fused_node);
+          memo.insert(node_ptr, result_arc.clone());
+          result_arc
+      }
 
       // --- Analysis and Debugging ---
 
@@ -2679,6 +2876,45 @@ local_system:
               
               // The structures leading to the leaves should be distinct, not shared.
               assert!(!Arc::ptr_eq(s_d1, s_d2));
+          }
+
+          #[test]
+          fn test_gss_fuse_predecessors() {
+              // Structure:
+              // root -> (B, edge 100) at depth 1
+              // root -> (C, edge 100) at depth 3
+              let leaf1 = Arc::new(GSSNode::new(mock_acc(1)));
+              let leaf2 = Arc::new(GSSNode::new(mock_acc(2)));
+              let b = Arc::new(leaf1.push(mock_edge(1), empty_acc()));
+              let c_tmp = Arc::new(leaf2.push(mock_edge(2), empty_acc()));
+              let c_tmp2 = Arc::new(c_tmp.push(mock_edge(3), empty_acc()));
+              let c = Arc::new(c_tmp2.push(mock_edge(4), empty_acc()));
+
+              assert_eq!(b.max_depth, 1);
+              assert_eq!(c.max_depth, 3);
+
+              let mut preds_map = BTreeMap::new();
+              let mut b_map = BTreeMap::new();
+              b_map.insert(mock_edge(100), b.clone());
+              preds_map.insert(b.max_depth, b_map);
+
+              let mut c_map = BTreeMap::new();
+              c_map.insert(mock_edge(100), c.clone());
+              preds_map.insert(c.max_depth, c_map);
+
+              let mut root = GSSNode::new_with_map(Arc::new(empty_acc()), preds_map);
+              assert_eq!(root.num_predecessors(), 2);
+
+              // Fuse predecessors of root (levels=1)
+              root.fuse_predecessors(1);
+
+              assert_eq!(root.num_predecessors(), 1);
+              let fused_pred_arc = root.predecessors().values().next().unwrap().values().next().unwrap();
+
+              let mut disallowed_vec: Vec<_> = fused_pred_arc.full_union_acc().llm_tokens().disallowed().iter().collect();
+              disallowed_vec.sort();
+              assert_eq!(disallowed_vec, vec![1, 2]);
+              assert_eq!(fused_pred_arc.num_predecessors(), 2);
           }
       }
   diffs_applied_this_send: true
@@ -2996,6 +3232,7 @@ messages:
 
       /// Processes a set of incoming predecessors, grouping them by depth and edge,
       /// and merging nodes that share the same edge to create a canonical `NodeMap`.
+      #[time_it]
       fn process_predecessors(incoming: &NodeSet) -> NodeMap {
           let mut grouped_by_depth: BTreeMap<MaxDepth, BTreeMap<ParseStateEdgeContent, Vec<Arc<GSSNode>>>> = BTreeMap::new();
 
@@ -3035,6 +3272,7 @@ messages:
       }
 
       /// Merges the `source` NodeMap into the `target` NodeMap.
+      #[time_it]
       fn merge_node_maps(target: &mut NodeMap, source: NodeMap) {
           for (depth, source_preds_for_depth) in source {
               let target_preds_for_depth = target.entry(depth).or_default();
@@ -3564,8 +3802,85 @@ messages:
                   **node_arc_ref_mut = simplified_arc;
               }
           }
+
+          /// Fuses predecessor nodes that share the same edge value, even if they are at different depths.
+          /// This can simplify the GSS by reducing path diversity. The fusion process is applied
+          /// recursively for `levels` number of levels down from this node.
+          ///
+          /// For example, if a node has predecessors `(A, edgeX)` at depth 5 and `(B, edgeX)` at depth 3,
+          /// they will be merged into a single predecessor `(merged(A,B), edgeX)`. This process
+          /// continues recursively down the graph structure.
+          ///
+          /// The process is post-order: children are fused before their parents. This means that
+          /// deeper parts of the graph are simplified first.
+          #[time_it]
+          pub fn fuse_predecessors(&mut self, levels: usize) {
+              if levels == 0 {
+                  return;
+              }
+              let temp_arc = Arc::new(self.clone());
+              let mut memo = HashMap::new();
+              let fused_arc = fuse_predecessors_recursive(&temp_arc, levels, &mut memo);
+              *self = Arc::try_unwrap(fused_arc).unwrap_or_else(|arc| (*arc).clone());
+          }
       }
 
+      pub fn fuse_predecessors_recursive(
+          node_arc: &Arc<GSSNode>,
+          levels: usize,
+          memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
+      ) -> Arc<GSSNode> {
+          if levels == 0 {
+              return node_arc.clone();
+          }
+          let node_ptr = Arc::as_ptr(node_arc);
+          if let Some(fused_arc) = memo.get(&node_ptr) {
+              return fused_arc.clone();
+          }
+
+          // 1. Recursively fuse the predecessors first (post-order traversal).
+          let mut recursively_fused_predecessors = Vec::new();
+          for (_, preds_for_depth) in &node_arc.predecessors {
+              for (edge_val, pred_arc) in preds_for_depth {
+                  let fused_pred_arc = fuse_predecessors_recursive(pred_arc, levels - 1, memo);
+                  recursively_fused_predecessors.push((edge_val.clone(), fused_pred_arc));
+              }
+          }
+
+          // 2. Group the now-fused predecessors by their edge value.
+          let mut grouped_by_edge = BTreeMap::<ParseStateEdgeContent, Vec<Arc<GSSNode>>>::new();
+          for (edge_val, pred_arc) in recursively_fused_predecessors {
+              grouped_by_edge.entry(edge_val).or_default().push(pred_arc);
+          }
+
+          // 3. For each edge value, merge all predecessors associated with it into a single node.
+          let mut new_predecessors_set = NodeSet::new();
+          for (edge_val, pred_arcs_to_merge) in grouped_by_edge {
+              if pred_arcs_to_merge.is_empty() { continue; }
+
+              let mut iter = pred_arcs_to_merge.into_iter();
+              let first = iter.next().unwrap();
+
+              let final_pred_arc = if iter.len() == 0 {
+                  first
+              } else {
+                  let mut merged_node = (*first).clone();
+                  for other_arc in iter {
+                      merged_node.merge(&other_arc);
+                  }
+                  Arc::new(merged_node)
+              };
+              new_predecessors_set.insert((final_pred_arc, edge_val));
+          }
+
+          // 4. Rebuild the current node with the new, fused set of predecessors.
+          let new_predecessors_map = process_predecessors(&new_predecessors_set);
+          let fused_node = GSSNode::new_with_map(node_arc.acc_manager.local.clone(), new_predecessors_map);
+
+          let result_arc = Arc::new(fused_node);
+          memo.insert(node_ptr, result_arc.clone());
+          result_arc
+      }
 
       // --- Analysis and Debugging ---
 
@@ -4042,154 +4357,171 @@ messages:
               // The structures leading to the leaves should be distinct, not shared.
               assert!(!Arc::ptr_eq(s_d1, s_d2));
           }
+
+          #[test]
+          fn test_gss_fuse_predecessors() {
+              // Structure:
+              // root -> (B, edge 100) at depth 1
+              // root -> (C, edge 100) at depth 3
+              let leaf1 = Arc::new(GSSNode::new(mock_acc(1)));
+              let leaf2 = Arc::new(GSSNode::new(mock_acc(2)));
+              let b = Arc::new(leaf1.push(mock_edge(1), empty_acc()));
+              let c_tmp = Arc::new(leaf2.push(mock_edge(2), empty_acc()));
+              let c_tmp2 = Arc::new(c_tmp.push(mock_edge(3), empty_acc()));
+              let c = Arc::new(c_tmp2.push(mock_edge(4), empty_acc()));
+
+              assert_eq!(b.max_depth, 1);
+              assert_eq!(c.max_depth, 3);
+
+              let mut preds_map = BTreeMap::new();
+              let mut b_map = BTreeMap::new();
+              b_map.insert(mock_edge(100), b.clone());
+              preds_map.insert(b.max_depth, b_map);
+
+              let mut c_map = BTreeMap::new();
+              c_map.insert(mock_edge(100), c.clone());
+              preds_map.insert(c.max_depth, c_map);
+
+              let mut root = GSSNode::new_with_map(Arc::new(empty_acc()), preds_map);
+              assert_eq!(root.num_predecessors(), 2);
+
+              // Fuse predecessors of root (levels=1)
+              root.fuse_predecessors(1);
+
+              assert_eq!(root.num_predecessors(), 1);
+              let fused_pred_arc = root.predecessors().values().next().unwrap().values().next().unwrap();
+
+              let mut disallowed_vec: Vec<_> = fused_pred_arc.full_union_acc().llm_tokens().disallowed().iter().collect();
+              disallowed_vec.sort();
+              assert_eq!(disallowed_vec, vec![1, 2]);
+              assert_eq!(fused_pred_arc.num_predecessors(), 2);
+          }
       }
 
       ```
     metadata:
       filename: src/datastructures/gss.rs
   - user: |-
-      Add a function that fuses child nodes of same edge value but different max depth.
-      ie one entry in each second-level node map map.
-      Or better, allow fusing down to any given number of levels.
+      Add a function to gss.rs that helps us explore paths in the GSS.
+      It should take a slice of GSS refs `&[&GSSNode]` and randomly sample a single path, returning a vector of `ParseStateEdgeContent`. Take a random seed as well.
     metadata:
   - assistant: |-
-      Of course, I can help with that. Here are the diffs for the requested changes. I've added a `fuse_predecessors` method to `GSSNode` to merge predecessor nodes that share the same edge value, along with a recursive helper and a test case to verify its functionality.
+      Of course! As a helpful assistant, I'd be happy to add a function to `gss.rs` that helps explore paths in the GSS by randomly sampling one. Here are the required changes.
 
-      In `src/datastructures/gss.rs`, I'll add the new `fuse_predecessors` method and its helper function.
+      I'll add the `sample_path` function to `src/datastructures/gss.rs` for path exploration, including necessary imports and a unit test to ensure its correctness and deterministic behavior.
+
+      Here is the git diff for the changes:
 
       ```diff
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -699,11 +699,78 @@
-                   **node_arc_ref_mut = simplified_arc;
-               }
-           }
-      +
-      +    /// Fuses predecessor nodes that share the same edge value, even if they are at different depths.
-      +    /// This can simplify the GSS by reducing path diversity. The fusion process is applied
-      +    /// recursively for `levels` number of levels down from this node.
-      +    ///
-      +    /// For example, if a node has predecessors `(A, edgeX)` at depth 5 and `(B, edgeX)` at depth 3,
-      +    /// they will be merged into a single predecessor `(merged(A,B), edgeX)`. This process
-      +    /// continues recursively down the graph structure.
-      +    ///
-      +    /// The process is post-order: children are fused before their parents. This means that
-      +    /// deeper parts of the graph are simplified first.
-      +    #[time_it]
-      +    pub fn fuse_predecessors(&mut self, levels: usize) {
-      +        if levels == 0 {
-      +            return;
-      +        }
-      +        let temp_arc = Arc::new(self.clone());
-      +        let mut memo = HashMap::new();
-      +        let fused_arc = fuse_predecessors_recursive(&temp_arc, levels, &mut memo);
-      +        *self = Arc::try_unwrap(fused_arc).unwrap_or_else(|arc| (*arc).clone());
-      +    }
+      @@ -5,6 +5,8 @@
+       use std::collections::hash_map::DefaultHasher;
+       use bimap::BiBTreeMap;
+       use deterministic_hash::DeterministicHasher;
+      +use rand::rngs::StdRng;
+      +use rand::{Rng, SeedableRng};
+       
+       use crate::glr::parser::ParseStateEdgeContent;
+       use crate::constraint::{LLMTokenBV, LLMVocab, TerminalBV};
+      @@ -880,6 +882,49 @@
+           if path.is_empty() { None } else { Some(path) }
        }
        
-      +fn fuse_predecessors_recursive(
-      +    node_arc: &Arc<GSSNode>,
-      +    levels: usize,
-      +    memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>,
-      +) -> Arc<GSSNode> {
-      +    if levels == 0 {
-      +        return node_arc.clone();
-      +    }
-      +    let node_ptr = Arc::as_ptr(node_arc);
-      +    if let Some(fused_arc) = memo.get(&node_ptr) {
-      +        return fused_arc.clone();
+      +/// Randomly samples a single path from a GSS forest.
+      +///
+      +/// A path is defined as a sequence of `ParseStateEdgeContent` from a root to a leaf.
+      +/// The sampling process starts by picking a random root from the provided slice.
+      +/// Then, it traverses down to a leaf by randomly selecting a predecessor at each step.
+      +///
+      +/// # Arguments
+      +/// * `roots` - A slice of `GSSNode` references representing the roots of the forest.
+      +/// * `seed` - A seed for the random number generator to ensure deterministic sampling.
+      +///
+      +/// # Returns
+      +/// * `Some(Vec<ParseStateEdgeContent>)` containing the sampled path if roots are provided.
+      +///   The path is ordered from the root-most edge to the leaf-most edge.
+      +///   Returns an empty vector if a root is also a leaf.
+      +/// * `None` if the `roots` slice is empty.
+      +pub fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStateEdgeContent>> {
+      +    if roots.is_empty() {
+      +        return None;
       +    }
       +
-      +    // 1. Recursively fuse the predecessors first (post-order traversal).
-      +    let mut recursively_fused_predecessors = Vec::new();
-      +    for (_, preds_for_depth) in &node_arc.predecessors {
-      +        for (edge_val, pred_arc) in preds_for_depth {
-      +            let fused_pred_arc = fuse_predecessors_recursive(pred_arc, levels - 1, memo);
-      +            recursively_fused_predecessors.push((edge_val.clone(), fused_pred_arc));
+      +    let mut rng = StdRng::seed_from_u64(seed);
+      +    let root_index = rng.gen_range(0..roots.len());
+      +    let mut current_node = roots[root_index];
+      +
+      +    let mut path = Vec::new();
+      +    let mut temp_arc_storage: Arc<GSSNode>;
+      +
+      +    loop {
+      +        if current_node.is_empty() {
+      +            break;
       +        }
+      +
+      +        let predecessors: Vec<_> = current_node.peek_iter().collect();
+      +        if predecessors.is_empty() {
+      +            break;
+      +        }
+      +
+      +        let chosen_index = rng.gen_range(0..predecessors.len());
+      +        let chosen_peek = &predecessors[chosen_index];
+      +
+      +        path.push(chosen_peek.edge_value().clone());
+      +
+      +        temp_arc_storage = chosen_peek.predecessor().clone();
+      +        current_node = &temp_arc_storage;
       +    }
       +
-      +    // 2. Group the now-fused predecessors by their edge value.
-      +    let mut grouped_by_edge = BTreeMap::<ParseStateEdgeContent, Vec<Arc<GSSNode>>>::new();
-      +    for (edge_val, pred_arc) in recursively_fused_predecessors {
-      +        grouped_by_edge.entry(edge_val).or_default().push(pred_arc);
-      +    }
-      +
-      +    // 3. For each edge value, merge all predecessors associated with it into a single node.
-      +    let mut new_predecessors_set = NodeSet::new();
-      +    for (edge_val, pred_arcs_to_merge) in grouped_by_edge {
-      +        if pred_arcs_to_merge.is_empty() { continue; }
-      +
-      +        let mut iter = pred_arcs_to_merge.into_iter();
-      +        let first = iter.next().unwrap();
-      +
-      +        let final_pred_arc = if iter.len() == 0 {
-      +            first
-      +        } else {
-      +            let mut merged_node = (*first).clone();
-      +            for other_arc in iter {
-      +                merged_node.merge(&other_arc);
-      +            }
-      +            Arc::new(merged_node)
-      +        };
-      +        new_predecessors_set.insert((final_pred_arc, edge_val));
-      +    }
-      +
-      +    // 4. Rebuild the current node with the new, fused set of predecessors.
-      +    let new_predecessors_map = process_predecessors(&new_predecessors_set);
-      +    let fused_node = GSSNode::new_with_map(node_arc.acc_manager.local.clone(), new_predecessors_map);
-      +
-      +    let result_arc = Arc::new(fused_node);
-      +    memo.insert(node_ptr, result_arc.clone());
-      +    result_arc
+      +    Some(path)
       +}
-       
-       // --- Analysis and Debugging ---
-       
-      @@ -1041,5 +1108,44 @@
-               // The structures leading to the leaves should be distinct, not shared.
-               assert!(!Arc::ptr_eq(s_d1, s_d2));
+      +
+       /// Pretty-prints a GSS forest for debugging.
+       #[time_it]
+       pub fn print_gss_forest(
+      @@ -1168,4 +1213,41 @@
+               assert_eq!(disallowed_vec, vec![1, 2]);
+               assert_eq!(fused_pred_arc.num_predecessors(), 2);
            }
+      -}
       +
       +    #[test]
-      +    fn test_gss_fuse_predecessors() {
+      +    fn test_sample_path() {
       +        // Structure:
-      +        // root -> (B, edge 100) at depth 1
-      +        // root -> (C, edge 100) at depth 3
-      +        let leaf1 = Arc::new(GSSNode::new(mock_acc(1)));
-      +        let leaf2 = Arc::new(GSSNode::new(mock_acc(2)));
-      +        let b = Arc::new(leaf1.push(mock_edge(1), empty_acc()));
-      +        let c_tmp = Arc::new(leaf2.push(mock_edge(2), empty_acc()));
-      +        let c_tmp2 = Arc::new(c_tmp.push(mock_edge(3), empty_acc()));
-      +        let c = Arc::new(c_tmp2.push(mock_edge(4), empty_acc()));
+      +        // root -> (B, edge 10)
+      +        // B -> (C, edge 20)
+      +        // C -> (D, edge 30)
+      +        // C -> (E, edge 40)
+      +        // D, E are leaves
+      +        let d = Arc::new(GSSNode::new(empty_acc()));
+      +        let e = Arc::new(GSSNode::new(empty_acc()));
       +
-      +        assert_eq!(b.max_depth, 1);
-      +        assert_eq!(c.max_depth, 3);
+      +        let mut c_preds = NodeSet::new();
+      +        c_preds.insert((d, mock_edge(30)));
+      +        c_preds.insert((e, mock_edge(40)));
+      +        let c_preds_map = process_predecessors(&c_preds);
+      +        let c = Arc::new(GSSNode::new_with_map(Arc::new(empty_acc()), c_preds_map));
       +
-      +        let mut preds_map = BTreeMap::new();
-      +        let mut b_map = BTreeMap::new();
-      +        b_map.insert(mock_edge(100), b.clone());
-      +        preds_map.insert(b.max_depth, b_map);
+      +        let b = Arc::new(c.push(mock_edge(20), empty_acc()));
+      +        let root = b.push(mock_edge(10), empty_acc());
       +
-      +        let mut c_map = BTreeMap::new();
-      +        c_map.insert(mock_edge(100), c.clone());
-      +        preds_map.insert(c.max_depth, c_map);
+      +        // With seed 0, it should pick one path.
+      +        let path1 = sample_path(&[&root], 0).unwrap();
+      +        // With seed 1, it might pick the other path.
+      +        let path2 = sample_path(&[&root], 1).unwrap();
       +
-      +        let mut root = GSSNode::new_with_map(Arc::new(empty_acc()), preds_map);
-      +        assert_eq!(root.num_predecessors(), 2);
+      +        // Path is root -> B -> C -> (D or E). Edges are 10, 20, (30 or 40)
+      +        assert_eq!(path1.len(), 3);
+      +        assert_eq!(path1[0], mock_edge(10));
+      +        assert_eq!(path1[1], mock_edge(20));
+      +        assert!(path1[2] == mock_edge(30) || path1[2] == mock_edge(40));
       +
-      +        // Fuse predecessors of root (levels=1)
-      +        root.fuse_predecessors(1);
-      +
-      +        assert_eq!(root.num_predecessors(), 1);
-      +        let fused_pred_arc = root.predecessors().values().next().unwrap().values().next().unwrap();
-      +
-      +        let mut disallowed_vec: Vec<_> = fused_pred_arc.full_union_acc().llm_tokens().disallowed().iter().collect();
-      +        disallowed_vec.sort();
-      +        assert_eq!(disallowed_vec, vec![1, 2]);
-      +        assert_eq!(fused_pred_arc.num_predecessors(), 2);
+      +        // Test for determinism.
+      +        let path1_again = sample_path(&[&root], 0).unwrap();
+      +        assert_eq!(path1, path1_again);
       +    }
-       }
+      +}
 
       ```
     metadata:

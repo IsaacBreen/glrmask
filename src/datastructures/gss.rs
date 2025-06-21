@@ -6,6 +6,8 @@ use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use bimap::BiBTreeMap;
 use deterministic_hash::DeterministicHasher;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 
 use crate::glr::parser::ParseStateEdgeContent;
 use crate::constraint::{LLMTokenBV, LLMVocab, TerminalBV};
@@ -1094,6 +1096,55 @@ pub fn find_longest_path(root_node: &Arc<GSSNode>) -> Option<Vec<(ParseStateEdge
     if path.is_empty() { None } else { Some(path) }
 }
 
+/// Randomly samples a single path from a GSS forest.
+///
+/// A path is defined as a sequence of `ParseStateEdgeContent` from a root to a leaf.
+/// The sampling process starts by picking a random root from the provided slice.
+/// Then, it traverses down to a leaf by randomly selecting a predecessor at each step.
+///
+/// # Arguments
+/// * `roots` - A slice of `GSSNode` references representing the roots of the forest.
+/// * `seed` - A seed for the random number generator to ensure deterministic sampling.
+///
+/// # Returns
+/// * `Some(Vec<ParseStateEdgeContent>)` containing the sampled path if roots are provided.
+///   The path is ordered from the root-most edge to the leaf-most edge.
+///   Returns an empty vector if a root is also a leaf.
+/// * `None` if the `roots` slice is empty.
+pub fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStateEdgeContent>> {
+    if roots.is_empty() {
+        return None;
+    }
+
+    let mut rng = StdRng::seed_from_u64(seed);
+    let root_index = rng.gen_range(0..roots.len());
+    let mut current_node = roots[root_index];
+
+    let mut path = Vec::new();
+    let mut temp_arc_storage: Arc<GSSNode>;
+
+    loop {
+        if current_node.is_empty() {
+            break;
+        }
+
+        let predecessors: Vec<_> = current_node.peek_iter().collect();
+        if predecessors.is_empty() {
+            break;
+        }
+
+        let chosen_index = rng.gen_range(0..predecessors.len());
+        let chosen_peek = &predecessors[chosen_index];
+
+        path.push(chosen_peek.edge_value().clone());
+
+        temp_arc_storage = chosen_peek.predecessor().clone();
+        current_node = &temp_arc_storage;
+    }
+
+    Some(path)
+}
+
 /// Pretty-prints a GSS forest for debugging.
 #[time_it]
 pub fn print_gss_forest(
@@ -1451,5 +1502,41 @@ mod tests {
         disallowed_vec.sort();
         assert_eq!(disallowed_vec, vec![1, 2]);
         assert_eq!(fused_pred_arc.num_predecessors(), 2);
+    }
+
+    #[test]
+    fn test_sample_path() {
+        // Structure:
+        // root -> (B, edge 10)
+        // B -> (C, edge 20)
+        // C -> (D, edge 30)
+        // C -> (E, edge 40)
+        // D, E are leaves
+        let d = Arc::new(GSSNode::new(empty_acc()));
+        let e = Arc::new(GSSNode::new(empty_acc()));
+
+        let mut c_preds = NodeSet::new();
+        c_preds.insert((d, mock_edge(30)));
+        c_preds.insert((e, mock_edge(40)));
+        let c_preds_map = process_predecessors(&c_preds);
+        let c = Arc::new(GSSNode::new_with_map(Arc::new(empty_acc()), c_preds_map));
+
+        let b = Arc::new(c.push(mock_edge(20), empty_acc()));
+        let root = b.push(mock_edge(10), empty_acc());
+
+        // With seed 0, it should pick one path.
+        let path1 = sample_path(&[&root], 0).unwrap();
+        // With seed 1, it might pick the other path.
+        let path2 = sample_path(&[&root], 1).unwrap();
+
+        // Path is root -> B -> C -> (D or E). Edges are 10, 20, (30 or 40)
+        assert_eq!(path1.len(), 3);
+        assert_eq!(path1[0], mock_edge(10));
+        assert_eq!(path1[1], mock_edge(20));
+        assert!(path1[2] == mock_edge(30) || path1[2] == mock_edge(40));
+
+        // Test for determinism.
+        let path1_again = sample_path(&[&root], 0).unwrap();
+        assert_eq!(path1, path1_again);
     }
 }
