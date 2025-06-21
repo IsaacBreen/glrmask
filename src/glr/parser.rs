@@ -588,6 +588,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                 match row.shifts_and_reduces.get(&token_id) {
                     Some(Stage7ShiftsAndReduces::Shift(to)) => {
+                        timeit!("GLRParserState::step::shift", {
                         crate::debug!(4, "Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
                         let stack_for_push = peek.to_arc_node();
                         let new_content = ParseStateEdgeContent { state_id: *to };
@@ -597,29 +598,36 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         crate::debug!(6, "Merging next state with new parse state: {}", print_gss_forest(&[new_parse_state.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
                         next.merge(new_parse_state);
                         crate::debug!(6, "Next state after shift: {}", print_gss_forest(&[next.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
+                        })
                     }
 
                     Some(Stage7ShiftsAndReduces::Reduce {
                              nonterminal_id: nt,
                              len, ..
                          }) => {
+                        timeit!("GLRParserState::step::reduce", {
                         crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", peek.edge_value().state_id.0, token_id.0, nt.0, len);
                         let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                         if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
                            todo.push(ParseState { stack: s_new_arc });
                         }
+                        })
                     }
 
                     Some(Stage7ShiftsAndReduces::Split { shift, reduces }) => {
+                        timeit!("GLRParserState::step::split", {
                         crate::debug!(4, "Split from state {} via token {}", peek.edge_value().state_id.0, token_id.0);
                         if let Some(to) = shift {
+                            timeit!("GLRParserState::step::split::shift", {
                             crate::debug!(4, " Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
                             let stack_for_push = peek.to_arc_node();
                             let new_content = ParseStateEdgeContent { state_id: *to };
                             let new_parse_state = self.push_state(&stack_for_push, new_content);
                             next.merge(new_parse_state);
+                            })
                         }
                         for (len, nts) in reduces {
+                            timeit!("GLRParserState::step::split::reduce", {
                             crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", peek.edge_value().state_id.0, token_id.0, nts);
                             for (nt, _prod_ids) in nts {
                                 crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
@@ -628,7 +636,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     todo.push(ParseState { stack: s_new_arc });
                                 }
                             }
+                            })
                         }
+                        })
                     }
 
                     None => {
