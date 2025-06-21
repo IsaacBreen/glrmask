@@ -1,35 +1,10 @@
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
-x.y
+if x:
+ if x:
+  if x:
+   if x:
+    if x:
+     if x:
+      if x:
+       if x:
+        False
+print(x)
