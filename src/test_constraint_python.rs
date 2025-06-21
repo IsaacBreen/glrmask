@@ -763,7 +763,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     let tokenizer_vocab_tree = VocabPrefixTree::build(&vocab_tokens_for_tree);
 
     // The full text to tokenize.
-    let example_code_path = "src/example_code.py";
+    let example_code_path = "src/example_code2.py";
     let full_text_to_tokenize = match fs::read_to_string(example_code_path) {
         Ok(s) => s,
         Err(e) => {
