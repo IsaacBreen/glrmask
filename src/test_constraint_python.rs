@@ -924,6 +924,8 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             );
             println!("  Constraint state is active after commit.");
 
+            todo!("Sample 10 parse stacks and 'explain' them");
+
             // Update current_text_byte_offset for the next iteration
             current_text_byte_offset = token_end_byte_in_full_text;
         }
