@@ -8,7 +8,7 @@ use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::{Debug, Display, Formatter};
+use std::fmt::{Debug, Display, Formatter, Write};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use crate::debug;
@@ -16,7 +16,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use profiler_macro::{time_it, timeit};
 use crate::datastructures::gss::Acc;
-use crate::glr::items::Item;
+use crate::glr::items::{compute_closure, Item};
 
 pub trait DynEq {
     fn dyn_eq(&self, other: &dyn Any) -> bool;
@@ -290,6 +290,103 @@ impl GLRParser {
         let mut state = self.init_glr_parser(llm_vocab);
         state.parse(input);
         state
+    }
+
+    pub fn explain_stack(&self, stack: &[StateID]) -> String {
+        let mut result = String::new();
+        writeln!(&mut result, "--- Explaining Parse Stack: {:?} ---", stack.iter().map(|s| s.0).collect::<Vec<_>>()).unwrap();
+
+        for &state_id in stack {
+            writeln!(&mut result, "\nState {}:", state_id.0).unwrap();
+
+            // Get and print items
+            if let Some(core_items) = self.item_set_map.get_by_right(&state_id) {
+                let full_closure = compute_closure(core_items, &self.productions);
+                let closure_only_items: BTreeSet<_> = full_closure.difference(core_items).cloned().collect();
+
+                writeln!(&mut result, "  Core Items:").unwrap();
+                if core_items.is_empty() {
+                    writeln!(&mut result, "    (None)").unwrap();
+                } else {
+                    for item in core_items {
+                        writeln!(&mut result, "    - {}", item).unwrap();
+                    }
+                }
+
+                if !closure_only_items.is_empty() {
+                    writeln!(&mut result, "  Closure-only Items:").unwrap();
+                    for item in &closure_only_items {
+                        writeln!(&mut result, "    - {}", item).unwrap();
+                    }
+                }
+            } else {
+                writeln!(&mut result, "  (State ID not found in item set map)").unwrap();
+            }
+
+            // Get and print actions
+            if let Some(row) = self.stage_7_table.get(&state_id) {
+                writeln!(&mut result, "  Actions:").unwrap();
+                if row.shifts_and_reduces.is_empty() {
+                    writeln!(&mut result, "    (No shift/reduce actions)").unwrap();
+                } else {
+                    // Sort by terminal name for consistent output
+                    let mut sorted_actions: Vec<_> = row.shifts_and_reduces.iter().collect();
+                    sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
+
+                    for (terminal_id, action) in sorted_actions {
+                        let terminal_name = &self.terminal_map.get_by_right(terminal_id).unwrap().0;
+                        write!(&mut result, "    - On '{}': ", terminal_name).unwrap();
+                        match action {
+                            Stage7ShiftsAndReduces::Shift(next_state_id) => {
+                                writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
+                            }
+                            Stage7ShiftsAndReduces::Reduce { production_id, .. } => {
+                                let prod = &self.productions[production_id.0];
+                                writeln!(&mut result, "Reduce by rule #{} ({})", production_id.0, prod).unwrap();
+                            }
+                            Stage7ShiftsAndReduces::Split { shift, reduces } => {
+                                writeln!(&mut result, "Conflict:").unwrap();
+                                if let Some(shift_state) = shift {
+                                    writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
+                                }
+                                for (_len, nts) in reduces {
+                                    for (_nt_id, prod_ids) in nts {
+                                        for prod_id in prod_ids {
+                                            let prod = &self.productions[prod_id.0];
+                                            writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                writeln!(&mut result, "  Gotos:").unwrap();
+                if row.gotos.is_empty() {
+                    writeln!(&mut result, "    (No goto actions)").unwrap();
+                } else {
+                    // Sort by non-terminal name
+                    let mut sorted_gotos: Vec<_> = row.gotos.iter().collect();
+                    sorted_gotos.sort_by_key(|(ntid, _)| self.non_terminal_map.get_by_right(ntid).unwrap());
+
+                    for (non_terminal_id, goto) in sorted_gotos {
+                        let non_terminal_name = &self.non_terminal_map.get_by_right(non_terminal_id).unwrap().0;
+                        write!(&mut result, "    - On '{}': ", non_terminal_name).unwrap();
+                        match goto {
+                            Goto::State(next_state_id) => writeln!(&mut result, "Goto State {}", next_state_id.0).unwrap(),
+                            Goto::Accept => writeln!(&mut result, "Accept").unwrap(),
+                        }
+                    }
+                }
+
+            } else {
+                writeln!(&mut result, "  (State ID not found in parse table)").unwrap();
+            }
+            writeln!(&mut result, "---").unwrap();
+        }
+
+        result
     }
 }
 
@@ -632,103 +729,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
 
         debug!(5, "{}", make_msg(stats.unique_nodes <= MAX, MAX));
-    }
-    
-    pub fn explain_stack(&self, stack: &[StateID]) -> String {
-        let mut result = String::new();
-        writeln!(&mut result, "--- Explaining Parse Stack: {:?} ---", stack.iter().map(|s| s.0).collect::<Vec<_>>()).unwrap();
-
-        for &state_id in stack {
-            writeln!(&mut result, "\nState {}:", state_id.0).unwrap();
-
-            // Get and print items
-            if let Some(core_items) = self.item_set_map.get_by_right(&state_id) {
-                let full_closure = compute_closure(core_items, &self.productions);
-                let closure_only_items: BTreeSet<_> = full_closure.difference(core_items).cloned().collect();
-
-                writeln!(&mut result, "  Core Items:").unwrap();
-                if core_items.is_empty() {
-                    writeln!(&mut result, "    (None)").unwrap();
-                } else {
-                    for item in core_items {
-                        writeln!(&mut result, "    - {}", item).unwrap();
-                    }
-                }
-
-                if !closure_only_items.is_empty() {
-                    writeln!(&mut result, "  Closure-only Items:").unwrap();
-                    for item in &closure_only_items {
-                        writeln!(&mut result, "    - {}", item).unwrap();
-                    }
-                }
-            } else {
-                writeln!(&mut result, "  (State ID not found in item set map)").unwrap();
-            }
-
-            // Get and print actions
-            if let Some(row) = self.stage_7_table.get(&state_id) {
-                writeln!(&mut result, "  Actions:").unwrap();
-                if row.shifts_and_reduces.is_empty() {
-                    writeln!(&mut result, "    (No shift/reduce actions)").unwrap();
-                } else {
-                    // Sort by terminal name for consistent output
-                    let mut sorted_actions: Vec<_> = row.shifts_and_reduces.iter().collect();
-                    sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
-
-                    for (terminal_id, action) in sorted_actions {
-                        let terminal_name = &self.terminal_map.get_by_right(terminal_id).unwrap().0;
-                        write!(&mut result, "    - On '{}': ", terminal_name).unwrap();
-                        match action {
-                            Stage7ShiftsAndReduces::Shift(next_state_id) => {
-                                writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
-                            }
-                            Stage7ShiftsAndReduces::Reduce { production_id, .. } => {
-                                let prod = &self.productions[production_id.0];
-                                writeln!(&mut result, "Reduce by rule #{} ({})", production_id.0, prod).unwrap();
-                            }
-                            Stage7ShiftsAndReduces::Split { shift, reduces } => {
-                                writeln!(&mut result, "Conflict:").unwrap();
-                                if let Some(shift_state) = shift {
-                                    writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
-                                }
-                                for (_len, nts) in reduces {
-                                    for (_nt_id, prod_ids) in nts {
-                                        for prod_id in prod_ids {
-                                            let prod = &self.productions[prod_id.0];
-                                            writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                writeln!(&mut result, "  Gotos:").unwrap();
-                if row.gotos.is_empty() {
-                    writeln!(&mut result, "    (No goto actions)").unwrap();
-                } else {
-                    // Sort by non-terminal name
-                    let mut sorted_gotos: Vec<_> = row.gotos.iter().collect();
-                    sorted_gotos.sort_by_key(|(ntid, _)| self.non_terminal_map.get_by_right(ntid).unwrap());
-
-                    for (non_terminal_id, goto) in sorted_gotos {
-                        let non_terminal_name = &self.non_terminal_map.get_by_right(non_terminal_id).unwrap().0;
-                        write!(&mut result, "    - On '{}': ", non_terminal_name).unwrap();
-                        match goto {
-                            Goto::State(next_state_id) => writeln!(&mut result, "Goto State {}", next_state_id.0).unwrap(),
-                            Goto::Accept => writeln!(&mut result, "Accept").unwrap(),
-                        }
-                    }
-                }
-
-            } else {
-                writeln!(&mut result, "  (State ID not found in parse table)").unwrap();
-            }
-            writeln!(&mut result, "---").unwrap();
-        }
-
-        result
     }
 }
 
