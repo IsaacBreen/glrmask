@@ -98,7 +98,7 @@ impl Display for Production {
         write!(f, "{} ->", self.lhs.0)?;
         for symbol in &self.rhs {
             match symbol {
-                Symbol::Terminal(terminal) => write!(f, " '{}'", terminal.0)?,
+                Symbol::Terminal(terminal) => write!(f, " {}", terminal.0)?,
                 Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
             }
         }
@@ -253,4 +253,3 @@ pub fn compute_follow_sets(productions: &[Production]) -> BTreeMap<NonTerminal, 
 
     follow_sets
 }
-
