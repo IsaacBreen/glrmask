@@ -43,9 +43,12 @@ impl Display for Item {
                 write!(f, " •")?;
             }
             match symbol {
-                Symbol::Terminal(terminal) => write!(f, " {}", terminal.0)?,
+                Symbol::Terminal(terminal) => write!(f, " '{}'", terminal.0)?,
                 Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
             }
+        }
+        if self.dot_position == self.production.rhs.len() {
+            write!(f, " •")?;
         }
         Ok(())
     }
@@ -97,3 +100,4 @@ pub fn split_on_dot(items: &BTreeSet<Item>) -> BTreeMap<Option<Symbol>, BTreeSet
     }
     result
 }
+

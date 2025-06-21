@@ -898,6 +898,46 @@ fn test_resolve_right_recursion() {
     resolve_right_recursion(&mut prods7, |name| format!("{}_prime", name));
     assert!(compare_prods(&prods7, &expected7), "Test 7 failed. Got: {:?}", prods7);
 }
+
+#[test]
+fn test_explain_stack() {
+    let parser = create_simple_parser();
+    // Stack for input "b" would be something like:
+    // 1. Start in State 0.
+    // 2. Shift 'b', go to a new state. (Stack: [0, X])
+    
+    // Let's find the actual state IDs from the generated parser.
+    let start_state = parser.start_state_id;
+    let b_token_id = *parser.terminal_map.get_by_left(&Terminal("b".to_string())).unwrap();
+    
+    let start_row = &parser.stage_7_table[&start_state];
+    let shift_action = &start_row.shifts_and_reduces[&b_token_id];
+    let state_after_b = match shift_action {
+        crate::glr::table::Stage7ShiftsAndReduces::Shift(id) => *id,
+        _ => panic!("Expected shift on 'b' from start state"),
+    };
+
+    let stack_to_explain = vec![start_state, state_after_b];
+    let explanation = parser.explain_stack(&stack_to_explain);
+
+    println!("{}", explanation);
+
+    // Assertions for State 0 (start state)
+    assert!(explanation.contains(&format!("State {}:", start_state.0)));
+    assert!(explanation.contains("Core Items:"));
+    assert!(explanation.contains("S -> • A '$'"));
+    assert!(explanation.contains("Closure-only Items:"));
+    assert!(explanation.contains("A -> • A 'a'"));
+    assert!(explanation.contains("A -> • 'b'"));
+    assert!(explanation.contains("On 'b': Shift to State"));
+
+    // Assertions for State after shifting 'b'
+    assert!(explanation.contains(&format!("State {}:", state_after_b.0)));
+    assert!(explanation.contains("Core Items:"));
+    assert!(explanation.contains("A -> 'b' •"));
+    assert!(explanation.contains("On 'a': Reduce by rule #2 (A -> 'b')"));
+    assert!(explanation.contains("On '$': Reduce by rule #2 (A -> 'b')"));
+}
 // --- Notes on Limitations Not Easily Tested Here ---
 // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
 //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
@@ -910,3 +950,4 @@ fn test_resolve_right_recursion() {
 // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
 //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
 //    or non-productive non-terminals), which could be considered a limitation of the validation step.
+
