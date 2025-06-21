@@ -330,7 +330,7 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
 #     tokens.reverse()
     # TODO: uncomment this
 #     exprs.extend(tokens)
-    tokens_to_add = ["NAME", "NEWLINE", "INDENT", "DEDENT", "IGNORE"]
+    tokens_to_add = ["NUMBER", "NEWLINE", "INDENT", "DEDENT", "IGNORE"]
     for name, token_expr in tokens:
         if name in tokens_to_add:
             exprs.append((name, token_expr))

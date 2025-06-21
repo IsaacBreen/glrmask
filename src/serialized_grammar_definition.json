@@ -69,7 +69,7 @@
                     "variant": "Terminal"
                 },
                 {
-                    "value": "NAME",
+                    "value": "NUMBER",
                     "variant": "NonTerminal"
                 },
                 {
@@ -102,7 +102,7 @@
             "lhs": "statement",
             "rhs": [
                 {
-                    "value": "NAME",
+                    "value": "NUMBER",
                     "variant": "NonTerminal"
                 },
                 {
@@ -174,14 +174,14 @@
             ]
         },
         {
-            "lhs": "NAME",
+            "lhs": "NUMBER",
             "rhs": [
                 {
                     "value": "IGNORE",
                     "variant": "NonTerminal"
                 },
                 {
-                    "value": "NAME[0]",
+                    "value": "NUMBER[0]",
                     "variant": "Terminal"
                 }
             ]
@@ -322,675 +322,78 @@
             "expr": {
                 "exprs": [
                     {
-                        "exprs": [
-                            {
-                                "exprs": [
-                                    {
-                                        "bytes": [
-                                            97
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            98
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            99
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            100
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            101
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            102
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            103
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            104
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            105
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            106
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            107
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            108
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            109
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            110
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            111
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            112
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            113
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            114
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            115
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            116
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            117
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            118
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            119
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            120
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            121
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            122
-                                        ],
-                                        "variant": "U8Seq"
-                                    }
-                                ],
-                                "variant": "Choice"
-                            },
-                            {
-                                "exprs": [
-                                    {
-                                        "bytes": [
-                                            65
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            66
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            67
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            68
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            69
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            70
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            71
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            72
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            73
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            74
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            75
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            76
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            77
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            78
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            79
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            80
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            81
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            82
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            83
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            84
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            85
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            86
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            87
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            88
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            89
-                                        ],
-                                        "variant": "U8Seq"
-                                    },
-                                    {
-                                        "bytes": [
-                                            90
-                                        ],
-                                        "variant": "U8Seq"
-                                    }
-                                ],
-                                "variant": "Choice"
-                            },
-                            {
-                                "bytes": [
-                                    95
-                                ],
-                                "variant": "U8Seq"
-                            }
-                        ],
-                        "variant": "Choice"
-                    },
-                    {
                         "expr": {
                             "exprs": [
                                 {
-                                    "exprs": [
-                                        {
-                                            "exprs": [
-                                                {
-                                                    "bytes": [
-                                                        97
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        98
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        99
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        100
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        101
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        102
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        103
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        104
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        105
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        106
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        107
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        108
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        109
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        110
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        111
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        112
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        113
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        114
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        115
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        116
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        117
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        118
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        119
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        120
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        121
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        122
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                }
-                                            ],
-                                            "variant": "Choice"
-                                        },
-                                        {
-                                            "exprs": [
-                                                {
-                                                    "bytes": [
-                                                        65
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        66
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        67
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        68
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        69
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        70
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        71
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        72
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        73
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        74
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        75
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        76
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        77
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        78
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        79
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        80
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        81
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        82
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        83
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        84
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        85
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        86
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        87
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        88
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        89
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                },
-                                                {
-                                                    "bytes": [
-                                                        90
-                                                    ],
-                                                    "variant": "U8Seq"
-                                                }
-                                            ],
-                                            "variant": "Choice"
-                                        },
-                                        {
-                                            "bytes": [
-                                                95
-                                            ],
-                                            "variant": "U8Seq"
-                                        }
+                                    "bytes": [
+                                        48
                                     ],
-                                    "variant": "Choice"
+                                    "variant": "U8Seq"
                                 },
                                 {
+                                    "bytes": [
+                                        49
+                                    ],
+                                    "variant": "U8Seq"
+                                },
+                                {
+                                    "bytes": [
+                                        50
+                                    ],
+                                    "variant": "U8Seq"
+                                },
+                                {
+                                    "bytes": [
+                                        51
+                                    ],
+                                    "variant": "U8Seq"
+                                },
+                                {
+                                    "bytes": [
+                                        52
+                                    ],
+                                    "variant": "U8Seq"
+                                },
+                                {
+                                    "bytes": [
+                                        53
+                                    ],
+                                    "variant": "U8Seq"
+                                },
+                                {
+                                    "bytes": [
+                                        54
+                                    ],
+                                    "variant": "U8Seq"
+                                },
+                                {
+                                    "bytes": [
+                                        55
+                                    ],
+                                    "variant": "U8Seq"
+                                },
+                                {
+                                    "bytes": [
+                                        56
+                                    ],
+                                    "variant": "U8Seq"
+                                },
+                                {
+                                    "bytes": [
+                                        57
+                                    ],
+                                    "variant": "U8Seq"
+                                }
+                            ],
+                            "variant": "Choice"
+                        },
+                        "q_type": "OneOrMore",
+                        "variant": "Quantifier"
+                    },
+                    {
+                        "exprs": [
+                            {
+                                "expr": {
                                     "exprs": [
                                         {
                                             "bytes": [
@@ -1054,18 +457,93 @@
                                         }
                                     ],
                                     "variant": "Choice"
-                                }
-                            ],
-                            "variant": "Choice"
-                        },
-                        "q_type": "ZeroOrMore",
-                        "variant": "Quantifier"
+                                },
+                                "q_type": "ZeroOrMore",
+                                "variant": "Quantifier"
+                            },
+                            {
+                                "bytes": [
+                                    46
+                                ],
+                                "variant": "U8Seq"
+                            },
+                            {
+                                "expr": {
+                                    "exprs": [
+                                        {
+                                            "bytes": [
+                                                48
+                                            ],
+                                            "variant": "U8Seq"
+                                        },
+                                        {
+                                            "bytes": [
+                                                49
+                                            ],
+                                            "variant": "U8Seq"
+                                        },
+                                        {
+                                            "bytes": [
+                                                50
+                                            ],
+                                            "variant": "U8Seq"
+                                        },
+                                        {
+                                            "bytes": [
+                                                51
+                                            ],
+                                            "variant": "U8Seq"
+                                        },
+                                        {
+                                            "bytes": [
+                                                52
+                                            ],
+                                            "variant": "U8Seq"
+                                        },
+                                        {
+                                            "bytes": [
+                                                53
+                                            ],
+                                            "variant": "U8Seq"
+                                        },
+                                        {
+                                            "bytes": [
+                                                54
+                                            ],
+                                            "variant": "U8Seq"
+                                        },
+                                        {
+                                            "bytes": [
+                                                55
+                                            ],
+                                            "variant": "U8Seq"
+                                        },
+                                        {
+                                            "bytes": [
+                                                56
+                                            ],
+                                            "variant": "U8Seq"
+                                        },
+                                        {
+                                            "bytes": [
+                                                57
+                                            ],
+                                            "variant": "U8Seq"
+                                        }
+                                    ],
+                                    "variant": "Choice"
+                                },
+                                "q_type": "ZeroOrMore",
+                                "variant": "Quantifier"
+                            }
+                        ],
+                        "variant": "Seq"
                     }
                 ],
-                "variant": "Seq"
+                "variant": "Choice"
             },
             "group_id": 6,
-            "name": "NAME[0]"
+            "name": "NUMBER[0]"
         },
         {
             "expr": {
