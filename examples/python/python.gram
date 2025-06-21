@@ -1,4 +1,3 @@
 file: statements ENDMARKER
-
 statements: statement+
 statement: ('if' NAME ':' (NEWLINE INDENT statements DEDENT)) | (NAME NEWLINE)
