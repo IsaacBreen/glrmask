@@ -329,7 +329,14 @@ def pegen_to_sep1_grammar(grammar: pegen.grammar.Grammar) -> CompiledGrammar: # 
     tokens = define_tokens()
 #     tokens.reverse()
     # TODO: uncomment this
-    exprs.extend(tokens)
+#     exprs.extend(tokens)
+    tokens_to_add = ["NAME", "NEWLINE", "INDENT", "DEDENT", "IGNORE"]
+    for name, token_expr in tokens:
+        if name in tokens_to_add:
+            exprs.append((name, token_expr))
+        else:
+            print(f"Ignoring token {name} for now")
+
 
 #     tokens = {}
 #     tokens["FSTRING_START"] = eat('f"')
