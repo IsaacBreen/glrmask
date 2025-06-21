@@ -1310,11 +1310,11 @@ impl<'a> GrammarConstraintState<'a> {
 
         self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
 
-        // let mut fuse_memo = HashMap::new();
-        // for state in self.state.values_mut() {
-            // state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 3, &mut fuse_memo);
-        // }
-        // fuse_memo.clear();
+        let mut fuse_memo = HashMap::new();
+        for state in self.state.values_mut() {
+            state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 3, &mut fuse_memo);
+        }
+        fuse_memo.clear();
 
         // let mut roots_to_simplify_arcs = Vec::new();
         // for glr_parser_state in self.state.values_mut() {
