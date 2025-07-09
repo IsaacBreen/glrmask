@@ -284,6 +284,8 @@ fn print_token_context(
 fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     let grammar_path = "src/js.ebnf";
 
+    todo!();
+
     println!("Compiling GrammarDefinition into CompiledGrammar...");
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition.clone()));
     println!("Successfully compiled GrammarDefinition into CompiledGrammar.");

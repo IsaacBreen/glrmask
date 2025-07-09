@@ -13,3 +13,4 @@ pub mod json_serialization;
 mod test_constraint_basic;
 mod test_constraint_python;
 mod profiler;
+mod test_constraint_js;
