@@ -225,7 +225,7 @@ dotted_name[expr_ty]:
 # ---------------
 
 block[asdl_stmt_seq*] (memo):
-    | simple_stmts
+    | simple_stmt
     | NEWLINE
 
 decorators[asdl_expr_seq*]: a[asdl_expr_seq*]=('@' f=named_expression NEWLINE { f })+ { a }
@@ -409,7 +409,7 @@ finally_block[asdl_stmt_seq*]:
 # ---------------
 
 match_stmt[stmt_ty]:
-    | "match" subject=subject_expr ':' NEWLINE INDENT cases[asdl_match_case_seq*]=case_block+ DEDENT {
+    | "match" subject=subject_expr ':' NEWLINE cases[asdl_match_case_seq*]=case_block+ {
         CHECK_VERSION(stmt_ty, 10, "Pattern matching is", _PyAST_Match(subject, cases, EXTRA)) }
 
 subject_expr[expr_ty]:
@@ -1116,7 +1116,7 @@ type_expressions[asdl_expr_seq*]:
     | a[asdl_expr_seq*]=','.expression+ {a}
 
 func_type_comment[Token*]:
-    | NEWLINE t=TYPE_COMMENT &(NEWLINE INDENT) { t }  # Must be followed by indented block
+    | NEWLINE t=TYPE_COMMENT &(NEWLINE) { t }
     | TYPE_COMMENT
 
 # ========================= END OF THE GRAMMAR ===========================
