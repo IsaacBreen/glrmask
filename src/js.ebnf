@@ -1,0 +1,221 @@
+ws ::= ( ' ' | '\t' | '\n' | '\r' )* ;
+
+program ::= ws statement_list? ws ;
+
+statement_list ::= statement ( ws statement )* ;
+
+statement ::=
+    block
+  | variable_statement
+  | if_statement
+  | iteration_statement
+  | function_declaration
+  | return_statement
+  | expression_statement
+  ;
+
+expression_statement ::= expression ws ';' ;
+
+block ::= '{' ws statement_list? ws '}' ;
+
+variable_statement ::= 'var' ws variable_declaration_list ws ';' ;
+
+variable_declaration_list ::= variable_declaration ( ws ',' ws variable_declaration )* ;
+
+variable_declaration ::= identifier ( ws '=' ws expression )? ;
+
+if_statement ::= 'if' ws '(' ws expression ws ')' ws statement ( ws 'else' ws statement )? ;
+
+iteration_statement ::=
+    'while' ws '(' ws expression ws ')' ws statement
+  | 'for' ws '(' ws ( expression? | variable_statement ) ws ';' ws expression? ws ';' ws expression? ws ')' ws statement
+  ;
+
+function_declaration ::= 'function' ws identifier ws '(' ws parameter_list? ws ')' ws block ;
+
+parameter_list ::= identifier ( ws ',' ws identifier )* ;
+
+return_statement ::= 'return' ws expression? ws ';' ;
+
+expression ::= assignment_expression ;
+
+assignment_expression ::=
+    left_hand_side_expression ws '=' ws assignment_expression
+  | conditional_expression
+  ;
+
+conditional_expression ::=
+    logical_or_expression ( ws '?' ws assignment_expression ws ':' ws assignment_expression )?
+  ;
+
+logical_or_expression ::= logical_and_expression ( ws '||' ws logical_and_expression )* ;
+
+logical_and_expression ::= bitwise_or_expression ( ws '&&' ws bitwise_or_expression )* ;
+
+bitwise_or_expression ::= bitwise_xor_expression ( ws '|' ws bitwise_xor_expression )* ;
+
+bitwise_xor_expression ::= bitwise_and_expression ( ws '^' ws bitwise_and_expression )* ;
+
+bitwise_and_expression ::= equality_expression ( ws '&' ws equality_expression )* ;
+
+equality_expression ::= relational_expression ( ( ws '==' ws | ws '!=' ws ) relational_expression )* ;
+
+relational_expression ::= shift_expression ( ( ws '<' ws | ws '>' ws | ws '<=' ws | ws '>=' ws ) shift_expression )* ;
+
+shift_expression ::= additive_expression ( ( ws '<<' ws | ws '>>' ws | ws '>>>' ws ) additive_expression )* ;
+
+additive_expression ::= multiplicative_expression ( ( ws '+' ws | ws '-' ws ) multiplicative_expression )* ;
+
+multiplicative_expression ::= unary_expression ( ( ws '*' ws | ws '/' ws | ws '%' ws ) unary_expression )* ;
+
+unary_expression ::=
+    postfix_expression
+  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' ) ws unary_expression
+  ;
+
+postfix_expression ::=
+    left_hand_side_expression ( ws '++' | ws '--' )?
+  ;
+
+left_hand_side_expression ::=
+    new_expression
+  | call_expression
+  ;
+
+new_expression ::=
+    member_expression
+  | 'new' ws new_expression
+  ;
+
+call_expression ::=
+    member_expression ws arguments
+  | call_expression ws arguments
+  | call_expression ws '[' ws expression ws ']'
+  | call_expression ws '.' ws identifier
+  ;
+
+arguments ::= '(' ws ( assignment_expression ( ws ',' ws assignment_expression )* )? ws ')' ;
+
+member_expression ::=
+    primary_expression
+  | member_expression ws '[' ws expression ws ']'
+  | member_expression ws '.' ws identifier
+  | 'new' ws member_expression ws arguments
+  ;
+
+primary_expression ::=
+    'this'
+  | identifier
+  | literal
+  | array_literal
+  | object_literal
+  | '(' ws expression ws ')'
+  ;
+
+array_literal ::= '[' ws ( elision? ws assignment_expression )? ( ws ',' ws elision? ws assignment_expression )* ws ','? ws elision? ws ']' ;
+
+elision ::= ( ',' ws )+ ;
+
+object_literal ::= '{' ws ( property_assignment ( ws ',' ws property_assignment )* )? ws ','? ws '}' ;
+
+property_assignment ::=
+    property_name ws ':' ws assignment_expression
+  | 'get' ws property_name ws '(' ws ')' ws block
+  | 'set' ws property_name ws '(' ws identifier ws ')' ws block
+  ;
+
+property_name ::=
+    identifier
+  | string_literal
+  | numeric_literal
+  ;
+
+literal ::=
+    null_literal
+  | boolean_literal
+  | numeric_literal
+  | string_literal
+  ;
+
+null_literal ::= 'null' ;
+
+boolean_literal ::= 'true' | 'false' ;
+
+numeric_literal ::= decimal_literal ;
+
+decimal_literal ::= decimal_integer_literal '.' decimal_digits? exponent_part? | '.' decimal_digits exponent_part? | decimal_integer_literal exponent_part? ;
+
+decimal_integer_literal ::= '0' | non_zero_digit decimal_digits? ;
+
+decimal_digits ::= decimal_digit+ ;
+
+decimal_digit ::= '0' | '1' | '2' | '3' | '4' | '4' | '5' | '6' | '7' | '8' | '9' ;
+
+non_zero_digit ::= '1' | '2' | '3' | '4' | '4' | '5' | '6' | '7' | '8' | '9' ;
+
+exponent_part ::= exponent_indicator signed_integer ;
+
+exponent_indicator ::= 'e' | 'E' ;
+
+signed_integer ::= ( '+' | '-' )? decimal_digits ;
+
+string_literal ::= '"' double_string_characters? '"' | '\'' single_string_characters? '\'' ;
+
+double_string_characters ::= double_string_character+ ;
+
+single_string_characters ::= single_string_character+ ;
+
+double_string_character ::=
+    ' ' | '!' | '#' | '$' | '%' | '&' | '(' | ')' | '*' | '+' | ',' | '-' | '.' | '/' |
+    '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' |
+    ':' | ';' | '<' | '=' | '>' | '?' | '@' |
+    'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M' |
+    'N' | 'O' | 'P' | 'Q' | 'R' | 'S' | 'T' | 'U' | 'V' | 'W' | 'X' | 'Y' | 'Z' |
+    '[' | ']' | '^' | '_' | '`' |
+    'a' | 'b' | 'c' | 'd' | 'e' | 'f' | 'g' | 'h' | 'i' | 'j' | 'k' | 'l' | 'm' |
+    'n' | 'o' | 'p' | 'q' | 'r' | 's' | 't' | 'u' | 'v' | 'w' | 'x' | 'y' | 'z' |
+    '{' | '|' | '}' | '~' |
+    '\\' escape_sequence
+  ;
+
+single_string_character ::=
+    ' ' | '!' | '"' | '#' | '$' | '%' | '&' | '(' | ')' | '*' | '+' | ',' | '-' | '.' | '/' |
+    '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' |
+    ':' | ';' | '<' | '=' | '>' | '?' | '@' |
+    'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M' |
+    'N' | 'O' | 'P' | 'Q' | 'R' | 'S' | 'T' | 'U' | 'V' | 'W' | 'X' | 'Y' | 'Z' |
+    '[' | ']' | '^' | '_' | '`' |
+    'a' | 'b' | 'c' | 'd' | 'e' | 'f' | 'g' | 'h' | 'i' | 'j' | 'k' | 'l' | 'm' |
+    'n' | 'o' | 'p' | 'q' | 'r' | 's' | 't' | 'u' | 'v' | 'w' | 'x' | 'y' | 'z' |
+    '{' | '|' | '}' | '~' |
+    '\\' escape_sequence
+  ;
+
+escape_sequence ::=
+    character_escape_sequence
+  | '0'
+  | hex_escape_sequence
+  | unicode_escape_sequence
+  ;
+
+character_escape_sequence ::= single_escape_character | non_escape_character ;
+
+single_escape_character ::= '\'' | '"' | '\\' | 'b' | 'f' | 'n' | 'r' | 't' | 'v' ;
+
+non_escape_character ::= ' ' ;
+
+hex_escape_sequence ::= 'x' hex_digit hex_digit ;
+
+unicode_escape_sequence ::= 'u' hex_digit hex_digit hex_digit hex_digit ;
+
+hex_digit ::= '0'|'1'|'2'|'3'|'4'|'5'|'6'|'7'|'8'|'9'|'a'|'b'|'c'|'d'|'e'|'f'|'A'|'B'|'C'|'D'|'E'|'F' ;
+
+identifier ::= identifier_start identifier_part* ;
+
+identifier_start ::= letter | '$' | '_' ;
+
+identifier_part ::= identifier_start | decimal_digit ;
+
+letter ::=
+    'a'|'b'|'c'|'d'|'e'|'f'|'g'|'h'|'i'|'j'|'k'|'l'|'m'|'n'|'o'|'p'|'q'|'r'|'s'|'t'|'u'|'v'|'w'|'x'|'y'|'z' |
+    'A'|'B'|'C'|'D'|'E'|'F'|'G'|'H'|'I'|'J'|'K'|'L'|'M'|'N'|'O'|'P'|'Q'|'R'|'S'|'T'|'U'|'V'|'W'|'X'|'Y'|'Z' ;

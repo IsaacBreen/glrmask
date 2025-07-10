@@ -1,5 +1,6 @@
 use crate::constraint::GrammarConstraint;
 use crate::debug;
+use crate::interface::ebnf::EbnfParser;
 use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParser;
@@ -11,6 +12,7 @@ use kdam::tqdm;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
+use std::fs;
 use std::collections::BTreeMap as StdMap;
 use crate::glr::analyze::simplify_grammar;
 
@@ -656,6 +658,20 @@ impl GrammarDefinition {
             terminal_expr_to_group_id,
         })
     }
+
+    /// Constructs a `GrammarDefinition` from an EBNF string.
+    pub fn from_ebnf(ebnf_source: &str) -> Result<Self, String> {
+        let rules = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
+        GrammarDefinition::from_exprs(rules)
+    }
+
+    /// Constructs a `GrammarDefinition` from an EBNF file.
+    pub fn from_ebnf_file(path: &str) -> Result<Self, String> {
+        let content = fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read EBNF file '{}': {}", path, e))?;
+        Self::from_ebnf(&content)
+    }
+
 
     /// Helper to get terminal expressions ordered by group ID for tokenizer construction.
     pub fn get_terminal_expressions_for_tokenizer(&self) -> Vec<ExprGroup> {
