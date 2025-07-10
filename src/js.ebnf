@@ -1,7 +1,5 @@
 !ignore WS;
 
-temp_start ::= if_statement+;
-
 program ::= statement_list? ;
 
 WS ::= ( ' ' | '\t' | '\n' | '\r' )* ;
