@@ -723,16 +723,21 @@ impl GrammarDefinition {
         let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
         let mut rules = ebnf.grammar_rules;
 
+        fn is_terminal(name: &str, expr: &GrammarExpr) -> bool {
+            // Is terminal if first char is uppercase letter.
+            name.chars().next().map_or(false, |c| c.is_uppercase())
+        }
+
         let mut terminals = BTreeMap::new();
         for (name, expr) in rules.iter() {
-            if let GrammarExpr::RegexExpr(regex_expr) = expr {
-                terminals.insert(name.clone(), regex_expr.clone());
+            if is_terminal(name, expr) {
+                terminals.insert(name.clone(), expr.clone());
             }
         }
 
         fn gather_referenced_terminals(
             expr: &GrammarExpr,
-            terminals: &BTreeMap<String, Expr>,
+            terminals: &BTreeMap<String, GrammarExpr>,
             referenced_terminals: &mut HashSet<String>,
         ) {
             match expr {
