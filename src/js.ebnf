@@ -153,9 +153,9 @@ decimal_integer_literal ::= '0' | non_zero_digit decimal_digits? ;
 
 decimal_digits ::= decimal_digit+ ;
 
-decimal_digit ::= '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' ;
+decimal_digit ::= '0' | '1' | '2' | '3' | '4' | '4' | '5' | '6' | '7' | '8' | '9' ;
 
-non_zero_digit ::= '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' ;
+non_zero_digit ::= '1' | '2' | '3' | '4' | '4' | '5' | '6' | '7' | '8' | '9' ;
 
 exponent_part ::= exponent_indicator signed_integer ;
 

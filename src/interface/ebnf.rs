@@ -17,8 +17,8 @@ fn get_token_regex() -> &'static Regex {
         Regex::new(
             r#"(?x)
         (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
-        (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*'|\[|\]) |
-        (?P<op>::=|;|\?|\*|\+|\||\(|\)|\{|\}|!) |
+        (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
+        (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!) |
         (?P<comment>\(\*([^*]|[\r\n]|(\*+([^*)]|[\r\n])))*\*+\)) |
         (?P<ws>\s+) |
         (?P<error>.)
@@ -35,26 +35,22 @@ fn tokenize(source: &str) -> Result<Vec<EbnfToken>, String> {
             tokens.push(EbnfToken::Ident(ident.as_str().to_string()));
         } else if let Some(lit) = cap.name("literal") {
             let s = lit.as_str();
-            if s == "[" || s == "]" {
-                tokens.push(EbnfToken::Literal(s.to_string()));
-            } else {
-                let content = &s[1..s.len() - 1];
-                let mut unescaped = String::with_capacity(content.len());
-                let mut chars = content.chars();
-                while let Some(c) = chars.next() {
-                    if c == '\\' {
-                        if let Some(next_c) = chars.next() {
-                            unescaped.push(next_c);
-                        } else {
-                            // This case should be prevented by the regex, but as a safeguard:
-                            return Err(format!("Literal with dangling escape: {}", s));
-                        }
+            let content = &s[1..s.len() - 1];
+            let mut unescaped = String::with_capacity(content.len());
+            let mut chars = content.chars();
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    if let Some(next_c) = chars.next() {
+                        unescaped.push(next_c);
                     } else {
-                        unescaped.push(c);
+                        // This case should be prevented by the regex, but as a safeguard:
+                        return Err(format!("Literal with dangling escape: {}", s));
                     }
+                } else {
+                    unescaped.push(c);
                 }
-                tokens.push(EbnfToken::Literal(unescaped));
             }
+            tokens.push(EbnfToken::Literal(unescaped));
         } else if let Some(op) = cap.name("op") {
             tokens.push(EbnfToken::Op(op.as_str().to_string()));
         } else if let Some(e) = cap.name("error") {
@@ -176,6 +172,11 @@ impl EbnfParser {
             let expr = self.parse_expression()?;
             self.expect_op(")")?;
             Ok(expr)
+        } else if self.peek_op("[") {
+            self.consume_op("[")?;
+            let expr = self.parse_expression()?;
+            self.expect_op("]")?;
+            Ok(optional(expr))
         } else if self.peek_op("{") {
             self.consume_op("{")?;
             let expr = self.parse_expression()?;
