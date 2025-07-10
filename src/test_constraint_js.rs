@@ -893,7 +893,7 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
 
             assert!(
                 current_mask.contains(llm_token_id.0),
-                "Expected LLMTokenID({}) for '{:?}' to be in the mask. Mask: {:?}",
+                "Expected LLMTokenID({}) for {:?} to be in the mask. Mask: {:?}",
                 llm_token_id.0, current_token_str, current_mask
             );
             println!("  LLMTokenID({}) for '{}' is in the mask.", llm_token_id.0, current_token_str);
