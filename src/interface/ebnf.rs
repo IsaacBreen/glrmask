@@ -187,7 +187,7 @@ impl EbnfParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interface::{choice, literal, optional, r#ref, repeat, sequence};
+    use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarDefinition};
 
     #[test]
     fn test_ebnf_parser_simple() {
