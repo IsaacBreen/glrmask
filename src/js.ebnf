@@ -1,3 +1,5 @@
+temp_start ::= if_statement+;
+
 program ::= ws statement_list? ws ;
 
 ws ::= ( ' ' | '\t' | '\n' | '\r' )* ;
