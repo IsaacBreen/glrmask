@@ -819,6 +819,8 @@ impl GrammarDefinition {
         }
 
         let mut grammar_def = GrammarDefinition::from_exprs(rules)?;
+        println!("GrammarDefinition from EBNF:");
+        println!("{}", grammar_def);
         if let Some(ignore_name) = &ebnf.ignore_symbol_name {
             grammar_def.insert_ignore_symbol(ignore_name);
         }
