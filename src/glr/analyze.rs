@@ -541,7 +541,7 @@ pub fn insert_ignore_symbol_in_productions(
 
         let is_start_prod = start_production_id.map_or(false, |id| id == i);
         let original_rhs = std::mem::take(&mut prod.rhs);
-        let mut new_rhs = Vec::with_capacity(original_rhs.len() * 2);
+        let mut new_rhs = Vec::with_capacity((original_rhs.len() * 2).saturating_sub(1));
 
         if is_start_prod { new_rhs.push(ignore_symbol.clone()); }
 
