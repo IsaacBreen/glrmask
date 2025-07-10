@@ -475,35 +475,33 @@ impl GrammarDefinition {
     fn convert_grammar_expr_to_regex_expr(
         grammar_expr: &GrammarExpr,
         resolved_terminals: &BTreeMap<String, Expr>,
-    ) -> Result<Expr, ()> {
+    ) -> Result<Expr, String> {
         match grammar_expr {
             GrammarExpr::Literal(bytes) => Ok(Expr::U8Seq(bytes.clone())),
             GrammarExpr::RegexExpr(expr) => Ok(expr.clone()),
             GrammarExpr::Ref(name) => {
                 if name.chars().next().map_or(false, |c| c.is_uppercase()) {
                     // Terminal ref
-                    resolved_terminals.get(name).cloned().ok_or(())
+                    resolved_terminals.get(name).cloned().ok_or_else(|| format!("Terminal reference '{}' not found in resolved terminals.", name))
                 } else {
                     // Non-terminal ref in terminal definition, this is an error.
-                    Err(())
+                    Err(format!("Non-terminal reference '{}' found in a terminal definition. Terminal definitions cannot contain non-terminal references.", name))
                 }
             }
             GrammarExpr::Sequence(exprs) => {
                 if exprs.is_empty() {
                     return Ok(Expr::Epsilon);
                 }
-                let mut sub_exprs = Vec::new();
-                for e in exprs {
-                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, resolved_terminals)?);
-                }
-                Ok(Expr::Seq(sub_exprs))
+                exprs.iter()
+                    .map(|e| Self::convert_grammar_expr_to_regex_expr(e, resolved_terminals))
+                    .collect::<Result<Vec<Expr>, String>>()
+                    .map(Expr::Seq)
             }
             GrammarExpr::Choice(exprs) => {
-                let mut sub_exprs = Vec::new();
-                for e in exprs {
-                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, resolved_terminals)?);
-                }
-                Ok(Expr::Choice(sub_exprs))
+                exprs.iter()
+                    .map(|e| Self::convert_grammar_expr_to_regex_expr(e, resolved_terminals))
+                    .collect::<Result<Vec<Expr>, String>>()
+                    .map(Expr::Choice)
             }
             GrammarExpr::Optional(expr) => {
                 let sub_expr = Self::convert_grammar_expr_to_regex_expr(expr, resolved_terminals)?;
@@ -767,7 +765,7 @@ impl GrammarDefinition {
                         false
                     } else {
                         // Inline any terminals in this expression
-                        Self::convert_grammar_expr_to_regex_expr(grammar_expr, &terminals).expect("Failed to convert grammar expression to regex expression");
+                        Self::convert_grammar_expr_to_regex_expr(grammar_expr, &terminals)?;
                         true
                     }
                 } else {
