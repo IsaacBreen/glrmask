@@ -492,16 +492,18 @@ impl GrammarDefinition {
                 if exprs.is_empty() {
                     return Ok(Expr::Epsilon);
                 }
-                exprs.iter()
-                    .map(|e| Self::convert_grammar_expr_to_regex_expr(e, resolved_terminals))
-                    .collect::<Result<Vec<Expr>, String>>()
-                    .map(Expr::Seq)
+                let mut sub_exprs = Vec::new();
+                for e in exprs {
+                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, resolved_terminals)?);
+                }
+                Ok(Expr::Seq(sub_exprs))
             }
             GrammarExpr::Choice(exprs) => {
-                exprs.iter()
-                    .map(|e| Self::convert_grammar_expr_to_regex_expr(e, resolved_terminals))
-                    .collect::<Result<Vec<Expr>, String>>()
-                    .map(Expr::Choice)
+                let mut sub_exprs = Vec::new();
+                for e in exprs {
+                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, resolved_terminals)?);
+                }
+                Ok(Expr::Choice(sub_exprs))
             }
             GrammarExpr::Optional(expr) => {
                 let sub_expr = Self::convert_grammar_expr_to_regex_expr(expr, resolved_terminals)?;
