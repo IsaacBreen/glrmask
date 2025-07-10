@@ -80,8 +80,8 @@ impl EbnfParser {
         })
     }
 
-    fn parse_nonterminal_rule(&mut self) -> Result<(String, GrammarExpr), String> {
-        let name = self.expect_nonterminal_ident()?;
+    fn parse_rule(&mut self) -> Result<(String, GrammarExpr), String> {
+        let name = self.expect_ident()?;
         self.expect_grammar_op("::=")?;
         let expr = self.parse_grammar_expression()?;
         self.expect_grammar_op(";")?;
@@ -89,7 +89,7 @@ impl EbnfParser {
     }
 
     pub(super) fn parse(&mut self) -> Result<EbnfParseResult, String> {
-        let mut non_terminal_rules: Vec<(String, GrammarExpr)> = Vec::new();
+        let mut rules: Vec<(String, GrammarExpr)> = Vec::new();
         let mut ignore_symbol_name = None;
 
         while self.tokens.peek().is_some() {
@@ -106,28 +106,13 @@ impl EbnfParser {
                 self.expect_grammar_op(";")?;
                 ignore_symbol_name = Some(symbol_name);
             } else {
-                // Peek at the next token to decide which rule to parse
-                if let Some(EbnfToken::Ident(id)) = self.tokens.peek().cloned() {
-                    if id.chars().next().map_or(false, |c| c.is_lowercase()) {
-                        non_terminal_rules.push(self.parse_nonterminal_rule()?);
-                    } else if id.chars().next().map_or(false, |c| c.is_uppercase()) {
-                        // It's a terminal rule, but we parse it into a GrammarExpr for now.
-                        let name = self.expect_terminal_ident()?;
-                        self.expect_grammar_op("::=")?;
-                        let expr = self.parse_grammar_expression()?;
-                        self.expect_grammar_op(";")?;
-                        non_terminal_rules.push((name, expr));
-                    } else {
-                        return Err(format!("Invalid identifier format: {}", id));
-                    }
-                } else {
-                    return Err(format!("Expected a rule definition, found {:?}", self.tokens.peek()));
-                }
+                let (rule_name, rule_expr) = self.parse_rule()?;
+                rules.push((rule_name, rule_expr));
             }
         }
 
         Ok(EbnfParseResult {
-            grammar_rules: non_terminal_rules,
+            grammar_rules: rules,
             ignore_symbol_name,
         })
     }
@@ -238,43 +223,6 @@ impl EbnfParser {
         match self.tokens.next() {
             Some(EbnfToken::Ident(id)) => Ok(id),
             other => Err(format!("Expected identifier, found {:?}", other)),
-        }
-    }
-
-    fn expect_nonterminal_ident(&mut self) -> Result<String, String> {
-        let id = self.expect_ident()?;
-        if id.chars().next().map_or(false, |c| c.is_lowercase()) {
-            Ok(id)
-        } else {
-            Err(format!("Expected non-terminal identifier (lowercase), found '{}'", id))
-        }
-    }
-
-    fn expect_terminal_ident(&mut self) -> Result<String, String> {
-        let id = self.expect_ident()?;
-        if id.chars().next().map_or(false, |c| c.is_uppercase()) {
-            Ok(id)
-        } else {
-            Err(format!("Expected terminal identifier (uppercase), found '{}'", id))
-        }
-    }
-
-    fn collect_referenced_terminals(expr: &GrammarExpr, refs: &mut HashSet<String>) {
-        match expr {
-            GrammarExpr::Ref(name) => {
-                if name.chars().next().map_or(false, |c| c.is_uppercase()) {
-                    refs.insert(name.clone());
-                }
-            }
-            GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
-                for e in exprs {
-                    Self::collect_referenced_terminals(e, refs);
-                }
-            }
-            GrammarExpr::Optional(e) | GrammarExpr::Repeat(e) => {
-                Self::collect_referenced_terminals(e.as_ref(), refs);
-            }
-            GrammarExpr::Literal(_) | GrammarExpr::RegexExpr(_) => {}
         }
     }
 }
