@@ -116,15 +116,7 @@ impl EbnfParser {
                 self.expect_grammar_op(";")?;
                 ignore_symbol_name = Some(symbol_name);
             } else {
-                let (name, expr) = self.parse_nonterminal_rule()?;
-                if name.chars().next().map_or(false, |c| c.is_uppercase()) {
-                    if all_terminal_defs.insert(name.clone()) {
-                        return Err(format!("Duplicate definition for terminal '{}'", name))
-                    }
-                    terminal_rules.push((name, expr));
-                } else {
-                    non_terminal_rules.push((name, expr));
-                }
+                todo!("try nonterminal rule, try terminal rule");
             }
         }
 
