@@ -18,7 +18,7 @@ fn get_token_regex() -> &'static Regex {
             r#"(?x)
         (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
         (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
-        (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}) |
+        (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!) |
         (?P<comment>\(\*([^*]|[\r\n]|(\*+([^*)]|[\r\n])))*\*+\)) |
         (?P<ws>\s+) |
         (?P<error>.)
@@ -61,6 +61,11 @@ fn tokenize(source: &str) -> Result<Vec<EbnfToken>, String> {
     Ok(tokens)
 }
 
+pub(super) struct EbnfParseResult {
+    pub rules: Vec<(String, GrammarExpr)>,
+    pub ignore_symbol_name: Option<String>,
+}
+
 pub(super) struct EbnfParser {
     tokens: Peekable<IntoIter<EbnfToken>>,
 }
@@ -73,20 +78,36 @@ impl EbnfParser {
         })
     }
 
-    pub(super) fn parse(&mut self) -> Result<Vec<(String, GrammarExpr)>, String> {
-        let mut rules = Vec::new();
-        while self.tokens.peek().is_some() {
-            rules.push(self.parse_rule()?);
-        }
-        Ok(rules)
-    }
-
     fn parse_rule(&mut self) -> Result<(String, GrammarExpr), String> {
         let name = self.expect_ident()?;
         self.expect_op("::=")?;
         let expr = self.parse_expression()?;
         self.expect_op(";")?;
         Ok((name, expr))
+    }
+
+    pub(super) fn parse(&mut self) -> Result<EbnfParseResult, String> {
+        let mut rules = Vec::new();
+        let mut ignore_symbol_name = None;
+
+        while self.tokens.peek().is_some() {
+            if self.peek_op("!") {
+                if ignore_symbol_name.is_some() {
+                    return Err("Duplicate ignore directive found".to_string());
+                }
+                self.consume_op("!")?;
+                let directive_name = self.expect_ident()?;
+                if directive_name != "ignore" {
+                    return Err(format!("Unknown directive: {}", directive_name));
+                }
+                let symbol_name = self.expect_ident()?;
+                self.expect_op(";")?;
+                ignore_symbol_name = Some(symbol_name);
+            } else {
+                rules.push(self.parse_rule()?);
+            }
+        }
+        Ok(EbnfParseResult { rules, ignore_symbol_name })
     }
 
     fn parse_expression(&mut self) -> Result<GrammarExpr, String> {
@@ -213,7 +234,7 @@ mod tests {
             C ::= 'c'?;
         "#;
         let mut parser = EbnfParser::new(ebnf).unwrap();
-        let rules = parser.parse().unwrap();
+        let rules = parser.parse().unwrap().rules;
 
         let expected_rules = vec![
             ("S".to_string(), sequence(vec![r#ref("A"), r#ref("B")])),

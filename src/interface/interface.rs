@@ -1,6 +1,6 @@
 use crate::constraint::GrammarConstraint;
 use crate::debug;
-use crate::interface::ebnf::EbnfParser;
+use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
 use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParser;
@@ -14,7 +14,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 use std::fs;
 use std::collections::BTreeMap as StdMap;
-use crate::glr::analyze::simplify_grammar;
+use crate::glr::analyze::{insert_ignore_symbol_in_productions, simplify_grammar};
 
 type LLMToken<'a> = &'a [u8];
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
@@ -247,6 +247,21 @@ impl GrammarDefinition {
     pub fn simplify(&mut self) {
         // Simplify the grammar definition
         (self.productions, self.start_production_id) = simplify_grammar(&self.productions, self.start_production_id);
+    }
+
+    /// Inserts an "ignore" symbol between every pair of symbols in the RHS of productions.
+    /// This transformation is useful for grammars where whitespace or other separators
+    /// are allowed between any two tokens.
+    ///
+    /// For the start production, the ignore symbol is also added at the beginning and end.
+    pub fn insert_ignore_symbol(&mut self, ignore_symbol_name: &str) {
+        let start_id = self.start_production_id;
+        let ignore_sym = Symbol::NonTerminal(NonTerminal(ignore_symbol_name.to_string()));
+        insert_ignore_symbol_in_productions(
+            &mut self.productions,
+            &ignore_sym,
+            Some(start_id),
+        );
     }
 }
 
@@ -661,8 +676,20 @@ impl GrammarDefinition {
 
     /// Constructs a `GrammarDefinition` from an EBNF string.
     pub fn from_ebnf(ebnf_source: &str) -> Result<Self, String> {
-        let rules = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
-        GrammarDefinition::from_exprs(rules)
+        let parse_result = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
+
+        if let Some(ignore_name) = &parse_result.ignore_symbol_name {
+            // Check that the ignore symbol is defined in the grammar rules
+            if !parse_result.rules.iter().any(|(name, _)| name == ignore_name) {
+                return Err(format!("Ignore symbol '{}' is not a defined non-terminal.", ignore_name));
+            }
+        }
+
+        let mut grammar_def = GrammarDefinition::from_exprs(parse_result.rules)?;
+        if let Some(ignore_name) = &parse_result.ignore_symbol_name {
+            grammar_def.insert_ignore_symbol(ignore_name);
+        }
+        Ok(grammar_def)
     }
 
     /// Constructs a `GrammarDefinition` from an EBNF file.
