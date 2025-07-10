@@ -527,6 +527,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
     let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
     let mut productions = productions.to_vec();
+    println!("Before recursion resolution:\n{}", display_productions(&productions));
     // crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
     crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
     println!("After direct right recursion:\n{}", display_productions(&productions));
