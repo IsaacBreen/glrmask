@@ -361,7 +361,13 @@ impl GrammarDefinition {
                 }
             }
             GrammarExpr::Ref(name) => {
-                (vec![Symbol::NonTerminal(NonTerminal(name.clone()))], Vec::new()) // Return symbols and empty productions
+                if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    // It's a terminal reference.
+                    (vec![Symbol::Terminal(Terminal(name.clone()))], Vec::new())
+                } else {
+                    // It's a non-terminal reference.
+                    (vec![Symbol::NonTerminal(NonTerminal(name.clone()))], Vec::new())
+                }
             }
             GrammarExpr::Sequence(exprs) => {
                 let mut combined_symbols = Vec::new();
@@ -472,10 +478,65 @@ impl GrammarDefinition {
         }
     }
 
+    fn convert_grammar_expr_to_regex_expr(
+        grammar_expr: &GrammarExpr,
+        resolved_terminals: &BTreeMap<String, Expr>,
+    ) -> Result<Expr, ()> {
+        match grammar_expr {
+            GrammarExpr::Literal(bytes) => Ok(Expr::U8Seq(bytes.clone())),
+            GrammarExpr::RegexExpr(expr) => Ok(expr.clone()),
+            GrammarExpr::Ref(name) => {
+                if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    // Terminal ref
+                    resolved_terminals.get(name).cloned().ok_or(())
+                } else {
+                    // Non-terminal ref in terminal definition, this is an error.
+                    Err(())
+                }
+            }
+            GrammarExpr::Sequence(exprs) => {
+                if exprs.is_empty() {
+                    return Ok(Expr::Epsilon);
+                }
+                let mut sub_exprs = Vec::new();
+                for e in exprs {
+                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, resolved_terminals)?);
+                }
+                Ok(Expr::Seq(sub_exprs))
+            }
+            GrammarExpr::Choice(exprs) => {
+                let mut sub_exprs = Vec::new();
+                for e in exprs {
+                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, resolved_terminals)?);
+                }
+                Ok(Expr::Choice(sub_exprs))
+            }
+            GrammarExpr::Optional(expr) => {
+                let sub_expr = Self::convert_grammar_expr_to_regex_expr(expr, resolved_terminals)?;
+                Ok(Expr::Quantifier(Box::new(sub_expr), QuantifierType::ZeroOrOne))
+            }
+            GrammarExpr::Repeat(expr) => {
+                let sub_expr = Self::convert_grammar_expr_to_regex_expr(expr, resolved_terminals)?;
+                Ok(Expr::Quantifier(Box::new(sub_expr), QuantifierType::ZeroOrMore))
+            }
+        }
+    }
+
     /// Constructs a `GrammarDefinition` from a list of grammar expressions.
     pub fn from_exprs(exprs: Vec<(String, GrammarExpr)>) -> Result<Self, String> {
         if exprs.is_empty() {
             return Err("Grammar expressions list cannot be empty.".to_string());
+        }
+
+        // Separate terminal and non-terminal rules based on casing
+        let mut non_terminal_exprs = Vec::new();
+        let mut terminal_exprs_map = BTreeMap::new();
+        for (name, expr) in exprs {
+            if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                terminal_exprs_map.insert(name, expr);
+            } else {
+                non_terminal_exprs.push((name, expr));
+            }
         }
 
         let mut productions = Vec::new();
@@ -483,24 +544,61 @@ impl GrammarDefinition {
         let mut terminal_expr_to_group_id = BiBTreeMap::new();
         let mut next_terminal_group_id = 0;
 
-        let mut all_names: HashSet<String> = exprs.iter().map(|(name, _)| name.clone()).collect();
+        // Iteratively resolve terminal definitions into regex `Expr`s
+        let mut resolved_terminal_exprs = BTreeMap::new();
+        while resolved_terminal_exprs.len() < terminal_exprs_map.len() {
+            let mut changed_in_pass = false;
+            for (name, grammar_expr) in &terminal_exprs_map {
+                if resolved_terminal_exprs.contains_key(name) {
+                    continue;
+                }
+                if let Ok(expr) = Self::convert_grammar_expr_to_regex_expr(grammar_expr, &resolved_terminal_exprs) {
+                    resolved_terminal_exprs.insert(name.clone(), expr);
+                    changed_in_pass = true;
+                }
+            }
+            if !changed_in_pass {
+                // No progress was made in a full pass, so there must be a cycle or undefined ref
+                let missing: Vec<_> = terminal_exprs_map.keys().filter(|k| !resolved_terminal_exprs.contains_key(*k)).cloned().collect();
+                return Err(format!("Could not resolve all terminal definitions. This may be due to a circular dependency or an undefined terminal reference. Unresolved terminals: {:?}", missing));
+            }
+        }
+
+        // Populate terminal maps from resolved expressions
+        for (name, expr) in resolved_terminal_exprs {
+            let group_id = next_terminal_group_id;
+            terminal_name_to_group_id.insert(name.clone(), group_id);
+            terminal_expr_to_group_id.insert(expr, group_id);
+            next_terminal_group_id += 1;
+        }
+
+        // Now process non-terminal rules
+        let mut all_names: HashSet<String> = non_terminal_exprs.iter().map(|(name, _)| name.clone()).collect();
+        all_names.extend(terminal_exprs_map.keys().cloned());
         let mut per_base_counters: HashMap<String, usize> = HashMap::new();
 
         let mut start_production_name = "start'".to_string();
-        let nonterminal_names_from_exprs: HashSet<&str> = exprs.iter().map(|(name, _)| name.as_str()).collect();
+        let nonterminal_names_from_exprs: HashSet<&str> = non_terminal_exprs.iter().map(|(name, _)| name.as_str()).collect();
         while nonterminal_names_from_exprs.contains(start_production_name.as_str()) || all_names.contains(&start_production_name) {
             start_production_name.push('\'');
         }
         all_names.insert(start_production_name.clone());
         debug!(2, "Augmented start_production_name: {:?}", start_production_name);
 
+        if non_terminal_exprs.is_empty() {
+            // If there are only terminal rules, we can still create a valid (but likely useless) grammar.
+            // However, the logic below assumes at least one non-terminal for the start rule.
+            // Let's return an error for clarity.
+            return Err("Grammar must contain at least one non-terminal rule.".to_string());
+        }
+
         productions.push(Production {
             lhs: NonTerminal(start_production_name.clone()),
-            rhs: vec![Symbol::NonTerminal(NonTerminal(exprs[0].0.clone()))],
+            rhs: vec![Symbol::NonTerminal(NonTerminal(non_terminal_exprs[0].0.clone()))],
         });
         let start_production_id = 0; // The augmented start production is always the first one.
 
-        for (name, expr) in tqdm!(exprs.iter()) {
+        for (name, expr) in tqdm!(non_terminal_exprs.iter()) {
             let lhs = NonTerminal(name.clone());
             let lhs_name_str = name; // Base name for generated sub-rules/terminals
 
