@@ -743,14 +743,14 @@ impl GrammarDefinition {
         let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
         let mut rules = ebnf.grammar_rules;
 
-        fn is_terminal(name: &str, expr: &GrammarExpr) -> bool {
+        fn is_terminal(name: &str) -> bool {
             // Is terminal if first char is uppercase letter.
             name.chars().next().map_or(false, |c| c.is_uppercase())
         }
 
         let mut terminals = BTreeMap::new();
         for (name, expr) in rules.iter() {
-            if is_terminal(name, expr) {
+            if is_terminal(name) {
                 terminals.insert(name.clone(), expr.clone());
             }
         }
@@ -781,21 +781,27 @@ impl GrammarDefinition {
 
         let mut referenced_terminals = HashSet::new();
         for (name, expr) in rules.iter() {
-            if !is_terminal(name, expr) {
+            if !is_terminal(name) {
                 gather_referenced_terminals(expr, &terminals, &mut referenced_terminals);
             }
         }
+        if let Some(ignore_name) = &ebnf.ignore_symbol_name {
+            if is_terminal(ignore_name) {
+                referenced_terminals.insert(ignore_name.clone());
+            }
+        }
+
         dbg!(&referenced_terminals);
 
         rules.retain_mut(
             |(name, grammar_expr)| {
-                !(is_terminal(name, grammar_expr) && !referenced_terminals.contains(name))
+                !(is_terminal(name) && !referenced_terminals.contains(name))
             }
         );
 
         let mut memo = BTreeMap::new();
         for (name, grammar_expr) in rules.iter_mut() {
-            if is_terminal(name, grammar_expr) {
+            if is_terminal(name) {
                 let mut resolving_stack = HashSet::new();
                 let regex_expr = Self::convert_grammar_expr_to_regex_expr(
                     grammar_expr,
