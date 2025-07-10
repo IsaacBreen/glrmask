@@ -818,6 +818,10 @@ impl GrammarDefinition {
             }
         }
 
+        println!("Processed EBNF rules:");
+        for (rule_name, grammar_expr) in rules.iter() {
+            println!("{} -> {:?}", rule_name, grammar_expr);
+        }
         let mut grammar_def = GrammarDefinition::from_exprs(rules)?;
         println!("GrammarDefinition from EBNF:");
         println!("{}", grammar_def);
