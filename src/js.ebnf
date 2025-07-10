@@ -24,7 +24,7 @@ block ::= '{' statement_list? '}' ;
 
 variable_statement ::= 'var' variable_declaration_list ';' ;
 
-variable_declaration_list ::= IDENTIFIER ( '=' expression )? ( ',' IDENTIFIER ( '=' expression )? )* ;
+variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
 
 variable_declaration ::= IDENTIFIER ( '=' expression )? ;
 
@@ -35,9 +35,9 @@ iteration_statement ::=
   | 'for' '(' ( expression? | 'var' variable_declaration_list ) ';' expression? ';' expression? ')' statement
   ;
 
-function_declaration ::= 'function' IDENTIFIER '(' parameter_list? ')' block ;
+function_declaration ::= 'function' identifier '(' parameter_list? ')' block ;
 
-parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
+parameter_list ::= identifier ( ',' identifier )* ;
 
 return_statement ::= 'return' expression? ';' ;
 
@@ -94,41 +94,41 @@ new_expression ::=
 call_expression ::=
     member_expression arguments
   | call_expression arguments
-  | call_expression '[' expression ']'
-  | call_expression '.' IDENTIFIER
+  | call_expression '[' expression ']' 
+  | call_expression '.' identifier
   ;
 
 arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
 
 member_expression ::=
     primary_expression
-  | member_expression '[' expression ']'
-  | member_expression '.' IDENTIFIER
+  | member_expression '[' expression ']' 
+  | member_expression '.' identifier
   | 'new' member_expression arguments
   ;
 
 primary_expression ::=
-    'this'
-  | IDENTIFIER
+    'this' 
+  | identifier
   | literal
   | array_literal
   | object_literal
   | '(' expression ')'
   ;
 
-array_literal ::= '[' ( elision? assignment_expression )? ( ',' elision? assignment_expression )* ','? elision? ']' ;
+array_literal ::= '[' ( ELISION? assignment_expression )? ( ',' ELISION? assignment_expression )* ','? ELISION? ']' ;
 
-elision ::= ','+ ;
+ELISION ::= ','+ ;
 
-object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
+object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ; 
 
 property_assignment ::=
-    PROPERTY_NAME ':' assignment_expression
-  | 'get' PROPERTY_NAME '(' ')' block
-  | 'set' PROPERTY_NAME '(' IDENTIFIER ')' block
+    property_name ':' assignment_expression
+  | 'get' property_name '(' ')' block
+  | 'set' property_name '(' identifier ')' block
   ;
 
-PROPERTY_NAME ::=
+property_name ::=
     IDENTIFIER
   | STRING_LITERAL
   | NUMERIC_LITERAL
@@ -213,6 +213,8 @@ HEX_ESCAPE_SEQUENCE ::= 'x' HEX_DIGIT HEX_DIGIT ;
 UNICODE_ESCAPE_SEQUENCE ::= 'u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT ;
 
 HEX_DIGIT ::= '0'|'1'|'2'|'3'|'4'|'5'|'6'|'7'|'8'|'9'|'a'|'b'|'c'|'d'|'e'|'f'|'A'|'B'|'C'|'D'|'E'|'F' ;
+
+identifier ::= IDENTIFIER ;
 
 IDENTIFIER ::= IDENTIFIER_START IDENTIFIER_PART* ;
 
