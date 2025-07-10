@@ -17,7 +17,7 @@ fn get_token_regex() -> &'static Regex {
         Regex::new(
             r#"(?x)
         (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
-        (?P<literal>"[^"]*"|'[^']*') |
+        (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
         (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}) |
         (?P<comment>\(\*([^*]|[\r\n]|(\*+([^*)]|[\r\n])))*\*+\)) |
         (?P<ws>\s+) |
@@ -35,7 +35,22 @@ fn tokenize(source: &str) -> Result<Vec<EbnfToken>, String> {
             tokens.push(EbnfToken::Ident(ident.as_str().to_string()));
         } else if let Some(lit) = cap.name("literal") {
             let s = lit.as_str();
-            tokens.push(EbnfToken::Literal(s[1..s.len() - 1].to_string()));
+            let content = &s[1..s.len() - 1];
+            let mut unescaped = String::with_capacity(content.len());
+            let mut chars = content.chars();
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    if let Some(next_c) = chars.next() {
+                        unescaped.push(next_c);
+                    } else {
+                        // This case should be prevented by the regex, but as a safeguard:
+                        return Err(format!("Literal with dangling escape: {}", s));
+                    }
+                } else {
+                    unescaped.push(c);
+                }
+            }
+            tokens.push(EbnfToken::Literal(unescaped));
         } else if let Some(op) = cap.name("op") {
             tokens.push(EbnfToken::Op(op.as_str().to_string()));
         } else if let Some(e) = cap.name("error") {
