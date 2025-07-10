@@ -1,16 +1,15 @@
-if 1:
- 1
-if 1:
- 1
-if 1:
- 1
-if 1:
- 1
-if 1:
- 1
-if 1:
- 1
-if 1:
- 1
-if 1:
- 1
+if (true) {}
+if (true) {}
+if (true) {}
+if (true) {}
+if (true) {}
+if (true) {}
+if (true) {}
+if (true) {}
+if (true) {}
+if (true) {}
+if (true) {}
+if (true) {}
+if (true) {}
+if (true) {}
+if (true) {}

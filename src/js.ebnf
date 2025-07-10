@@ -1,6 +1,6 @@
-ws ::= ( ' ' | '\t' | '\n' | '\r' )* ;
-
 program ::= ws statement_list? ws ;
+
+ws ::= ( ' ' | '\t' | '\n' | '\r' )* ;
 
 statement_list ::= statement ( ws statement )* ;
 
