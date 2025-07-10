@@ -42,8 +42,19 @@ fn tokenize(source: &str) -> Result<Vec<EbnfToken>, String> {
             let mut chars = content.chars();
             while let Some(c) = chars.next() {
                 if c == '\\' {
-                    if let Some(next_c) = chars.next() {
-                        unescaped.push(next_c);
+                    if let Some(escaped_char) = chars.next() {
+                        match escaped_char {
+                            'n' => unescaped.push('\n'),
+                            't' => unescaped.push('\t'),
+                            'r' => unescaped.push('\r'),
+                            'b' => unescaped.push('\u{0008}'),
+                            'f' => unescaped.push('\u{000C}'),
+                            'v' => unescaped.push('\u{000B}'),
+                            '\\' => unescaped.push('\\'),
+                            '\'' => unescaped.push('\''),
+                            '"' => unescaped.push('"'),
+                            other => unescaped.push(other),
+                        }
                     } else {
                         // This case should be prevented by the regex, but as a safeguard:
                         return Err(format!("Literal with dangling escape: {}", s));
