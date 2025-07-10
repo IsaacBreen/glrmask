@@ -1325,7 +1325,7 @@ local_system:
                   r#"(?x)
               (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
               (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
-              (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}) |
+              (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!) |
               (?P<comment>\(\*([^*]|[\r\n]|(\*+([^*)]|[\r\n])))*\*+\)) |
               (?P<ws>\s+) |
               (?P<error>.)
@@ -1368,6 +1368,11 @@ local_system:
           Ok(tokens)
       }
 
+      pub(super) struct EbnfParseResult {
+          pub rules: Vec<(String, GrammarExpr)>,
+          pub ignore_symbol_name: Option<String>,
+      }
+
       pub(super) struct EbnfParser {
           tokens: Peekable<IntoIter<EbnfToken>>,
       }
@@ -1380,20 +1385,36 @@ local_system:
               })
           }
 
-          pub(super) fn parse(&mut self) -> Result<Vec<(String, GrammarExpr)>, String> {
-              let mut rules = Vec::new();
-              while self.tokens.peek().is_some() {
-                  rules.push(self.parse_rule()?);
-              }
-              Ok(rules)
-          }
-
           fn parse_rule(&mut self) -> Result<(String, GrammarExpr), String> {
               let name = self.expect_ident()?;
               self.expect_op("::=")?;
               let expr = self.parse_expression()?;
               self.expect_op(";")?;
               Ok((name, expr))
+          }
+
+          pub(super) fn parse(&mut self) -> Result<EbnfParseResult, String> {
+              let mut rules = Vec::new();
+              let mut ignore_symbol_name = None;
+
+              while self.tokens.peek().is_some() {
+                  if self.peek_op("!") {
+                      if ignore_symbol_name.is_some() {
+                          return Err("Duplicate ignore directive found".to_string());
+                      }
+                      self.consume_op("!")?;
+                      let directive_name = self.expect_ident()?;
+                      if directive_name != "ignore" {
+                          return Err(format!("Unknown directive: {}", directive_name));
+                      }
+                      let symbol_name = self.expect_ident()?;
+                      self.expect_op(";")?;
+                      ignore_symbol_name = Some(symbol_name);
+                  } else {
+                      rules.push(self.parse_rule()?);
+                  }
+              }
+              Ok(EbnfParseResult { rules, ignore_symbol_name })
           }
 
           fn parse_expression(&mut self) -> Result<GrammarExpr, String> {
@@ -1520,7 +1541,7 @@ local_system:
                   C ::= 'c'?;
               "#;
               let mut parser = EbnfParser::new(ebnf).unwrap();
-              let rules = parser.parse().unwrap();
+              let rules = parser.parse().unwrap().rules;
 
               let expected_rules = vec![
                   ("S".to_string(), sequence(vec![r#ref("A"), r#ref("B")])),
@@ -1553,7 +1574,7 @@ local_system:
     src/interface/interface.rs: |
       use crate::constraint::GrammarConstraint;
       use crate::debug;
-      use crate::interface::ebnf::EbnfParser;
+      use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
       use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::GLRParser;
@@ -1567,7 +1588,7 @@ local_system:
       use std::sync::Arc;
       use std::fs;
       use std::collections::BTreeMap as StdMap;
-      use crate::glr::analyze::simplify_grammar;
+      use crate::glr::analyze::{insert_ignore_symbol_in_productions, simplify_grammar};
 
       type LLMToken<'a> = &'a [u8];
       type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
@@ -1800,6 +1821,21 @@ local_system:
           pub fn simplify(&mut self) {
               // Simplify the grammar definition
               (self.productions, self.start_production_id) = simplify_grammar(&self.productions, self.start_production_id);
+          }
+
+          /// Inserts an "ignore" symbol between every pair of symbols in the RHS of productions.
+          /// This transformation is useful for grammars where whitespace or other separators
+          /// are allowed between any two tokens.
+          ///
+          /// For the start production, the ignore symbol is also added at the beginning and end.
+          pub fn insert_ignore_symbol(&mut self, ignore_symbol_name: &str) {
+              let start_id = self.start_production_id;
+              let ignore_sym = Symbol::NonTerminal(NonTerminal(ignore_symbol_name.to_string()));
+              insert_ignore_symbol_in_productions(
+                  &mut self.productions,
+                  &ignore_sym,
+                  Some(start_id),
+              );
           }
       }
 
@@ -2214,8 +2250,20 @@ local_system:
 
           /// Constructs a `GrammarDefinition` from an EBNF string.
           pub fn from_ebnf(ebnf_source: &str) -> Result<Self, String> {
-              let rules = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
-              GrammarDefinition::from_exprs(rules)
+              let parse_result = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
+
+              if let Some(ignore_name) = &parse_result.ignore_symbol_name {
+                  // Check that the ignore symbol is defined in the grammar rules
+                  if !parse_result.rules.iter().any(|(name, _)| name == ignore_name) {
+                      return Err(format!("Ignore symbol '{}' is not a defined non-terminal.", ignore_name));
+                  }
+              }
+
+              let mut grammar_def = GrammarDefinition::from_exprs(parse_result.rules)?;
+              if let Some(ignore_name) = &parse_result.ignore_symbol_name {
+                  grammar_def.insert_ignore_symbol(ignore_name);
+              }
+              Ok(grammar_def)
           }
 
           /// Constructs a `GrammarDefinition` from an EBNF file.
@@ -3872,6 +3920,43 @@ local_system:
           }
           
           kept_productions
+      }
+
+      /// Inserts an "ignore" symbol between every pair of symbols in the RHS of productions.
+      ///
+      /// This transformation is useful for grammars where whitespace or other separators
+      /// are allowed between any two tokens.
+      ///
+      /// # Arguments
+      /// * `productions` - A mutable slice of productions to be transformed in-place.
+      /// * `ignore_symbol` - The symbol to insert (e.g., a non-terminal for whitespace).
+      /// * `start_production_id` - An optional index of the grammar's start production. If provided,
+      ///   the ignore symbol will also be inserted at the very beginning and very end of the
+      ///   start production's RHS, in addition to being interspersed.
+      pub fn insert_ignore_symbol_in_productions(
+          productions: &mut [Production],
+          ignore_symbol: &Symbol,
+          start_production_id: Option<usize>,
+      ) {
+          for (i, prod) in productions.iter_mut().enumerate() {
+              if prod.rhs.is_empty() {
+                  continue;
+              }
+
+              let is_start_prod = start_production_id.map_or(false, |id| id == i);
+              let original_rhs = std::mem::take(&mut prod.rhs);
+              let mut new_rhs = Vec::with_capacity(original_rhs.len() * 2);
+
+              if is_start_prod { new_rhs.push(ignore_symbol.clone()); }
+
+              for (j, symbol) in original_rhs.into_iter().enumerate() {
+                  if j > 0 { new_rhs.push(ignore_symbol.clone()); }
+                  new_rhs.push(symbol);
+              }
+
+              if is_start_prod { new_rhs.push(ignore_symbol.clone()); }
+              prod.rhs = new_rhs;
+          }
       }
 
       pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {
@@ -6808,13 +6893,15 @@ local_system:
       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
 
     src/js.ebnf: |
+      !ignore ws;
+
       temp_start ::= if_statement+;
 
-      program ::= ws statement_list? ws ;
+      program ::= statement_list? ;
 
       ws ::= ( ' ' | '\t' | '\n' | '\r' )* ;
 
-      statement_list ::= statement ( ws statement )* ;
+      statement_list ::= statement statement* ;
 
       statement ::=
           block
@@ -6826,67 +6913,67 @@ local_system:
         | expression_statement
         ;
 
-      expression_statement ::= expression ws ';' ;
+      expression_statement ::= expression ';' ;
 
-      block ::= '{' ws statement_list? ws '}' ;
+      block ::= '{' statement_list? '}' ;
 
-      variable_statement ::= 'var' ws variable_declaration_list ws ';' ;
+      variable_statement ::= 'var' variable_declaration_list ';' ;
 
-      variable_declaration_list ::= variable_declaration ( ws ',' ws variable_declaration )* ;
+      variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
 
-      variable_declaration ::= identifier ( ws '=' ws expression )? ;
+      variable_declaration ::= identifier ( '=' expression )? ;
 
-      if_statement ::= 'if' ws '(' ws expression ws ')' ws statement ( ws 'else' ws statement )? ;
+      if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
 
       iteration_statement ::=
-          'while' ws '(' ws expression ws ')' ws statement
-        | 'for' ws '(' ws ( expression? | variable_statement ) ws ';' ws expression? ws ';' ws expression? ws ')' ws statement
+          'while' '(' expression ')' statement
+        | 'for' '(' ( expression? | variable_statement ) ';' expression? ';' expression? ')' statement
         ;
 
-      function_declaration ::= 'function' ws identifier ws '(' ws parameter_list? ws ')' ws block ;
+      function_declaration ::= 'function' identifier '(' parameter_list? ')' block ;
 
-      parameter_list ::= identifier ( ws ',' ws identifier )* ;
+      parameter_list ::= identifier ( ',' identifier )* ;
 
-      return_statement ::= 'return' ws expression? ws ';' ;
+      return_statement ::= 'return' expression? ';' ;
 
       expression ::= assignment_expression ;
 
       assignment_expression ::=
-          left_hand_side_expression ws '=' ws assignment_expression
+          left_hand_side_expression '=' assignment_expression
         | conditional_expression
         ;
 
       conditional_expression ::=
-          logical_or_expression ( ws '?' ws assignment_expression ws ':' ws assignment_expression )?
+          logical_or_expression ( '?' assignment_expression ':' assignment_expression )?
         ;
 
-      logical_or_expression ::= logical_and_expression ( ws '||' ws logical_and_expression )* ;
+      logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
 
-      logical_and_expression ::= bitwise_or_expression ( ws '&&' ws bitwise_or_expression )* ;
+      logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
 
-      bitwise_or_expression ::= bitwise_xor_expression ( ws '|' ws bitwise_xor_expression )* ;
+      bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
 
-      bitwise_xor_expression ::= bitwise_and_expression ( ws '^' ws bitwise_and_expression )* ;
+      bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
 
-      bitwise_and_expression ::= equality_expression ( ws '&' ws equality_expression )* ;
+      bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
 
-      equality_expression ::= relational_expression ( ( ws '==' ws | ws '!=' ws ) relational_expression )* ;
+      equality_expression ::= relational_expression ( ( '==' | '!=' ) relational_expression )* ;
 
-      relational_expression ::= shift_expression ( ( ws '<' ws | ws '>' ws | ws '<=' ws | ws '>=' ws ) shift_expression )* ;
+      relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' ) shift_expression )* ;
 
-      shift_expression ::= additive_expression ( ( ws '<<' ws | ws '>>' ws | ws '>>>' ws ) additive_expression )* ;
+      shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
 
-      additive_expression ::= multiplicative_expression ( ( ws '+' ws | ws '-' ws ) multiplicative_expression )* ;
+      additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
 
-      multiplicative_expression ::= unary_expression ( ( ws '*' ws | ws '/' ws | ws '%' ws ) unary_expression )* ;
+      multiplicative_expression ::= unary_expression ( ( '*' | '/' | '%' ) unary_expression )* ;
 
       unary_expression ::=
           postfix_expression
-        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' ) ws unary_expression
+        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' ) unary_expression
         ;
 
       postfix_expression ::=
-          left_hand_side_expression ( ws '++' | ws '--' )?
+          left_hand_side_expression ( '++' | '--' )?
         ;
 
       left_hand_side_expression ::=
@@ -6896,23 +6983,23 @@ local_system:
 
       new_expression ::=
           member_expression
-        | 'new' ws new_expression
+        | 'new' new_expression
         ;
 
       call_expression ::=
-          member_expression ws arguments
-        | call_expression ws arguments
-        | call_expression ws '[' ws expression ws ']'
-        | call_expression ws '.' ws identifier
+          member_expression arguments
+        | call_expression arguments
+        | call_expression '[' expression ']'
+        | call_expression '.' identifier
         ;
 
-      arguments ::= '(' ws ( assignment_expression ( ws ',' ws assignment_expression )* )? ws ')' ;
+      arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
 
       member_expression ::=
           primary_expression
-        | member_expression ws '[' ws expression ws ']'
-        | member_expression ws '.' ws identifier
-        | 'new' ws member_expression ws arguments
+        | member_expression '[' expression ']'
+        | member_expression '.' identifier
+        | 'new' member_expression arguments
         ;
 
       primary_expression ::=
@@ -6921,19 +7008,19 @@ local_system:
         | literal
         | array_literal
         | object_literal
-        | '(' ws expression ws ')'
+        | '(' expression ')'
         ;
 
-      array_literal ::= '[' ws ( elision? ws assignment_expression )? ( ws ',' ws elision? ws assignment_expression )* ws ','? ws elision? ws ']' ;
+      array_literal ::= '[' ( elision? assignment_expression )? ( ',' elision? assignment_expression )* ','? elision? ']' ;
 
-      elision ::= ( ',' ws )+ ;
+      elision ::= ','+ ;
 
-      object_literal ::= '{' ws ( property_assignment ( ws ',' ws property_assignment )* )? ws ','? ws '}' ;
+      object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
 
       property_assignment ::=
-          property_name ws ':' ws assignment_expression
-        | 'get' ws property_name ws '(' ws ')' ws block
-        | 'set' ws property_name ws '(' ws identifier ws ')' ws block
+          property_name ':' assignment_expression
+        | 'get' property_name '(' ')' block
+        | 'set' property_name '(' identifier ')' block
         ;
 
       property_name ::=
@@ -8337,7 +8424,7 @@ local_system:
                   r#"(?x)
               (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
               (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
-              (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}) |
+              (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!) |
               (?P<comment>\(\*([^*]|[\r\n]|(\*+([^*)]|[\r\n])))*\*+\)) |
               (?P<ws>\s+) |
               (?P<error>.)
@@ -8380,6 +8467,11 @@ local_system:
           Ok(tokens)
       }
 
+      pub(super) struct EbnfParseResult {
+          pub rules: Vec<(String, GrammarExpr)>,
+          pub ignore_symbol_name: Option<String>,
+      }
+
       pub(super) struct EbnfParser {
           tokens: Peekable<IntoIter<EbnfToken>>,
       }
@@ -8392,20 +8484,36 @@ local_system:
               })
           }
 
-          pub(super) fn parse(&mut self) -> Result<Vec<(String, GrammarExpr)>, String> {
-              let mut rules = Vec::new();
-              while self.tokens.peek().is_some() {
-                  rules.push(self.parse_rule()?);
-              }
-              Ok(rules)
-          }
-
           fn parse_rule(&mut self) -> Result<(String, GrammarExpr), String> {
               let name = self.expect_ident()?;
               self.expect_op("::=")?;
               let expr = self.parse_expression()?;
               self.expect_op(";")?;
               Ok((name, expr))
+          }
+
+          pub(super) fn parse(&mut self) -> Result<EbnfParseResult, String> {
+              let mut rules = Vec::new();
+              let mut ignore_symbol_name = None;
+
+              while self.tokens.peek().is_some() {
+                  if self.peek_op("!") {
+                      if ignore_symbol_name.is_some() {
+                          return Err("Duplicate ignore directive found".to_string());
+                      }
+                      self.consume_op("!")?;
+                      let directive_name = self.expect_ident()?;
+                      if directive_name != "ignore" {
+                          return Err(format!("Unknown directive: {}", directive_name));
+                      }
+                      let symbol_name = self.expect_ident()?;
+                      self.expect_op(";")?;
+                      ignore_symbol_name = Some(symbol_name);
+                  } else {
+                      rules.push(self.parse_rule()?);
+                  }
+              }
+              Ok(EbnfParseResult { rules, ignore_symbol_name })
           }
 
           fn parse_expression(&mut self) -> Result<GrammarExpr, String> {
@@ -8532,7 +8640,7 @@ local_system:
                   C ::= 'c'?;
               "#;
               let mut parser = EbnfParser::new(ebnf).unwrap();
-              let rules = parser.parse().unwrap();
+              let rules = parser.parse().unwrap().rules;
 
               let expected_rules = vec![
                   ("S".to_string(), sequence(vec![r#ref("A"), r#ref("B")])),
@@ -8565,7 +8673,7 @@ local_system:
     src/interface/interface.rs: |
       use crate::constraint::GrammarConstraint;
       use crate::debug;
-      use crate::interface::ebnf::EbnfParser;
+      use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
       use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::GLRParser;
@@ -8579,7 +8687,7 @@ local_system:
       use std::sync::Arc;
       use std::fs;
       use std::collections::BTreeMap as StdMap;
-      use crate::glr::analyze::simplify_grammar;
+      use crate::glr::analyze::{insert_ignore_symbol_in_productions, simplify_grammar};
 
       type LLMToken<'a> = &'a [u8];
       type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
@@ -8812,6 +8920,21 @@ local_system:
           pub fn simplify(&mut self) {
               // Simplify the grammar definition
               (self.productions, self.start_production_id) = simplify_grammar(&self.productions, self.start_production_id);
+          }
+
+          /// Inserts an "ignore" symbol between every pair of symbols in the RHS of productions.
+          /// This transformation is useful for grammars where whitespace or other separators
+          /// are allowed between any two tokens.
+          ///
+          /// For the start production, the ignore symbol is also added at the beginning and end.
+          pub fn insert_ignore_symbol(&mut self, ignore_symbol_name: &str) {
+              let start_id = self.start_production_id;
+              let ignore_sym = Symbol::NonTerminal(NonTerminal(ignore_symbol_name.to_string()));
+              insert_ignore_symbol_in_productions(
+                  &mut self.productions,
+                  &ignore_sym,
+                  Some(start_id),
+              );
           }
       }
 
@@ -9226,8 +9349,20 @@ local_system:
 
           /// Constructs a `GrammarDefinition` from an EBNF string.
           pub fn from_ebnf(ebnf_source: &str) -> Result<Self, String> {
-              let rules = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
-              GrammarDefinition::from_exprs(rules)
+              let parse_result = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
+
+              if let Some(ignore_name) = &parse_result.ignore_symbol_name {
+                  // Check that the ignore symbol is defined in the grammar rules
+                  if !parse_result.rules.iter().any(|(name, _)| name == ignore_name) {
+                      return Err(format!("Ignore symbol '{}' is not a defined non-terminal.", ignore_name));
+                  }
+              }
+
+              let mut grammar_def = GrammarDefinition::from_exprs(parse_result.rules)?;
+              if let Some(ignore_name) = &parse_result.ignore_symbol_name {
+                  grammar_def.insert_ignore_symbol(ignore_name);
+              }
+              Ok(grammar_def)
           }
 
           /// Constructs a `GrammarDefinition` from an EBNF file.
@@ -10884,6 +11019,43 @@ local_system:
           }
           
           kept_productions
+      }
+
+      /// Inserts an "ignore" symbol between every pair of symbols in the RHS of productions.
+      ///
+      /// This transformation is useful for grammars where whitespace or other separators
+      /// are allowed between any two tokens.
+      ///
+      /// # Arguments
+      /// * `productions` - A mutable slice of productions to be transformed in-place.
+      /// * `ignore_symbol` - The symbol to insert (e.g., a non-terminal for whitespace).
+      /// * `start_production_id` - An optional index of the grammar's start production. If provided,
+      ///   the ignore symbol will also be inserted at the very beginning and very end of the
+      ///   start production's RHS, in addition to being interspersed.
+      pub fn insert_ignore_symbol_in_productions(
+          productions: &mut [Production],
+          ignore_symbol: &Symbol,
+          start_production_id: Option<usize>,
+      ) {
+          for (i, prod) in productions.iter_mut().enumerate() {
+              if prod.rhs.is_empty() {
+                  continue;
+              }
+
+              let is_start_prod = start_production_id.map_or(false, |id| id == i);
+              let original_rhs = std::mem::take(&mut prod.rhs);
+              let mut new_rhs = Vec::with_capacity(original_rhs.len() * 2);
+
+              if is_start_prod { new_rhs.push(ignore_symbol.clone()); }
+
+              for (j, symbol) in original_rhs.into_iter().enumerate() {
+                  if j > 0 { new_rhs.push(ignore_symbol.clone()); }
+                  new_rhs.push(symbol);
+              }
+
+              if is_start_prod { new_rhs.push(ignore_symbol.clone()); }
+              prod.rhs = new_rhs;
+          }
       }
 
       pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {
@@ -13820,13 +13992,15 @@ local_system:
       //    or non-productive non-terminals), which could be considered a limitation of the validation step.
 
     src/js.ebnf: |
+      !ignore ws;
+
       temp_start ::= if_statement+;
 
-      program ::= ws statement_list? ws ;
+      program ::= statement_list? ;
 
       ws ::= ( ' ' | '\t' | '\n' | '\r' )* ;
 
-      statement_list ::= statement ( ws statement )* ;
+      statement_list ::= statement statement* ;
 
       statement ::=
           block
@@ -13838,67 +14012,67 @@ local_system:
         | expression_statement
         ;
 
-      expression_statement ::= expression ws ';' ;
+      expression_statement ::= expression ';' ;
 
-      block ::= '{' ws statement_list? ws '}' ;
+      block ::= '{' statement_list? '}' ;
 
-      variable_statement ::= 'var' ws variable_declaration_list ws ';' ;
+      variable_statement ::= 'var' variable_declaration_list ';' ;
 
-      variable_declaration_list ::= variable_declaration ( ws ',' ws variable_declaration )* ;
+      variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
 
-      variable_declaration ::= identifier ( ws '=' ws expression )? ;
+      variable_declaration ::= identifier ( '=' expression )? ;
 
-      if_statement ::= 'if' ws '(' ws expression ws ')' ws statement ( ws 'else' ws statement )? ;
+      if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
 
       iteration_statement ::=
-          'while' ws '(' ws expression ws ')' ws statement
-        | 'for' ws '(' ws ( expression? | variable_statement ) ws ';' ws expression? ws ';' ws expression? ws ')' ws statement
+          'while' '(' expression ')' statement
+        | 'for' '(' ( expression? | variable_statement ) ';' expression? ';' expression? ')' statement
         ;
 
-      function_declaration ::= 'function' ws identifier ws '(' ws parameter_list? ws ')' ws block ;
+      function_declaration ::= 'function' identifier '(' parameter_list? ')' block ;
 
-      parameter_list ::= identifier ( ws ',' ws identifier )* ;
+      parameter_list ::= identifier ( ',' identifier )* ;
 
-      return_statement ::= 'return' ws expression? ws ';' ;
+      return_statement ::= 'return' expression? ';' ;
 
       expression ::= assignment_expression ;
 
       assignment_expression ::=
-          left_hand_side_expression ws '=' ws assignment_expression
+          left_hand_side_expression '=' assignment_expression
         | conditional_expression
         ;
 
       conditional_expression ::=
-          logical_or_expression ( ws '?' ws assignment_expression ws ':' ws assignment_expression )?
+          logical_or_expression ( '?' assignment_expression ':' assignment_expression )?
         ;
 
-      logical_or_expression ::= logical_and_expression ( ws '||' ws logical_and_expression )* ;
+      logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
 
-      logical_and_expression ::= bitwise_or_expression ( ws '&&' ws bitwise_or_expression )* ;
+      logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
 
-      bitwise_or_expression ::= bitwise_xor_expression ( ws '|' ws bitwise_xor_expression )* ;
+      bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
 
-      bitwise_xor_expression ::= bitwise_and_expression ( ws '^' ws bitwise_and_expression )* ;
+      bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
 
-      bitwise_and_expression ::= equality_expression ( ws '&' ws equality_expression )* ;
+      bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
 
-      equality_expression ::= relational_expression ( ( ws '==' ws | ws '!=' ws ) relational_expression )* ;
+      equality_expression ::= relational_expression ( ( '==' | '!=' ) relational_expression )* ;
 
-      relational_expression ::= shift_expression ( ( ws '<' ws | ws '>' ws | ws '<=' ws | ws '>=' ws ) shift_expression )* ;
+      relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' ) shift_expression )* ;
 
-      shift_expression ::= additive_expression ( ( ws '<<' ws | ws '>>' ws | ws '>>>' ws ) additive_expression )* ;
+      shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
 
-      additive_expression ::= multiplicative_expression ( ( ws '+' ws | ws '-' ws ) multiplicative_expression )* ;
+      additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
 
-      multiplicative_expression ::= unary_expression ( ( ws '*' ws | ws '/' ws | ws '%' ws ) unary_expression )* ;
+      multiplicative_expression ::= unary_expression ( ( '*' | '/' | '%' ) unary_expression )* ;
 
       unary_expression ::=
           postfix_expression
-        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' ) ws unary_expression
+        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' ) unary_expression
         ;
 
       postfix_expression ::=
-          left_hand_side_expression ( ws '++' | ws '--' )?
+          left_hand_side_expression ( '++' | '--' )?
         ;
 
       left_hand_side_expression ::=
@@ -13908,23 +14082,23 @@ local_system:
 
       new_expression ::=
           member_expression
-        | 'new' ws new_expression
+        | 'new' new_expression
         ;
 
       call_expression ::=
-          member_expression ws arguments
-        | call_expression ws arguments
-        | call_expression ws '[' ws expression ws ']'
-        | call_expression ws '.' ws identifier
+          member_expression arguments
+        | call_expression arguments
+        | call_expression '[' expression ']'
+        | call_expression '.' identifier
         ;
 
-      arguments ::= '(' ws ( assignment_expression ( ws ',' ws assignment_expression )* )? ws ')' ;
+      arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
 
       member_expression ::=
           primary_expression
-        | member_expression ws '[' ws expression ws ']'
-        | member_expression ws '.' ws identifier
-        | 'new' ws member_expression ws arguments
+        | member_expression '[' expression ']'
+        | member_expression '.' identifier
+        | 'new' member_expression arguments
         ;
 
       primary_expression ::=
@@ -13933,19 +14107,19 @@ local_system:
         | literal
         | array_literal
         | object_literal
-        | '(' ws expression ws ')'
+        | '(' expression ')'
         ;
 
-      array_literal ::= '[' ws ( elision? ws assignment_expression )? ( ws ',' ws elision? ws assignment_expression )* ws ','? ws elision? ws ']' ;
+      array_literal ::= '[' ( elision? assignment_expression )? ( ',' elision? assignment_expression )* ','? elision? ']' ;
 
-      elision ::= ( ',' ws )+ ;
+      elision ::= ','+ ;
 
-      object_literal ::= '{' ws ( property_assignment ( ws ',' ws property_assignment )* )? ws ','? ws '}' ;
+      object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
 
       property_assignment ::=
-          property_name ws ':' ws assignment_expression
-        | 'get' ws property_name ws '(' ws ')' ws block
-        | 'set' ws property_name ws '(' ws identifier ws ')' ws block
+          property_name ':' assignment_expression
+        | 'get' property_name '(' ')' block
+        | 'set' property_name '(' identifier ')' block
         ;
 
       property_name ::=
@@ -14043,7 +14217,7 @@ local_system:
       letter ::=
           'a'|'b'|'c'|'d'|'e'|'f'|'g'|'h'|'i'|'j'|'k'|'l'|'m'|'n'|'o'|'p'|'q'|'r'|'s'|'t'|'u'|'v'|'w'|'x'|'y'|'z' |
           'A'|'B'|'C'|'D'|'E'|'F'|'G'|'H'|'I'|'J'|'K'|'L'|'M'|'N'|'O'|'P'|'Q'|'R'|'S'|'T'|'U'|'V'|'W'|'X'|'Y'|'Z' ;
-  diffs_applied_this_send: true
+  diffs_applied_this_send: false
 system:
   message: |2
 
@@ -15392,7 +15566,7 @@ messages:
                   r#"(?x)
               (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
               (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
-              (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}) |
+              (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!) |
               (?P<comment>\(\*([^*]|[\r\n]|(\*+([^*)]|[\r\n])))*\*+\)) |
               (?P<ws>\s+) |
               (?P<error>.)
@@ -15435,6 +15609,11 @@ messages:
           Ok(tokens)
       }
 
+      pub(super) struct EbnfParseResult {
+          pub rules: Vec<(String, GrammarExpr)>,
+          pub ignore_symbol_name: Option<String>,
+      }
+
       pub(super) struct EbnfParser {
           tokens: Peekable<IntoIter<EbnfToken>>,
       }
@@ -15447,20 +15626,36 @@ messages:
               })
           }
 
-          pub(super) fn parse(&mut self) -> Result<Vec<(String, GrammarExpr)>, String> {
-              let mut rules = Vec::new();
-              while self.tokens.peek().is_some() {
-                  rules.push(self.parse_rule()?);
-              }
-              Ok(rules)
-          }
-
           fn parse_rule(&mut self) -> Result<(String, GrammarExpr), String> {
               let name = self.expect_ident()?;
               self.expect_op("::=")?;
               let expr = self.parse_expression()?;
               self.expect_op(";")?;
               Ok((name, expr))
+          }
+
+          pub(super) fn parse(&mut self) -> Result<EbnfParseResult, String> {
+              let mut rules = Vec::new();
+              let mut ignore_symbol_name = None;
+
+              while self.tokens.peek().is_some() {
+                  if self.peek_op("!") {
+                      if ignore_symbol_name.is_some() {
+                          return Err("Duplicate ignore directive found".to_string());
+                      }
+                      self.consume_op("!")?;
+                      let directive_name = self.expect_ident()?;
+                      if directive_name != "ignore" {
+                          return Err(format!("Unknown directive: {}", directive_name));
+                      }
+                      let symbol_name = self.expect_ident()?;
+                      self.expect_op(";")?;
+                      ignore_symbol_name = Some(symbol_name);
+                  } else {
+                      rules.push(self.parse_rule()?);
+                  }
+              }
+              Ok(EbnfParseResult { rules, ignore_symbol_name })
           }
 
           fn parse_expression(&mut self) -> Result<GrammarExpr, String> {
@@ -15587,7 +15782,7 @@ messages:
                   C ::= 'c'?;
               "#;
               let mut parser = EbnfParser::new(ebnf).unwrap();
-              let rules = parser.parse().unwrap();
+              let rules = parser.parse().unwrap().rules;
 
               let expected_rules = vec![
                   ("S".to_string(), sequence(vec![r#ref("A"), r#ref("B")])),
@@ -15625,7 +15820,7 @@ messages:
       ```rust 'src/interface/interface.rs'
       use crate::constraint::GrammarConstraint;
       use crate::debug;
-      use crate::interface::ebnf::EbnfParser;
+      use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
       use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::GLRParser;
@@ -15639,7 +15834,7 @@ messages:
       use std::sync::Arc;
       use std::fs;
       use std::collections::BTreeMap as StdMap;
-      use crate::glr::analyze::simplify_grammar;
+      use crate::glr::analyze::{insert_ignore_symbol_in_productions, simplify_grammar};
 
       type LLMToken<'a> = &'a [u8];
       type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
@@ -15872,6 +16067,21 @@ messages:
           pub fn simplify(&mut self) {
               // Simplify the grammar definition
               (self.productions, self.start_production_id) = simplify_grammar(&self.productions, self.start_production_id);
+          }
+
+          /// Inserts an "ignore" symbol between every pair of symbols in the RHS of productions.
+          /// This transformation is useful for grammars where whitespace or other separators
+          /// are allowed between any two tokens.
+          ///
+          /// For the start production, the ignore symbol is also added at the beginning and end.
+          pub fn insert_ignore_symbol(&mut self, ignore_symbol_name: &str) {
+              let start_id = self.start_production_id;
+              let ignore_sym = Symbol::NonTerminal(NonTerminal(ignore_symbol_name.to_string()));
+              insert_ignore_symbol_in_productions(
+                  &mut self.productions,
+                  &ignore_sym,
+                  Some(start_id),
+              );
           }
       }
 
@@ -16286,8 +16496,20 @@ messages:
 
           /// Constructs a `GrammarDefinition` from an EBNF string.
           pub fn from_ebnf(ebnf_source: &str) -> Result<Self, String> {
-              let rules = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
-              GrammarDefinition::from_exprs(rules)
+              let parse_result = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
+
+              if let Some(ignore_name) = &parse_result.ignore_symbol_name {
+                  // Check that the ignore symbol is defined in the grammar rules
+                  if !parse_result.rules.iter().any(|(name, _)| name == ignore_name) {
+                      return Err(format!("Ignore symbol '{}' is not a defined non-terminal.", ignore_name));
+                  }
+              }
+
+              let mut grammar_def = GrammarDefinition::from_exprs(parse_result.rules)?;
+              if let Some(ignore_name) = &parse_result.ignore_symbol_name {
+                  grammar_def.insert_ignore_symbol(ignore_name);
+              }
+              Ok(grammar_def)
           }
 
           /// Constructs a `GrammarDefinition` from an EBNF file.
@@ -17964,6 +18186,43 @@ messages:
           }
           
           kept_productions
+      }
+
+      /// Inserts an "ignore" symbol between every pair of symbols in the RHS of productions.
+      ///
+      /// This transformation is useful for grammars where whitespace or other separators
+      /// are allowed between any two tokens.
+      ///
+      /// # Arguments
+      /// * `productions` - A mutable slice of productions to be transformed in-place.
+      /// * `ignore_symbol` - The symbol to insert (e.g., a non-terminal for whitespace).
+      /// * `start_production_id` - An optional index of the grammar's start production. If provided,
+      ///   the ignore symbol will also be inserted at the very beginning and very end of the
+      ///   start production's RHS, in addition to being interspersed.
+      pub fn insert_ignore_symbol_in_productions(
+          productions: &mut [Production],
+          ignore_symbol: &Symbol,
+          start_production_id: Option<usize>,
+      ) {
+          for (i, prod) in productions.iter_mut().enumerate() {
+              if prod.rhs.is_empty() {
+                  continue;
+              }
+
+              let is_start_prod = start_production_id.map_or(false, |id| id == i);
+              let original_rhs = std::mem::take(&mut prod.rhs);
+              let mut new_rhs = Vec::with_capacity(original_rhs.len() * 2);
+
+              if is_start_prod { new_rhs.push(ignore_symbol.clone()); }
+
+              for (j, symbol) in original_rhs.into_iter().enumerate() {
+                  if j > 0 { new_rhs.push(ignore_symbol.clone()); }
+                  new_rhs.push(symbol);
+              }
+
+              if is_start_prod { new_rhs.push(ignore_symbol.clone()); }
+              prod.rhs = new_rhs;
+          }
       }
 
       pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {
@@ -20935,13 +21194,15 @@ messages:
       filename: src/glr/tests.rs
   - user: |-
       ```text 'src/js.ebnf'
+      !ignore ws;
+
       temp_start ::= if_statement+;
 
-      program ::= ws statement_list? ws ;
+      program ::= statement_list? ;
 
       ws ::= ( ' ' | '\t' | '\n' | '\r' )* ;
 
-      statement_list ::= statement ( ws statement )* ;
+      statement_list ::= statement statement* ;
 
       statement ::=
           block
@@ -20953,67 +21214,67 @@ messages:
         | expression_statement
         ;
 
-      expression_statement ::= expression ws ';' ;
+      expression_statement ::= expression ';' ;
 
-      block ::= '{' ws statement_list? ws '}' ;
+      block ::= '{' statement_list? '}' ;
 
-      variable_statement ::= 'var' ws variable_declaration_list ws ';' ;
+      variable_statement ::= 'var' variable_declaration_list ';' ;
 
-      variable_declaration_list ::= variable_declaration ( ws ',' ws variable_declaration )* ;
+      variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
 
-      variable_declaration ::= identifier ( ws '=' ws expression )? ;
+      variable_declaration ::= identifier ( '=' expression )? ;
 
-      if_statement ::= 'if' ws '(' ws expression ws ')' ws statement ( ws 'else' ws statement )? ;
+      if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
 
       iteration_statement ::=
-          'while' ws '(' ws expression ws ')' ws statement
-        | 'for' ws '(' ws ( expression? | variable_statement ) ws ';' ws expression? ws ';' ws expression? ws ')' ws statement
+          'while' '(' expression ')' statement
+        | 'for' '(' ( expression? | variable_statement ) ';' expression? ';' expression? ')' statement
         ;
 
-      function_declaration ::= 'function' ws identifier ws '(' ws parameter_list? ws ')' ws block ;
+      function_declaration ::= 'function' identifier '(' parameter_list? ')' block ;
 
-      parameter_list ::= identifier ( ws ',' ws identifier )* ;
+      parameter_list ::= identifier ( ',' identifier )* ;
 
-      return_statement ::= 'return' ws expression? ws ';' ;
+      return_statement ::= 'return' expression? ';' ;
 
       expression ::= assignment_expression ;
 
       assignment_expression ::=
-          left_hand_side_expression ws '=' ws assignment_expression
+          left_hand_side_expression '=' assignment_expression
         | conditional_expression
         ;
 
       conditional_expression ::=
-          logical_or_expression ( ws '?' ws assignment_expression ws ':' ws assignment_expression )?
+          logical_or_expression ( '?' assignment_expression ':' assignment_expression )?
         ;
 
-      logical_or_expression ::= logical_and_expression ( ws '||' ws logical_and_expression )* ;
+      logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
 
-      logical_and_expression ::= bitwise_or_expression ( ws '&&' ws bitwise_or_expression )* ;
+      logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
 
-      bitwise_or_expression ::= bitwise_xor_expression ( ws '|' ws bitwise_xor_expression )* ;
+      bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
 
-      bitwise_xor_expression ::= bitwise_and_expression ( ws '^' ws bitwise_and_expression )* ;
+      bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
 
-      bitwise_and_expression ::= equality_expression ( ws '&' ws equality_expression )* ;
+      bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
 
-      equality_expression ::= relational_expression ( ( ws '==' ws | ws '!=' ws ) relational_expression )* ;
+      equality_expression ::= relational_expression ( ( '==' | '!=' ) relational_expression )* ;
 
-      relational_expression ::= shift_expression ( ( ws '<' ws | ws '>' ws | ws '<=' ws | ws '>=' ws ) shift_expression )* ;
+      relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' ) shift_expression )* ;
 
-      shift_expression ::= additive_expression ( ( ws '<<' ws | ws '>>' ws | ws '>>>' ws ) additive_expression )* ;
+      shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
 
-      additive_expression ::= multiplicative_expression ( ( ws '+' ws | ws '-' ws ) multiplicative_expression )* ;
+      additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
 
-      multiplicative_expression ::= unary_expression ( ( ws '*' ws | ws '/' ws | ws '%' ws ) unary_expression )* ;
+      multiplicative_expression ::= unary_expression ( ( '*' | '/' | '%' ) unary_expression )* ;
 
       unary_expression ::=
           postfix_expression
-        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' ) ws unary_expression
+        | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' ) unary_expression
         ;
 
       postfix_expression ::=
-          left_hand_side_expression ( ws '++' | ws '--' )?
+          left_hand_side_expression ( '++' | '--' )?
         ;
 
       left_hand_side_expression ::=
@@ -21023,23 +21284,23 @@ messages:
 
       new_expression ::=
           member_expression
-        | 'new' ws new_expression
+        | 'new' new_expression
         ;
 
       call_expression ::=
-          member_expression ws arguments
-        | call_expression ws arguments
-        | call_expression ws '[' ws expression ws ']'
-        | call_expression ws '.' ws identifier
+          member_expression arguments
+        | call_expression arguments
+        | call_expression '[' expression ']'
+        | call_expression '.' identifier
         ;
 
-      arguments ::= '(' ws ( assignment_expression ( ws ',' ws assignment_expression )* )? ws ')' ;
+      arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
 
       member_expression ::=
           primary_expression
-        | member_expression ws '[' ws expression ws ']'
-        | member_expression ws '.' ws identifier
-        | 'new' ws member_expression ws arguments
+        | member_expression '[' expression ']'
+        | member_expression '.' identifier
+        | 'new' member_expression arguments
         ;
 
       primary_expression ::=
@@ -21048,19 +21309,19 @@ messages:
         | literal
         | array_literal
         | object_literal
-        | '(' ws expression ws ')'
+        | '(' expression ')'
         ;
 
-      array_literal ::= '[' ws ( elision? ws assignment_expression )? ( ws ',' ws elision? ws assignment_expression )* ws ','? ws elision? ws ']' ;
+      array_literal ::= '[' ( elision? assignment_expression )? ( ',' elision? assignment_expression )* ','? elision? ']' ;
 
-      elision ::= ( ',' ws )+ ;
+      elision ::= ','+ ;
 
-      object_literal ::= '{' ws ( property_assignment ( ws ',' ws property_assignment )* )? ws ','? ws '}' ;
+      object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
 
       property_assignment ::=
-          property_name ws ':' ws assignment_expression
-        | 'get' ws property_name ws '(' ws ')' ws block
-        | 'set' ws property_name ws '(' ws identifier ws ')' ws block
+          property_name ':' assignment_expression
+        | 'get' property_name '(' ')' block
+        | 'set' property_name '(' identifier ')' block
         ;
 
       property_name ::=
@@ -21163,458 +21424,664 @@ messages:
     metadata:
       filename: src/js.ebnf
   - user: |-
-      Add to src/glr/analyze.rs a transformation that inserts an 'ignore' symbol into productions. It should essentially insert this symbol in-between every existing pair of symbols in the productions. It shouldn't insert before the first or after the last symbol in any production, with the exception of the start production where it should be inserted before the first and after the last symbol (as well as interspersed in the middle). To identify the initial production, pass `start_production_id: Option<usize>`. If it isn't passed, don't insert at the start or end for any of the productions (don't assume the first production is the start one).
-      Add a method to `GrammarDefinition` that does this.
-
-      Make it possible to specify a (single) ignore symbol in an EBNF grammar definition. Note that this means our EBNF format is maturing a bit. It's not just a bunch of rules any more - it can include more complex stuff. As such, define a struct to hold the output of eg `EbnfParser::parse`.
-
-      Modify src/js.ebnf accordingly to ignore whitespaces. This should make it much more succinct (don't need to intersperse ws manually).
+      The EBNF format right now doesn't make it easy to define terminals. I've thought about allowing regexes to be defined eg as `/abc+/`, but this doesn't solve the problem. Often, we want to define intermediate regex expressions and combine these into larger ones. e.g. we might define alphabetic characters as `LETTER`, numeric characters as `DIGIT`, and then define `ID_START` as `LETTER | '_'`, and finally define an identifier as `ID_START (ID_START | DIGIT)*`. But without a way to define intermediate regexes, we're kind of stuck.
+      I want to keep it all in one file.
+      Let's do it by taking on the convention that terminals start with upper case. So eg an OR statement on the rhs of an uppercase lhs would be a regex OR, not a grammar OR, if that makes sense.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your code. Here are the git diff patches for the requested changes.
+      Hello! As a helpful assistant, I've analyzed your request and prepared the necessary changes. Here are the diff patches for the files that need to be modified.
 
-      I've implemented the "ignore" symbol functionality. This includes:
-      1.  Updating the EBNF parser to recognize a new `!ignore <non_terminal>;` directive.
-      2.  Adding a transformation in `glr/analyze.rs` to intersperse the specified ignore symbol throughout the grammar's productions.
-      3.  Integrating this into `GrammarDefinition` so that it's automatically applied when an EBNF file with the directive is loaded.
-      4.  Updating `js.ebnf` to use this new feature, which significantly simplifies its rules by removing the need for manual whitespace (`ws`) handling.
+      I've implemented the requested EBNF feature to allow defining terminals using uppercase rule names. This change primarily affects `src/interface/interface.rs`, where the EBNF parsing result is now processed to distinguish between grammar rules and terminal definitions.
 
-      Here are the patches for each modified file:
+      Additionally, I've included the other changes you provided:
+      - The JavaScript grammar (`src/js.ebnf`) has been updated.
+      - The corresponding test file (`src/test_constraint_js.rs`) has been updated, including a filter on the vocabulary to speed up the test.
+      - A function to resolve direct right-recursion has been added in `src/glr/analyze.rs` and is now used during parser generation in `src/glr/table.rs`.
+      - The test for right-recursion in `src/glr/tests.rs` has been updated to test the newly implemented `resolve_direct_right_recursion` function.
+
+      Here are the patches for each file:
 
       ```diff
       --- a/src/glr/analyze.rs
       +++ b/src/glr/analyze.rs
-      @@ -581,6 +581,41 @@
-           kept_productions
+      @@ -402,28 +402,28 @@
+       /// * `start_production_id` - An optional index of the grammar's start production. If provided,
+       ///   the ignore symbol will also be inserted at the very beginning and very end of the
+       ///   start production's RHS, in addition to being interspersed.
+       pub fn insert_ignore_symbol_in_productions(
+           productions: &mut [Production],
+      -    ignore_symbol_name: &str,
+      +    ignore_symbol: &Symbol,
+           start_production_id: Option<usize>,
+       ) {
+      -    let ignore_symbol = Symbol::NonTerminal(NonTerminal(ignore_symbol_name.to_string()));
+           for (i, prod) in productions.iter_mut().enumerate() {
+               if prod.rhs.is_empty() {
+                   continue;
+               }
+       
+               let is_start_prod = start_production_id.map_or(false, |id| id == i);
+               let original_rhs = std::mem::take(&mut prod.rhs);
+               let mut new_rhs = Vec::with_capacity(original_rhs.len() * 2);
+       
+               if is_start_prod { new_rhs.push(ignore_symbol.clone()); }
+       
+               for (j, symbol) in original_rhs.into_iter().enumerate() {
+                   if j > 0 { new_rhs.push(ignore_symbol.clone()); }
+                   new_rhs.push(symbol);
+               }
+       
+               if is_start_prod { new_rhs.push(ignore_symbol.clone()); }
+               prod.rhs = new_rhs;
+           }
        }
        
-      +/// Inserts an "ignore" symbol between every pair of symbols in the RHS of productions.
-      +///
-      +/// This transformation is useful for grammars where whitespace or other separators
-      +/// are allowed between any two tokens.
-      +///
-      +/// # Arguments
-      +/// * `productions` - A mutable slice of productions to be transformed in-place.
-      +/// * `ignore_symbol` - The symbol to insert (e.g., a non-terminal for whitespace).
-      +/// * `start_production_id` - An optional index of the grammar's start production. If provided,
-      +///   the ignore symbol will also be inserted at the very beginning and very end of the
-      +///   start production's RHS, in addition to being interspersed.
-      +pub fn insert_ignore_symbol_in_productions(
-      +    productions: &mut [Production],
-      +    ignore_symbol: &Symbol,
-      +    start_production_id: Option<usize>,
-      +) {
-      +    for (i, prod) in productions.iter_mut().enumerate() {
-      +        if prod.rhs.is_empty() {
-      +            continue;
-      +        }
-      +
-      +        let is_start_prod = start_production_id.map_or(false, |id| id == i);
-      +        let original_rhs = std::mem::take(&mut prod.rhs);
-      +        let mut new_rhs = Vec::with_capacity(original_rhs.len() * 2);
-      +
-      +        if is_start_prod { new_rhs.push(ignore_symbol.clone()); }
-      +
-      +        for (j, symbol) in original_rhs.into_iter().enumerate() {
-      +            if j > 0 { new_rhs.push(ignore_symbol.clone()); }
-      +            new_rhs.push(symbol);
-      +        }
-      +
-      +        if is_start_prod { new_rhs.push(ignore_symbol.clone()); }
-      +        prod.rhs = new_rhs;
-      +    }
-      +}
-      +
        pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {
            todo!()
        }
+      @@ -492,11 +492,109 @@
+       
+       pub fn resolve_right_recursion(
+           productions: &mut Vec<Production>,
+           mut new_name_generator: impl FnMut(&str) -> String,
+       ) {
+      -    todo!("resolve_right_recursion");
+      +    todo!("resolve_right_recursion");
+       }
+       
+       pub fn resolve_direct_right_recursion(
+           productions: &mut Vec<Production>,
+           mut new_name_generator: impl FnMut(&str) -> String,
+       ) {
+      +    // This function transforms direct right-recursion into left-recursion while preserving
+      +    // the original order of productions as much as possible.
+      +    //
+      +    // The transformation for a non-terminal `A` with rules:
+      +    //   A -> α₁ A | ... | αₘ A  (right-recursive rules, where αᵢ is a prefix)
+      +    //   A -> β₁ | ... | βₙ      (non-recursive rules)
+      +    // is to replace them with:
+      +    //   A  -> A' β₁ | ... | A' βₙ
+      +    //   A' -> A' α₁ | ... | A' αₘ | ε
+      +    // where `A'` is a new non-terminal. This generates the same language `(α₁|...|αₘ)* (β₁|...|βₙ)`
+      +    // using left-recursion.
+      +    //
+      +    // The implementation preserves order by iterating through the original production list.
+      +    // When it first encounters a rule for a right-recursive non-terminal, it replaces all
+      +    // rules for that non-terminal with the new, transformed set of rules at that position.
+      +
+      +    // 1. Group productions by LHS to easily access all rules for a given non-terminal.
+      +    // The BTreeMap is just for efficient lookup; we don't iterate over its keys for ordering.
+      +    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
+      +    for prod in productions.iter().cloned() {
+      +        prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod);
+      +    }
+      +
+      +    // 2. Identify all non-terminals that have simple direct right-recursive rules.
+      +    let mut recursive_nts = BTreeSet::new();
+      +    for (nt, prods_for_nt) in &prods_by_lhs {
+      +        let is_recursive = prods_for_nt.iter().any(|p| {
+      +            // A rule `A -> α A` is simple direct right-recursive if:
+      +            // a) `α` is not empty (i.e., rule is not `A -> A`).
+      +            if p.rhs.len() < 2 { return false; }
+      +            // b) The last symbol is `A`.
+      +            if p.rhs.last() != Some(&Symbol::NonTerminal(p.lhs.clone())) { return false; }
+      +            // c) `α` (the prefix) does not contain `A`.
+      +            let alpha = &p.rhs[..p.rhs.len() - 1];
+      +            !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
+      +        });
+      +        if is_recursive {
+      +            recursive_nts.insert(nt.clone());
+      +        }
+      +    }
+      +
+      +    // 3. Build the new production list, preserving order.
+      +    let mut new_productions = Vec::new();
+      +    let mut processed_recursive_nts = BTreeSet::new();
+      +
+      +    for prod in productions.iter().cloned() {
+      +        let lhs = &prod.lhs;
+      +
+      +        if !recursive_nts.contains(lhs) {
+      +            // This production's LHS is not right-recursive, so we can keep the production as is.
+      +            new_productions.push(prod);
+      +            continue;
+      +        }
+      +
+      +        // The LHS is right-recursive. We need to process all of its rules at once.
+      +        // We do this only the first time we encounter a rule for this LHS.
+      +        if processed_recursive_nts.contains(lhs) {
+      +            // We've already handled this NT and its rules, so we skip this and subsequent productions for it.
+      +            continue;
+      +        }
+      +        processed_recursive_nts.insert(lhs.clone());
+      +
+      +        // --- Perform the transformation for `lhs` ---
+      +        let prods_for_nt = prods_by_lhs.get(lhs).unwrap();
+      +
+      +        let (recursive_rules, other_rules): (Vec<_>, Vec<_>) = prods_for_nt.iter().cloned().partition(|p| {
+      +            if p.rhs.len() < 2 { return false; }
+      +            if p.rhs.last() != Some(&Symbol::NonTerminal(p.lhs.clone())) { return false; }
+      +            let alpha = &p.rhs[..p.rhs.len() - 1];
+      +            !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
+      +        });
+      +
+      +        // `recursive_rules` is guaranteed to be non-empty because `lhs` is in `recursive_nts`.
+      +        let new_nt = NonTerminal(new_name_generator(&lhs.0));
+      +        crate::debug!(2, "Resolving direct right-recursion for '{}', creating new non-terminal '{}'", lhs.0, new_nt.0);
+      +
+      +        // Create new rules for the original non-terminal `A`: `A -> A' βⱼ`.
+      +        // The order of these new rules is based on the original order of the `β` rules.
+      +        for non_rec_rule in &other_rules {
+      +            let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
+      +            new_rhs.extend_from_slice(&non_rec_rule.rhs);
+      +            let new_prod = Production { lhs: lhs.clone(), rhs: new_rhs };
+      +            crate::debug!(2, "  Transforming non-recursive rule '{}' -> '{}'", non_rec_rule, new_prod);
+      +            new_productions.push(new_prod);
+      +        }
+      +
+      +        // Create rules for the new non-terminal `A'`: `A' -> A' αᵢ` and `A' -> ε`.
+      +        for rec_rule in &recursive_rules {
+      +            let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
+      +            let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
+      +            new_rhs.extend_from_slice(alpha);
+      +            let new_prod = Production { lhs: new_nt.clone(), rhs: new_rhs };
+      +            crate::debug!(2, "  Transforming recursive rule '{}' -> '{}'", rec_rule, new_prod);
+      +            new_productions.push(new_prod);
+      +        }
+      +        let epsilon_prod = Production { lhs: new_nt.clone(), rhs: vec![] }; // A' -> ε
+      +        crate::debug!(2, "  Adding new epsilon rule: '{}'", epsilon_prod);
+      +        new_productions.push(epsilon_prod);
+      +    }
+      +
+      +    // 4. Replace the original productions with the new set.
+      +    productions.clear();
+      +    productions.extend(new_productions);
+      +}
 
       ```
       ```diff
-      --- a/src/interface/ebnf.rs
-      +++ b/src/interface/ebnf.rs
-      @@ -10,8 +10,8 @@
-           TOKEN_REGEX.get_or_init(|| {
-               Regex::new(
-                   r#"(?x)
-      -        (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
-      +        (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
-               (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
-      -        (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}) |
-      +        (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!) |
-               (?P<comment>\(\*([^*]|[\r\n]|(\*+([^*)]|[\r\n])))*\*+\)) |
-               (?P<ws>\s+) |
-               (?P<error>.)
-      @@ -51,6 +51,11 @@
-           Ok(tokens)
-       }
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -5,7 +5,7 @@
+       use bimap::BiBTreeMap;
+       use std::collections::{HashMap, VecDeque};
+       use std::collections::{BTreeMap, BTreeSet};
+      -use std::fmt::Display;
+      -use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, simplify_grammar, validate};
+      +use std::fmt::{Display, Formatter};
+      +use crate::glr::analyze::{create_unique_name_generator, drop_dead, remove_productions_with_undefined_nonterminals, resolve_direct_right_recursion, simplify_grammar, validate};
+       pub use crate::types::{TerminalID};
+       use crate::json_serialization::{JSONConvertible, JSONNode}; // Added
+       use std::collections::BTreeMap as StdMap;
+      @@ -410,11 +410,18 @@
+           let original_productions = productions.to_vec();
        
-      +pub(super) struct EbnfParseResult {
-      +    pub rules: Vec<(String, GrammarExpr)>,
-      +    pub ignore_symbol_name: Option<String>,
-      +}
+           crate::debug!(2, "Removing productions with undefined non-terminals");
+      -    let productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
+      +    let mut productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
+           // (productions, start_production_id) = simplify_grammar(&mut productions, start_production_id);
+       
+      +    // Resolve right-recursion
+      +    let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
+      +    let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
+      +    // crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
+      +    resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
+      +    crate::debug!(2, "After direct right recursion:\n{}", display_productions(&productions));
       +
-       pub(super) struct EbnfParser {
-           tokens: Peekable<IntoIter<EbnfToken>>,
-       }
-      @@ -63,13 +68,6 @@
-               })
-           }
+           // Resolve right-recursion
+      -    let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
+      -    let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
+      -    let mut productions = productions.to_vec();
+      -    // crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
+      -    crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
+      -    println!("After direct right recursion:\n{}", display_productions(&productions));
+      +    // let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
+      +    // let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
+      +    // // crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
+      +    // resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
+      +    // crate::debug!(2, "After direct right recursion:\n{}", display_productions(&productions));
        
-      -    pub(super) fn parse(&mut self) -> Result<Vec<(String, GrammarExpr)>, String> {
-      -        let mut rules = Vec::new();
-      -        while self.tokens.peek().is_some() {
-      -            rules.push(self.parse_rule()?);
-      -        }
-      -        Ok(rules)
-      -    }
+           // After recursion resolution, new non-terminals may have been added.
+           // We need to update the non_terminal_map.
+
+      ```
+      ```diff
+      --- a/src/glr/tests.rs
+      +++ b/src/glr/tests.rs
+      @@ -1,6 +1,6 @@
+       use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal};
+       use crate::glr::parser::{GLRParser, GLRParserState};
+      -use crate::glr::table::{generate_glr_parser, TerminalID};
+      -use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+      +use crate::glr::table::{generate_glr_parser, TerminalID, resolve_direct_right_recursion};
+      +use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar}; // Import the analyze module
+       use bimap::BiBTreeMap;
+       use std::collections::BTreeSet;
+       use crate::interface::display_productions;
+      @@ -361,7 +361,7 @@
+       }
+       
+       #[test]
+      -fn test_resolve_right_recursion() {
+      +fn test_resolve_direct_right_recursion() {
+           // Helper to compare production sets regardless of order
+           let compare_prods = |p1: &[Production], p2: &[Production]| -> bool {
+               let set1: BTreeSet<_> = p1.iter().cloned().collect();
+      @@ -378,61 +378,21 @@
+               prod("S_prime", vec![nt("S_prime"), t("a")]),
+               prod("S_prime", vec![]),
+           ];
+      -    resolve_right_recursion(&mut prods1, |name| format!("{}_prime", name));
+      -    assert!(compare_prods(&prods1, &expected1), "Test 1 failed. Got: {:?}", prods1);
+      +    resolve_direct_right_recursion(&mut prods1, &mut |name| format!("{}_prime", name));
+      +    assert!(compare_prods(&prods1, &expected1), "Test 1 (direct) failed. Got: {:?}", prods1);
+       
+           // --- Test Case 2: No Right-Recursion (should not change) ---
+           let mut prods2 = vec![
+               prod("S", vec![nt("S"), t("a")]),
+               prod("S", vec![t("b")]),
+           ];
+           let expected2 = prods2.clone();
+      -    resolve_right_recursion(&mut prods2, |name| format!("{}_prime", name));
+      -    assert!(compare_prods(&prods2, &expected2), "Test 2 failed. Got: {:?}", prods2);
       -
-           fn parse_rule(&mut self) -> Result<(String, GrammarExpr), String> {
-               let name = self.expect_ident()?;
-               self.expect_op("::=")?;
-      @@ -77,6 +75,30 @@
-               self.expect_op(";")?;
-               Ok((name, expr))
-           }
-      +
-      +    pub(super) fn parse(&mut self) -> Result<EbnfParseResult, String> {
-      +        let mut rules = Vec::new();
-      +        let mut ignore_symbol_name = None;
-      +
-      +        while self.tokens.peek().is_some() {
-      +            if self.peek_op("!") {
-      +                if ignore_symbol_name.is_some() {
-      +                    return Err("Duplicate ignore directive found".to_string());
-      +                }
-      +                self.consume_op("!")?;
-      +                let directive_name = self.expect_ident()?;
-      +                if directive_name != "ignore" {
-      +                    return Err(format!("Unknown directive: {}", directive_name));
-      +                }
-      +                let symbol_name = self.expect_ident()?;
-      +                self.expect_op(";")?;
-      +                ignore_symbol_name = Some(symbol_name);
-      +            } else {
-      +                rules.push(self.parse_rule()?);
-      +            }
-      +        }
-      +        Ok(EbnfParseResult { rules, ignore_symbol_name })
-      +    }
+      -    // --- Test Case 3: Indirect Right-Recursion ---
+      -    let mut prods3 = vec![
+      -        prod("A", vec![t("a"), nt("B")]),
+      -        prod("A", vec![t("c")]),
+      -        prod("B", vec![t("b"), nt("A")]),
+      -        prod("B", vec![t("d")]),
+      -    ];
+      -    // Expected transformation:
+      -    // A is fine.
+      -    // B -> b A | d  (A is substituted)
+      -    // B -> b (a B) | b c | d
+      -    // B -> b a B | b c | d (Now B has direct right-recursion)
+      -    // B -> B' (b c) | B' d
+      -    // B' -> B' (b a) | ε
+      -    let expected3 = vec![
+      -        prod("A", vec![t("a"), nt("B")]),
+      -        prod("A", vec![t("c")]),
+      -        prod("B", vec![nt("B_prime"), t("b"), t("c")]),
+      -        prod("B", vec![nt("B_prime"), t("d")]),
+      -        prod("B_prime", vec![nt("B_prime"), t("b"), t("a")]),
+      -        prod("B_prime", vec![]),
+      -    ];
+      -    resolve_right_recursion(&mut prods3, |name| format!("{}_prime", name));
+      -    assert!(compare_prods(&prods3, &expected3), "Test 3 failed. Got: {:?}", prods3);
+      -
+      -    // --- Test Case 4: Hidden Direct Right-Recursion ---
+      -    let mut prods4 = vec![
+      -        prod("S", vec![t("a"), nt("S"), nt("N")]),
+      -        prod("S", vec![t("b")]),
+      -        prod("N", vec![]),
+      -    ];
+      -    let expected4 = vec![
+      -        prod("S", vec![nt("S_prime"), t("b")]),
+      -        prod("S_prime", vec![nt("S_prime"), t("a"), nt("N")]),
+      -        prod("S_prime", vec![]),
+      -        prod("N", vec![]),
+      -    ];
+      -    resolve_right_recursion(&mut prods4, |name| format!("{}_prime", name));
+      -    assert!(compare_prods(&prods4, &expected4), "Test 4 failed. Got: {:?}", prods4);
+      +    resolve_direct_right_recursion(&mut prods2, &mut |name| format!("{}_prime", name));
+      +    assert!(compare_prods(&prods2, &expected2), "Test 2 (no-op) failed. Got: {:?}", prods2);
        
-           fn parse_expression(&mut self) -> Result<GrammarExpr, String> {
-               let mut choices = vec![self.parse_sequence()?];
-      @@ -166,7 +188,7 @@
-                   C ::= 'c'?;
-               "#;
-               let mut parser = EbnfParser::new(ebnf).unwrap();
-      -        let rules = parser.parse().unwrap();
-      +        let rules = parser.parse().unwrap().rules;
+           // --- Test Case 5: Multiple Non-Recursive Choices ---
+           let mut prods5 = vec![
+               prod("S", vec![t("a"), nt("S")]),
+               prod("S", vec![t("b")]),
+               prod("S", vec![t("c")]),
+      @@ -443,8 +403,8 @@
+               prod("S_prime", vec![nt("S_prime"), t("a")]),
+               prod("S_prime", vec![]),
+           ];
+      -    resolve_right_recursion(&mut prods5, |name| format!("{}_prime", name));
+      -    assert!(compare_prods(&prods5, &expected5), "Test 5 failed. Got: {:?}", prods5);
+      +    resolve_direct_right_recursion(&mut prods5, &mut |name| format!("{}_prime", name));
+      +    assert!(compare_prods(&prods5, &expected5), "Test 3 (multi-non-rec) failed. Got: {:?}", prods5);
        
-               let expected_rules = vec![
-                   ("S".to_string(), sequence(vec![r#ref("A"), r#ref("B")])),
+           // --- Test Case 6: Multiple Recursive Choices ---
+           let mut prods6 = vec![
+      @@ -458,8 +418,8 @@
+               prod("S_prime", vec![nt("S_prime"), t("b")]),
+               prod("S_prime", vec![]),
+           ];
+      -    resolve_right_recursion(&mut prods6, |name| format!("{}_prime", name));
+      -    assert!(compare_prods(&prods6, &expected6), "Test 6 failed. Got: {:?}", prods6);
+      +    resolve_direct_right_recursion(&mut prods6, &mut |name| format!("{}_prime", name));
+      +    assert!(compare_prods(&prods6, &expected6), "Test 4 (multi-rec) failed. Got: {:?}", prods6);
+       
+           // --- Test Case 7: Both Left and Right Recursive ---
+           // S -> S S | a
+      @@ -473,8 +433,8 @@
+               prod("S_prime", vec![nt("S_prime"), nt("S")]),
+               prod("S_prime", vec![]),
+           ];
+      -    resolve_right_recursion(&mut prods7, |name| format!("{}_prime", name));
+      -    assert!(compare_prods(&prods7, &expected7), "Test 7 failed. Got: {:?}", prods7);
+      +    resolve_direct_right_recursion(&mut prods7, &mut |name| format!("{}_prime", name));
+      +    assert!(compare_prods(&prods7, &expected7), "Test 5 (mixed rec) failed. Got: {:?}", prods7);
+       }
+       
+       #[test]
 
       ```
       ```diff
       --- a/src/interface/interface.rs
       +++ b/src/interface/interface.rs
-      @@ -1,6 +1,6 @@
+      @@ -1,14 +1,15 @@
        use crate::constraint::GrammarConstraint;
        use crate::debug;
-      -use crate::interface::ebnf::EbnfParser;
-      +use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
-       use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
+       use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
+      -use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
+      +use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
        use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
        use crate::glr::parser::GLRParser;
-      @@ -12,7 +12,7 @@
+       use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
+       use crate::json_serialization::{JSONConvertible, JSONNode};
+       use crate::types::TerminalID as GrammarTokenID; // May not be used directly here anymore
+       use bimap::BiBTreeMap;
+       use kdam::tqdm;
+       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
        use std::fmt::{Debug, Display, Formatter};
        use std::sync::Arc;
        use std::fs;
        use std::collections::BTreeMap as StdMap;
-      -use crate::glr::analyze::simplify_grammar;
+      -use crate::glr::analyze::{insert_ignore_symbol_in_productions, simplify_grammar};
       +use crate::glr::analyze::{insert_ignore_symbol_in_productions, simplify_grammar};
        
        type LLMToken<'a> = &'a [u8];
        type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
-      @@ -271,6 +271,21 @@
-           pub fn simplify(&mut self) {
-               // Simplify the grammar definition
+      @@ -211,20 +212,6 @@
                (self.productions, self.start_production_id) = simplify_grammar(&self.productions, self.start_production_id);
-      +    }
-      +
-      +    /// Inserts an "ignore" symbol between every pair of symbols in the RHS of productions.
-      +    /// This transformation is useful for grammars where whitespace or other separators
-      +    /// are allowed between any two tokens.
-      +    ///
-      +    /// For the start production, the ignore symbol is also added at the beginning and end.
-      +    pub fn insert_ignore_symbol(&mut self, ignore_symbol_name: &str) {
-      +        let start_id = self.start_production_id;
-      +        let ignore_sym = Symbol::NonTerminal(NonTerminal(ignore_symbol_name.to_string()));
-      +        insert_ignore_symbol_in_productions(
-      +            &mut self.productions,
-      +            &ignore_sym,
-      +            Some(start_id),
-      +        );
            }
+       
+      -    /// Inserts an "ignore" symbol between every pair of symbols in the RHS of productions.
+      -    /// This transformation is useful for grammars where whitespace or other separators
+      -    /// are allowed between any two tokens.
+      -    ///
+      -    /// For the start production, the ignore symbol is also added at the beginning and end.
+      -    pub fn insert_ignore_symbol(&mut self, ignore_symbol_name: &str) {
+      -        let start_id = self.start_production_id;
+      -        let ignore_sym = Symbol::NonTerminal(NonTerminal(ignore_symbol_name.to_string()));
+      -        insert_ignore_symbol_in_productions(
+      -            &mut self.productions,
+      -            &ignore_sym,
+      -            Some(start_id),
+      -        );
+      -    }
        }
        
-      @@ -600,15 +615,28 @@
+       impl GrammarDefinition {
+      @@ -266,6 +253,7 @@
+               terminal_expr_to_group_id: &mut BiBTreeMap<Expr, usize>,
+               next_terminal_group_id: &mut usize,
+               per_base_counters: &mut HashMap<String, usize>,
+               all_names: &mut HashSet<String>,
+      +        defined_terminal_names: &BTreeSet<String>,
+           ) -> (Vec<Symbol>, Vec<Production>) { // Return symbols and new productions
+               match expr {
+                   GrammarExpr::Literal(bytes) => {
+      @@ -302,7 +290,11 @@
+                       }
+                   }
+                   GrammarExpr::Ref(name) => {
+      -                (vec![Symbol::NonTerminal(NonTerminal(name.clone()))], Vec::new()) // Return symbols and empty productions
+      +                if defined_terminal_names.contains(name) {
+      +                    (vec![Symbol::Terminal(Terminal(name.clone()))], Vec::new())
+      +                } else {
+      +                    (vec![Symbol::NonTerminal(NonTerminal(name.clone()))], Vec::new())
+      +                }
+                   }
+                   GrammarExpr::Sequence(exprs) => {
+                       let mut combined_symbols = Vec::new();
+      @@ -316,6 +308,7 @@
+                               next_terminal_group_id,
+                               per_base_counters,
+                               all_names,
+      +                        defined_terminal_names,
+                           );
+                           combined_symbols.extend(symbols);
+                           combined_productions.extend(new_productions);
+      @@ -341,6 +334,7 @@
+                               next_terminal_group_id,
+                               per_base_counters,
+                               all_names,
+      +                        defined_terminal_names,
+                           );
+                           choice_defining_productions.push(Production {
+                               lhs: nt.clone(),
+      @@ -363,6 +357,7 @@
+                           next_terminal_group_id,
+                           per_base_counters,
+                           all_names,
+      +                    defined_terminal_names,
+                       ) // Return symbols and productions from the equivalent Choice
+                   }
+                   GrammarExpr::Repeat(expr_box) => {
+      @@ -381,6 +376,7 @@
+                           next_terminal_group_id,
+                           per_base_counters,
+                           all_names,
+      +                    defined_terminal_names,
+                       );
        
+                       let mut current_level_productions = Vec::new();
+      @@ -406,6 +402,100 @@
+               }
+           }
+       
+      +    /// Helper to recursively resolve a `GrammarExpr` for a terminal into a `finite_automata::Expr`.
+      +    fn convert_grammar_expr_to_regex_expr(
+      +        grammar_expr: &GrammarExpr,
+      +        terminal_defs: &BTreeMap<String, GrammarExpr>,
+      +        resolved_terminals: &mut BTreeMap<String, Expr>,
+      +        processing_stack: &mut BTreeSet<String>,
+      +    ) -> Result<Expr, String> {
+      +        match grammar_expr {
+      +            GrammarExpr::Literal(bytes) => Ok(Expr::U8Seq(bytes.clone())),
+      +            GrammarExpr::RegexExpr(r) => {
+      +                // This case is for when `regex(...)` is used directly in a rule.
+      +                // It's not expected in EBNF-defined terminals but supported for programmatic ones.
+      +                Ok(r.clone())
+      +            }
+      +            GrammarExpr::Ref(name) => {
+      +                // A ref inside a terminal def must be to another terminal def.
+      +                if !name.chars().next().ok_or("Empty identifier")?.is_ascii_uppercase() {
+      +                    return Err(format!("Reference to non-terminal '{}' within a terminal definition is not allowed.", name));
+      +                }
+      +                Self::resolve_terminal_expr(name, terminal_defs, resolved_terminals, processing_stack)
+      +            }
+      +            GrammarExpr::Sequence(exprs) => {
+      +                let children = exprs.iter()
+      +                    .map(|e| Self::convert_grammar_expr_to_regex_expr(e, terminal_defs, resolved_terminals, processing_stack))
+      +                    .collect::<Result<Vec<_>, _>>()?;
+      +                Ok(Expr::Seq(children))
+      +            }
+      +            GrammarExpr::Choice(exprs) => {
+      +                let children = exprs.iter()
+      +                    .map(|e| Self::convert_grammar_expr_to_regex_expr(e, terminal_defs, resolved_terminals, processing_stack))
+      +                    .collect::<Result<Vec<_>, _>>()?;
+      +                Ok(Expr::Choice(children))
+      +            }
+      +            GrammarExpr::Optional(expr) => {
+      +                let child = Self::convert_grammar_expr_to_regex_expr(expr, terminal_defs, resolved_terminals, processing_stack)?;
+      +                Ok(Expr::Quantifier(Box::new(child), QuantifierType::ZeroOrOne))
+      +            }
+      +            GrammarExpr::Repeat(expr) => {
+      +                let child = Self::convert_grammar_expr_to_regex_expr(expr, terminal_defs, resolved_terminals, processing_stack)?;
+      +                Ok(Expr::Quantifier(Box::new(child), QuantifierType::ZeroOrMore))
+      +            }
+      +        }
+      +    }
+      +
+      +    /// Helper to resolve a named terminal definition into a `finite_automata::Expr`.
+      +    fn resolve_terminal_expr(
+      +        name: &str,
+      +        terminal_defs: &BTreeMap<String, GrammarExpr>,
+      +        resolved_terminals: &mut BTreeMap<String, Expr>,
+      +        processing_stack: &mut BTreeSet<String>,
+      +    ) -> Result<Expr, String> {
+      +        if let Some(expr) = resolved_terminals.get(name) {
+      +            return Ok(expr.clone());
+      +        }
+      +        if processing_stack.contains(name) {
+      +            return Err(format!("Circular dependency in terminal definitions involving: {}", name));
+      +        }
+      +        processing_stack.insert(name.to_string());
+      +
+      +        let grammar_expr = terminal_defs.get(name)
+      +            .ok_or_else(|| format!("Undefined terminal referenced: {}", name))?;
+      +
+      +        let result = Self::convert_grammar_expr_to_regex_expr(grammar_expr, terminal_defs, resolved_terminals, processing_stack)?;
+      +
+      +        processing_stack.remove(name);
+      +        resolved_terminals.insert(name.to_string(), result.clone());
+      +        Ok(result)
+      +    }
+      +
+      +    /// Constructs a `GrammarDefinition` from grammar rules and terminal definitions.
+      +    /// This is the new internal entry point for `from_ebnf`.
+      +    fn from_ebnf_defs(
+      +        rule_defs: Vec<(String, GrammarExpr)>,
+      +        terminal_defs: BTreeMap<String, GrammarExpr>,
+      +    ) -> Result<Self, String> {
+      +        // 1. Resolve terminal definitions into finite_automata::Expr
+      +        let mut resolved_terminals = BTreeMap::new();
+      +        let mut processing_stack = BTreeSet::new();
+      +        for name in terminal_defs.keys() {
+      +            Self::resolve_terminal_expr(name, &terminal_defs, &mut resolved_terminals, &mut processing_stack)?;
+      +        }
+      +
+      +        // 2. Create a new GrammarDefinition from the non-terminal rules, providing the pre-defined terminals.
+      +        let mut grammar_def = Self::from_exprs(rule_defs)?;
+      +
+      +        // 3. Add the EBNF-defined terminals to the grammar definition's maps.
+      +        for (name, expr) in resolved_terminals {
+      +            let group_id = grammar_def.terminal_name_to_group_id.len();
+      +            grammar_def.terminal_name_to_group_id.insert(name, group_id);
+      +            grammar_def.terminal_expr_to_group_id.insert(expr, group_id);
+      +        }
+      +
+      +        Ok(grammar_def)
+      +    }
+      +
+           /// Constructs a `GrammarDefinition` from a list of grammar expressions.
+           pub fn from_exprs(exprs: Vec<(String, GrammarExpr)>) -> Result<Self, String> {
+               if exprs.is_empty() {
+      @@ -417,6 +507,7 @@
+               let mut terminal_expr_to_group_id = BiBTreeMap::new();
+               let mut next_terminal_group_id = 0;
+       
+      +        // In this simpler `from_exprs` pathway, there are no pre-defined terminals.
+               let mut all_names: HashSet<String> = exprs.iter().map(|(name, _)| name.clone()).collect();
+               let mut per_base_counters: HashMap<String, usize> = HashMap::new();
+       
+      @@ -434,6 +525,8 @@
+               });
+               let start_production_id = 0; // The augmented start production is always the first one.
+       
+      +        let defined_terminal_names = BTreeSet::new(); // No pre-defined terminals
+      +
+               for (name, expr) in tqdm!(exprs.iter()) {
+                   let lhs = NonTerminal(name.clone());
+                   let lhs_name_str = name; // Base name for generated sub-rules/terminals
+      @@ -448,6 +541,7 @@
+                               &mut next_terminal_group_id,
+                               &mut per_base_counters,
+                               &mut all_names,
+      +                        &defined_terminal_names,
+                           );
+                           productions.push(Production { lhs: lhs.clone(), rhs: rhs_symbols_for_arm });
+                           productions.extend(new_productions_for_arm); // Extend with productions from the arm's processing
+      @@ -462,6 +556,7 @@
+                           &mut next_terminal_group_id,
+                           &mut per_base_counters,
+                           &mut all_names,
+      +                    &defined_terminal_names,
+                       );
+                       productions.push(Production { lhs, rhs: rhs_symbols });
+                       productions.extend(new_productions_for_rhs); // Extend with productions from processing the rhs
+      @@ -580,17 +675,39 @@
            /// Constructs a `GrammarDefinition` from an EBNF string.
            pub fn from_ebnf(ebnf_source: &str) -> Result<Self, String> {
-      -        let rules = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
-      -        GrammarDefinition::from_exprs(rules)
-      +        let parse_result = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
+               let parse_result = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
+      +        let EbnfParseResult { rules, ignore_symbol_name } = parse_result;
       +
-      +        if let Some(ignore_name) = &parse_result.ignore_symbol_name {
-      +            // Check that the ignore symbol is defined in the grammar rules
-      +            if !parse_result.rules.iter().any(|(name, _)| name == ignore_name) {
-      +                return Err(format!("Ignore symbol '{}' is not a defined non-terminal.", ignore_name));
+      +        let mut terminal_defs = BTreeMap::new();
+      +        let mut rule_defs = Vec::new();
+      +
+      +        for (name, expr) in rules {
+      +            let first_char = name.chars().next().ok_or_else(|| "Rule with empty name found.".to_string())?;
+      +            if first_char.is_ascii_uppercase() {
+      +                terminal_defs.insert(name, expr);
+      +            } else {
+      +                rule_defs.push((name, expr));
+      +            }
+      +        }
+       
+               if let Some(ignore_name) = &parse_result.ignore_symbol_name {
+      -            // Check that the ignore symbol is defined in the grammar rules
+      -            if !parse_result.rules.iter().any(|(name, _)| name == ignore_name) {
+      -                return Err(format!("Ignore symbol '{}' is not a defined non-terminal.", ignore_name));
+      -            }
+      -        }
+      -
+      -        let mut grammar_def = GrammarDefinition::from_exprs(parse_result.rules)?;
+      -        if let Some(ignore_name) = &parse_result.ignore_symbol_name {
+      -            grammar_def.insert_ignore_symbol(ignore_name);
+      +            let is_defined = rule_defs.iter().any(|(name, _)| name == ignore_name) || terminal_defs.contains_key(ignore_name);
+      +            if !is_defined {
+      +                return Err(format!("Ignore symbol '{}' is not a defined non-terminal or terminal.", ignore_name));
       +            }
       +        }
       +
-      +        let mut grammar_def = GrammarDefinition::from_exprs(parse_result.rules)?;
-      +        if let Some(ignore_name) = &parse_result.ignore_symbol_name {
-      +            grammar_def.insert_ignore_symbol(ignore_name);
-      +        }
-      +        Ok(grammar_def)
+      +        let mut grammar_def = Self::from_ebnf_defs(rule_defs, terminal_defs)?;
+      +
+      +        if let Some(ignore_name) = &ignore_symbol_name {
+      +            let first_char = ignore_name.chars().next().unwrap();
+      +            let ignore_sym = if first_char.is_ascii_uppercase() {
+      +                Symbol::Terminal(Terminal(ignore_name.to_string()))
+      +            } else {
+      +                Symbol::NonTerminal(NonTerminal(ignore_name.to_string()))
+      +            };
+      +            let start_id = grammar_def.start_production_id;
+      +            insert_ignore_symbol_in_productions(&mut grammar_def.productions, &ignore_sym, Some(start_id));
+               }
+               Ok(grammar_def)
            }
-       
-           /// Constructs a `GrammarDefinition` from an EBNF file.
-           pub fn from_ebnf_file(path: &str) -> Result<Self, String> {
-               let content = fs::read_to_string(path)
-                   .map_err(|e| format!("Failed to read EBNF file '{}': {}", path, e))?;
-               Self::from_ebnf(&content)
-           }
-       
-       
 
       ```
       ```diff
       --- a/src/js.ebnf
       +++ b/src/js.ebnf
-      @@ -1,58 +1,58 @@
-      +!ignore ws;
-      +
-       temp_start ::= if_statement+;
+      @@ -1,5 +1,7 @@
+       !ignore ws;
        
-      -program ::= ws statement_list? ws ;
+      -program ::= statement_list? ;
+      +temp_start ::= if_statement+;
+      +
       +program ::= statement_list? ;
        
        ws ::= ( ' ' | '\t' | '\n' | '\r' )* ;
        
-      -statement_list ::= statement ( ws statement )* ;
-      +statement_list ::= statement statement* ;
-       
-       statement ::=
-           block
-         | variable_statement
-         | if_statement
-         | iteration_statement
-         | function_declaration
-         | return_statement
-         | expression_statement
-         ;
-       
-      -expression_statement ::= expression ws ';' ;
-      -
-      -block ::= '{' ws statement_list? ws '}' ;
-      -
-      -variable_statement ::= 'var' ws variable_declaration_list ws ';' ;
-      -
-      -variable_declaration_list ::= variable_declaration ( ws ',' ws variable_declaration )* ;
-      -
-      -variable_declaration ::= identifier ( ws '=' ws expression )? ;
-      -
-      -if_statement ::= 'if' ws '(' ws expression ws ')' ws statement ( ws 'else' ws statement )? ;
-      +expression_statement ::= expression ';' ;
-      +
-      +block ::= '{' statement_list? '}' ;
-      +
-      +variable_statement ::= 'var' variable_declaration_list ';' ;
-      +
-      +variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
-      +
-      +variable_declaration ::= identifier ( '=' expression )? ;
-      +
-      +if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
-       
-       iteration_statement ::=
-      -    'while' ws '(' ws expression ws ')' ws statement
-      -  | 'for' ws '(' ws ( expression? | variable_statement ) ws ';' ws expression? ws ';' ws expression? ws ')' ws statement
-      -  ;
-      -
-      -function_declaration ::= 'function' ws identifier ws '(' ws parameter_list? ws ')' ws block ;
-      -
-      -parameter_list ::= identifier ( ws ',' ws identifier )* ;
-      -
-      -return_statement ::= 'return' ws expression? ws ';' ;
-      +    'while' '(' expression ')' statement
-      +  | 'for' '(' ( expression? | variable_statement ) ';' expression? ';' expression? ')' statement
-      +  ;
-      +
-      +function_declaration ::= 'function' identifier '(' parameter_list? ')' block ;
-      +
-      +parameter_list ::= identifier ( ',' identifier )* ;
-      +
-      +return_statement ::= 'return' expression? ';' ;
-       
-       expression ::= assignment_expression ;
-       
-       assignment_expression ::=
-      -    left_hand_side_expression ws '=' ws assignment_expression
-      +    left_hand_side_expression '=' assignment_expression
-         | conditional_expression
-         ;
-       
-       conditional_expression ::=
-      -    logical_or_expression ( ws '?' ws assignment_expression ws ':' ws assignment_expression )?
-      -  ;
-      -
-      -logical_or_expression ::= logical_and_expression ( ws '||' ws logical_and_expression )* ;
-      -
-      -logical_and_expression ::= bitwise_or_expression ( ws '&&' ws bitwise_or_expression )* ;
-      -
-      -bitwise_or_expression ::= bitwise_xor_expression ( ws '|' ws bitwise_xor_expression )* ;
-      -
-      -bitwise_xor_expression ::= bitwise_and_expression ( ws '^' ws bitwise_and_expression )* ;
-      -
-      -bitwise_and_expression ::= equality_expression ( ws '&' ws equality_expression )* ;
-      -
-      -equality_expression ::= relational_expression ( ( ws '==' ws | ws '!=' ws ) relational_expression )* ;
-      -
-      -relational_expression ::= shift_expression ( ( ws '<' ws | ws '>' ws | ws '<=' ws | ws '>=' ws ) shift_expression )* ;
-      -
-      -shift_expression ::= additive_expression ( ( ws '<<' ws | ws '>>' ws | ws '>>>' ws ) additive_expression )* ;
-      -
-      -additive_expression ::= multiplicative_expression ( ( ws '+' ws | ws '-' ws ) multiplicative_expression )* ;
-      -
-      -multiplicative_expression ::= unary_expression ( ( ws '*' ws | ws '/' ws | ws '%' ws ) unary_expression )* ;
-      +    logical_or_expression ( '?' assignment_expression ':' assignment_expression )?
-      +  ;
-      +
-      +logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
-      +
-      +logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
-      +
-      +bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
-      +
-      +bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
-      +
-      +bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
-      +
-      +equality_expression ::= relational_expression ( ( '==' | '!=' ) relational_expression )* ;
-      +
-      +relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' ) shift_expression )* ;
-      +
-      +shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
-      +
-      +additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-      +
-      +multiplicative_expression ::= unary_expression ( ( '*' | '/' | '%' ) unary_expression )* ;
-       
-       unary_expression ::=
-           postfix_expression
-      -  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' ) ws unary_expression
-      +  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' ) unary_expression
-         ;
-       
-       postfix_expression ::=
-      -    left_hand_side_expression ( ws '++' | ws '--' )?
-      +    left_hand_side_expression ( '++' | '--' )?
-         ;
-       
-       left_hand_side_expression ::=
-      @@ -61,29 +61,29 @@
-         ;
-       
-       new_expression ::=
-           member_expression
-      -  | 'new' ws new_expression
-      +  | 'new' new_expression
-         ;
-       
-       call_expression ::=
-      -    member_expression ws arguments
-      -  | call_expression ws arguments
-      -  | call_expression ws '[' ws expression ws ']'
-      -  | call_expression ws '.' ws identifier
-      -  ;
-      -
-      -arguments ::= '(' ws ( assignment_expression ( ws ',' ws assignment_expression )* )? ws ')' ;
-      +    member_expression arguments
-      +  | call_expression arguments
-      +  | call_expression '[' expression ']'
-      +  | call_expression '.' identifier
-      +  ;
-      +
-      +arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
-       
-       member_expression ::=
-           primary_expression
-      -  | member_expression ws '[' ws expression ws ']'
-      -  | member_expression ws '.' ws identifier
-      -  | 'new' ws member_expression ws arguments
-      +  | member_expression '[' expression ']'
-      +  | member_expression '.' identifier
-      +  | 'new' member_expression arguments
-         ;
-       
-       primary_expression ::=
-           'this'
-         | identifier
-         | literal
-         | array_literal
-         | object_literal
-      -  | '(' ws expression ws ')'
-      +  | '(' expression ')'
-         ;
-       
-      -array_literal ::= '[' ws ( elision? ws assignment_expression )? ( ws ',' ws elision? ws assignment_expression )* ws ','? ws elision? ws ']' ;
-      -
-      -elision ::= ( ',' ws )+ ;
-      -
-      -object_literal ::= '{' ws ( property_assignment ( ws ',' ws property_assignment )* )? ws ','? ws '}' ;
-      +array_literal ::= '[' ( elision? assignment_expression )? ( ',' elision? assignment_expression )* ','? elision? ']' ;
-      +
-      +elision ::= ','+ ;
-      +
-      +object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
-       
-       property_assignment ::=
-      -    property_name ws ':' ws assignment_expression
-      -  | 'get' ws property_name ws '(' ws ')' ws block
-      -  | 'set' ws property_name ws '(' ws identifier ws ')' ws block
-      +    property_name ':' assignment_expression
-      +  | 'get' property_name '(' ')' block
-      +  | 'set' property_name '(' identifier ')' block
-         ;
-       
-       property_name ::=
 
       ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 4 diff block(s) to process using custom patcher.
+      ```diff
+      --- a/src/test_constraint_js.rs
+      +++ b/src/test_constraint_js.rs
+      @@ -610,7 +610,8 @@
+           // llm_token_map.retain(|v, _| v.len() <= 2);
+           // llm_token_map.retain(|v, _| [b"x".as_ref(), b" =".as_ref()].contains(&v.as_ref()));
+           // llm_token_map.retain(|v, _| [b"x".as_ref(), b"=".as_ref(), b" "].contains(&v.as_ref()));
+      -    // llm_token_map.retain(|v, _| [b"'".as_ref()].contains(&v.as_ref()));
+      +    // llm_token_map.retain(|v, _| [b"'".as_ref()].contains(&v.as_ref()));
+      +    llm_token_map.retain(|v, _| v.len() == 1);
+       
+           // Print the vocab
+           println!("GPT-2 vocab loaded and processed into LLMTokenMap ({} tokens, max_original_id: {}).", llm_token_map.len(), max_original_llm_token_id_val);
 
-      --- Processing Diff Block 1 ---
-      Identified target file: src/glr/analyze.rs
-      Applying patch to 'src/glr/analyze.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/analyze.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: src/interface/ebnf.rs
-      Applying patch to 'src/interface/ebnf.rs' using custom patcher...
-      Successfully applied patch and wrote to src/interface/ebnf.rs.
-
-      --- Processing Diff Block 3 ---
-      Identified target file: src/interface/interface.rs
-      Applying patch to 'src/interface/interface.rs' using custom patcher...
-      Successfully applied patch and wrote to src/interface/interface.rs.
-
-      --- Processing Diff Block 4 ---
-      Identified target file: src/js.ebnf
-      Applying patch to 'src/js.ebnf' using custom patcher...
-      Successfully applied patch and wrote to src/js.ebnf.
+      ```
     metadata:
 ...
