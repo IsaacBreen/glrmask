@@ -353,6 +353,8 @@ impl GrammarDefinition {
                         per_base_counters,
                         all_names,
                     );
+                    dbg!(&expr);
+                    dbg!(&terminal_name);
                     let group_id = *next_terminal_group_id;
                     terminal_name_to_group_id.insert(terminal_name.clone(), group_id);
                     terminal_expr_to_group_id.insert(regex_expr.clone(), group_id);
