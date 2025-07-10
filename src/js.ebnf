@@ -149,17 +149,17 @@ numeric_literal ::= decimal_literal ;
 
 decimal_literal ::= decimal_integer_literal '.' decimal_digits? exponent_part? | '.' decimal_digits exponent_part? | decimal_integer_literal exponent_part? ;
 
-decimal_integer_literal ::= '0' | (non_zero_digit decimal_digits?) ;
+decimal_integer_literal ::= '0' | non_zero_digit decimal_digits? ;
 
 decimal_digits ::= decimal_digit+ ;
 
-decimal_digit ::= /[0-9]/ ;
+decimal_digit ::= '0' | '1' | '2' | '3' | '4' | '4' | '5' | '6' | '7' | '8' | '9' ;
 
-non_zero_digit ::= /[1-9]/ ;
+non_zero_digit ::= '1' | '2' | '3' | '4' | '4' | '5' | '6' | '7' | '8' | '9' ;
 
 exponent_part ::= exponent_indicator signed_integer ;
 
-exponent_indicator ::= /[eE]/ ;
+exponent_indicator ::= 'e' | 'E' ;
 
 signed_integer ::= ( '+' | '-' )? decimal_digits ;
 
@@ -212,12 +212,14 @@ hex_escape_sequence ::= 'x' hex_digit hex_digit ;
 
 unicode_escape_sequence ::= 'u' hex_digit hex_digit hex_digit hex_digit ;
 
-hex_digit ::= /[0-9a-fA-F]/ ;
+hex_digit ::= '0'|'1'|'2'|'3'|'4'|'5'|'6'|'7'|'8'|'9'|'a'|'b'|'c'|'d'|'e'|'f'|'A'|'B'|'C'|'D'|'E'|'F' ;
 
 identifier ::= identifier_start identifier_part* ;
 
-identifier_start ::= /[a-zA-Z_$]/ ;
+identifier_start ::= letter | '$' | '_' ;
 
-identifier_part ::= /[a-zA-Z0-9_$]/ ;
+identifier_part ::= identifier_start | decimal_digit ;
 
-letter ::= /[a-zA-Z]/ ;
+letter ::=
+    'a'|'b'|'c'|'d'|'e'|'f'|'g'|'h'|'i'|'j'|'k'|'l'|'m'|'n'|'o'|'p'|'q'|'r'|'s'|'t'|'u'|'v'|'w'|'x'|'y'|'z' |
+    'A'|'B'|'C'|'D'|'E'|'F'|'G'|'H'|'I'|'J'|'K'|'L'|'M'|'N'|'O'|'P'|'Q'|'R'|'S'|'T'|'U'|'V'|'W'|'X'|'Y'|'Z' ;

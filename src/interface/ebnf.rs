@@ -1,16 +1,13 @@
-use crate::datastructures::u8set::U8Set;
-use crate::finite_automata::{Expr, QuantifierType};
 use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarExpr};
 use regex::Regex;
 use std::iter::Peekable;
 use std::sync::OnceLock;
 use std::vec::IntoIter;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum EbnfToken {
     Ident(String),
     Literal(String),
-    Regex(String),
     Op(String),
 }
 
@@ -20,7 +17,6 @@ fn get_token_regex() -> &'static Regex {
         Regex::new(
             r#"(?x)
         (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
-        (?P<regex>\/(?:\\.|[^\\/])+\/) |
         (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
         (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!) |
         (?P<comment>\(\*([^*]|[\r\n]|(\*+([^*)]|[\r\n])))*\*+\)) |
@@ -55,11 +51,6 @@ fn tokenize(source: &str) -> Result<Vec<EbnfToken>, String> {
                 }
             }
             tokens.push(EbnfToken::Literal(unescaped));
-        } else if let Some(re) = cap.name("regex") {
-            let s = re.as_str();
-            let content = &s[1..s.len() - 1];
-            let unescaped = content.replace("\\/", "/");
-            tokens.push(EbnfToken::Regex(unescaped));
         } else if let Some(op) = cap.name("op") {
             tokens.push(EbnfToken::Op(op.as_str().to_string()));
         } else if let Some(e) = cap.name("error") {
@@ -68,51 +59,6 @@ fn tokenize(source: &str) -> Result<Vec<EbnfToken>, String> {
         // ws and comment are ignored
     }
     Ok(tokens)
-}
-
-/// Parses the content of a character class regex, e.g., `a-zA-Z_`.
-fn parse_char_class_content(content: &str) -> Result<Expr, String> {
-    let mut u8set = U8Set::new();
-    let mut chars = content.chars().peekable();
-
-    let negated = if chars.peek() == Some(&'^') {
-        chars.next(); // Consume '^'
-        true
-    } else {
-        false
-    };
-
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(escaped_char) = chars.next() {
-                u8set.add_char(escaped_char);
-            } else {
-                return Err("Dangling escape at end of character class".to_string());
-            }
-        } else if chars.peek() == Some(&'-') {
-            // Potential range
-            let start_char = c;
-            chars.next(); // Consume '-'
-
-            if let Some(end_char) = chars.next() {
-                if end_char == '\\' {
-                    return Err("Dangling escape after range operator '-'".to_string());
-                }
-                for i in (start_char as u8)..=(end_char as u8) {
-                    u8set.add_byte(i);
-                }
-            } else {
-                // '-' is at the end, treat as a literal
-                u8set.add_char(start_char);
-                u8set.add_char('-');
-            }
-        } else {
-            u8set.add_char(c);
-        }
-    }
-
-    let final_set = if negated { u8set.complement() } else { u8set };
-    Ok(Expr::U8Class(final_set))
 }
 
 pub(super) struct EbnfParseResult {
@@ -221,16 +167,6 @@ impl EbnfParser {
         } else if let Some(EbnfToken::Literal(lit)) = self.tokens.peek().cloned() {
             self.tokens.next();
             Ok(literal(lit.into_bytes()))
-        } else if let Some(EbnfToken::Regex(re_str)) = self.tokens.peek().cloned() {
-            self.tokens.next();
-            if !re_str.starts_with('[') || !re_str.ends_with(']') {
-                return Err(format!(
-                    "Unsupported regex: \"{}\". Only character classes like `/[...]` are currently supported.",
-                    re_str
-                ));
-            }
-            let expr = parse_char_class_content(&re_str[1..re_str.len() - 1])?;
-            Ok(crate::interface::regex(expr))
         } else if self.peek_op("(") {
             self.consume_op("(")?;
             let expr = self.parse_expression()?;
@@ -287,7 +223,6 @@ impl EbnfParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::finite_automata::Expr;
     use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarDefinition};
 
     #[test]
@@ -312,20 +247,6 @@ mod tests {
         ];
 
         assert_eq!(rules, expected_rules);
-    }
-
-    #[test]
-    fn test_ebnf_parser_with_regex() {
-        let ebnf = r#"
-            digit ::= /[0-9]/;
-            word ::= /[a-zA-Z_]+/ ;
-        "#;
-        let mut parser = EbnfParser::new(ebnf).unwrap();
-        let result = parser.parse().unwrap();
-        let rules = result.rules;
-
-        assert_eq!(rules.len(), 2);
-        // Further assertions could be made on the structure of the resulting GrammarExpr
     }
 
     #[test]
