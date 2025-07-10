@@ -1,10 +1,10 @@
-!ignore ws;
+!ignore WS;
 
 temp_start ::= if_statement+;
 
 program ::= statement_list? ;
 
-ws ::= ( ' ' | '\t' | '\n' | '\r' )* ;
+WS ::= ( ' ' | '\t' | '\n' | '\r' )* ;
 
 statement_list ::= statement statement* ;
 
@@ -26,13 +26,13 @@ variable_statement ::= 'var' variable_declaration_list ';' ;
 
 variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
 
-variable_declaration ::= identifier ( '=' expression )? ;
+variable_declaration ::= IDENTIFIER ( '=' expression )? ;
 
 if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
 
 iteration_statement ::=
     'while' '(' expression ')' statement
-  | 'for' '(' ( expression? | variable_statement ) ';' expression? ';' expression? ')' statement
+  | 'for' '(' ( expression? | 'var' variable_declaration_list ) ';' expression? ';' expression? ')' statement
   ;
 
 function_declaration ::= 'function' identifier '(' parameter_list? ')' block ;
@@ -94,7 +94,7 @@ new_expression ::=
 call_expression ::=
     member_expression arguments
   | call_expression arguments
-  | call_expression '[' expression ']'
+  | call_expression '[' expression ']' 
   | call_expression '.' identifier
   ;
 
@@ -102,13 +102,13 @@ arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' 
 
 member_expression ::=
     primary_expression
-  | member_expression '[' expression ']'
+  | member_expression '[' expression ']' 
   | member_expression '.' identifier
   | 'new' member_expression arguments
   ;
 
 primary_expression ::=
-    'this'
+    'this' 
   | identifier
   | literal
   | array_literal
@@ -116,11 +116,11 @@ primary_expression ::=
   | '(' expression ')'
   ;
 
-array_literal ::= '[' ( elision? assignment_expression )? ( ',' elision? assignment_expression )* ','? elision? ']' ;
+array_literal ::= '[' ( ELISION? assignment_expression )? ( ',' ELISION? assignment_expression )* ','? ELISION? ']' ;
 
-elision ::= ','+ ;
+ELISION ::= ','+ ;
 
-object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
+object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ; 
 
 property_assignment ::=
     property_name ':' assignment_expression
@@ -129,47 +129,47 @@ property_assignment ::=
   ;
 
 property_name ::=
-    identifier
-  | string_literal
-  | numeric_literal
+    IDENTIFIER
+  | STRING_LITERAL
+  | NUMERIC_LITERAL
   ;
 
 literal ::=
-    null_literal
-  | boolean_literal
-  | numeric_literal
-  | string_literal
+    NULL_LITERAL
+  | BOOLEAN_LITERAL
+  | NUMERIC_LITERAL
+  | STRING_LITERAL
   ;
 
-null_literal ::= 'null' ;
+NULL_LITERAL ::= 'null' ;
 
-boolean_literal ::= 'true' | 'false' ;
+BOOLEAN_LITERAL ::= 'true' | 'false' ;
 
-numeric_literal ::= decimal_literal ;
+NUMERIC_LITERAL ::= DECIMAL_LITERAL ;
 
-decimal_literal ::= decimal_integer_literal '.' decimal_digits? exponent_part? | '.' decimal_digits exponent_part? | decimal_integer_literal exponent_part? ;
+DECIMAL_LITERAL ::= DECIMAL_INTEGER_LITERAL '.' DECIMAL_DIGITS? EXPONENT_PART? | '.' DECIMAL_DIGITS EXPONENT_PART? | DECIMAL_INTEGER_LITERAL EXPONENT_PART? ;
 
-decimal_integer_literal ::= '0' | non_zero_digit decimal_digits? ;
+DECIMAL_INTEGER_LITERAL ::= '0' | NON_ZERO_DIGIT DECIMAL_DIGITS? ;
 
-decimal_digits ::= decimal_digit+ ;
+DECIMAL_DIGITS ::= DECIMAL_DIGIT+ ;
 
-decimal_digit ::= '0' | '1' | '2' | '3' | '4' | '4' | '5' | '6' | '7' | '8' | '9' ;
+DECIMAL_DIGIT ::= '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' ;
 
-non_zero_digit ::= '1' | '2' | '3' | '4' | '4' | '5' | '6' | '7' | '8' | '9' ;
+NON_ZERO_DIGIT ::= '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' ;
 
-exponent_part ::= exponent_indicator signed_integer ;
+EXPONENT_PART ::= EXPONENT_INDICATOR SIGNED_INTEGER ;
 
-exponent_indicator ::= 'e' | 'E' ;
+EXPONENT_INDICATOR ::= 'e' | 'E' ;
 
-signed_integer ::= ( '+' | '-' )? decimal_digits ;
+SIGNED_INTEGER ::= ( '+' | '-' )? DECIMAL_DIGITS ;
 
-string_literal ::= '"' double_string_characters? '"' | '\'' single_string_characters? '\'' ;
+STRING_LITERAL ::= '"' DOUBLE_STRING_CHARACTERS? '"' | '\'' SINGLE_STRING_CHARACTERS? '\'' ;
 
-double_string_characters ::= double_string_character+ ;
+DOUBLE_STRING_CHARACTERS ::= DOUBLE_STRING_CHARACTER+ ;
 
-single_string_characters ::= single_string_character+ ;
+SINGLE_STRING_CHARACTERS ::= SINGLE_STRING_CHARACTER+ ;
 
-double_string_character ::=
+DOUBLE_STRING_CHARACTER ::=
     ' ' | '!' | '#' | '$' | '%' | '&' | '(' | ')' | '*' | '+' | ',' | '-' | '.' | '/' |
     '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' |
     ':' | ';' | '<' | '=' | '>' | '?' | '@' |
@@ -179,10 +179,10 @@ double_string_character ::=
     'a' | 'b' | 'c' | 'd' | 'e' | 'f' | 'g' | 'h' | 'i' | 'j' | 'k' | 'l' | 'm' |
     'n' | 'o' | 'p' | 'q' | 'r' | 's' | 't' | 'u' | 'v' | 'w' | 'x' | 'y' | 'z' |
     '{' | '|' | '}' | '~' |
-    '\\' escape_sequence
+    '\\' ESCAPE_SEQUENCE
   ;
 
-single_string_character ::=
+SINGLE_STRING_CHARACTER ::=
     ' ' | '!' | '"' | '#' | '$' | '%' | '&' | '(' | ')' | '*' | '+' | ',' | '-' | '.' | '/' |
     '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' |
     ':' | ';' | '<' | '=' | '>' | '?' | '@' |
@@ -192,34 +192,36 @@ single_string_character ::=
     'a' | 'b' | 'c' | 'd' | 'e' | 'f' | 'g' | 'h' | 'i' | 'j' | 'k' | 'l' | 'm' |
     'n' | 'o' | 'p' | 'q' | 'r' | 's' | 't' | 'u' | 'v' | 'w' | 'x' | 'y' | 'z' |
     '{' | '|' | '}' | '~' |
-    '\\' escape_sequence
+    '\\' ESCAPE_SEQUENCE
   ;
 
-escape_sequence ::=
-    character_escape_sequence
+ESCAPE_SEQUENCE ::=
+    CHARACTER_ESCAPE_SEQUENCE
   | '0'
-  | hex_escape_sequence
-  | unicode_escape_sequence
+  | HEX_ESCAPE_SEQUENCE
+  | UNICODE_ESCAPE_SEQUENCE
   ;
 
-character_escape_sequence ::= single_escape_character | non_escape_character ;
+CHARACTER_ESCAPE_SEQUENCE ::= SINGLE_ESCAPE_CHARACTER | NON_ESCAPE_CHARACTER ;
 
-single_escape_character ::= '\'' | '"' | '\\' | 'b' | 'f' | 'n' | 'r' | 't' | 'v' ;
+SINGLE_ESCAPE_CHARACTER ::= '\'' | '"' | '\\' | 'b' | 'f' | 'n' | 'r' | 't' | 'v' ;
 
-non_escape_character ::= ' ' ;
+NON_ESCAPE_CHARACTER ::= ' ' ;
 
-hex_escape_sequence ::= 'x' hex_digit hex_digit ;
+HEX_ESCAPE_SEQUENCE ::= 'x' HEX_DIGIT HEX_DIGIT ;
 
-unicode_escape_sequence ::= 'u' hex_digit hex_digit hex_digit hex_digit ;
+UNICODE_ESCAPE_SEQUENCE ::= 'u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT ;
 
-hex_digit ::= '0'|'1'|'2'|'3'|'4'|'5'|'6'|'7'|'8'|'9'|'a'|'b'|'c'|'d'|'e'|'f'|'A'|'B'|'C'|'D'|'E'|'F' ;
+HEX_DIGIT ::= '0'|'1'|'2'|'3'|'4'|'5'|'6'|'7'|'8'|'9'|'a'|'b'|'c'|'d'|'e'|'f'|'A'|'B'|'C'|'D'|'E'|'F' ;
 
-identifier ::= identifier_start identifier_part* ;
+identifier ::= IDENTIFIER ;
 
-identifier_start ::= letter | '$' | '_' ;
+IDENTIFIER ::= IDENTIFIER_START IDENTIFIER_PART* ;
 
-identifier_part ::= identifier_start | decimal_digit ;
+IDENTIFIER_START ::= LETTER | '$' | '_' ;
 
-letter ::=
+IDENTIFIER_PART ::= IDENTIFIER_START | DECIMAL_DIGIT ;
+
+LETTER ::=
     'a'|'b'|'c'|'d'|'e'|'f'|'g'|'h'|'i'|'j'|'k'|'l'|'m'|'n'|'o'|'p'|'q'|'r'|'s'|'t'|'u'|'v'|'w'|'x'|'y'|'z' |
     'A'|'B'|'C'|'D'|'E'|'F'|'G'|'H'|'I'|'J'|'K'|'L'|'M'|'N'|'O'|'P'|'Q'|'R'|'S'|'T'|'U'|'V'|'W'|'X'|'Y'|'Z' ;

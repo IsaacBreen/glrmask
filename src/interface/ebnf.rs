@@ -62,7 +62,8 @@ fn tokenize(source: &str) -> Result<Vec<EbnfToken>, String> {
 }
 
 pub(super) struct EbnfParseResult {
-    pub rules: Vec<(String, GrammarExpr)>,
+    pub grammar_rules: Vec<(String, GrammarExpr)>,
+    pub terminal_rules: Vec<(String, GrammarExpr)>,
     pub ignore_symbol_name: Option<String>,
 }
 
@@ -87,7 +88,8 @@ impl EbnfParser {
     }
 
     pub(super) fn parse(&mut self) -> Result<EbnfParseResult, String> {
-        let mut rules = Vec::new();
+        let mut grammar_rules = Vec::new();
+        let mut terminal_rules = Vec::new();
         let mut ignore_symbol_name = None;
 
         while self.tokens.peek().is_some() {
@@ -104,10 +106,15 @@ impl EbnfParser {
                 self.expect_op(";")?;
                 ignore_symbol_name = Some(symbol_name);
             } else {
-                rules.push(self.parse_rule()?);
+                let (name, expr) = self.parse_rule()?;
+                if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    terminal_rules.push((name, expr));
+                } else {
+                    grammar_rules.push((name, expr));
+                }
             }
         }
-        Ok(EbnfParseResult { rules, ignore_symbol_name })
+        Ok(EbnfParseResult { grammar_rules, terminal_rules, ignore_symbol_name })
     }
 
     fn parse_expression(&mut self) -> Result<GrammarExpr, String> {
@@ -234,7 +241,7 @@ mod tests {
             C ::= 'c'?;
         "#;
         let mut parser = EbnfParser::new(ebnf).unwrap();
-        let rules = parser.parse().unwrap().rules;
+        let rules = parser.parse().unwrap().grammar_rules;
 
         let expected_rules = vec![
             ("S".to_string(), sequence(vec![r#ref("A"), r#ref("B")])),
