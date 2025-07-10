@@ -1987,17 +1987,17 @@ local_system:
           fn convert_grammar_expr_to_regex_expr(
               grammar_expr: &GrammarExpr,
               resolved_terminals: &BTreeMap<String, Expr>,
-          ) -> Result<Expr, ()> {
+          ) -> Result<Expr, String> {
               match grammar_expr {
                   GrammarExpr::Literal(bytes) => Ok(Expr::U8Seq(bytes.clone())),
                   GrammarExpr::RegexExpr(expr) => Ok(expr.clone()),
                   GrammarExpr::Ref(name) => {
-                      if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                      if let Some(ref_expr) = resolved_terminals.get(name) {
                           // Terminal ref
-                          resolved_terminals.get(name).cloned().ok_or(())
+                          Ok(ref_expr.clone())
                       } else {
                           // Non-terminal ref in terminal definition, this is an error.
-                          Err(())
+                          Err(format!("Non-terminal reference '{}' found in a terminal definition. Terminal definitions cannot contain non-terminal references.", name))
                       }
                   }
                   GrammarExpr::Sequence(exprs) => {
@@ -2235,16 +2235,21 @@ local_system:
               let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
               let mut rules = ebnf.grammar_rules;
 
+              fn is_terminal(name: &str, expr: &GrammarExpr) -> bool {
+                  // Is terminal if first char is uppercase letter.
+                  name.chars().next().map_or(false, |c| c.is_uppercase())
+              }
+
               let mut terminals = BTreeMap::new();
               for (name, expr) in rules.iter() {
-                  if let GrammarExpr::RegexExpr(regex_expr) = expr {
-                      terminals.insert(name.clone(), regex_expr.clone());
+                  if is_terminal(name, expr) {
+                      terminals.insert(name.clone(), expr.clone());
                   }
               }
 
               fn gather_referenced_terminals(
                   expr: &GrammarExpr,
-                  terminals: &BTreeMap<String, Expr>,
+                  terminals: &BTreeMap<String, GrammarExpr>,
                   referenced_terminals: &mut HashSet<String>,
               ) {
                   match expr {
@@ -2278,8 +2283,7 @@ local_system:
                               // If the terminal is not referenced, remove it
                               false
                           } else {
-                              // Inline any terminals in this expression
-                              Self::convert_grammar_expr_to_regex_expr(grammar_expr, &terminals).expect("Failed to convert grammar expression to regex expression");
+                              // Keep
                               true
                           }
                       } else {
@@ -2287,6 +2291,13 @@ local_system:
                       }
                   }
               );
+
+              for (name, grammar_expr) in rules.iter_mut() {
+                  if let GrammarExpr::RegexExpr(expr) = grammar_expr {
+                      // Inline any terminals in this expression
+                      Self::convert_grammar_expr_to_regex_expr(grammar_expr, &terminals)?;
+                  }
+              }
 
               let mut grammar_def = GrammarDefinition::from_exprs(rules)?;
               if let Some(ignore_name) = &ebnf.ignore_symbol_name {
@@ -9117,17 +9128,17 @@ local_system:
           fn convert_grammar_expr_to_regex_expr(
               grammar_expr: &GrammarExpr,
               resolved_terminals: &BTreeMap<String, Expr>,
-          ) -> Result<Expr, ()> {
+          ) -> Result<Expr, String> {
               match grammar_expr {
                   GrammarExpr::Literal(bytes) => Ok(Expr::U8Seq(bytes.clone())),
                   GrammarExpr::RegexExpr(expr) => Ok(expr.clone()),
                   GrammarExpr::Ref(name) => {
-                      if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                      if let Some(ref_expr) = resolved_terminals.get(name) {
                           // Terminal ref
-                          resolved_terminals.get(name).cloned().ok_or(())
+                          Ok(ref_expr.clone())
                       } else {
                           // Non-terminal ref in terminal definition, this is an error.
-                          Err(())
+                          Err(format!("Non-terminal reference '{}' found in a terminal definition. Terminal definitions cannot contain non-terminal references.", name))
                       }
                   }
                   GrammarExpr::Sequence(exprs) => {
@@ -9365,16 +9376,21 @@ local_system:
               let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
               let mut rules = ebnf.grammar_rules;
 
+              fn is_terminal(name: &str, expr: &GrammarExpr) -> bool {
+                  // Is terminal if first char is uppercase letter.
+                  name.chars().next().map_or(false, |c| c.is_uppercase())
+              }
+
               let mut terminals = BTreeMap::new();
               for (name, expr) in rules.iter() {
-                  if let GrammarExpr::RegexExpr(regex_expr) = expr {
-                      terminals.insert(name.clone(), regex_expr.clone());
+                  if is_terminal(name, expr) {
+                      terminals.insert(name.clone(), expr.clone());
                   }
               }
 
               fn gather_referenced_terminals(
                   expr: &GrammarExpr,
-                  terminals: &BTreeMap<String, Expr>,
+                  terminals: &BTreeMap<String, GrammarExpr>,
                   referenced_terminals: &mut HashSet<String>,
               ) {
                   match expr {
@@ -9408,8 +9424,7 @@ local_system:
                               // If the terminal is not referenced, remove it
                               false
                           } else {
-                              // Inline any terminals in this expression
-                              Self::convert_grammar_expr_to_regex_expr(grammar_expr, &terminals).expect("Failed to convert grammar expression to regex expression");
+                              // Keep
                               true
                           }
                       } else {
@@ -9417,6 +9432,13 @@ local_system:
                       }
                   }
               );
+
+              for (name, grammar_expr) in rules.iter_mut() {
+                  if let GrammarExpr::RegexExpr(expr) = grammar_expr {
+                      // Inline any terminals in this expression
+                      Self::convert_grammar_expr_to_regex_expr(grammar_expr, &terminals)?;
+                  }
+              }
 
               let mut grammar_def = GrammarDefinition::from_exprs(rules)?;
               if let Some(ignore_name) = &ebnf.ignore_symbol_name {
@@ -14293,7 +14315,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - gf
+    - gp
   code_completion_model:
     - gf
   commit_message_model:
@@ -16294,17 +16316,17 @@ messages:
           fn convert_grammar_expr_to_regex_expr(
               grammar_expr: &GrammarExpr,
               resolved_terminals: &BTreeMap<String, Expr>,
-          ) -> Result<Expr, ()> {
+          ) -> Result<Expr, String> {
               match grammar_expr {
                   GrammarExpr::Literal(bytes) => Ok(Expr::U8Seq(bytes.clone())),
                   GrammarExpr::RegexExpr(expr) => Ok(expr.clone()),
                   GrammarExpr::Ref(name) => {
-                      if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                      if let Some(ref_expr) = resolved_terminals.get(name) {
                           // Terminal ref
-                          resolved_terminals.get(name).cloned().ok_or(())
+                          Ok(ref_expr.clone())
                       } else {
                           // Non-terminal ref in terminal definition, this is an error.
-                          Err(())
+                          Err(format!("Non-terminal reference '{}' found in a terminal definition. Terminal definitions cannot contain non-terminal references.", name))
                       }
                   }
                   GrammarExpr::Sequence(exprs) => {
@@ -16542,16 +16564,21 @@ messages:
               let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
               let mut rules = ebnf.grammar_rules;
 
+              fn is_terminal(name: &str, expr: &GrammarExpr) -> bool {
+                  // Is terminal if first char is uppercase letter.
+                  name.chars().next().map_or(false, |c| c.is_uppercase())
+              }
+
               let mut terminals = BTreeMap::new();
               for (name, expr) in rules.iter() {
-                  if let GrammarExpr::RegexExpr(regex_expr) = expr {
-                      terminals.insert(name.clone(), regex_expr.clone());
+                  if is_terminal(name, expr) {
+                      terminals.insert(name.clone(), expr.clone());
                   }
               }
 
               fn gather_referenced_terminals(
                   expr: &GrammarExpr,
-                  terminals: &BTreeMap<String, Expr>,
+                  terminals: &BTreeMap<String, GrammarExpr>,
                   referenced_terminals: &mut HashSet<String>,
               ) {
                   match expr {
@@ -16585,8 +16612,7 @@ messages:
                               // If the terminal is not referenced, remove it
                               false
                           } else {
-                              // Inline any terminals in this expression
-                              Self::convert_grammar_expr_to_regex_expr(grammar_expr, &terminals).expect("Failed to convert grammar expression to regex expression");
+                              // Keep
                               true
                           }
                       } else {
@@ -16594,6 +16620,13 @@ messages:
                       }
                   }
               );
+
+              for (name, grammar_expr) in rules.iter_mut() {
+                  if let GrammarExpr::RegexExpr(expr) = grammar_expr {
+                      // Inline any terminals in this expression
+                      Self::convert_grammar_expr_to_regex_expr(grammar_expr, &terminals)?;
+                  }
+              }
 
               let mut grammar_def = GrammarDefinition::from_exprs(rules)?;
               if let Some(ignore_name) = &ebnf.ignore_symbol_name {
@@ -21515,70 +21548,122 @@ messages:
       ```
     metadata:
       filename: src/js.ebnf
-  - user: Modify convert_grammar_expr_to_regex_expr to return a Result and a message
-      if fails.
+  - user: "Modify convert_grammar_expr_to_regex_expr to take `unresolved_terminals:
+      &BTreeMap<String, GrammarExpr>` rather than `resolved_terminals: &BTreeMap<String,
+      Expr>`. Ensure they're resolved recursively."
     metadata:
   - assistant: |-
+      Hello! As a helpful AI assistant, I'd be happy to help you with your code. Dealing with recursive structures in grammars can be tricky. Here are the patches to modify `convert_grammar_expr_to_regex_expr` to handle recursive resolution of terminals.
+
+      I've updated `convert_grammar_expr_to_regex_expr` to handle recursive resolution of terminal definitions by passing along a cache of resolved terminals and a stack to detect cycles. I also corrected the logic in `from_ebnf` to properly iterate through terminal definitions and convert them to `RegexExpr`s.
+
+      Here are the diffs for the files:
+
       ```diff
       --- a/src/interface/interface.rs
       +++ b/src/interface/interface.rs
-      @@ -409,35 +409,35 @@
+      @@ -499,44 +499,52 @@
+       
            fn convert_grammar_expr_to_regex_expr(
                grammar_expr: &GrammarExpr,
-               resolved_terminals: &BTreeMap<String, Expr>,
-      -    ) -> Result<Expr, ()> {
-      +    ) -> Result<Expr, String> {
+      -        resolved_terminals: &BTreeMap<String, Expr>,
+      +        unresolved_terminals: &BTreeMap<String, GrammarExpr>,
+      +        resolved_cache: &mut BTreeMap<String, Expr>,
+      +        resolving_stack: &mut HashSet<String>,
+           ) -> Result<Expr, String> {
                match grammar_expr {
                    GrammarExpr::Literal(bytes) => Ok(Expr::U8Seq(bytes.clone())),
                    GrammarExpr::RegexExpr(expr) => Ok(expr.clone()),
                    GrammarExpr::Ref(name) => {
-                       if name.chars().next().map_or(false, |c| c.is_uppercase()) {
-                           // Terminal ref
-      -                    resolved_terminals.get(name).cloned().ok_or(())
-      +                    resolved_terminals.get(name).cloned().ok_or_else(|| format!("Terminal reference '{}' not found in resolved terminals.", name))
+      -                if let Some(ref_expr) = resolved_terminals.get(name) {
+      -                    // Terminal ref
+      -                    Ok(ref_expr.clone())
+      +                if let Some(resolved_expr) = resolved_cache.get(name) {
+      +                    return Ok(resolved_expr.clone());
+      +                }
+      +
+      +                if resolving_stack.contains(name) {
+      +                    return Err(format!("Cyclic reference in terminal definitions involving '{}'", name));
+      +                }
+      +
+      +                if let Some(terminal_expr) = unresolved_terminals.get(name) {
+      +                    resolving_stack.insert(name.clone());
+      +                    let result = Self::convert_grammar_expr_to_regex_expr(
+      +                        terminal_expr,
+      +                        unresolved_terminals,
+      +                        resolved_cache,
+      +                        resolving_stack,
+      +                    );
+      +                    resolving_stack.remove(name);
+      +                    
+      +                    let resolved_expr = result?;
+      +                    resolved_cache.insert(name.clone(), resolved_expr.clone());
+      +                    Ok(resolved_expr)
                        } else {
-                           // Non-terminal ref in terminal definition, this is an error.
-      -                    Err(())
-      +                    Err(format!("Non-terminal reference '{}' found in a terminal definition. Terminal definitions cannot contain non-terminal references.", name))
+      -                    // Non-terminal ref in terminal definition, this is an error.
+      +                    // This is a reference to a non-terminal, which is not allowed inside a terminal definition.
+                           Err(format!("Non-terminal reference '{}' found in a terminal definition. Terminal definitions cannot contain non-terminal references.", name))
                        }
                    }
                    GrammarExpr::Sequence(exprs) => {
                        if exprs.is_empty() {
                            return Ok(Expr::Epsilon);
                        }
-      -                let mut sub_exprs = Vec::new();
-      -                for e in exprs {
+                       let mut sub_exprs = Vec::new();
+                       for e in exprs {
       -                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, resolved_terminals)?);
-      -                }
-      -                Ok(Expr::Seq(sub_exprs))
-      +                exprs.iter()
-      +                    .map(|e| Self::convert_grammar_expr_to_regex_expr(e, resolved_terminals))
-      +                    .collect::<Result<Vec<Expr>, String>>()
-      +                    .map(Expr::Seq)
+      +                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, unresolved_terminals, resolved_cache, resolving_stack)?);
+                       }
+                       Ok(Expr::Seq(sub_exprs))
                    }
                    GrammarExpr::Choice(exprs) => {
-      -                let mut sub_exprs = Vec::new();
-      -                for e in exprs {
+                       let mut sub_exprs = Vec::new();
+                       for e in exprs {
       -                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, resolved_terminals)?);
-      -                }
-      -                Ok(Expr::Choice(sub_exprs))
-      +                exprs.iter()
-      +                    .map(|e| Self::convert_grammar_expr_to_regex_expr(e, resolved_terminals))
-      +                    .collect::<Result<Vec<Expr>, String>>()
-      +                    .map(Expr::Choice)
+      +                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, unresolved_terminals, resolved_cache, resolving_stack)?);
+                       }
+                       Ok(Expr::Choice(sub_exprs))
                    }
                    GrammarExpr::Optional(expr) => {
-                       let sub_expr = Self::convert_grammar_expr_to_regex_expr(expr, resolved_terminals)?;
-      @@ -630,7 +630,7 @@
-                               false
-                           } else {
-                               // Inline any terminals in this expression
-      -                        Self::convert_grammar_expr_to_regex_expr(grammar_expr, &terminals).expect("Failed to convert grammar expression to regex expression");
-      +                        Self::convert_grammar_expr_to_regex_expr(grammar_expr, &terminals)?;
-                               true
-                           }
-                       } else {
+      -                let sub_expr = Self::convert_grammar_expr_to_regex_expr(expr, resolved_terminals)?;
+      +                let sub_expr = Self::convert_grammar_expr_to_regex_expr(expr, unresolved_terminals, resolved_cache, resolving_stack)?;
+                       Ok(Expr::Quantifier(Box::new(sub_expr), QuantifierType::ZeroOrOne))
+                   }
+                   GrammarExpr::Repeat(expr) => {
+      -                let sub_expr = Self::convert_grammar_expr_to_regex_expr(expr, resolved_terminals)?;
+      +                let sub_expr = Self::convert_grammar_expr_to_regex_expr(expr, unresolved_terminals, resolved_cache, resolving_stack)?;
+                       Ok(Expr::Quantifier(Box::new(sub_expr), QuantifierType::ZeroOrMore))
+                   }
+               }
+      @@ -899,12 +907,19 @@
+                   }
+               );
+       
+      +        let mut resolved_terminals_cache = BTreeMap::new();
+               for (name, grammar_expr) in rules.iter_mut() {
+      -            if let GrammarExpr::RegexExpr(expr) = grammar_expr {
+      -                // Inline any terminals in this expression
+      -                Self::convert_grammar_expr_to_regex_expr(grammar_expr, &terminals)?;
+      -            }
+      -        }
+      +            if is_terminal(name, grammar_expr) {
+      +                let mut resolving_stack = HashSet::new();
+      +                let regex_expr = Self::convert_grammar_expr_to_regex_expr(
+      +                    grammar_expr,
+      +                    &terminals,
+      +                    &mut resolved_terminals_cache,
+      +                    &mut resolving_stack,
+      +                )?;
+      +                *grammar_expr = GrammarExpr::RegexExpr(regex_expr);
+      +            }
+      +        }
+       
+               let mut grammar_def = GrammarDefinition::from_exprs(rules)?;
+               if let Some(ignore_name) = &ebnf.ignore_symbol_name {
+
       ```
+
+      These changes should correctly handle recursive terminal definitions in your EBNF parser. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):

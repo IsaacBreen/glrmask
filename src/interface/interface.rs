@@ -474,17 +474,37 @@ impl GrammarDefinition {
 
     fn convert_grammar_expr_to_regex_expr(
         grammar_expr: &GrammarExpr,
-        resolved_terminals: &BTreeMap<String, Expr>,
+        unresolved_terminals: &BTreeMap<String, GrammarExpr>,
+        resolved_cache: &mut BTreeMap<String, Expr>,
+        resolving_stack: &mut HashSet<String>,
     ) -> Result<Expr, String> {
         match grammar_expr {
             GrammarExpr::Literal(bytes) => Ok(Expr::U8Seq(bytes.clone())),
             GrammarExpr::RegexExpr(expr) => Ok(expr.clone()),
             GrammarExpr::Ref(name) => {
-                if let Some(ref_expr) = resolved_terminals.get(name) {
-                    // Terminal ref
-                    Ok(ref_expr.clone())
+                if let Some(resolved_expr) = resolved_cache.get(name) {
+                    return Ok(resolved_expr.clone());
+                }
+
+                if resolving_stack.contains(name) {
+                    return Err(format!("Cyclic reference in terminal definitions involving '{}'", name));
+                }
+
+                if let Some(terminal_expr) = unresolved_terminals.get(name) {
+                    resolving_stack.insert(name.clone());
+                    let result = Self::convert_grammar_expr_to_regex_expr(
+                        terminal_expr,
+                        unresolved_terminals,
+                        resolved_cache,
+                        resolving_stack,
+                    );
+                    resolving_stack.remove(name);
+                    
+                    let resolved_expr = result?;
+                    resolved_cache.insert(name.clone(), resolved_expr.clone());
+                    Ok(resolved_expr)
                 } else {
-                    // Non-terminal ref in terminal definition, this is an error.
+                    // This is a reference to a non-terminal, which is not allowed inside a terminal definition.
                     Err(format!("Non-terminal reference '{}' found in a terminal definition. Terminal definitions cannot contain non-terminal references.", name))
                 }
             }
@@ -494,23 +514,23 @@ impl GrammarDefinition {
                 }
                 let mut sub_exprs = Vec::new();
                 for e in exprs {
-                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, resolved_terminals)?);
+                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, unresolved_terminals, resolved_cache, resolving_stack)?);
                 }
                 Ok(Expr::Seq(sub_exprs))
             }
             GrammarExpr::Choice(exprs) => {
                 let mut sub_exprs = Vec::new();
                 for e in exprs {
-                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, resolved_terminals)?);
+                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, unresolved_terminals, resolved_cache, resolving_stack)?);
                 }
                 Ok(Expr::Choice(sub_exprs))
             }
             GrammarExpr::Optional(expr) => {
-                let sub_expr = Self::convert_grammar_expr_to_regex_expr(expr, resolved_terminals)?;
+                let sub_expr = Self::convert_grammar_expr_to_regex_expr(expr, unresolved_terminals, resolved_cache, resolving_stack)?;
                 Ok(Expr::Quantifier(Box::new(sub_expr), QuantifierType::ZeroOrOne))
             }
             GrammarExpr::Repeat(expr) => {
-                let sub_expr = Self::convert_grammar_expr_to_regex_expr(expr, resolved_terminals)?;
+                let sub_expr = Self::convert_grammar_expr_to_regex_expr(expr, unresolved_terminals, resolved_cache, resolving_stack)?;
                 Ok(Expr::Quantifier(Box::new(sub_expr), QuantifierType::ZeroOrMore))
             }
         }
@@ -780,10 +800,17 @@ impl GrammarDefinition {
             }
         );
 
+        let mut resolved_terminals_cache = BTreeMap::new();
         for (name, grammar_expr) in rules.iter_mut() {
-            if let GrammarExpr::RegexExpr(expr) = grammar_expr {
-                // Inline any terminals in this expression
-                Self::convert_grammar_expr_to_regex_expr(grammar_expr, &terminals)?;
+            if is_terminal(name, grammar_expr) {
+                let mut resolving_stack = HashSet::new();
+                let regex_expr = Self::convert_grammar_expr_to_regex_expr(
+                    grammar_expr,
+                    &terminals,
+                    &mut resolved_terminals_cache,
+                    &mut resolving_stack,
+                )?;
+                *grammar_expr = GrammarExpr::RegexExpr(regex_expr);
             }
         }
 
