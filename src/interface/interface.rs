@@ -721,7 +721,62 @@ impl GrammarDefinition {
     /// Constructs a `GrammarDefinition` from an EBNF string.
     pub fn from_ebnf(ebnf_source: &str) -> Result<Self, String> {
         let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
-        let mut grammar_def = GrammarDefinition::from_exprs(ebnf.grammar_rules)?;
+        let mut rules = ebnf.grammar_rules;
+
+        let mut terminals = BTreeMap::new();
+        for (name, expr) in rules.iter() {
+            if let GrammarExpr::RegexExpr(regex_expr) = expr {
+                terminals.insert(name.clone(), regex_expr.clone());
+            }
+        }
+
+        fn gather_referenced_terminals(
+            expr: &GrammarExpr,
+            terminals: &BTreeMap<String, Expr>,
+            referenced_terminals: &mut HashSet<String>,
+        ) {
+            match expr {
+                GrammarExpr::Literal(_) => {}
+                GrammarExpr::RegexExpr(_) => {}
+                GrammarExpr::Ref(name) => {
+                    if terminals.contains_key(name) {
+                        referenced_terminals.insert(name.clone());
+                    }
+                }
+                GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
+                    for e in exprs {
+                        gather_referenced_terminals(e, terminals, referenced_terminals);
+                    }
+                }
+                GrammarExpr::Optional(expr_box) | GrammarExpr::Repeat(expr_box) => {
+                    gather_referenced_terminals(&*expr_box, terminals, referenced_terminals);
+                }
+            }
+        }
+
+        let mut referenced_terminals = HashSet::new();
+        for (_, expr) in rules.iter() {
+            gather_referenced_terminals(expr, &terminals, &mut referenced_terminals);
+        }
+
+        rules.retain_mut(
+            |(name, grammar_expr)| {
+                if let GrammarExpr::RegexExpr(expr) = grammar_expr {
+                    if !referenced_terminals.contains(name) {
+                        // If the terminal is not referenced, remove it
+                        false
+                    } else {
+                        // Inline any terminals in this expression
+                        Self::convert_grammar_expr_to_regex_expr(grammar_expr, &terminals).expect("Failed to convert grammar expression to regex expression");
+                        true
+                    }
+                } else {
+                    true
+                }
+            }
+        );
+
+        let mut grammar_def = GrammarDefinition::from_exprs(rules)?;
         if let Some(ignore_name) = &ebnf.ignore_symbol_name {
             grammar_def.insert_ignore_symbol(ignore_name);
         }

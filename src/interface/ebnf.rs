@@ -90,6 +90,7 @@ impl EbnfParser {
 
     pub(super) fn parse(&mut self) -> Result<EbnfParseResult, String> {
         let mut rules: Vec<(String, GrammarExpr)> = Vec::new();
+        let mut seen_names = HashSet::new();
         let mut ignore_symbol_name = None;
 
         while self.tokens.peek().is_some() {
@@ -107,6 +108,10 @@ impl EbnfParser {
                 ignore_symbol_name = Some(symbol_name);
             } else {
                 let (rule_name, rule_expr) = self.parse_rule()?;
+                if seen_names.contains(&rule_name) {
+                    return Err(format!("Duplicate rule name: {}", rule_name));
+                }
+                seen_names.insert(rule_name.clone());
                 rules.push((rule_name, rule_expr));
             }
         }
