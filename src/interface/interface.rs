@@ -780,9 +780,12 @@ impl GrammarDefinition {
         }
 
         let mut referenced_terminals = HashSet::new();
-        for (_, expr) in rules.iter() {
-            gather_referenced_terminals(expr, &terminals, &mut referenced_terminals);
+        for (name, expr) in rules.iter() {
+            if !is_terminal(name, expr) {
+                gather_referenced_terminals(expr, &terminals, &mut referenced_terminals);
+            }
         }
+        dbg!(&referenced_terminals);
 
         rules.retain_mut(
             |(name, grammar_expr)| {
