@@ -480,9 +480,9 @@ impl GrammarDefinition {
             GrammarExpr::Literal(bytes) => Ok(Expr::U8Seq(bytes.clone())),
             GrammarExpr::RegexExpr(expr) => Ok(expr.clone()),
             GrammarExpr::Ref(name) => {
-                if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                if let Some(ref_expr) = resolved_terminals.get(name) {
                     // Terminal ref
-                    resolved_terminals.get(name).cloned().ok_or_else(|| format!("Terminal reference '{}' not found in resolved terminals.", name))
+                    Ok(ref_expr.clone())
                 } else {
                     // Non-terminal ref in terminal definition, this is an error.
                     Err(format!("Non-terminal reference '{}' found in a terminal definition. Terminal definitions cannot contain non-terminal references.", name))
@@ -766,8 +766,7 @@ impl GrammarDefinition {
                         // If the terminal is not referenced, remove it
                         false
                     } else {
-                        // Inline any terminals in this expression
-                        Self::convert_grammar_expr_to_regex_expr(grammar_expr, &terminals)?;
+                        // Keep
                         true
                     }
                 } else {
@@ -775,6 +774,13 @@ impl GrammarDefinition {
                 }
             }
         );
+
+        for (name, grammar_expr) in rules.iter_mut() {
+            if let GrammarExpr::RegexExpr(expr) = grammar_expr {
+                // Inline any terminals in this expression
+                Self::convert_grammar_expr_to_regex_expr(grammar_expr, &terminals)?;
+            }
+        }
 
         let mut grammar_def = GrammarDefinition::from_exprs(rules)?;
         if let Some(ignore_name) = &ebnf.ignore_symbol_name {
