@@ -4,7 +4,7 @@ temp_start ::= if_statement+;
 
 program ::= statement_list? ;
 
-ws ::= ( ' ' | '\t' | '\n' | '\r' )* ;
+ws ::= (/[ \t\n\r]/)* ;
 
 statement_list ::= statement statement* ;
 
@@ -151,7 +151,7 @@ decimal_literal ::= decimal_integer_literal '.' decimal_digits? exponent_part? |
 
 decimal_integer_literal ::= '0' | (non_zero_digit decimal_digits?) ;
 
-decimal_digits ::= decimal_digit+ ;
+decimal_digits ::= (decimal_digit)+ ;
 
 decimal_digit ::= /[0-9]/ ;
 
@@ -165,35 +165,13 @@ signed_integer ::= ( '+' | '-' )? decimal_digits ;
 
 string_literal ::= '"' double_string_characters? '"' | '\'' single_string_characters? '\'' ;
 
-double_string_characters ::= double_string_character+ ;
+double_string_characters ::= (double_string_character)+ ;
 
-single_string_characters ::= single_string_character+ ;
+single_string_characters ::= (single_string_character)+ ;
 
-double_string_character ::=
-    ' ' | '!' | '#' | '$' | '%' | '&' | '(' | ')' | '*' | '+' | ',' | '-' | '.' | '/' |
-    '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' |
-    ':' | ';' | '<' | '=' | '>' | '?' | '@' |
-    'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M' |
-    'N' | 'O' | 'P' | 'Q' | 'R' | 'S' | 'T' | 'U' | 'V' | 'W' | 'X' | 'Y' | 'Z' |
-    '[' | ']' | '^' | '_' | '`' |
-    'a' | 'b' | 'c' | 'd' | 'e' | 'f' | 'g' | 'h' | 'i' | 'j' | 'k' | 'l' | 'm' |
-    'n' | 'o' | 'p' | 'q' | 'r' | 's' | 't' | 'u' | 'v' | 'w' | 'x' | 'y' | 'z' |
-    '{' | '|' | '}' | '~' |
-    '\\' escape_sequence
-  ;
+double_string_character ::= /[^"\\]/ | ('\\' escape_sequence) ;
 
-single_string_character ::=
-    ' ' | '!' | '"' | '#' | '$' | '%' | '&' | '(' | ')' | '*' | '+' | ',' | '-' | '.' | '/' |
-    '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' |
-    ':' | ';' | '<' | '=' | '>' | '?' | '@' |
-    'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M' |
-    'N' | 'O' | 'P' | 'Q' | 'R' | 'S' | 'T' | 'U' | 'V' | 'W' | 'X' | 'Y' | 'Z' |
-    '[' | ']' | '^' | '_' | '`' |
-    'a' | 'b' | 'c' | 'd' | 'e' | 'f' | 'g' | 'h' | 'i' | 'j' | 'k' | 'l' | 'm' |
-    'n' | 'o' | 'p' | 'q' | 'r' | 's' | 't' | 'u' | 'v' | 'w' | 'x' | 'y' | 'z' |
-    '{' | '|' | '}' | '~' |
-    '\\' escape_sequence
-  ;
+single_string_character ::= /[^'\\]/ | ('\\' escape_sequence) ;
 
 escape_sequence ::=
     character_escape_sequence
@@ -204,7 +182,7 @@ escape_sequence ::=
 
 character_escape_sequence ::= single_escape_character | non_escape_character ;
 
-single_escape_character ::= '\'' | '"' | '\\' | 'b' | 'f' | 'n' | 'r' | 't' | 'v' ;
+single_escape_character ::= /[\\'"bfnrtv]/ ;
 
 non_escape_character ::= ' ' ;
 
@@ -216,8 +194,6 @@ hex_digit ::= /[0-9a-fA-F]/ ;
 
 identifier ::= identifier_start identifier_part* ;
 
-identifier_start ::= /[a-zA-Z_$]/ ;
+identifier_start ::= /[a-zA-Z$_]/ ;
 
-identifier_part ::= /[a-zA-Z0-9_$]/ ;
-
-letter ::= /[a-zA-Z]/ ;
+identifier_part ::= /[a-zA-Z0-9$_]/ ;
