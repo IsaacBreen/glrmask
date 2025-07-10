@@ -676,55 +676,9 @@ impl GrammarDefinition {
 
     /// Constructs a `GrammarDefinition` from an EBNF string.
     pub fn from_ebnf(ebnf_source: &str) -> Result<Self, String> {
-        let EbnfParseResult { grammar_rules, resolved_terminals, ignore_symbol_name } = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
-
-        // Now, we manually construct the GrammarDefinition, similar to `from_exprs`, but aware of the resolved terminals.
-        let mut productions = Vec::new();
-        let mut terminal_name_to_group_id = BiBTreeMap::new();
-        let mut terminal_expr_to_group_id = BiBTreeMap::new();
-        let mut next_terminal_group_id = 0;
-
-        // Pre-populate terminal maps from the resolved named terminals.
-        for (name, expr) in &resolved_terminals {
-            let group_id = next_terminal_group_id;
-            terminal_name_to_group_id.insert(name.clone(), group_id);
-            terminal_expr_to_group_id.insert(expr.clone(), group_id);
-            next_terminal_group_id += 1;
-        }
-
-        // The rest of this logic is adapted from `from_exprs` to handle the pre-resolved terminals.
-        let mut all_names: HashSet<String> = grammar_rules.iter().map(|(name, _)| name.clone()).collect();
-        all_names.extend(resolved_terminals.keys().cloned());
-        let mut per_base_counters: HashMap<String, usize> = HashMap::new();
-
-        let mut start_production_name = "start'".to_string();
-        while all_names.contains(&start_production_name) {
-            start_production_name.push('\'');
-        }
-        all_names.insert(start_production_name.clone());
-
-        productions.push(Production {
-            lhs: NonTerminal(start_production_name.clone()),
-            rhs: vec![Symbol::NonTerminal(NonTerminal(grammar_rules[0].0.clone()))],
-        });
-        let start_production_id = 0;
-
-        for (name, expr) in grammar_rules.iter() {
-            // This is a simplified conversion because we don't expect choices on the top level of a named rule.
-            // The logic from `from_exprs` for handling choices is now inside `convert_grammar_expr_to_symbols`.
-            let (rhs_symbols, new_productions) = Self::convert_grammar_expr_to_symbols(
-                expr, name, &mut terminal_name_to_group_id, &mut terminal_expr_to_group_id,
-                &mut next_terminal_group_id, &mut per_base_counters, &mut all_names
-            );
-            productions.push(Production { lhs: NonTerminal(name.clone()), rhs: rhs_symbols });
-            productions.extend(new_productions);
-        }
-
-        let mut grammar_def = GrammarDefinition {
-            productions, start_production_id, terminal_name_to_group_id, terminal_expr_to_group_id
-        };
-
-        if let Some(ignore_name) = &ignore_symbol_name {
+        let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
+        let mut grammar_def = GrammarDefinition::from_exprs(ebnf.grammar_rules)?;
+        if let Some(ignore_name) = &ebnf.ignore_symbol_name {
             grammar_def.insert_ignore_symbol(ignore_name);
         }
         Ok(grammar_def)

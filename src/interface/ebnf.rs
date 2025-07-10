@@ -1,6 +1,6 @@
 use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarExpr};
 use regex::Regex;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::iter::Peekable;
 use std::sync::OnceLock;
 use std::vec::IntoIter;
@@ -65,7 +65,6 @@ fn tokenize(source: &str) -> Result<Vec<EbnfToken>, String> {
 
 pub(super) struct EbnfParseResult {
     pub grammar_rules: Vec<(String, GrammarExpr)>,
-    pub resolved_terminals: BTreeMap<String, Expr>,
     pub ignore_symbol_name: Option<String>,
 }
 
@@ -91,7 +90,8 @@ impl EbnfParser {
 
     pub(super) fn parse(&mut self) -> Result<EbnfParseResult, String> {
         let mut non_terminal_rules = Vec::new();
-        let mut all_terminal_defs = BTreeMap::new();
+        let mut terminal_rules = Vec::new();
+        let mut all_terminal_defs = BTreeSet::new();
         let mut ignore_symbol_name = None;
 
         while self.tokens.peek().is_some() {
@@ -110,9 +110,10 @@ impl EbnfParser {
             } else {
                 let (name, expr) = self.parse_rule()?;
                 if name.chars().next().map_or(false, |c| c.is_uppercase()) {
-                    if all_terminal_defs.insert(name.clone(), expr).is_some() {
+                    if all_terminal_defs.insert(name.clone()) {
                         return Err(format!("Duplicate definition for terminal '{}'", name))
                     }
+                    terminal_rules.push((name, expr));
                 } else {
                     non_terminal_rules.push((name, expr));
                 }
@@ -125,25 +126,15 @@ impl EbnfParser {
             Self::collect_referenced_terminals(grammar_expr, &mut referenced_terminals);
         }
 
-        // Resolve referenced terminals and their dependencies
-        let mut resolved_terminals = BTreeMap::new();
-        let mut visiting = HashSet::new(); // For cycle detection
-
-        let terminal_defs_ref: BTreeMap<String, &GrammarExpr> =
-            all_terminal_defs.iter().map(|(k, v)| (k.clone(), v)).collect();
-
-        for terminal_name in referenced_terminals {
-            Self::resolve_one_terminal(
-                &terminal_name,
-                &terminal_defs_ref,
-                &mut resolved_terminals,
-                &mut visiting,
-            )?;
+        // Add referenced terminals as rules
+        for (name, expr) in terminal_rules {
+            if referenced_terminals.contains(&name) {
+                non_terminal_rules.push((name, expr));
+            }
         }
 
         Ok(EbnfParseResult {
             grammar_rules: non_terminal_rules,
-            resolved_terminals,
             ignore_symbol_name,
         })
     }
@@ -274,86 +265,6 @@ impl EbnfParser {
             }
             GrammarExpr::Literal(_) | GrammarExpr::RegexExpr(_) => {}
         }
-    }
-
-    fn convert_terminal_expr(
-        expr: &GrammarExpr,
-        terminal_defs: &BTreeMap<String, &GrammarExpr>,
-        resolved: &mut BTreeMap<String, Expr>,
-        visiting: &mut HashSet<String>,
-    ) -> Result<Expr, String> {
-        match expr {
-            GrammarExpr::Literal(bytes) => Ok(Expr::U8Seq(bytes.clone())),
-            GrammarExpr::RegexExpr(_) => {
-                Err("GrammarExpr::RegexExpr not allowed in terminal definitions.".to_string())
-            }
-            GrammarExpr::Ref(name) => {
-                if name.chars().next().map_or(false, |c| c.is_uppercase()) {
-                    Self::resolve_one_terminal(name, terminal_defs, resolved, visiting)
-                } else {
-                    Err(format!(
-                        "Terminals cannot reference non-terminals ('{}')",
-                        name
-                    ))
-                }
-            }
-            GrammarExpr::Sequence(exprs) => {
-                let children = exprs
-                    .iter()
-                    .map(|e| Self::convert_terminal_expr(e, terminal_defs, resolved, visiting))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Expr::Seq(children))
-            }
-            GrammarExpr::Choice(exprs) => {
-                let children = exprs
-                    .iter()
-                    .map(|e| Self::convert_terminal_expr(e, terminal_defs, resolved, visiting))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Expr::Choice(children))
-            }
-            GrammarExpr::Optional(expr) => {
-                let child = Self::convert_terminal_expr(expr, terminal_defs, resolved, visiting)?;
-                Ok(Expr::Quantifier(
-                    Box::new(child),
-                    QuantifierType::ZeroOrOne,
-                ))
-            }
-            GrammarExpr::Repeat(expr) => {
-                let child = Self::convert_terminal_expr(expr, terminal_defs, resolved, visiting)?;
-                Ok(Expr::Quantifier(
-                    Box::new(child),
-                    QuantifierType::ZeroOrMore,
-                ))
-            }
-        }
-    }
-
-    fn resolve_one_terminal<'a>(
-        name: &'a str,
-        terminal_defs: &'a BTreeMap<String, &GrammarExpr>,
-        resolved: &'a mut BTreeMap<String, Expr>,
-        visiting: &'a mut HashSet<String>,
-    ) -> Result<Expr, String> {
-        if let Some(expr) = resolved.get(name) {
-            return Ok(expr.clone());
-        }
-        if visiting.contains(name) {
-            return Err(format!(
-                "Circular reference in terminal definitions involving '{}'",
-                name
-            ));
-        }
-
-        visiting.insert(name.to_string());
-
-        let expr_def = terminal_defs
-            .get(name)
-            .ok_or_else(|| format!("Undefined terminal '{}' referenced.", name))?;
-        let regex_expr = Self::convert_terminal_expr(expr_def, terminal_defs, resolved, visiting)?;
-
-        visiting.remove(name);
-        resolved.insert(name.to_string(), regex_expr.clone());
-        Ok(regex_expr)
     }
 }
 
