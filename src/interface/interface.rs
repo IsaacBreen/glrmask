@@ -676,17 +676,158 @@ impl GrammarDefinition {
 
     /// Constructs a `GrammarDefinition` from an EBNF string.
     pub fn from_ebnf(ebnf_source: &str) -> Result<Self, String> {
-        let parse_result = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
-
-        if let Some(ignore_name) = &parse_result.ignore_symbol_name {
-            // Check that the ignore symbol is defined in the grammar rules
-            if !parse_result.rules.iter().any(|(name, _)| name == ignore_name) {
-                return Err(format!("Ignore symbol '{}' is not a defined non-terminal.", ignore_name));
+        fn resolve_terminals(
+            terminal_rules: &[(String, GrammarExpr)],
+        ) -> Result<BTreeMap<String, Expr>, String> {
+            fn convert(
+                expr: &GrammarExpr,
+                terminal_defs: &BTreeMap<String, &GrammarExpr>,
+                resolved: &mut BTreeMap<String, Expr>,
+                visiting: &mut HashSet<String>,
+            ) -> Result<Expr, String> {
+                use crate::finite_automata::{Expr as RegexExpr, QuantifierType};
+                match expr {
+                    GrammarExpr::Literal(bytes) => Ok(RegexExpr::U8Seq(bytes.clone())),
+                    GrammarExpr::RegexExpr(_) => {
+                        Err("GrammarExpr::RegexExpr not allowed in terminal definitions.".to_string())
+                    }
+                    GrammarExpr::Ref(name) => {
+                        if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                            resolve_one_terminal(name, terminal_defs, resolved, visiting)
+                        } else {
+                            Err(format!(
+                                "Terminals cannot reference non-terminals ('{}')",
+                                name
+                            ))
+                        }
+                    }
+                    GrammarExpr::Sequence(exprs) => {
+                        let children = exprs
+                            .iter()
+                            .map(|e| convert(e, terminal_defs, resolved, visiting))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Ok(RegexExpr::Seq(children))
+                    }
+                    GrammarExpr::Choice(exprs) => {
+                        let children = exprs
+                            .iter()
+                            .map(|e| convert(e, terminal_defs, resolved, visiting))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Ok(RegexExpr::Choice(children))
+                    }
+                    GrammarExpr::Optional(expr) => {
+                        let child = convert(expr, terminal_defs, resolved, visiting)?;
+                        Ok(RegexExpr::Quantifier(
+                            Box::new(child),
+                            QuantifierType::ZeroOrOne,
+                        ))
+                    }
+                    GrammarExpr::Repeat(expr) => {
+                        let child = convert(expr, terminal_defs, resolved, visiting)?;
+                        Ok(RegexExpr::Quantifier(
+                            Box::new(child),
+                            QuantifierType::ZeroOrMore,
+                        ))
+                    }
+                }
             }
+
+            fn resolve_one_terminal<'a>(
+                name: &'a str,
+                terminal_defs: &'a BTreeMap<String, &GrammarExpr>,
+                resolved: &'a mut BTreeMap<String, Expr>,
+                visiting: &'a mut HashSet<String>,
+            ) -> Result<Expr, String> {
+                if let Some(expr) = resolved.get(name) {
+                    return Ok(expr.clone());
+                }
+                if visiting.contains(name) {
+                    return Err(format!(
+                        "Circular reference in terminal definitions involving '{}'",
+                        name
+                    ));
+                }
+
+                visiting.insert(name.to_string());
+
+                let expr_def = terminal_defs
+                    .get(name)
+                    .ok_or_else(|| format!("Undefined terminal '{}' referenced.", name))?;
+                let regex_expr = convert(expr_def, terminal_defs, resolved, visiting)?;
+
+                visiting.remove(name);
+                resolved.insert(name.to_string(), regex_expr.clone());
+                Ok(regex_expr)
+            }
+
+            let mut resolved = BTreeMap::new();
+            let terminal_defs: BTreeMap<String, &GrammarExpr> =
+                terminal_rules.iter().map(|(n, e)| (n.clone(), e)).collect();
+
+            for (name, _) in terminal_rules {
+                if !resolved.contains_key(name) {
+                    resolve_one_terminal(name, &terminal_defs, &mut resolved, &mut HashSet::new())?;
+                }
+            }
+
+            Ok(resolved)
         }
 
-        let mut grammar_def = GrammarDefinition::from_exprs(parse_result.rules)?;
-        if let Some(ignore_name) = &parse_result.ignore_symbol_name {
+        let EbnfParseResult { grammar_rules, terminal_rules, ignore_symbol_name } = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
+
+        let resolved_terminals = resolve_terminals(&terminal_rules)?;
+
+        // Now, we manually construct the GrammarDefinition, similar to `from_exprs`, but aware of the resolved terminals.
+        let mut productions = Vec::new();
+        let mut terminal_name_to_group_id = BiBTreeMap::new();
+        let mut terminal_expr_to_group_id = BiBTreeMap::new();
+        let mut next_terminal_group_id = 0;
+
+        // Pre-populate terminal maps from the resolved named terminals.
+        for (name, expr) in &resolved_terminals {
+            let group_id = next_terminal_group_id;
+            terminal_name_to_group_id.insert(name.clone(), group_id);
+            terminal_expr_to_group_id.insert(expr.clone(), group_id);
+            next_terminal_group_id += 1;
+        }
+
+        // The rest of this logic is adapted from `from_exprs` to handle the pre-resolved terminals.
+        let mut all_names: HashSet<String> = grammar_rules.iter().map(|(name, _)| name.clone()).collect();
+        all_names.extend(resolved_terminals.keys().cloned());
+        let mut per_base_counters: HashMap<String, usize> = HashMap::new();
+
+        let mut start_production_name = "start'".to_string();
+        while all_names.contains(&start_production_name) {
+            start_production_name.push('\'');
+        }
+        all_names.insert(start_production_name.clone());
+
+        productions.push(Production {
+            lhs: NonTerminal(start_production_name.clone()),
+            rhs: vec![Symbol::NonTerminal(NonTerminal(grammar_rules[0].0.clone()))],
+        });
+        let start_production_id = 0;
+
+        for (name, expr) in grammar_rules.iter() {
+            // This is a simplified conversion because we don't expect choices on the top level of a named rule.
+            // The logic from `from_exprs` for handling choices is now inside `convert_grammar_expr_to_symbols`.
+            let (rhs_symbols, new_productions) = Self::convert_grammar_expr_to_symbols(
+                expr, name, &mut terminal_name_to_group_id, &mut terminal_expr_to_group_id,
+                &mut next_terminal_group_id, &mut per_base_counters, &mut all_names
+            );
+            productions.push(Production { lhs: NonTerminal(name.clone()), rhs: rhs_symbols });
+            productions.extend(new_productions);
+        }
+
+        let mut grammar_def = GrammarDefinition {
+            productions, start_production_id, terminal_name_to_group_id, terminal_expr_to_group_id
+        };
+
+        if let Some(ignore_name) = &ignore_symbol_name {
+            // Check that the ignore symbol is defined in the grammar rules
+            if !grammar_def.terminal_name_to_group_id.contains_left(ignore_name) && !grammar_def.productions.iter().any(|p| p.lhs.0 == *ignore_name) {
+                return Err(format!("Ignore symbol '{}' is not a defined non-terminal.", ignore_name));
+            }
             grammar_def.insert_ignore_symbol(ignore_name);
         }
         Ok(grammar_def)

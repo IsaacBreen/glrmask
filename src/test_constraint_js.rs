@@ -295,106 +295,32 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
     println!("\nTesting GLR parser with specific grammar terminal sequences...");
 
     if false {
-        // Ensure the test string tokenizes as expected.
-        let text = b"f\"";
-        let mut expected_matches = Vec::new();
-        let expected_terminal_name = "NAME[0]";
-        let name_group_id = *grammar_definition.terminal_name_to_group_id.get_by_left(expected_terminal_name).unwrap();
-        expected_matches.push(Token {
-            id: name_group_id,
-            width: 1,
-        });
-        let expected_terminal_name = "FSTRING_MIDDLE_SINGLE_SINGLE[0]";
-        let fstring_middle_group_id = *grammar_definition.terminal_name_to_group_id.get_by_left(expected_terminal_name).unwrap();
-        expected_matches.push(Token {
-            id: fstring_middle_group_id,
-            width: 2,
-        });
-        let expected_terminal_name = "FSTRING_START_SINGLE_SINGLE[0]";
-        let fstring_start_group_id = *grammar_definition.terminal_name_to_group_id.get_by_left(expected_terminal_name).unwrap();
-        expected_matches.push(Token {
-            id: fstring_start_group_id,
-            width: 2,
-        });
-        let results = compiled_grammar.tokenizer.execute_from_state(text, TokenizerStateID(0));
-        // TODO: uncomment this
-        // assert_eq!(results.matches.iter().collect::<BTreeSet<_>>(), expected_matches.iter().collect::<BTreeSet<_>>());
+        // This block can be used for specific tokenizer checks if needed.
     }
 
     // Define the sequences of terminal names to test
     let mut test_sequences_str = vec![
-        // Sequence 0
-        vec!["IGNORE[0][0]", "\"->\""],
-        // Sequence 1
-        vec!["STRING[0]", "\"->\""],
-        // Sequence 2
-        vec!["FSTRING_START_SINGLE_SINGLE[0]", "\"->\""],
-        // Sequence 3
-        vec!["IGNORE[0][0]", "\"...\"", "\"->\""],
-        // Sequence 4
-        vec!["STRING[0]", "\"...\"", "\"->\""],
-        // Sequence 5
-        vec!["FSTRING_START_SINGLE_SINGLE[0]", "\"...\"", "\"->\""],
-        // Sequence 6
-        vec!["IGNORE[0][0]", "\"==\"", "\"->\""],
-        // Sequence 7
-        vec!["STRING[0]", "\"==\"", "\"->\""],
-        // Sequence 8
-        vec!["FSTRING_START_SINGLE_SINGLE[0]", "\"==\"", "\"->\""],
-        // Sequence 9
-        vec!["IGNORE[0][0]", "\"!=\"", "\"->\""],
-        // Sequence 10
-        vec!["STRING[0]", "\"!=\"", "\"->\""],
-        // Sequence 11
-        vec!["FSTRING_START_SINGLE_SINGLE[0]", "\"!=\"", "\"->\""],
-        // Sequence 12
-        vec!["IGNORE[0][0]", "\"<=\"", "\"->\""],
-        // Sequence 13
-        vec!["STRING[0]", "\"<=\"", "\"->\""],
-        // Sequence 14
-        vec!["FSTRING_START_SINGLE_SINGLE[0]", "\"<=\"", "\"->\""],
-        // Sequence 15
-        vec!["IGNORE[0][0]", "\">=\"", "\"->\""],
-        // Sequence 16
-        vec!["STRING[0]", "\">=\"", "\"->\""],
-        // Sequence 17
-        vec!["FSTRING_START_SINGLE_SINGLE[0]", "\">=\"", "\"->\""],
-        // Sequence 18
-        vec!["IGNORE[0][0]", "\"<<\"", "\"->\""],
-        // Sequence 19
-        vec!["STRING[0]", "\"<<\"", "\"->\""],
-        // Sequence 20
-        vec!["FSTRING_START_SINGLE_SINGLE[0]", "\"<<\"", "\"->\""],
-        // Sequence 21
-        vec!["IGNORE[0][0]", "STRING[0]", "\"->\""],
-        // Sequence 22
-        vec!["STRING[0]", "STRING[0]", "\"->\""],
-        // Sequence 23
-        vec!["FSTRING_START_SINGLE_SINGLE[0]", "STRING[0]", "\"->\""],
-        // Sequence 24
-        vec!["IGNORE[0][0]", "FSTRING_START_SINGLE_SINGLE[0]", "\"->\""],
-        // Sequence 25
-        vec!["STRING[0]", "FSTRING_START_SINGLE_SINGLE[0]", "\"->\""],
-        // Sequence 26
-        vec!["FSTRING_START_SINGLE_SINGLE[0]", "FSTRING_START_SINGLE_SINGLE[0]", "\"->\""],
-        // Sequence 27
-        vec!["IGNORE[0][0]", "FSTRING_MIDDLE_SINGLE_SINGLE[0]", "\"->\""],
-        // Sequence 28
-        vec!["STRING[0]", "FSTRING_MIDDLE_SINGLE_SINGLE[0]", "\"->\""],
-        // Sequence 29
-        vec!["FSTRING_START_SINGLE_SINGLE[0]", "FSTRING_MIDDLE_SINGLE_SINGLE[0]", "\"->\""],
+        // Valid JS sequences
+        vec!["\"var\"", "IDENTIFIER", "\";\""],
+        vec!["\"var\"", "IDENTIFIER", "\"=\"", "NUMERIC_LITERAL", "\";\""],
+        vec!["\"if\"", "\"(\"", "IDENTIFIER", "\")\"", "\"{\""],
+        vec!["IDENTIFIER", "\"||\"", "IDENTIFIER"],
+        vec!["\"function\"", "IDENTIFIER", "\"(\"", "\")\"", "\"{\"","\"}\""],
+        vec!["\"return\"", "STRING_LITERAL", "\";\""],
 
-        vec!["IGNORE[0][0]", "\"->\""],
-        vec!["STRING[0]", "\"->\""],
-        vec!["IGNORE[0][0]", "\"!=\"", "\"->\""],
-        vec!["STRING[0]", "\"!=\"", "\"->\""],
-        vec!["IGNORE[0][0]", "\">=\"", "\"->\""],
-        vec!["STRING[0]", "\">=\"", "\"->\""],
-        vec!["IGNORE[0][0]", "STRING[0]", "\"->\""],
-        vec!["STRING[0]", "STRING[0]", "\"->\""],
+        // Sequences that should be valid prefixes
+        vec!["\"var\""],
+        vec!["\"var\"", "IDENTIFIER"],
+        vec!["\"var\"", "IDENTIFIER", "\"=\""],
+        vec!["\"if\"", "\"(\""],
 
-        // THIS one is important. Actual failure case. Causes goto not found panic.
-        vec!["\"...\"", "\";\"", "\"elif\""],
+        // Potentially problematic sequences
+        vec!["\"=\"", "\"=\""], // "=="
+        vec!["\"<\"", "\"=\""], // "<="
+        vec!["\"+\"", "\"+\""], // "++"
+        vec!["\"|\"", "\"|\""], // "||"
+        vec!["STRING_LITERAL", "IDENTIFIER"], // A string followed by an identifier
+        vec!["NUMERIC_LITERAL", "\"+\"", "NUMERIC_LITERAL"],
     ];
     test_sequences_str.reverse(); // Reverse the order of the test sequences
 
