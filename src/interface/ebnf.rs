@@ -91,7 +91,7 @@ impl EbnfParser {
     fn parse_terminal_rule(&mut self) -> Result<(String, Expr), String> {
         let name = self.expect_terminal_ident()?;
         self.expect_grammar_op("::=")?;
-        let expr = self.parse_regex_expression()?;
+        let expr = self.parse_terminal_expression()?;
         self.expect_grammar_op(";")?;
         Ok((name, expr))
     }
@@ -99,7 +99,7 @@ impl EbnfParser {
     pub(super) fn parse(&mut self) -> Result<EbnfParseResult, String> {
         let mut non_terminal_rules: Vec<(String, GrammarExpr)> = Vec::new();
         let mut terminal_rules: Vec<(String, Expr)> = Vec::new();
-        // Removed unused `all_terminal_defs` variable
+        let mut all_terminal_defs = BTreeSet::new();
         let mut ignore_symbol_name = None;
 
         while self.tokens.peek().is_some() {
@@ -116,32 +116,27 @@ impl EbnfParser {
                 self.expect_grammar_op(";")?;
                 ignore_symbol_name = Some(symbol_name);
             } else {
-                // Try to parse a non-terminal rule or a terminal rule
-                if let Some(EbnfToken::Ident(id)) = self.tokens.peek().cloned() {
-                    if id.chars().next().map_or(false, |c| c.is_uppercase()) {
-                        let (name, expr) = self.parse_nonterminal_rule()?;
-                        non_terminal_rules.push((name, expr));
-                    } else if id.chars().next().map_or(false, |c| c.is_lowercase()) {
-                        let (name, expr) = self.parse_terminal_rule()?;
-                        terminal_rules.push((name, expr));
-                    } else {
-                        return Err(format!("Expected non-terminal or terminal identifier to start a rule, found {:?}", self.tokens.peek()));
+                let (name, expr) = self.parse_nonterminal_rule()?;
+                if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    if all_terminal_defs.insert(name.clone()) {
+                        return Err(format!("Duplicate definition for terminal '{}'", name))
                     }
+                    terminal_rules.push((name, expr));
                 } else {
-                    return Err(format!("Expected identifier to start a rule, found {:?}", self.tokens.peek()));
+                    non_terminal_rules.push((name, expr));
                 }
             }
         }
 
-        // Identify all symbols (non-terminals and terminals) referenced by non-terminal rules
-        let mut referenced_symbols = HashSet::new();
+        // Identify terminals referenced by non-terminal rules
+        let mut referenced_terminals = HashSet::new();
         for (_, grammar_expr) in &non_terminal_rules {
-            Self::collect_referenced_symbols(grammar_expr, &mut referenced_symbols);
+            Self::collect_referenced_terminals(grammar_expr, &mut referenced_terminals);
         }
 
-        // Add referenced terminal definitions as grammar rules (RegexExpr)
-        for (name, expr) in terminal_rules.into_iter() {
-            if referenced_symbols.contains(&name) && name.chars().next().map_or(false, |c| c.is_lowercase()) {
+        // Add referenced terminals as rules
+        for (name, expr) in terminal_rules {
+            if referenced_terminals.contains(&name) {
                 non_terminal_rules.push((name, GrammarExpr::RegexExpr(expr)));
             }
         }
@@ -293,11 +288,14 @@ impl EbnfParser {
         }
     }
 
-    fn collect_referenced_symbols(expr: &GrammarExpr, refs: &mut HashSet<String>) {
+    fn collect_referenced_terminals(expr: &GrammarExpr, refs: &mut HashSet<String>) {
         match expr {
             GrammarExpr::Ref(name) => {
-                refs.insert(name.clone()); // Collect all referenced names, regardless of case
-            }            GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
+                if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    refs.insert(name.clone());
+                }
+            }
+            GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
                 for e in exprs {
                     Self::collect_referenced_terminals(e, refs);
                 }
@@ -310,6 +308,10 @@ impl EbnfParser {
     }
 
     // --- Regex Parser Helpers (for terminal definitions) ---
+
+    fn parse_terminal_expression(&mut self) -> Result<Expr, String> {
+        self.parse_regex_expression()
+    }
 
     fn peek_regex_op(&mut self, op: &str) -> bool {
         matches!(self.tokens.peek(), Some(EbnfToken::Op(s)) if s == op)
