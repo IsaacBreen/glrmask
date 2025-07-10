@@ -704,19 +704,7 @@ impl GrammarDefinition {
             );
             let opt_nt = NonTerminal(opt_nt_name.clone());
 
-            // (b) create the two new productions:
-            //         <opt_nt>  ->  <terminal_name>
-            //         <opt_nt>  ->  ε
-            productions.push(Production {
-                lhs: opt_nt.clone(),
-                rhs: vec![Symbol::Terminal(Terminal(terminal_name.clone()))],
-            });
-            productions.push(Production {
-                lhs: opt_nt.clone(),
-                rhs: Vec::new(), // ε
-            });
-
-            // (c) replace every occurrence of the terminal in all existing
+            // (b) replace every occurrence of the terminal in all existing
             //     productions with the new optional non-terminal.
             for prod in productions.iter_mut() {
                 for sym in &mut prod.rhs {
@@ -727,6 +715,18 @@ impl GrammarDefinition {
                     }
                 }
             }
+
+            // (c) create the two new productions:
+            //         <opt_nt>  ->  <terminal_name>
+            //         <opt_nt>  ->  ε
+            productions.push(Production {
+                lhs: opt_nt.clone(),
+                rhs: vec![Symbol::Terminal(Terminal(terminal_name.clone()))],
+            });
+            productions.push(Production {
+                lhs: opt_nt.clone(),
+                rhs: Vec::new(), // ε
+            });
         }
         // ------------------------------------------------------------------
         //  End of nullability processing
