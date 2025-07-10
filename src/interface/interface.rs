@@ -725,10 +725,6 @@ impl GrammarDefinition {
         };
 
         if let Some(ignore_name) = &ignore_symbol_name {
-            // Check that the ignore symbol is defined in the grammar rules
-            if !grammar_def.terminal_name_to_group_id.contains_left(ignore_name) && !grammar_def.productions.iter().any(|p| p.lhs.0 == *ignore_name) {
-                return Err(format!("Ignore symbol '{}' is not a defined non-terminal.", ignore_name));
-            }
             grammar_def.insert_ignore_symbol(ignore_name);
         }
         Ok(grammar_def)
