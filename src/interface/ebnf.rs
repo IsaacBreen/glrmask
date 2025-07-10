@@ -91,7 +91,7 @@ impl EbnfParser {
 
     pub(super) fn parse(&mut self) -> Result<self::EbnfParseResult, String> {
         let mut grammar_rules = Vec::new();
-        let mut terminal_rules = Vec::new();
+        let mut terminal_rules: Vec<(String, Expr)> = Vec::new();
         let mut ignore_symbol_name = None;
 
         while self.tokens.peek().is_some() {
