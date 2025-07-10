@@ -85,7 +85,7 @@ fn parse_char_class_content(content: &str) -> Result<Expr, String> {
     while let Some(c) = chars.next() {
         if c == '\\' {
             if let Some(escaped_char) = chars.next() {
-                u8set.add_char(escaped_char);
+                u8set.insert(escaped_char as u8);
             } else {
                 return Err("Dangling escape at end of character class".to_string());
             }
@@ -99,15 +99,15 @@ fn parse_char_class_content(content: &str) -> Result<Expr, String> {
                     return Err("Dangling escape after range operator '-'".to_string());
                 }
                 for i in (start_char as u8)..=(end_char as u8) {
-                    u8set.add_byte(i);
+                    u8set.insert(i);
                 }
             } else {
                 // '-' is at the end, treat as a literal
-                u8set.add_char(start_char);
-                u8set.add_char('-');
+                u8set.insert(c as u8);
+                u8set.insert(b'-');
             }
         } else {
-            u8set.add_char(c);
+            u8set.insert(c as u8);
         }
     }
 
