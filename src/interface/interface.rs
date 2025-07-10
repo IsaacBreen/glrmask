@@ -475,14 +475,14 @@ impl GrammarDefinition {
     fn convert_grammar_expr_to_regex_expr(
         grammar_expr: &GrammarExpr,
         unresolved_terminals: &BTreeMap<String, GrammarExpr>,
-        resolved_cache: &mut BTreeMap<String, Expr>,
+        memo: &mut BTreeMap<String, Expr>,
         resolving_stack: &mut HashSet<String>,
     ) -> Result<Expr, String> {
         match grammar_expr {
             GrammarExpr::Literal(bytes) => Ok(Expr::U8Seq(bytes.clone())),
             GrammarExpr::RegexExpr(expr) => Ok(expr.clone()),
             GrammarExpr::Ref(name) => {
-                if let Some(resolved_expr) = resolved_cache.get(name) {
+                if let Some(resolved_expr) = memo.get(name) {
                     return Ok(resolved_expr.clone());
                 }
 
@@ -495,13 +495,13 @@ impl GrammarDefinition {
                     let result = Self::convert_grammar_expr_to_regex_expr(
                         terminal_expr,
                         unresolved_terminals,
-                        resolved_cache,
+                        memo,
                         resolving_stack,
                     );
                     resolving_stack.remove(name);
                     
                     let resolved_expr = result?;
-                    resolved_cache.insert(name.clone(), resolved_expr.clone());
+                    memo.insert(name.clone(), resolved_expr.clone());
                     Ok(resolved_expr)
                 } else {
                     // This is a reference to a non-terminal, which is not allowed inside a terminal definition.
@@ -514,23 +514,23 @@ impl GrammarDefinition {
                 }
                 let mut sub_exprs = Vec::new();
                 for e in exprs {
-                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, unresolved_terminals, resolved_cache, resolving_stack)?);
+                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, unresolved_terminals, memo, resolving_stack)?);
                 }
                 Ok(Expr::Seq(sub_exprs))
             }
             GrammarExpr::Choice(exprs) => {
                 let mut sub_exprs = Vec::new();
                 for e in exprs {
-                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, unresolved_terminals, resolved_cache, resolving_stack)?);
+                    sub_exprs.push(Self::convert_grammar_expr_to_regex_expr(e, unresolved_terminals, memo, resolving_stack)?);
                 }
                 Ok(Expr::Choice(sub_exprs))
             }
             GrammarExpr::Optional(expr) => {
-                let sub_expr = Self::convert_grammar_expr_to_regex_expr(expr, unresolved_terminals, resolved_cache, resolving_stack)?;
+                let sub_expr = Self::convert_grammar_expr_to_regex_expr(expr, unresolved_terminals, memo, resolving_stack)?;
                 Ok(Expr::Quantifier(Box::new(sub_expr), QuantifierType::ZeroOrOne))
             }
             GrammarExpr::Repeat(expr) => {
-                let sub_expr = Self::convert_grammar_expr_to_regex_expr(expr, unresolved_terminals, resolved_cache, resolving_stack)?;
+                let sub_expr = Self::convert_grammar_expr_to_regex_expr(expr, unresolved_terminals, memo, resolving_stack)?;
                 Ok(Expr::Quantifier(Box::new(sub_expr), QuantifierType::ZeroOrMore))
             }
         }
@@ -800,14 +800,14 @@ impl GrammarDefinition {
             }
         );
 
-        let mut resolved_terminals_cache = BTreeMap::new();
+        let mut memo = BTreeMap::new();
         for (name, grammar_expr) in rules.iter_mut() {
             if is_terminal(name, grammar_expr) {
                 let mut resolving_stack = HashSet::new();
                 let regex_expr = Self::convert_grammar_expr_to_regex_expr(
                     grammar_expr,
                     &terminals,
-                    &mut resolved_terminals_cache,
+                    &mut memo,
                     &mut resolving_stack,
                 )?;
                 *grammar_expr = GrammarExpr::RegexExpr(regex_expr);
