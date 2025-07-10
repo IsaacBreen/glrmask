@@ -1,4 +1,4 @@
-use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarExpr};
+use crate::interface::{choice, choice_fast, literal, optional, r#ref, repeat, sequence, GrammarExpr};
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::iter::Peekable;
@@ -80,35 +80,43 @@ impl EbnfParser {
         })
     }
 
-    fn parse_rule(&mut self) -> Result<(String, GrammarExpr), String> {
-        let name = self.expect_ident()?;
-        self.expect_op("::=")?;
-        let expr = self.parse_expression()?;
-        self.expect_op(";")?;
+    fn parse_nonterminal_rule(&mut self) -> Result<(String, GrammarExpr), String> {
+        let name = self.expect_nonterminal_ident()?;
+        self.expect_grammar_op("::=")?;
+        let expr = self.parse_grammar_expression()?;
+        self.expect_grammar_op(";")?;
+        Ok((name, expr))
+    }
+
+    fn parse_terminal_rule(&mut self) -> Result<(String, Expr), String> {
+        let name = self.expect_terminal_ident()?;
+        self.expect_grammar_op("::=")?;
+        let expr = self.parse_terminal_expression()?;
+        self.expect_grammar_op(";")?;
         Ok((name, expr))
     }
 
     pub(super) fn parse(&mut self) -> Result<EbnfParseResult, String> {
-        let mut non_terminal_rules = Vec::new();
-        let mut terminal_rules = Vec::new();
+        let mut non_terminal_rules: Vec<(String, GrammarExpr)> = Vec::new();
+        let mut terminal_rules: Vec<(String, Expr)> = Vec::new();
         let mut all_terminal_defs = BTreeSet::new();
         let mut ignore_symbol_name = None;
 
         while self.tokens.peek().is_some() {
-            if self.peek_op("!") {
+            if self.peek_grammar_op("!") {
                 if ignore_symbol_name.is_some() {
                     return Err("Duplicate ignore directive found".to_string())
                 }
-                self.consume_op("!")?;
+                self.consume_grammar_op("!")?;
                 let directive_name = self.expect_ident()?;
                 if directive_name != "ignore" {
                     return Err(format!("Unknown directive: {}", directive_name))
                 }
                 let symbol_name = self.expect_ident()?;
-                self.expect_op(";")?;
+                self.expect_grammar_op(";")?;
                 ignore_symbol_name = Some(symbol_name);
             } else {
-                let (name, expr) = self.parse_rule()?;
+                let (name, expr) = self.parse_nonterminal_rule()?;
                 if name.chars().next().map_or(false, |c| c.is_uppercase()) {
                     if all_terminal_defs.insert(name.clone()) {
                         return Err(format!("Duplicate definition for terminal '{}'", name))
@@ -129,7 +137,7 @@ impl EbnfParser {
         // Add referenced terminals as rules
         for (name, expr) in terminal_rules {
             if referenced_terminals.contains(&name) {
-                non_terminal_rules.push((name, expr));
+                non_terminal_rules.push((name, GrammarExpr::RegexExpr(expr)));
             }
         }
 
@@ -139,11 +147,11 @@ impl EbnfParser {
         })
     }
 
-    fn parse_expression(&mut self) -> Result<GrammarExpr, String> {
-        let mut choices = vec![self.parse_sequence()?];
-        while self.peek_op("|") {
-            self.consume_op("|")?;
-            choices.push(self.parse_sequence()?);
+    fn parse_grammar_expression(&mut self) -> Result<GrammarExpr, String> {
+        let mut choices = vec![self.parse_grammar_sequence()?];
+        while self.peek_grammar_op("|") {
+            self.consume_grammar_op("|")?;
+            choices.push(self.parse_grammar_sequence()?);
         }
         if choices.len() == 1 {
             Ok(choices.remove(0))
@@ -152,17 +160,17 @@ impl EbnfParser {
         }
     }
 
-    fn parse_sequence(&mut self) -> Result<GrammarExpr, String> {
+    fn parse_grammar_sequence(&mut self) -> Result<GrammarExpr, String> {
         let mut terms = Vec::new();
         // A sequence can be empty, which is a valid choice in an expression (e.g., `A ::= B | ;`)
         while self.tokens.peek().is_some()
-            && !self.peek_op(")")
-            && !self.peek_op("]")
-            && !self.peek_op("}")
-            && !self.peek_op("|")
-            && !self.peek_op(";")
+            && !self.peek_grammar_op(")")
+            && !self.peek_grammar_op("]")
+            && !self.peek_grammar_op("}")
+            && !self.peek_grammar_op("|")
+            && !self.peek_grammar_op(";")
         {
-            terms.push(self.parse_term()?);
+            terms.push(self.parse_grammar_term()?);
         }
 
         if terms.len() == 1 {
@@ -172,44 +180,44 @@ impl EbnfParser {
         }
     }
 
-    fn parse_term(&mut self) -> Result<GrammarExpr, String> {
-        let factor = self.parse_factor()?;
+    fn parse_grammar_term(&mut self) -> Result<GrammarExpr, String> {
+        let factor = self.parse_grammar_factor()?;
 
-        if self.peek_op("?") {
-            self.consume_op("?")?;
+        if self.peek_grammar_op("?") {
+            self.consume_grammar_op("?")?;
             Ok(optional(factor))
-        } else if self.peek_op("*") {
-            self.consume_op("*")?;
+        } else if self.peek_grammar_op("*") {
+            self.consume_grammar_op("*")?;
             Ok(repeat(factor))
-        } else if self.peek_op("+") {
-            self.consume_op("+")?;
+        } else if self.peek_grammar_op("+") {
+            self.consume_grammar_op("+")?;
             Ok(sequence(vec![factor.clone(), repeat(factor)]))
         } else {
             Ok(factor)
         }
     }
 
-    fn parse_factor(&mut self) -> Result<GrammarExpr, String> {
+    fn parse_grammar_factor(&mut self) -> Result<GrammarExpr, String> {
         if let Some(EbnfToken::Ident(id)) = self.tokens.peek().cloned() {
             self.tokens.next();
             Ok(r#ref(&id))
         } else if let Some(EbnfToken::Literal(lit)) = self.tokens.peek().cloned() {
             self.tokens.next();
             Ok(literal(lit.into_bytes()))
-        } else if self.peek_op("(") {
-            self.consume_op("(")?;
-            let expr = self.parse_expression()?;
-            self.expect_op(")")?;
+        } else if self.peek_grammar_op("(") {
+            self.consume_grammar_op("(")?;
+            let expr = self.parse_grammar_expression()?;
+            self.expect_grammar_op(")")?;
             Ok(expr)
-        } else if self.peek_op("[") {
-            self.consume_op("[")?;
-            let expr = self.parse_expression()?;
-            self.expect_op("]")?;
+        } else if self.peek_grammar_op("[") {
+            self.consume_grammar_op("[")?;
+            let expr = self.parse_grammar_expression()?;
+            self.expect_grammar_op("]")?;
             Ok(optional(expr))
-        } else if self.peek_op("{") {
-            self.consume_op("{")?;
-            let expr = self.parse_expression()?;
-            self.expect_op("}")?;
+        } else if self.peek_grammar_op("{") {
+            self.consume_grammar_op("{")?;
+            let expr = self.parse_grammar_expression()?;
+            self.expect_grammar_op("}")?;
             Ok(repeat(expr))
         } else {
             Err(format!(
@@ -221,12 +229,12 @@ impl EbnfParser {
 
     // --- Parser Helpers ---
 
-    fn peek_op(&mut self, op: &str) -> bool {
+    fn peek_grammar_op(&mut self, op: &str) -> bool {
         matches!(self.tokens.peek(), Some(EbnfToken::Op(s)) if s == op)
     }
 
-    fn consume_op(&mut self, op: &str) -> Result<(), String> {
-        if self.peek_op(op) {
+    fn consume_grammar_op(&mut self, op: &str) -> Result<(), String> {
+        if self.peek_grammar_op(op) {
             self.tokens.next();
             Ok(())
         } else {
@@ -234,7 +242,7 @@ impl EbnfParser {
         }
     }
 
-    fn expect_op(&mut self, op: &str) -> Result<(), String> {
+    fn expect_grammar_op(&mut self, op: &str) -> Result<(), String> {
         match self.tokens.next() {
             Some(EbnfToken::Op(s)) if s == op => Ok(()),
             other => Err(format!("Expected op '{}', found {:?}", op, other)),
@@ -245,6 +253,38 @@ impl EbnfParser {
         match self.tokens.next() {
             Some(EbnfToken::Ident(id)) => Ok(id),
             other => Err(format!("Expected identifier, found {:?}", other)),
+        }
+    }
+
+    fn parse_regex_expression(&mut self) -> Result<Expr, String> {
+        let mut choices = vec![self.parse_regex_sequence()?];
+        while self.peek_regex_op("|") {
+            self.consume_regex_op("|")?;
+            choices.push(self.parse_regex_sequence()?);
+        }
+        if choices.len() == 1 {
+            Ok(choices.remove(0))
+        } else {
+            Ok(choice_fast(choices))
+        }
+    }
+
+
+    fn expect_nonterminal_ident(&mut self) -> Result<String, String> {
+        let id = self.expect_ident()?;
+        if id.chars().next().map_or(false, |c| c.is_uppercase()) {
+            Ok(id)
+        } else {
+            Err(format!("Expected non-terminal identifier (uppercase), found '{}'", id))
+        }
+    }
+
+    fn expect_terminal_ident(&mut self) -> Result<String, String> {
+        let id = self.expect_ident()?;
+        if id.chars().next().map_or(false, |c| c.is_lowercase()) {
+            Ok(id)
+        } else {
+            Err(format!("Expected terminal identifier (lowercase), found '{}'", id))
         }
     }
 
@@ -265,6 +305,69 @@ impl EbnfParser {
             }
             GrammarExpr::Literal(_) | GrammarExpr::RegexExpr(_) => {}
         }
+    }
+
+    // --- Regex Parser Helpers (for terminal definitions) ---
+
+    fn parse_terminal_expression(&mut self) -> Result<Expr, String> {
+        self.parse_regex_expression()
+    }
+
+    fn peek_regex_op(&mut self, op: &str) -> bool {
+        matches!(self.tokens.peek(), Some(EbnfToken::Op(s)) if s == op)
+    }
+
+    fn consume_regex_op(&mut self, op: &str) -> Result<(), String> {
+        if self.peek_regex_op(op) {
+            self.tokens.next();
+            Ok(())
+        } else {
+            Err(format!("Expected regex op '{}', found {:?}", op, self.tokens.peek()))
+        }
+    }
+
+    fn expect_regex_op(&mut self, op: &str) -> Result<(), String> {
+        match self.tokens.next() {
+            Some(EbnfToken::Op(s)) if s == op => Ok(()),
+            other => Err(format!("Expected regex op '{}', found {:?}", op, other)),
+        }
+    }
+
+    fn parse_regex_sequence(&mut self) -> Result<Expr, String> {
+        let mut terms = Vec::new();
+        while self.tokens.peek().is_some()
+            && !self.peek_regex_op(")") // End of group
+            && !self.peek_regex_op("|") // End of choice alternative
+            && !self.peek_grammar_op(";") // End of rule
+        {
+            terms.push(self.parse_regex_term()?);
+        }
+
+        if terms.len() == 1 {
+            Ok(terms.remove(0))
+        } else if terms.is_empty() {
+            Ok(Expr::Epsilon) // An empty sequence of regex terms is epsilon
+        } else {
+            Ok(Expr::Seq(terms))
+        }
+    }
+
+    fn parse_regex_term(&mut self) -> Result<Expr, String> {
+        let factor = self.parse_regex_factor()?;
+
+        if self.peek_regex_op("?") {
+            self.consume_regex_op("?")?;
+            Ok(Expr::Quantifier(Box::new(factor), QuantifierType::ZeroOrOne))
+        } else if self.peek_regex_op("*") {
+            self.consume_regex_op("*")?;
+            Ok(Expr::Quantifier(Box::new(factor), QuantifierType::ZeroOrMore))
+        } else if self.peek_regex_op("+") {
+            self.consume_regex_op("+")?;
+            Ok(Expr::Quantifier(Box::new(factor), QuantifierType::OneOrMore))
+        } else {
+            Ok(factor)
+        }
+
     }
 }
 
