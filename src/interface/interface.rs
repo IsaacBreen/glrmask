@@ -353,8 +353,6 @@ impl GrammarDefinition {
                         per_base_counters,
                         all_names,
                     );
-                    dbg!(&expr);
-                    dbg!(&terminal_name);
                     let group_id = *next_terminal_group_id;
                     terminal_name_to_group_id.insert(terminal_name.clone(), group_id);
                     terminal_expr_to_group_id.insert(regex_expr.clone(), group_id);
@@ -669,6 +667,7 @@ impl GrammarDefinition {
         // ------------------------------------------------------------------
         // 2.  Remove the “always-null” terminals completely
         // ------------------------------------------------------------------
+        println!("Removing always-null terminals: {:?}", always_null_terminals);
         let mut updated_productions: Vec<Production> = Vec::with_capacity(productions.len());
         for prod in productions.into_iter() {
             let filtered_rhs: Vec<Symbol> = prod.rhs
@@ -694,6 +693,7 @@ impl GrammarDefinition {
         // ------------------------------------------------------------------
         // 3.  Turn the “sometimes null” terminals into *optional* non-terminals
         // ------------------------------------------------------------------
+        println!("Processing may-be-null terminals: {:?}", may_be_null_terminals);
         for terminal_name in may_be_null_terminals {
             // (a) generate a fresh non-terminal name that will stand for
             //       “   <terminal> | ε   ”.
