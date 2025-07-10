@@ -468,7 +468,7 @@ impl Display for GLRParser {
                             for (nt_id, prod_ids) in nts {
                                 let nt = non_terminal_map.get_by_right(nt_id).unwrap();
                                 for prod_id_val in prod_ids {
-                                    let prod = self.productions.get(prod_id_val.0).unwrap();
+                                    let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
                                     writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
                                 }
                             }
