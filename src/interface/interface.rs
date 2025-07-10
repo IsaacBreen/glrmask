@@ -743,6 +743,11 @@ impl GrammarDefinition {
         let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
         let mut rules = ebnf.grammar_rules;
 
+        println!("EBNF rules:");
+        for (rule_name, grammar_expr) in rules.iter() {
+            println!("{} -> {:?}", rule_name, grammar_expr);
+        }
+
         fn is_terminal(name: &str) -> bool {
             // Is terminal if first char is uppercase letter.
             name.chars().next().map_or(false, |c| c.is_uppercase())
