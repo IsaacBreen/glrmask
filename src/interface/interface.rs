@@ -786,17 +786,7 @@ impl GrammarDefinition {
 
         rules.retain_mut(
             |(name, grammar_expr)| {
-                if let GrammarExpr::RegexExpr(expr) = grammar_expr {
-                    if !referenced_terminals.contains(name) {
-                        // If the terminal is not referenced, remove it
-                        false
-                    } else {
-                        // Keep
-                        true
-                    }
-                } else {
-                    true
-                }
+                !(is_terminal(name, grammar_expr) && !referenced_terminals.contains(name))
             }
         );
 
