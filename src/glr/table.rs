@@ -390,51 +390,50 @@ fn stage_5(stage_4_table: Stage4Table, productions: &[Production]) -> Stage5Resu
 }
 
 fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
-    use Stage6ShiftsAndReduces::*;
+    let mut stage_6_table = BTreeMap::new();
 
-    stage_5_table
-        .into_iter()
-        .map(|(item_set, row)| {
-            // 1. Collect the union of shift keys and reduce keys.
-            let mut terminals: BTreeSet<_> = row.shifts.keys().cloned().collect();
-            terminals.extend(row.reduces.keys().cloned());
+    for (item_set, row) in stage_5_table {
+        let mut shifts_and_reduces = BTreeMap::new();
 
-            // 2-4. Build the action map.
-            let mut shifts_and_reduces = BTreeMap::new();
-            for terminal in terminals {
-                let shift_opt = row.shifts.get(&terminal);
-                let reduces_opt = row.reduces.get(&terminal);
+        // Get all terminals that appear in either shifts or reduces
+        let all_terminals: BTreeSet<_> = row.shifts.keys()
+            .chain(row.reduces.keys())
+            .cloned()
+            .collect();
 
-                let entry = match (shift_opt, reduces_opt) {
-                    // shift only -------------------------------------------------
-                    (Some(shift_set), None) => Shift(shift_set.clone()),
+        for terminal in all_terminals {
+            let shift = row.shifts.get(&terminal).cloned();
+            let reduces = row.reduces.get(&terminal).cloned().unwrap_or_default();
 
-                    // exactly one reduction and no shift ------------------------
-                    (None, Some(reduces)) if reduces.len() == 1 =>
-                        Reduce(*reduces.iter().next().unwrap()),
+            let action = match (shift, reduces.len()) {
+                // Only shift, no reduces
+                (Some(shift_target), 0) => {
+                    Stage6ShiftsAndReduces::Shift(shift_target)
+                }
+                // Only one reduce, no shift
+                (None, 1) => {
+                    let production_id = reduces.into_iter().next().unwrap();
+                    Stage6ShiftsAndReduces::Reduce(production_id)
+                }
+                // Either: shift + reduces, multiple reduces, or no shift + multiple reduces
+                (shift, _) => {
+                    Stage6ShiftsAndReduces::Split { shift, reduces }
+                }
+            };
 
-                    // shift + ≥1 reductions  OR  ≥2 reductions -------------------
-                    (shift, Some(reduces)) => Split {
-                        shift: shift.cloned(),
-                        reduces: reduces.clone(),
-                    },
+            shifts_and_reduces.insert(terminal, action);
+        }
 
-                    // no shift, no reduce – cannot happen -----------------------
-                    (None, None) => unreachable!("terminal collected but neither shift nor reduce"),
-                };
+        stage_6_table.insert(
+            item_set,
+            Stage6Row {
+                shifts_and_reduces,
+                gotos: row.gotos,
+            },
+        );
+    }
 
-                shifts_and_reduces.insert(terminal, entry);
-            }
-
-            (
-                item_set,
-                Stage6Row {
-                    shifts_and_reduces,
-                    gotos: row.gotos,
-                },
-            )
-        })
-        .collect()
+    stage_6_table
 }
 
 fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_production_id: usize, terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
