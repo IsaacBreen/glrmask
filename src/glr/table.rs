@@ -393,77 +393,36 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
     let mut stage_6_table = BTreeMap::new();
 
     for (item_set, row) in stage_5_table {
-        // Attempt 1
-        // let mut shifts_and_reduces = BTreeMap::new();
-        //
-        // for (terminal, next_item_set) in row.shifts {
-        //     shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Shift(next_item_set));
-        // }
-        //
-        // for (terminal, production_ids) in row.reduces {
-        //     if let Some(existing) = shifts_and_reduces.get_mut(&terminal) {
-        //         match existing {
-        //             Stage6ShiftsAndReduces::Shift(shift_set) => {
-        //                 *existing = Stage6ShiftsAndReduces::Split {
-        //                     shift: Some(shift_set.clone()),
-        //                     reduces: production_ids.clone(),
-        //                 };
-        //             }
-        //             Stage6ShiftsAndReduces::Split { shift, reduces } => {
-        //                 reduces.extend(production_ids.into_iter());
-        //             }
-        //             Stage6ShiftsAndReduces::Reduce(_) => unreachable!(),
-        //         }
-        //     } else {
-        //         // If there's only one production ID, we can optimize by storing it directly
-        //         if production_ids.len() == 1 {
-        //             shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Reduce(production_ids.iter().next().unwrap().clone()));
-        //         } else {
-        //             shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift: None, reduces: production_ids });
-        //         }
-        //     }
-        // }
+        let mut shifts_and_reduces = BTreeMap::new();
 
-        // Attempt 2
-        // let mut shifts_and_reduces = BTreeMap::new();
-        // for terminal in Iterator::chain(row.shifts.keys(), row.reduces.keys()) {
-        //     match (row.shifts.get(terminal), row.reduces.get(terminal).cloned().unwrap_or_default().into_iter().collect::<Vec<_>>().as_slice()) {
-        //         (Some(shifts), []) => {
-        //             shifts_and_reduces.insert(terminal.clone(), Stage6ShiftsAndReduces::Shift(shifts.clone()));
-        //         }
-        //         (None, [reduce]) => {
-        //             shifts_and_reduces.insert(terminal.clone(), Stage6ShiftsAndReduces::Reduce(reduce.clone()));
-        //         }
-        //         (maybe_shifts, reduces) => {
-        //             shifts_and_reduces.insert(
-        //                 terminal.clone(),
-        //                 Stage6ShiftsAndReduces::Split {
-        //                     shift: maybe_shifts.cloned(),
-        //                     reduces: reduces.iter().cloned().collect::<BTreeSet<_>>(),
-        //                 },
-        //             );
-        //         }
-        //     }
-        // }
+        // Get all terminals that appear in either shifts or reduces
+        let all_terminals: BTreeSet<_> = row.shifts.keys()
+            .chain(row.reduces.keys())
+            .cloned()
+            .collect();
 
-        // Attempt 3
-        // let mut shifts_and_reduces = Iterator::chain(row.shifts.keys(), row.reduces.keys()).collect::<BTreeSet<_>>().into_iter()
-        //     .map(|terminal| {
-        //         let maybe_shift = row.shifts.get(terminal).cloned();
-        //         let reduces = row.reduces.get(terminal).cloned().unwrap_or_default().into_iter().collect::<Vec<_>>();
-        //         let new_row = match (maybe_shift, reduces.as_slice()) {
-        //             (Some(shift), []) => Stage6ShiftsAndReduces::Shift(shift),
-        //             (None, [reduce]) => Stage6ShiftsAndReduces::Reduce(reduce.clone()),
-        //             (maybe_shift, reduces) => Stage6ShiftsAndReduces::Split {
-        //                 shift: maybe_shift,
-        //                 reduces: reduces.iter().cloned().collect::<BTreeSet<_>>(),
-        //             },
-        //         };
-        //         (terminal.clone(), new_row)
-        //     })
-        //     .collect::<BTreeMap<_, _>>();
+        for terminal in all_terminals {
+            let shift = row.shifts.get(&terminal).cloned();
+            let reduces = row.reduces.get(&terminal).cloned().unwrap_or_default();
 
-        todo!("Choose one");
+            let action = match (shift, reduces.len()) {
+                // Only shift, no reduces
+                (Some(shift_target), 0) => {
+                    Stage6ShiftsAndReduces::Shift(shift_target)
+                }
+                // Only one reduce, no shift
+                (None, 1) => {
+                    let production_id = reduces.into_iter().next().unwrap();
+                    Stage6ShiftsAndReduces::Reduce(production_id)
+                }
+                // Either: shift + reduces, multiple reduces, or no shift + multiple reduces
+                (shift, _) => {
+                    Stage6ShiftsAndReduces::Split { shift, reduces }
+                }
+            };
+
+            shifts_and_reduces.insert(terminal, action);
+        }
 
         stage_6_table.insert(
             item_set,
