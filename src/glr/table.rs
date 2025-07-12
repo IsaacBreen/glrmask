@@ -393,36 +393,53 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
     let mut stage_6_table = BTreeMap::new();
 
     for (item_set, row) in stage_5_table {
-        let mut shifts_and_reduces = BTreeMap::new();
-
-        // Get all terminals that appear in either shifts or reduces
-        let all_terminals: BTreeSet<_> = row.shifts.keys()
-            .chain(row.reduces.keys())
+        // 1. Get all unique terminals that have either a shift or a reduce action.
+        let all_terminals = row.shifts.keys()
             .cloned()
-            .collect();
+            .collect::<BTreeSet<_>>()
+            .union(&row.reduces.keys().cloned().collect())
+            .cloned()
+            .collect::<BTreeSet<_>>();
 
-        for terminal in all_terminals {
-            let shift = row.shifts.get(&terminal).cloned();
-            let reduces = row.reduces.get(&terminal).cloned().unwrap_or_default();
+        // 2. For each terminal, determine the correct combined action.
+        let shifts_and_reduces = all_terminals.into_iter()
+            .map(|terminal| {
+                let maybe_shift = row.shifts.get(&terminal).cloned();
+                let maybe_reduces = row.reduces.get(&terminal).cloned();
 
-            let action = match (shift, reduces.len()) {
-                // Only shift, no reduces
-                (Some(shift_target), 0) => {
-                    Stage6ShiftsAndReduces::Shift(shift_target)
-                }
-                // Only one reduce, no shift
-                (None, 1) => {
-                    let production_id = reduces.into_iter().next().unwrap();
-                    Stage6ShiftsAndReduces::Reduce(production_id)
-                }
-                // Either: shift + reduces, multiple reduces, or no shift + multiple reduces
-                (shift, _) => {
-                    Stage6ShiftsAndReduces::Split { shift, reduces }
-                }
-            };
+                let action = match (maybe_shift, maybe_reduces) {
+                    // Case 1: Only a shift action exists.
+                    (Some(shift_set), None) => Stage6ShiftsAndReduces::Shift(shift_set),
 
-            shifts_and_reduces.insert(terminal, action);
-        }
+                    // Case 2: Only reduce actions exist.
+                    (None, Some(reduce_set)) => {
+                        // Optimization: If there's only one reduction, use the simpler `Reduce` variant.
+                        if reduce_set.len() == 1 {
+                            let production_id = reduce_set.into_iter().next().unwrap();
+                            Stage6ShiftsAndReduces::Reduce(production_id)
+                        } else {
+                            // Otherwise, it's a reduce/reduce conflict.
+                            Stage6ShiftsAndReduces::Split {
+                                shift: None,
+                                reduces: reduce_set,
+                            }
+                        }
+                    }
+
+                    // Case 3: Both a shift and reduce actions exist (a shift/reduce conflict).
+                    (Some(shift_set), Some(reduce_set)) => Stage6ShiftsAndReduces::Split {
+                        shift: Some(shift_set),
+                        reduces: reduce_set,
+                    },
+
+                    // This case is impossible because we are iterating over keys that are guaranteed
+                    // to be in at least one of the maps.
+                    (None, None) => unreachable!(),
+                };
+
+                (terminal, action)
+            })
+            .collect::<BTreeMap<_, _>>();
 
         stage_6_table.insert(
             item_set,
