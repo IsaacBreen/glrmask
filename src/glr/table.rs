@@ -447,21 +447,23 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
         // }
 
         // Attempt 3
-        let mut shifts_and_reduces = Iterator::chain(row.shifts.keys(), row.reduces.keys()).collect::<BTreeSet<_>>().into_iter()
-            .map(|terminal| {
-                let maybe_shift = row.shifts.get(terminal).cloned();
-                let reduces = row.reduces.get(terminal).cloned().unwrap_or_default().into_iter().collect::<Vec<_>>();
-                let new_row = match (maybe_shift, reduces.as_slice()) {
-                    (Some(shift), []) => Stage6ShiftsAndReduces::Shift(shift),
-                    (None, [reduce]) => Stage6ShiftsAndReduces::Reduce(reduce.clone()),
-                    (maybe_shift, reduces) => Stage6ShiftsAndReduces::Split {
-                        shift: maybe_shift,
-                        reduces: reduces.iter().cloned().collect::<BTreeSet<_>>(),
-                    },
-                };
-                (terminal.clone(), new_row)
-            })
-            .collect::<BTreeMap<_, _>>();
+        // let mut shifts_and_reduces = Iterator::chain(row.shifts.keys(), row.reduces.keys()).collect::<BTreeSet<_>>().into_iter()
+        //     .map(|terminal| {
+        //         let maybe_shift = row.shifts.get(terminal).cloned();
+        //         let reduces = row.reduces.get(terminal).cloned().unwrap_or_default().into_iter().collect::<Vec<_>>();
+        //         let new_row = match (maybe_shift, reduces.as_slice()) {
+        //             (Some(shift), []) => Stage6ShiftsAndReduces::Shift(shift),
+        //             (None, [reduce]) => Stage6ShiftsAndReduces::Reduce(reduce.clone()),
+        //             (maybe_shift, reduces) => Stage6ShiftsAndReduces::Split {
+        //                 shift: maybe_shift,
+        //                 reduces: reduces.iter().cloned().collect::<BTreeSet<_>>(),
+        //             },
+        //         };
+        //         (terminal.clone(), new_row)
+        //     })
+        //     .collect::<BTreeMap<_, _>>();
+
+        todo!("Choose one");
 
         stage_6_table.insert(
             item_set,
