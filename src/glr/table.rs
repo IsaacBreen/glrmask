@@ -478,6 +478,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
                         let len = production.rhs.len();
                         len_to_nt_to_production_id.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id);
                     }
+                    assert!(shift_state_id.is_some() && len_to_nt_to_production_id.len() > 0 || shift_state_id.is_none() && len_to_nt_to_production_id.len() > 1 || shift_state_id.is_none() && len_to_nt_to_production_id.len() == 1 && len_to_nt_to_production_id.iter().next().unwrap().1.len() > 1);
                     Stage7ShiftsAndReduces::Split { shift: shift_state_id, reduces: len_to_nt_to_production_id }
                 }
             };
