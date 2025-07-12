@@ -400,7 +400,7 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
         }
 
         for (terminal, mut production_ids) in row.reduces {
-            if let Some(mut existing) = shifts_and_reduces.remove(&terminal) {
+            if let Some(existing) = shifts_and_reduces.remove(&terminal) {
                 match existing {
                     Stage6ShiftsAndReduces::Shift(shift_set) => {
                         shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
