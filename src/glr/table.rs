@@ -407,18 +407,11 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
 
             let action = match (shift, reduces.len()) {
                 // Only shift, no reduces
-                (Some(shift_target), 0) => {
-                    Stage6ShiftsAndReduces::Shift(shift_target)
-                }
+                (Some(shift_target), 0) => Stage6ShiftsAndReduces::Shift(shift_target),
                 // Only one reduce, no shift
-                (None, 1) => {
-                    let production_id = reduces.into_iter().next().unwrap();
-                    Stage6ShiftsAndReduces::Reduce(production_id)
-                }
+                (None, 1) => Stage6ShiftsAndReduces::Reduce(reduces.into_iter().next().unwrap()),
                 // Either: shift + reduces, multiple reduces, or no shift + multiple reduces
-                (shift, _) => {
-                    Stage6ShiftsAndReduces::Split { shift, reduces }
-                }
+                (shift, _) => Stage6ShiftsAndReduces::Split { shift, reduces },
             };
 
             shifts_and_reduces.insert(terminal, action);
