@@ -400,24 +400,23 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
         }
 
         for (terminal, mut production_ids) in row.reduces {
-            if let Some(existing) = shifts_and_reduces.remove(&terminal) {
+            if let Some(existing) = shifts_and_reduces.get_mut(&terminal) {
                 match existing {
                     Stage6ShiftsAndReduces::Shift(shift_set) => {
-                        shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
+                        *existing = Stage6ShiftsAndReduces::Split {
                             shift: Some(shift_set.clone()),
                             reduces: production_ids.clone(),
-                        });
+                        };
                     }
                     Stage6ShiftsAndReduces::Reduce(existing_production_id) => {
-                        production_ids.insert(existing_production_id);
-                        shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split {
+                        production_ids.insert(*existing_production_id);
+                        *existing = Stage6ShiftsAndReduces::Split {
                             shift: None,
                             reduces: production_ids,
-                        });
+                        };
                     }
-                    Stage6ShiftsAndReduces::Split { shift, mut reduces } => {
+                    Stage6ShiftsAndReduces::Split { shift, reduces } => {
                         reduces.extend(production_ids.into_iter());
-                        shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Split { shift, reduces });
                     }
                 }
             } else {
