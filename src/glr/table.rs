@@ -399,7 +399,7 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
             shifts_and_reduces.insert(terminal, Stage6ShiftsAndReduces::Shift(next_item_set));
         }
 
-        for (terminal, mut production_ids) in row.reduces {
+        for (terminal, production_ids) in row.reduces {
             if let Some(existing) = shifts_and_reduces.get_mut(&terminal) {
                 match existing {
                     Stage6ShiftsAndReduces::Shift(shift_set) => {
@@ -408,16 +408,10 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
                             reduces: production_ids.clone(),
                         };
                     }
-                    Stage6ShiftsAndReduces::Reduce(existing_production_id) => {
-                        production_ids.insert(*existing_production_id);
-                        *existing = Stage6ShiftsAndReduces::Split {
-                            shift: None,
-                            reduces: production_ids,
-                        };
-                    }
                     Stage6ShiftsAndReduces::Split { shift, reduces } => {
                         reduces.extend(production_ids.into_iter());
                     }
+                    Stage6ShiftsAndReduces::Reduce(_) => unreachable!(),
                 }
             } else {
                 // If there's only one production ID, we can optimize by storing it directly
