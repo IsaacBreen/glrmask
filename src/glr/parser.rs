@@ -603,11 +603,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     Some(Stage7ShiftsAndReduces::Reduce {
                              nonterminal_id: nt,
-                             len, ..
+                             len,
+                            production_id,
                          }) => {
+                        let nonterminal = self.parser.non_terminal_map.get_by_right(nt).unwrap();
                         // timeit!("GLRParserState::step::reduce", {
-                        timeit!(format!("GLRParserState::step::reduce ({} -> {})", nt.0, len), {
-                        crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", peek.edge_value().state_id.0, token_id.0, nt.0, len);
+                        timeit!(format!("GLRParserState::step::reduce ({} -> {}) (pid {})", nonterminal.0, len, production_id.0), {
+                        crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", peek.edge_value().state_id.0, token_id.0, nonterminal.0, len);
                         let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                         if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
                            todo.push(ParseState { stack: s_new_arc });
@@ -628,9 +630,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             })
                         }
                         for (len, nts) in reduces {
+                            let nts_mapped = nts.iter()
+                                .map(|(nt, pids)| (self.parser.non_terminal_map.get_by_right(nt).unwrap().clone().0, pids.iter()
+                                    .map(|pid| pid.0)
+                                    .collect::<BTreeSet<_>>()))
+                                .collect::<BTreeMap<_, _>>();
                             // timeit!("GLRParserState::step::split::reduce", {
-                        timeit!(format!("GLRParserState::step::split::reduce ({:?} -> {})", nts.iter().map(|(nt, pids)| (nt.0, pids.iter().map(|pid| pid.0).collect::<BTreeSet<_>>())).collect::<BTreeMap<_, _>>(), len), {
-                            crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", peek.edge_value().state_id.0, token_id.0, nts);
+                            timeit!(format!("GLRParserState::step::split::reduce ({:?} -> {})", nts_mapped, len), {
+                            crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", peek.edge_value().state_id.0, token_id.0, nts_mapped);
                             for (nt, _prod_ids) in nts {
                                 crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
                                 let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
