@@ -605,7 +605,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                              nonterminal_id: nt,
                              len, ..
                          }) => {
-                        timeit!("GLRParserState::step::reduce", {
+                        // timeit!("GLRParserState::step::reduce", {
+                        timeit!(format!("GLRParserState::step::reduce ({} -> {})", nt.0, len), {
                         crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", peek.edge_value().state_id.0, token_id.0, nt.0, len);
                         let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                         if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
@@ -627,7 +628,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             })
                         }
                         for (len, nts) in reduces {
-                            timeit!("GLRParserState::step::split::reduce", {
+                            // timeit!("GLRParserState::step::split::reduce", {
+                        timeit!(format!("GLRParserState::step::split::reduce ({:?} -> {})", nts.iter().map(|(nt, pids)| (nt.0, pids.iter().map(|pid| pid.0).collect::<BTreeSet<_>>())).collect::<BTreeMap<_, _>>(), len), {
                             crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", peek.edge_value().state_id.0, token_id.0, nts);
                             for (nt, _prod_ids) in nts {
                                 crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
