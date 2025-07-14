@@ -2,7 +2,7 @@
 mod tests {
     use crate::constraint::{GrammarConstraint, GrammarConstraintState};
     use crate::finite_automata::{eat_u8, rep, Expr as RegexExpr, QuantifierType, Expr, eat_u8_seq};
-    use crate::interface::{choice, sequence, literal, CompiledGrammar, IncrementalParser, GrammarExpr, GrammarDefinition};
+    use crate::interface::{choice, sequence, literal, CompiledGrammar, IncrementalParser, GrammarExpr, GrammarDefinition, repeat};
     use crate::tokenizer::LLMTokenID;
     use crate::datastructures::hybrid_bitset::HybridBitset;
     use bimap::BiBTreeMap; // Add this line

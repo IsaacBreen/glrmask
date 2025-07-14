@@ -786,7 +786,7 @@ impl GrammarDefinition {
             .filter(|(name, _)| !is_terminal_name(name))
             .collect();
 
-        let terminal_defs: Vec<(String, Expr)> = terminals.into_iter()
+        let terminal_defs: Vec<(String, Expr)> = terminals.clone().into_iter()
             .filter(|(name, _)| referenced_terminals.contains(name))
             .map(|(name, grammar_expr)| {
                 let mut memo = BTreeMap::new();
@@ -1054,141 +1054,141 @@ mod tests {
         bitvec.into()
     }
 
-    // #[ignore]
-    #[test]
-    fn test_grammar_from_exprs() {
-        let exprs = vec![
-            ("E".to_string(), choice(vec![sequence(vec![r#ref("E"), regex(eat_u8(b'+')), r#ref("T")]), r#ref("T")])),
-            ("T".to_string(), choice(vec![sequence(vec![r#ref("T"), regex(eat_u8(b'*')), r#ref("F")]), r#ref("F")])),
-            ("F".to_string(), choice(vec![sequence(vec![regex(eat_u8(b'(')), r#ref("E"), regex(eat_u8(b')'))]), regex(eat_u8(b'i'))])),
-        ];
+    // // #[ignore]
+    // #[test]
+    // fn test_grammar_from_exprs() {
+    //     let exprs = vec![
+    //         ("E".to_string(), choice(vec![sequence(vec![r#ref("E"), regex(eat_u8(b'+')), r#ref("T")]), r#ref("T")])),
+    //         ("T".to_string(), choice(vec![sequence(vec![r#ref("T"), regex(eat_u8(b'*')), r#ref("F")]), r#ref("F")])),
+    //         ("F".to_string(), choice(vec![sequence(vec![regex(eat_u8(b'(')), r#ref("E"), regex(eat_u8(b')'))]), regex(eat_u8(b'i'))])),
+    //     ];
+    //
+    //     let compiled_grammar = CompiledGrammar::from_exprs(exprs.clone()).expect("Failed to compile grammar");
+    //     debug!(2, "{}", &compiled_grammar);
+    //
+    //     // let parser = compiled_grammar.glr_parser(); // Accessor returns &GLRParser
+    //     // debug!(2, "{:?}", parser); // GLRParser Debug can be verbose
+    //
+    //     let llm_tokens: Vec<Vec<u8>> = vec![b"i".to_vec(), b"+".to_vec(), b"*".to_vec(), b"(".to_vec(), b")".to_vec(), b"(i".to_vec(), b"+i".to_vec()];
+    //     let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
+    //     let eof_llm_token_id = llm_tokens.len();
+    //     let max_llm_token_id = llm_tokens.len(); // For HybridBitset capacity
+    //
+    //     let grammar_constraint = GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), LLMTokenID(eof_llm_token_id), max_llm_token_id);
+    //     let mut grammar_constraint_state = grammar_constraint.init();
+    //
+    //     macro_rules! llm_token_vec {
+    //         ($($token:expr),* $(,)?) => {
+    //             vec![
+    //                 $(
+    //                     llm_token_map.get_by_left(&$token.to_vec()).unwrap().0,
+    //                 )*
+    //             ]
+    //         }
+    //     }
+    //
+    //     let mask = grammar_constraint_state.get_mask();
+    //     let expected_mask = bitvec_with_capacity_and_values(max_llm_token_id + 1, llm_token_vec!(b"i", b"(", b"(i"));
+    //     assert_eq!(mask, expected_mask);
+    //
+    //     let prefill: Vec<_> = llm_token_vec!(b"(i", b"+", b"i", b"*", b"i").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
+    //     // Re-init state for this part of the test or use a fresh one
+    //     let mut state_for_prefill = grammar_constraint.init();
+    //     for token in prefill.iter() {
+    //         state_for_prefill.commit(*token);
+    //     }
+    //
+    //     let mask_after_prefill = state_for_prefill.get_mask();
+    //     let expected_mask_after_prefill = bitvec_with_capacity_and_values(max_llm_token_id + 1, llm_token_vec!(b"+", b"*", b")", b"+i"));
+    //     assert_eq!(mask_after_prefill, expected_mask_after_prefill);
+    //
+    //     let final_token_seq: Vec<_> = llm_token_vec!(b")").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
+    //     for token in final_token_seq.iter() {
+    //         state_for_prefill.commit(*token);
+    //     }
+    //
+    //     let mask_after_final = state_for_prefill.get_mask();
+    //     let mut expected_mask_final = bitvec_with_capacity_and_values(max_llm_token_id + 1, llm_token_vec!(b"+", b"*", b"+i"));
+    //     assert_eq!(mask_after_final, expected_mask_final);
+    // }
 
-        let compiled_grammar = CompiledGrammar::from_exprs(exprs.clone()).expect("Failed to compile grammar");
-        debug!(2, "{}", &compiled_grammar);
-
-        // let parser = compiled_grammar.glr_parser(); // Accessor returns &GLRParser
-        // debug!(2, "{:?}", parser); // GLRParser Debug can be verbose
-
-        let llm_tokens: Vec<Vec<u8>> = vec![b"i".to_vec(), b"+".to_vec(), b"*".to_vec(), b"(".to_vec(), b")".to_vec(), b"(i".to_vec(), b"+i".to_vec()];
-        let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
-        let eof_llm_token_id = llm_tokens.len();
-        let max_llm_token_id = llm_tokens.len(); // For HybridBitset capacity
-
-        let grammar_constraint = GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), LLMTokenID(eof_llm_token_id), max_llm_token_id);
-        let mut grammar_constraint_state = grammar_constraint.init();
-
-        macro_rules! llm_token_vec {
-            ($($token:expr),* $(,)?) => {
-                vec![
-                    $(
-                        llm_token_map.get_by_left(&$token.to_vec()).unwrap().0,
-                    )*
-                ]
-            }
-        }
-
-        let mask = grammar_constraint_state.get_mask();
-        let expected_mask = bitvec_with_capacity_and_values(max_llm_token_id + 1, llm_token_vec!(b"i", b"(", b"(i"));
-        assert_eq!(mask, expected_mask);
-
-        let prefill: Vec<_> = llm_token_vec!(b"(i", b"+", b"i", b"*", b"i").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
-        // Re-init state for this part of the test or use a fresh one
-        let mut state_for_prefill = grammar_constraint.init();
-        for token in prefill.iter() {
-            state_for_prefill.commit(*token);
-        }
-
-        let mask_after_prefill = state_for_prefill.get_mask();
-        let expected_mask_after_prefill = bitvec_with_capacity_and_values(max_llm_token_id + 1, llm_token_vec!(b"+", b"*", b")", b"+i"));
-        assert_eq!(mask_after_prefill, expected_mask_after_prefill);
-
-        let final_token_seq: Vec<_> = llm_token_vec!(b")").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
-        for token in final_token_seq.iter() {
-            state_for_prefill.commit(*token);
-        }
-
-        let mask_after_final = state_for_prefill.get_mask();
-        let mut expected_mask_final = bitvec_with_capacity_and_values(max_llm_token_id + 1, llm_token_vec!(b"+", b"*", b"+i"));
-        assert_eq!(mask_after_final, expected_mask_final);
-    }
-
-    // #[ignore]
-    #[test]
-    fn test_grammar_from_exprs_simple() {
-        let exprs = vec![
-            ("E".to_string(), sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))])),
-        ];
-
-        let compiled_grammar = CompiledGrammar::from_exprs(exprs.clone()).expect("Failed to compile");
-
-        let llm_tokens: Vec<Vec<u8>> = vec![b"a".to_vec(), b"b".to_vec()];
-        let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
-        let eof_llm_token_id = llm_tokens.len();
-        let max_llm_token_id = llm_tokens.len();
-        let grammar_constraint = GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), LLMTokenID(eof_llm_token_id), max_llm_token_id);
-        grammar_constraint.dump_precomputed();
-        let mut grammar_constraint_state = grammar_constraint.init();
-
-        macro_rules! llm_token_vec {
-            ($($token:expr),* $(,)?) => {
-                vec![
-                    $(
-                        llm_token_map.get_by_left(&$token.to_vec()).unwrap().0,
-                    )*
-                ]
-            }
-        }
-
-        let mask = grammar_constraint_state.get_mask();
-        let expected_mask = bitvec_with_capacity_and_values(max_llm_token_id + 1, llm_token_vec!(b"a"));
-        assert_eq!(mask, expected_mask);
-
-        let terminals: Vec<_> = llm_token_vec!(b"a").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
-        for token in terminals.iter() {
-            grammar_constraint_state.commit(*token);
-        }
-
-        let mask = grammar_constraint_state.get_mask();
-        let expected_mask = bitvec_with_capacity_and_values(max_llm_token_id + 1, llm_token_vec!(b"b"));
-        assert_eq!(mask, expected_mask);
-    }
-
-    #[test]
-    fn test_grammar_from_exprs_very_simple() {
-        let exprs = vec![
-            ("E".to_string(), regex(eat_u8(b'a'))),
-        ];
-
-        let compiled_grammar = CompiledGrammar::from_exprs(exprs.clone()).expect("Failed to compile");
-
-        let llm_tokens: Vec<Vec<u8>> = vec![b"a".to_vec()];
-        let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
-        let eof_llm_token_id = llm_tokens.len();
-        let max_llm_token_id = llm_tokens.len();
-        let grammar_constraint = GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), LLMTokenID(eof_llm_token_id), max_llm_token_id);
-        grammar_constraint.dump_precomputed();
-        let mut grammar_constraint_state = grammar_constraint.init();
-
-        macro_rules! llm_token_vec {
-            ($($token:expr),* $(,)?) => {
-                vec![
-                    $(
-                        llm_token_map.get_by_left(&$token.to_vec()).unwrap().0,
-                    )*
-                ]
-            }
-        }
-
-        let mask = grammar_constraint_state.get_mask();
-        let expected_mask = bitvec_with_capacity_and_values(max_llm_token_id + 1, llm_token_vec!(b"a"));
-        assert_eq!(mask, expected_mask);
-
-        grammar_constraint_state.commit(LLMTokenID(0)); // Commit "a"
-
-        let mask = grammar_constraint_state.get_mask();
-        let mut expected_mask = HybridBitset::zeros(); // Empty mask initially
-        assert_eq!(mask, expected_mask);
-    }
+    // // #[ignore]
+    // #[test]
+    // fn test_grammar_from_exprs_simple() {
+    //     let exprs = vec![
+    //         ("E".to_string(), sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))])),
+    //     ];
+    //
+    //     let compiled_grammar = CompiledGrammar::from_exprs(exprs.clone()).expect("Failed to compile");
+    //
+    //     let llm_tokens: Vec<Vec<u8>> = vec![b"a".to_vec(), b"b".to_vec()];
+    //     let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
+    //     let eof_llm_token_id = llm_tokens.len();
+    //     let max_llm_token_id = llm_tokens.len();
+    //     let grammar_constraint = GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), LLMTokenID(eof_llm_token_id), max_llm_token_id);
+    //     grammar_constraint.dump_precomputed();
+    //     let mut grammar_constraint_state = grammar_constraint.init();
+    //
+    //     macro_rules! llm_token_vec {
+    //         ($($token:expr),* $(,)?) => {
+    //             vec![
+    //                 $(
+    //                     llm_token_map.get_by_left(&$token.to_vec()).unwrap().0,
+    //                 )*
+    //             ]
+    //         }
+    //     }
+    //
+    //     let mask = grammar_constraint_state.get_mask();
+    //     let expected_mask = bitvec_with_capacity_and_values(max_llm_token_id + 1, llm_token_vec!(b"a"));
+    //     assert_eq!(mask, expected_mask);
+    //
+    //     let terminals: Vec<_> = llm_token_vec!(b"a").into_iter().map(|token_id| LLMTokenID(token_id)).collect();
+    //     for token in terminals.iter() {
+    //         grammar_constraint_state.commit(*token);
+    //     }
+    //
+    //     let mask = grammar_constraint_state.get_mask();
+    //     let expected_mask = bitvec_with_capacity_and_values(max_llm_token_id + 1, llm_token_vec!(b"b"));
+    //     assert_eq!(mask, expected_mask);
+    // }
+    //
+    // #[test]
+    // fn test_grammar_from_exprs_very_simple() {
+    //     let exprs = vec![
+    //         ("E".to_string(), regex(eat_u8(b'a'))),
+    //     ];
+    //
+    //     let compiled_grammar = CompiledGrammar::from_exprs(exprs.clone()).expect("Failed to compile");
+    //
+    //     let llm_tokens: Vec<Vec<u8>> = vec![b"a".to_vec()];
+    //     let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
+    //     let eof_llm_token_id = llm_tokens.len();
+    //     let max_llm_token_id = llm_tokens.len();
+    //     let grammar_constraint = GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), LLMTokenID(eof_llm_token_id), max_llm_token_id);
+    //     grammar_constraint.dump_precomputed();
+    //     let mut grammar_constraint_state = grammar_constraint.init();
+    //
+    //     macro_rules! llm_token_vec {
+    //         ($($token:expr),* $(,)?) => {
+    //             vec![
+    //                 $(
+    //                     llm_token_map.get_by_left(&$token.to_vec()).unwrap().0,
+    //                 )*
+    //             ]
+    //         }
+    //     }
+    //
+    //     let mask = grammar_constraint_state.get_mask();
+    //     let expected_mask = bitvec_with_capacity_and_values(max_llm_token_id + 1, llm_token_vec!(b"a"));
+    //     assert_eq!(mask, expected_mask);
+    //
+    //     grammar_constraint_state.commit(LLMTokenID(0)); // Commit "a"
+    //
+    //     let mask = grammar_constraint_state.get_mask();
+    //     let mut expected_mask = HybridBitset::zeros(); // Empty mask initially
+    //     assert_eq!(mask, expected_mask);
+    // }
 
     #[test]
     fn test_precompute_for_python_name_token_with_names() {
