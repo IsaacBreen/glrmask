@@ -4,6 +4,7 @@ use crate::glr::table::{generate_glr_parser, TerminalID};
 use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
 use bimap::BiBTreeMap;
 use std::collections::BTreeSet;
+use crate::interface::display_productions;
 // --- Helper Functions for Tests ---
 
 fn create_simple_parser() -> GLRParser {
