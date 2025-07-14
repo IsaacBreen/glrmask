@@ -117,8 +117,9 @@ pub fn literal(bytes: Vec<u8>) -> GrammarExpr { GrammarExpr::Literal(bytes) }
 pub struct GrammarDefinition {
     pub productions: Vec<Production>,
     pub start_production_id: usize, // Index into productions
-    pub terminal_name_to_group_id: BiBTreeMap<String, usize>, // Maps terminal names (used in Productions) to group IDs
-    pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,   // Maps regex Exprs to group IDs
+    pub terminal_name_to_group_id: BiBTreeMap<String, usize>,    // Maps terminal names (used in Productions) to group IDs
+    pub terminal_group_id_to_expr: BTreeMap<usize, Expr>,      // Maps group IDs to regex Exprs
+    pub terminal_literal_to_group_id: BTreeMap<Vec<u8>, usize>, // For deduplicating literals
     pub ignore_terminal_id: Option<TerminalID>,
 }
 
@@ -133,9 +134,9 @@ impl JSONConvertible for GrammarDefinition {
         let mut sorted_terminals_info: Vec<(usize, String, Expr)> = Vec::new();
 
         for (name, group_id) in &self.terminal_name_to_group_id {
-            // Assuming consistency: if a name/group_id exists here, the group_id must exist in terminal_expr_to_group_id
-            let expr = self.terminal_expr_to_group_id.get_by_right(group_id)
-                .unwrap_or_else(|| panic!("Internal consistency error: group_id {} for name '{}' not found in terminal_expr_to_group_id.", group_id, name))
+            // Assuming consistency: if a name/group_id exists here, the group_id must exist in terminal_group_id_to_expr
+            let expr = self.terminal_group_id_to_expr.get(group_id)
+                .unwrap_or_else(|| panic!("Internal consistency error: group_id {} for name '{}' not found in terminal_group_id_to_expr.", group_id, name))
                 .clone();
             sorted_terminals_info.push((*group_id, name.clone(), expr));
         }
@@ -172,8 +173,9 @@ impl JSONConvertible for GrammarDefinition {
                 let terminals_node = obj.remove("terminals")
                     .ok_or_else(|| "Missing field terminals for GrammarDefinition".to_string())?;
 
-                let mut new_terminal_name_to_group_id = BiBTreeMap::new();
-                let mut new_terminal_expr_to_group_id = BiBTreeMap::new();
+                let mut terminal_name_to_group_id = BiBTreeMap::new();
+                let mut terminal_group_id_to_expr = BTreeMap::new();
+                let mut terminal_literal_to_group_id = BTreeMap::new();
 
                 if let JSONNode::Array(terminals_array) = terminals_node {
                     for terminal_item_node in terminals_array {
@@ -182,8 +184,18 @@ impl JSONConvertible for GrammarDefinition {
                             let group_id = terminal_obj.remove("group_id").ok_or_else(|| "Missing field group_id in terminal object".to_string()).and_then(usize::from_json)?;
                             let expr = terminal_obj.remove("expr").ok_or_else(|| "Missing field expr in terminal object".to_string()).and_then(Expr::from_json)?;
 
-                            new_terminal_name_to_group_id.insert_no_overwrite(name, group_id).map_err(|e| format!("Error inserting (name, group_id) into BiBTreeMap for names: {:?}", e))?;
-                            new_terminal_expr_to_group_id.insert_no_overwrite(expr, group_id).map_err(|e| format!("Error inserting (expr, group_id) into BiBTreeMap for exprs: {:?}", e))?;
+                            terminal_name_to_group_id.insert(name, group_id);
+                            if let Some(existing_expr) = terminal_group_id_to_expr.get(&group_id) {
+                                if *existing_expr != expr {
+                                    return Err(format!("Inconsistent expressions for same group_id {}: new {:?}, old {:?}", group_id, expr, existing_expr));
+                                }
+                            } else {
+                                terminal_group_id_to_expr.insert(group_id, expr.clone());
+                            }
+
+                            if let Expr::U8Seq(bytes) = expr {
+                                terminal_literal_to_group_id.insert(bytes, group_id);
+                            }
                         } else {
                             return Err("Expected JSONNode::Object for terminal item".to_string());
                         }
@@ -195,8 +207,9 @@ impl JSONConvertible for GrammarDefinition {
                 Ok(GrammarDefinition {
                     productions,
                     start_production_id,
-                    terminal_name_to_group_id: new_terminal_name_to_group_id,
-                    terminal_expr_to_group_id: new_terminal_expr_to_group_id,
+                    terminal_name_to_group_id,
+                    terminal_group_id_to_expr,
+                    terminal_literal_to_group_id,
                     ignore_terminal_id,
                 })
             }
@@ -298,7 +311,8 @@ impl GrammarDefinition {
         // productions: &mut Vec<Production>, // This is now returned
         nonterminal_names: &HashSet<&str>,
         terminal_name_to_group_id: &mut BiBTreeMap<String, usize>,
-        terminal_expr_to_group_id: &mut BiBTreeMap<Expr, usize>,
+        terminal_group_id_to_expr: &mut BTreeMap<usize, Expr>,
+        terminal_literal_to_group_id: &mut BTreeMap<Vec<u8>, usize>,
         next_terminal_group_id: &mut usize,
         per_base_counters: &mut HashMap<String, usize>,
         all_names: &mut HashSet<String>,
@@ -306,14 +320,23 @@ impl GrammarDefinition {
         match expr {
             GrammarExpr::Literal(bytes) => {
                 let terminal_name = Self::generate_unique_indexed_name_for_literal(
-                    bytes,
-                    per_base_counters,
-                    all_names,
+                    bytes, per_base_counters, all_names,
                 );
-                let group_id = *next_terminal_group_id;
-                terminal_name_to_group_id.insert(terminal_name.clone(), group_id);
-                terminal_expr_to_group_id.insert(Expr::U8Seq(bytes.clone()), group_id);
-                *next_terminal_group_id += 1;
+                let group_id = if let Some(id) = terminal_literal_to_group_id.get(bytes) {
+                    *id
+                } else {
+                    let new_id = *next_terminal_group_id;
+                    *next_terminal_group_id += 1;
+                    terminal_literal_to_group_id.insert(bytes.clone(), new_id);
+                    terminal_group_id_to_expr.insert(new_id, Expr::U8Seq(bytes.clone()));
+                    new_id
+                };
+
+                // Ensure the generated name is associated with the group_id
+                if !terminal_name_to_group_id.contains_right(&group_id) {
+                    terminal_name_to_group_id.insert(terminal_name.clone(), group_id);
+                }
+
                 (vec![Symbol::Terminal(Terminal(terminal_name))], Vec::new())
             }
             GrammarExpr::Ref(name) => {
@@ -333,7 +356,8 @@ impl GrammarDefinition {
                         // productions, // No longer passed
                         nonterminal_names,
                         terminal_name_to_group_id,
-                        terminal_expr_to_group_id,
+                        terminal_group_id_to_expr,
+                        terminal_literal_to_group_id,
                         next_terminal_group_id,
                         per_base_counters,
                         all_names,
@@ -361,7 +385,8 @@ impl GrammarDefinition {
                         // productions, // No longer passed
                         nonterminal_names,
                         terminal_name_to_group_id,
-                        terminal_expr_to_group_id,
+                        terminal_group_id_to_expr,
+                        terminal_literal_to_group_id,
                         next_terminal_group_id,
                         per_base_counters,
                         all_names,
@@ -385,7 +410,8 @@ impl GrammarDefinition {
                     // productions, // No longer passed
                     nonterminal_names,
                     terminal_name_to_group_id,
-                    terminal_expr_to_group_id,
+                    terminal_group_id_to_expr,
+                    terminal_literal_to_group_id,
                     next_terminal_group_id,
                     per_base_counters,
                     all_names,
@@ -405,7 +431,8 @@ impl GrammarDefinition {
                     // productions, // No longer passed
                     nonterminal_names,
                     terminal_name_to_group_id,
-                    terminal_expr_to_group_id,
+                    terminal_group_id_to_expr,
+                    terminal_literal_to_group_id,
                     next_terminal_group_id,
                     per_base_counters,
                     all_names,
@@ -510,7 +537,8 @@ impl GrammarDefinition {
 
         let mut productions = Vec::new();
         let mut terminal_name_to_group_id = BiBTreeMap::new();
-        let mut terminal_expr_to_group_id = BiBTreeMap::new();
+        let mut terminal_group_id_to_expr = BTreeMap::new();
+        let mut terminal_literal_to_group_id = BTreeMap::new();
         let mut next_terminal_group_id = 0;
 
         // Process predefined terminals
@@ -518,14 +546,25 @@ impl GrammarDefinition {
             if terminal_name_to_group_id.contains_left(&name) {
                 return Err(format!("Duplicate terminal name defined: {}", name));
             }
-            if let Some(group_id) = terminal_expr_to_group_id.get_by_left(&expr) {
-                terminal_name_to_group_id.insert(name, *group_id);
+            
+            let group_id = if let Expr::U8Seq(bytes) = &expr {
+                if let Some(existing_id) = terminal_literal_to_group_id.get(bytes) {
+                    *existing_id
+                } else {
+                    let new_id = next_terminal_group_id;
+                    next_terminal_group_id += 1;
+                    terminal_literal_to_group_id.insert(bytes.clone(), new_id);
+                    terminal_group_id_to_expr.insert(new_id, expr.clone());
+                    new_id
+                }
             } else {
-                let group_id = next_terminal_group_id;
-                terminal_name_to_group_id.insert(name, group_id);
-                terminal_expr_to_group_id.insert(expr, group_id);
+                let new_id = next_terminal_group_id;
                 next_terminal_group_id += 1;
-            }
+                terminal_group_id_to_expr.insert(new_id, expr.clone());
+                new_id
+            };
+            
+            terminal_name_to_group_id.insert(name, group_id);
         }
 
         let mut all_names: HashSet<String> = rules.iter().map(|(name, _)| name.clone()).collect();
@@ -557,7 +596,8 @@ impl GrammarDefinition {
                         lhs_name_str,
                         &nonterminal_names_from_rules,
                         &mut terminal_name_to_group_id,
-                        &mut terminal_expr_to_group_id,
+                        &mut terminal_group_id_to_expr,
+                        &mut terminal_literal_to_group_id,
                         &mut next_terminal_group_id,
                         &mut per_base_counters,
                         &mut all_names,
@@ -571,7 +611,8 @@ impl GrammarDefinition {
                     lhs_name_str,
                     &nonterminal_names_from_rules,
                     &mut terminal_name_to_group_id,
-                    &mut terminal_expr_to_group_id,
+                    &mut terminal_group_id_to_expr,
+                    &mut terminal_literal_to_group_id,
                     &mut next_terminal_group_id,
                     &mut per_base_counters,
                     &mut all_names,
@@ -718,7 +759,8 @@ impl GrammarDefinition {
             productions,
             start_production_id,
             terminal_name_to_group_id,
-            terminal_expr_to_group_id,
+            terminal_group_id_to_expr,
+            terminal_literal_to_group_id,
             ignore_terminal_id: None,
         })
     }
@@ -819,14 +861,14 @@ impl GrammarDefinition {
 
     /// Helper to get terminal expressions ordered by group ID for tokenizer construction.
     pub fn get_terminal_expressions_for_tokenizer(&self) -> Vec<ExprGroup> {
-        if self.terminal_expr_to_group_id.is_empty() {
+        if self.terminal_group_id_to_expr.is_empty() {
             return Vec::new();
         }
 
-        let max_group_id = *self.terminal_expr_to_group_id.iter().map(|(_, id)| id).max().unwrap_or(&0);
+        let max_group_id = *self.terminal_group_id_to_expr.keys().max().unwrap_or(&0);
         let mut expr_groups_vec: Vec<ExprGroup> = vec![greedy_group(Expr::Epsilon); max_group_id + 1];
 
-        for (expr, group_id) in &self.terminal_expr_to_group_id {
+        for (group_id, expr) in &self.terminal_group_id_to_expr {
             // Ensure the group_id is valid for the vector. This should hold if IDs are contiguous.
             if *group_id < expr_groups_vec.len() {
                  expr_groups_vec[*group_id] = greedy_group(expr.clone());
