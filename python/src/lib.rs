@@ -2,11 +2,11 @@ use sep1::tokenizer::LLMTokenID;
 use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq, ExprGroups, eat_u8_seq, eat_u8_set_negation};
 use sep1::finite_automata::Regex;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict};
+use pyo3::types::{PyDict, PyTuple};
 use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use sep1::glr::parser::{GLRParser, GLRParserState};
 use sep1::glr::table::{generate_glr_parser, StateID, TerminalID};
-use sep1::interface::{CompiledGrammar, GrammarExpr, choice as grammar_choice, literal as grammar_literal, optional as grammar_optional, regex as grammar_regex, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence, eat_any_fast, GrammarDefinition};
+use sep1::interface::{CompiledGrammar, GrammarExpr, choice as grammar_choice, literal as grammar_literal, optional as grammar_optional, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence, eat_any_fast, GrammarDefinition};
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
 use std::collections::{BTreeMap, BTreeSet};
 use bimap::BiBTreeMap;
@@ -57,13 +57,6 @@ impl PyGrammarExpr {
     fn repeat(expr: PyGrammarExpr) -> Self {
         Self {
             inner: grammar_repeat(expr.inner),
-        }
-    }
-
-    #[staticmethod]
-    fn regex(regex: PyRegexExpr) -> Self {
-        Self {
-            inner: grammar_regex(regex.inner)
         }
     }
 
@@ -214,11 +207,14 @@ pub struct PyGrammarDefinition {
 #[pymethods]
 impl PyGrammarDefinition {
     #[new]
-    fn new(exprs: Vec<(String, PyGrammarExpr)>) -> PyResult<Self> {
-        let inner_exprs = exprs.into_iter().map(|(s, e)| (s, e.inner)).collect();
-        let compiled_grammar = GrammarDefinition::from_exprs(inner_exprs)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to compile grammar: {}", e)))?;
-        Ok(PyGrammarDefinition { inner: compiled_grammar })
+    fn new(rules: Vec<(String, PyGrammarExpr)>, terminals: Vec<(String, PyRegexExpr)>) -> PyResult<Self> {
+        let inner_rules = rules.into_iter().map(|(s, e)| (s, e.inner)).collect();
+        let inner_terminals = terminals.into_iter().map(|(s, e)| (s, e.inner)).collect();
+
+        let grammar_def = GrammarDefinition::from_exprs(inner_rules, inner_terminals)
+             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to compile grammar: {}", e)))?;
+
+        Ok(PyGrammarDefinition { inner: grammar_def })
     }
 
     fn simplify(&mut self) {
@@ -259,14 +255,6 @@ pub struct PyCompiledGrammar {
 
 #[pymethods]
 impl PyCompiledGrammar {
-    #[new]
-    fn new(exprs: Vec<(String, PyGrammarExpr)>) -> PyResult<Self> {
-        let inner_exprs = exprs.into_iter().map(|(s, e)| (s, e.inner)).collect();
-        let compiled_grammar = CompiledGrammar::from_exprs(inner_exprs)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to compile grammar: {}", e)))?;
-        Ok(Self { inner: compiled_grammar })
-    }
-
     // If direct access to GLRParser is needed in Python, expose it.
     // fn glr_parser(&self) -> PyGLRParser {
     //     PyGLRParser { inner: self.inner.glr_parser().clone() } // Clone if GLRParser is Clone
@@ -454,4 +442,3 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyIncrementalParser>()?;
     Ok(())
 }
-

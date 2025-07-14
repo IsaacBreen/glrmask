@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
     use crate::constraint::{GrammarConstraint, GrammarConstraintState};
-    use crate::finite_automata::{eat_u8, rep, Expr as RegexExpr, QuantifierType};
-    use crate::interface::{choice, sequence, regex, literal, CompiledGrammar, IncrementalParser, GrammarExpr, GrammarDefinition};
+    use crate::finite_automata::{eat_u8, rep, Expr as RegexExpr, QuantifierType, Expr, eat_u8_seq};
+    use crate::interface::{choice, sequence, literal, CompiledGrammar, IncrementalParser, GrammarExpr, GrammarDefinition};
     use crate::tokenizer::LLMTokenID;
     use crate::datastructures::hybrid_bitset::HybridBitset;
     use bimap::BiBTreeMap; // Add this line
@@ -12,14 +12,20 @@ mod tests {
     #[test]
     fn test_incremental_parser_simple() {
         // Grammar: S -> 'a' 'b' | 'a' 'c'
-        let exprs = vec![(
+        let terminals = vec![
+            ("a".to_string(), eat_u8(b'a')),
+            ("b".to_string(), eat_u8(b'b')),
+            ("c".to_string(), eat_u8(b'c')),
+        ];
+        let rules = vec![(
             "S".to_string(),
             choice(vec![
-                sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'b'))]),
-                sequence(vec![regex(eat_u8(b'a')), regex(eat_u8(b'c'))]),
+                sequence(vec![crate::interface::r#ref("a"), crate::interface::r#ref("b")]),
+                sequence(vec![crate::interface::r#ref("a"), crate::interface::r#ref("c")]),
             ]),
         )];
-        let grammar = CompiledGrammar::from_exprs(exprs).unwrap();
+        let grammar_def = GrammarDefinition::from_exprs(rules, terminals).unwrap();
+        let grammar = CompiledGrammar::from_definition(std::sync::Arc::new(grammar_def));
         let mut parser = IncrementalParser::new(&grammar);
 
         assert!(parser.is_valid());
@@ -53,23 +59,25 @@ mod tests {
 
     #[test]
     fn test_minimal_python_example_with_compiled_grammar() {
-        let digit_regex = crate::interface::tokenizer_combinators::eat_u8_range_fast(b'0', b'9');
-        let number_expr = regex(crate::interface::tokenizer_combinators::repeat1_fast(digit_regex)); // This is a GrammarExpr
-        let plus_expr = regex(crate::interface::tokenizer_combinators::eat_u8_fast(b'+'));   // This is a GrammarExpr
+        let terminals = vec![
+            ("NUMBER".to_string(), crate::interface::tokenizer_combinators::repeat1_fast(crate::interface::tokenizer_combinators::eat_u8_range_fast(b'0', b'9'))),
+            ("PLUS".to_string(), crate::interface::tokenizer_combinators::eat_u8_fast(b'+')),
+        ];
 
-        let exprs = vec![(
+        let rules = vec![(
             "S".to_string(),
             sequence(vec![
-                number_expr.clone(),
-                plus_expr.clone(),
-                number_expr.clone(),
-                plus_expr.clone(),
-                number_expr.clone(),
+                crate::interface::r#ref("NUMBER"),
+                crate::interface::r#ref("PLUS"),
+                crate::interface::r#ref("NUMBER"),
+                crate::interface::r#ref("PLUS"),
+                crate::interface::r#ref("NUMBER"),
             ]),
         )];
 
         println!("Building grammar...");
-        let compiled_grammar = CompiledGrammar::from_exprs(exprs).unwrap();
+        let grammar_def = GrammarDefinition::from_exprs(rules, terminals).unwrap();
+        let compiled_grammar = CompiledGrammar::from_definition(std::sync::Arc::new(grammar_def));
         // compiled_grammar.glr_parser().print(); // GLRParser might be large
 
         let mut llm_token_map = bimap::BiBTreeMap::new();
@@ -147,30 +155,27 @@ mod tests {
 
     #[test]
     fn test_sentence_grammar_from_prompt() {
-        // Helper to create GrammarExpr::Literal from string
-        let lit = |s: &str| crate::interface::literal(s.as_bytes().to_vec());
+        let terminals = vec![
+            ("a".to_string(), eat_u8(b'a')),
+            ("the".to_string(), eat_u8_seq(b"the".to_vec())),
+            ("apple".to_string(), eat_u8_seq(b"apple".to_vec())),
+            ("banana".to_string(), eat_u8_seq(b"banana".to_vec())),
+            ("person".to_string(), eat_u8_seq(b"person".to_vec())),
+            (" ".to_string(), eat_u8(b' ')),
+            ("eats".to_string(), eat_u8_seq(b"eats".to_vec())),
+            ("likes".to_string(), eat_u8_seq(b"likes".to_vec())),
+            ("is".to_string(), eat_u8_seq(b"is".to_vec())),
+            ("tasty".to_string(), eat_u8_seq(b"tasty".to_vec())),
+            ("red".to_string(), eat_u8_seq(b"red".to_vec())),
+            ("happy".to_string(), eat_u8_seq(b"happy".to_vec())),
+            (".".to_string(), eat_u8(b'.')),
+            ("and".to_string(), eat_u8_seq(b"and".to_vec())),
+        ];
 
         // Define GrammarExprs for non-terminals
-        let expr_A = choice(vec![
-            lit("a"),
-            lit("the"),
-            lit("apple"),
-            lit("banana"),
-            lit("person"),
-        ]);
-
-        let expr_IGNORE = lit(" ");
-
-        let expr_B = choice(vec![
-            lit("eats"),
-            lit("likes"),
-            lit("is"),
-            lit("tasty"),
-            lit("red"),
-            lit("happy"),
-            lit("."),
-            lit("and"),
-        ]);
+        let expr_A = choice(vec![crate::interface::r#ref("a"), crate::interface::r#ref("the"), crate::interface::r#ref("apple"), crate::interface::r#ref("banana"), crate::interface::r#ref("person")]);
+        let expr_IGNORE = crate::interface::r#ref(" ");
+        let expr_B = choice(vec![crate::interface::r#ref("eats"), crate::interface::r#ref("likes"), crate::interface::r#ref("is"), crate::interface::r#ref("tasty"), crate::interface::r#ref("red"), crate::interface::r#ref("happy"), crate::interface::r#ref("."), crate::interface::r#ref("and")]);
 
         let expr_start = sequence(vec![
             crate::interface::r#ref("A"),
@@ -178,7 +183,7 @@ mod tests {
             crate::interface::r#ref("B"),
         ]);
 
-        // Grammar definition for CompiledGrammar
+        // Grammar rules
         let grammar_exprs = vec![
             ("start".to_string(), expr_start),
             ("A".to_string(), expr_A),
@@ -187,7 +192,8 @@ mod tests {
         ];
 
         println!("Building grammar for sentence test...");
-        let compiled_grammar = CompiledGrammar::from_exprs(grammar_exprs).expect("Failed to compile sentence grammar");
+        let grammar_def = GrammarDefinition::from_exprs(grammar_exprs, terminals).expect("Failed to create grammar definition");
+        let compiled_grammar = CompiledGrammar::from_definition(std::sync::Arc::new(grammar_def));
         println!("{}", compiled_grammar); // For debugging grammar structure
 
         // Setup LLMTokenMap
@@ -289,19 +295,19 @@ mod tests {
 
     #[test]
     fn test_sentence_grammar_from_prompt_simplified() {
-        // Helper to create GrammarExpr::Literal from string
-        let lit = |s: &str| crate::interface::literal(s.as_bytes().to_vec());
+        let terminals = vec![
+            ("A_T".to_string(), eat_u8_seq(b"ab".to_vec())),
+            ("B_T".to_string(), eat_u8_seq(b"bc".to_vec())),
+        ];
 
-        // Define GrammarExprs for non-terminals
-        let expr_A = lit("ab");
-        let expr_B = lit("bc");
+        let expr_A = crate::interface::r#ref("A_T");
+        let expr_B = crate::interface::r#ref("B_T");
 
         let expr_start = sequence(vec![
             crate::interface::r#ref("A"),
             crate::interface::r#ref("B"),
         ]);
 
-        // Grammar definition for CompiledGrammar
         let grammar_exprs = vec![
             ("start".to_string(), expr_start),
             ("A".to_string(), expr_A),
@@ -309,7 +315,8 @@ mod tests {
         ];
 
         println!("Building grammar for sentence test...");
-        let compiled_grammar = CompiledGrammar::from_exprs(grammar_exprs).expect("Failed to compile sentence grammar");
+        let grammar_def = GrammarDefinition::from_exprs(grammar_exprs, terminals).expect("Failed to create grammar definition");
+        let compiled_grammar = CompiledGrammar::from_definition(std::sync::Arc::new(grammar_def));
         println!("{}", compiled_grammar); // For debugging grammar structure
 
         // Setup LLMTokenMap
@@ -369,13 +376,17 @@ mod tests {
     #[test]
     fn test_python_reported_bug_def_rep_space_f() {
         // 1. Define Grammar: start -> "<space>* "f"
+        let terminals = vec![
+            ("SPACE".to_string(), eat_u8(b' ')),
+            ("F".to_string(), eat_u8(b'f')),
+        ];
         let start_expr = sequence(vec![
-            regex(rep(eat_u8(b' '))), // Represents one or more spaces matched by the tokenizer
-            literal(b"f".to_vec()),
+            repeat(crate::interface::r#ref("SPACE")),
+            crate::interface::r#ref("F"),
         ]);
         let exprs = vec![("start".to_string(), start_expr)];
-        let compiled_grammar = CompiledGrammar::from_exprs(exprs)
-            .expect("Failed to compile grammar for bug replication test");
+        let grammar_def = GrammarDefinition::from_exprs(exprs, terminals).expect("Failed to create grammar definition");
+        let compiled_grammar = CompiledGrammar::from_definition(std::sync::Arc::new(grammar_def));
         println!("Compiled Grammar: {}", compiled_grammar);
 
         // 2. Define LLM Token Map based on the Python example's problematic vocabulary
@@ -430,20 +441,24 @@ mod tests {
 
     #[test]
     fn test_nullability_handling_in_from_exprs() {
-        // Grammar expressions:
-        // "Root" -> (x?) (epsilon) "z"
-        // - regex(x?) is sometimes null
-        // - regex(epsilon) is always null
-        // - literal("z") is never null
-        let exprs = vec![
+        // Terminals:
+        // - X_OPT: x? (sometimes null)
+        // - EPS: epsilon (always null)
+        // - Z: "z" (never null)
+        let terminals = vec![
+            ("X_OPT".to_string(), RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne)),
+            ("EPS".to_string(), RegexExpr::Epsilon),
+            ("Z".to_string(), eat_u8(b'z')),
+        ];
+        let rules = vec![
             ("Root".to_string(), sequence(vec![
-                regex(RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne)),
-                regex(RegexExpr::Epsilon),
-                literal(b"z".to_vec()),
+                crate::interface::r#ref("X_OPT"),
+                crate::interface::r#ref("EPS"),
+                crate::interface::r#ref("Z"),
             ])),
         ];
 
-        let grammar_def = GrammarDefinition::from_exprs(exprs).expect("Failed to create GrammarDefinition");
+        let grammar_def = GrammarDefinition::from_exprs(rules, terminals).expect("Failed to create GrammarDefinition");
 
         // For debugging if the test fails:
         // println!("GrammarDefinition:\n{}", grammar_def);
@@ -461,7 +476,7 @@ mod tests {
         // Dynamically find the names of the relevant terminals
         let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
         let term_eps_expr = RegexExpr::Epsilon;
-        let term_z_expr = RegexExpr::U8Seq(b"z".to_vec()); // literal(b"z") becomes U8Seq in terminal_expr_to_group_id
+        let term_z_expr = eat_u8(b'z');
 
         let term_x_opt_gid = grammar_def.terminal_expr_to_group_id.get_by_left(&term_x_opt_expr)
             .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
