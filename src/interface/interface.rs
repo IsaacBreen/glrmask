@@ -1,7 +1,7 @@
 use crate::constraint::GrammarConstraint;
 use crate::debug;
 use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
-use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
+use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex,};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 use std::fs;
-use std::collections::BTreeMap as StdMap;
+use std::collections::BTreeMap as StdMap; 
 use crate::glr::analyze::{insert_ignore_symbol_in_productions, simplify_grammar};
 
 type LLMToken<'a> = &'a [u8];
@@ -130,6 +130,7 @@ pub struct GrammarDefinition {
     pub start_production_id: usize, // Index into productions
     pub terminal_name_to_group_id: BiBTreeMap<String, usize>, // Maps terminal names (used in Productions) to group IDs
     pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,   // Maps regex Exprs to group IDs
+    pub ignore_terminal_id: Option<TerminalID>,
 }
 
 impl JSONConvertible for GrammarDefinition {
@@ -137,6 +138,7 @@ impl JSONConvertible for GrammarDefinition {
         let mut obj = StdMap::new();
         obj.insert("productions".to_string(), self.productions.to_json());
         obj.insert("start_production_id".to_string(), self.start_production_id.to_json());
+        obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
 
         let mut terminals_json_list = Vec::new();
         let mut sorted_terminals_info: Vec<(usize, String, Expr)> = Vec::new();
@@ -174,6 +176,9 @@ impl JSONConvertible for GrammarDefinition {
                 let start_production_id = obj.remove("start_production_id")
                     .ok_or_else(|| "Missing field start_production_id for GrammarDefinition".to_string())
                     .and_then(usize::from_json)?;
+                let ignore_terminal_id = obj.remove("ignore_terminal_id")
+                    .ok_or_else(|| "Missing field ignore_terminal_id for GrammarDefinition".to_string())
+                    .and_then(Option::<TerminalID>::from_json)?;
 
                 let terminals_node = obj.remove("terminals")
                     .ok_or_else(|| "Missing field terminals for GrammarDefinition".to_string())?;
@@ -203,6 +208,7 @@ impl JSONConvertible for GrammarDefinition {
                     start_production_id,
                     terminal_name_to_group_id: new_terminal_name_to_group_id,
                     terminal_expr_to_group_id: new_terminal_expr_to_group_id,
+                    ignore_terminal_id,
                 })
             }
             _ => Err("Expected JSONNode::Object for GrammarDefinition".to_string()),
@@ -737,6 +743,7 @@ impl GrammarDefinition {
             start_production_id,
             terminal_name_to_group_id,
             terminal_expr_to_group_id,
+            ignore_terminal_id: None,
         })
     }
 
@@ -827,9 +834,13 @@ impl GrammarDefinition {
         let mut grammar_def = GrammarDefinition::from_exprs(rules)?;
         println!("GrammarDefinition from EBNF:");
         println!("{}", grammar_def);
+
         if let Some(ignore_name) = &ebnf.ignore_symbol_name {
-            grammar_def.insert_ignore_symbol(ignore_name);
+            let group_id = grammar_def.terminal_name_to_group_id.get_by_left(ignore_name)
+                .ok_or_else(|| format!("Ignore symbol '{}' is not a defined terminal in the grammar.", ignore_name))?;
+            grammar_def.ignore_terminal_id = Some(TerminalID(*group_id));
         }
+
         Ok(grammar_def)
     }
 
@@ -917,7 +928,12 @@ impl CompiledGrammar {
 
         debug!(2, "Building GLR parser from definition");
         let terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.terminal_name_to_group_id.iter().map(|(name, group_id)| (Terminal(name.clone()), TerminalID(*group_id))).collect();
-        let glr_parser = generate_glr_parser_with_terminal_map(&definition.productions, definition.start_production_id, terminal_map);
+        let glr_parser = generate_glr_parser_with_terminal_map(
+            &definition.productions,
+            definition.start_production_id,
+            terminal_map,
+            definition.ignore_terminal_id,
+        );
 
         Self {
             definition,
