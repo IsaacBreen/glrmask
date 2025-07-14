@@ -141,6 +141,7 @@ pub struct GLRParser {
     pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
     pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
     pub start_state_id: StateID,
+    pub ignore_terminal_id: Option<TerminalID>,
 }
 
 impl JSONConvertible for GLRParser {
@@ -152,6 +153,7 @@ impl JSONConvertible for GLRParser {
         obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
         obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
         obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
+        obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
         // Do not serialize self.actions
         JSONNode::Object(obj)
     }
@@ -171,6 +173,9 @@ impl JSONConvertible for GLRParser {
                                       .and_then(|n| BiBTreeMap::<BTreeSet<Item>, StateID>::from_json(n))?;
                 let start_state_id = obj.remove("start_state_id").ok_or_else(|| "Missing field start_state_id".to_string())
                                         .and_then(StateID::from_json)?;
+                let ignore_terminal_id = obj.remove("ignore_terminal_id")
+                    .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
+                    .and_then(Option::<TerminalID>::from_json)?;
                 Ok(GLRParser {
                     stage_7_table,
                     productions,
@@ -178,6 +183,7 @@ impl JSONConvertible for GLRParser {
                     non_terminal_map,
                     item_set_map,
                     start_state_id,
+                    ignore_terminal_id,
                 })
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
@@ -194,6 +200,7 @@ impl Debug for GLRParser {
             .field("non_terminal_map", &self.non_terminal_map)
             .field("item_set_map", &self.item_set_map)
             .field("start_state_id", &self.start_state_id)
+            .field("ignore_terminal_id", &self.ignore_terminal_id)
             .finish()
     }
 }
@@ -205,7 +212,8 @@ impl PartialEq for GLRParser {
         self.terminal_map == other.terminal_map &&
         self.non_terminal_map == other.non_terminal_map &&
         self.item_set_map == other.item_set_map &&
-        self.start_state_id == other.start_state_id
+        self.start_state_id == other.start_state_id &&
+        self.ignore_terminal_id == other.ignore_terminal_id
     }
 }
 
@@ -238,6 +246,7 @@ impl GLRParser {
             non_terminal_map,
             item_set_map,
             start_state_id,
+            ignore_terminal_id,
         }
     }
 
@@ -572,6 +581,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     #[time_it("GLRParserState::step")]
     pub fn step(&mut self, token_id: TerminalID) {
+        if Some(token_id) == self.parser.ignore_terminal_id {
+            crate::debug!(4, "Ignoring token {} ({:?})", token_id.0, self.parser.terminal_map.get_by_right(&token_id));
+            return;
+        }
+
         // timeit!(format!("GLRParserState::step({} ({:?})", token_id.0, self.parser.terminal_map.get_by_right(&token_id)), {
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
         self.log_gss("Step-start", token_id);

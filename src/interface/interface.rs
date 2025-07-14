@@ -14,7 +14,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 use std::fs;
 use std::collections::BTreeMap as StdMap; 
-use crate::glr::analyze::{insert_ignore_symbol_in_productions, simplify_grammar};
+use crate::glr::analyze::{simplify_grammar};
 
 type LLMToken<'a> = &'a [u8];
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
@@ -253,21 +253,6 @@ impl GrammarDefinition {
     pub fn simplify(&mut self) {
         // Simplify the grammar definition
         (self.productions, self.start_production_id) = simplify_grammar(&self.productions, self.start_production_id);
-    }
-
-    /// Inserts an "ignore" symbol between every pair of symbols in the RHS of productions.
-    /// This transformation is useful for grammars where whitespace or other separators
-    /// are allowed between any two tokens.
-    ///
-    /// For the start production, the ignore symbol is also added at the beginning and end.
-    pub fn insert_ignore_symbol(&mut self, ignore_symbol_name: &str) {
-        let start_id = self.start_production_id;
-        let ignore_sym = Symbol::NonTerminal(NonTerminal(ignore_symbol_name.to_string()));
-        insert_ignore_symbol_in_productions(
-            &mut self.productions,
-            &ignore_sym,
-            Some(start_id),
-        );
     }
 }
 

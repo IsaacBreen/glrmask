@@ -1,13 +1,6 @@
 local_system:
   attached_files:
     - Cargo.toml
-    - src/lib.rs
-    - src/tokenizer.rs
-    - src/interface/ebnf.rs
-    - src/interface/interface.rs
-    - src/interface/mod.rs
-    - src/interface/tests.rs
-    - src/interface/tokenizer_combinators.rs
     - src/glr/analyze.rs
     - src/glr/grammar.rs
     - src/glr/items.rs
@@ -15,6 +8,13 @@ local_system:
     - src/glr/parser.rs
     - src/glr/table.rs
     - src/glr/tests.rs
+    - src/interface/ebnf.rs
+    - src/interface/interface.rs
+    - src/interface/mod.rs
+    - src/interface/tests.rs
+    - src/interface/tokenizer_combinators.rs
+    - src/lib.rs
+    - src/tokenizer.rs
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -494,7 +494,7 @@ local_system:
       use crate::constraint::GrammarConstraint;
       use crate::debug;
       use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
-      use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
+      use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex,};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::GLRParser;
       use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
@@ -506,7 +506,7 @@ local_system:
       use std::fmt::{Debug, Display, Formatter};
       use std::sync::Arc;
       use std::fs;
-      use std::collections::BTreeMap as StdMap;
+      use std::collections::BTreeMap as StdMap; 
       use crate::glr::analyze::{insert_ignore_symbol_in_productions, simplify_grammar};
 
       type LLMToken<'a> = &'a [u8];
@@ -623,6 +623,7 @@ local_system:
           pub start_production_id: usize, // Index into productions
           pub terminal_name_to_group_id: BiBTreeMap<String, usize>, // Maps terminal names (used in Productions) to group IDs
           pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,   // Maps regex Exprs to group IDs
+          pub ignore_terminal_id: Option<TerminalID>,
       }
 
       impl JSONConvertible for GrammarDefinition {
@@ -630,6 +631,7 @@ local_system:
               let mut obj = StdMap::new();
               obj.insert("productions".to_string(), self.productions.to_json());
               obj.insert("start_production_id".to_string(), self.start_production_id.to_json());
+              obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
 
               let mut terminals_json_list = Vec::new();
               let mut sorted_terminals_info: Vec<(usize, String, Expr)> = Vec::new();
@@ -667,6 +669,9 @@ local_system:
                       let start_production_id = obj.remove("start_production_id")
                           .ok_or_else(|| "Missing field start_production_id for GrammarDefinition".to_string())
                           .and_then(usize::from_json)?;
+                      let ignore_terminal_id = obj.remove("ignore_terminal_id")
+                          .ok_or_else(|| "Missing field ignore_terminal_id for GrammarDefinition".to_string())
+                          .and_then(Option::<TerminalID>::from_json)?;
 
                       let terminals_node = obj.remove("terminals")
                           .ok_or_else(|| "Missing field terminals for GrammarDefinition".to_string())?;
@@ -696,6 +701,7 @@ local_system:
                           start_production_id,
                           terminal_name_to_group_id: new_terminal_name_to_group_id,
                           terminal_expr_to_group_id: new_terminal_expr_to_group_id,
+                          ignore_terminal_id,
                       })
                   }
                   _ => Err("Expected JSONNode::Object for GrammarDefinition".to_string()),
@@ -1230,6 +1236,7 @@ local_system:
                   start_production_id,
                   terminal_name_to_group_id,
                   terminal_expr_to_group_id,
+                  ignore_terminal_id: None,
               })
           }
 
@@ -1320,9 +1327,13 @@ local_system:
               let mut grammar_def = GrammarDefinition::from_exprs(rules)?;
               println!("GrammarDefinition from EBNF:");
               println!("{}", grammar_def);
+
               if let Some(ignore_name) = &ebnf.ignore_symbol_name {
-                  grammar_def.insert_ignore_symbol(ignore_name);
+                  let group_id = grammar_def.terminal_name_to_group_id.get_by_left(ignore_name)
+                      .ok_or_else(|| format!("Ignore symbol '{}' is not a defined terminal in the grammar.", ignore_name))?;
+                  grammar_def.ignore_terminal_id = Some(TerminalID(*group_id));
               }
+
               Ok(grammar_def)
           }
 
@@ -1410,7 +1421,12 @@ local_system:
 
               debug!(2, "Building GLR parser from definition");
               let terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.terminal_name_to_group_id.iter().map(|(name, group_id)| (Terminal(name.clone()), TerminalID(*group_id))).collect();
-              let glr_parser = generate_glr_parser_with_terminal_map(&definition.productions, definition.start_production_id, terminal_map);
+              let glr_parser = generate_glr_parser_with_terminal_map(
+                  &definition.productions,
+                  definition.start_production_id,
+                  terminal_map,
+                  definition.ignore_terminal_id,
+              );
 
               Self {
                   definition,
@@ -1755,7 +1771,7 @@ local_system:
               // To make it a meaningful test of the new structure, we'd need a GrammarConstraint.
               // Let's construct a dummy GLRParser for this.
               let dummy_productions = vec![Production { lhs: NonTerminal("S".to_string()), rhs: vec![] }];
-              let dummy_glr_parser = generate_glr_parser(&dummy_productions, 0);
+              let dummy_glr_parser = generate_glr_parser(&dummy_productions, 0, None);
 
               let constraint = GrammarConstraint::new(
                   tokenizer,
@@ -3834,6 +3850,7 @@ local_system:
               item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
               start_state_id: StateID,
               actions: BTreeMap<NonTerminal, ActionFn>, // Parameter type
+              ignore_terminal_id: Option<TerminalID>,
           ) -> Self {
               let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
                   .into_iter()
@@ -4900,7 +4917,7 @@ local_system:
           (stage_7_table, item_set_map, start_state_id)
       }
 
-      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>) -> GLRParser {
+      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
           let original_productions = productions.to_vec();
 
           crate::debug!(2, "Removing productions with undefined non-terminals");
@@ -4956,15 +4973,15 @@ local_system:
           GLRParser::new(stage_7_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions)
       }
 
-      pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
+      pub fn generate_glr_parser(productions: &[Production], start_production_id: usize, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
           let terminal_map = assign_terminal_ids(productions);
           let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new(), ignore_terminal_id)
       }
 
-      pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
+      pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
           let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new(), ignore_terminal_id)
       }
 
       pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
@@ -5018,7 +5035,7 @@ local_system:
               prod("A", vec![t("b")]),
           ];
 
-          generate_glr_parser(&productions, 0)
+          generate_glr_parser(&productions, 0, None)
       }
 
       fn create_expression_parser() -> GLRParser {
@@ -5040,7 +5057,7 @@ local_system:
               prod("F", vec![t("("), nt("E"), t(")")]),
               prod("F", vec![t("i")]),
           ];
-          generate_glr_parser(&productions, 0)
+          generate_glr_parser(&productions, 0, None)
       }
 
       fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
@@ -5377,7 +5394,7 @@ local_system:
               prod("Stmt", vec![t("other")]),
               prod("Expr", vec![t("id")]),
           ];
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let tokens = vec![
               *parser.terminal_map.get_by_left(&Terminal("if".to_string())).unwrap(),
@@ -5414,7 +5431,7 @@ local_system:
               prod("E", vec![nt("E"), t("*"), nt("E")]),
               prod("E", vec![t("id")]),
           ];
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let tokens = vec![
               *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
@@ -5447,7 +5464,7 @@ local_system:
               prod("A", vec![t("x")]),
               prod("B", vec![t("x")]),
           ];
-           let parser = generate_glr_parser(&productions, 0);
+           let parser = generate_glr_parser(&productions, 0, None);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let tokens = vec![
               *parser.terminal_map.get_by_left(&Terminal("x".to_string())).unwrap(),
@@ -5477,7 +5494,7 @@ local_system:
               prod("B", vec![t("x")]),
               prod("B", vec![]), // Epsilon
           ];
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           println!("Parser: {}", parser);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let tokens = vec![
@@ -5507,7 +5524,7 @@ local_system:
               prod("S", vec![nt("S"), nt("S")]),
               prod("S", vec![t("a")]),
           ];
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let tokens = vec![
               *parser.terminal_map.get_by_left(&Terminal("a".to_string())).unwrap(),
@@ -5546,7 +5563,7 @@ local_system:
           // until the validation logic is adjusted or skipped for testing purposes.
           // If validation is ever removed or changed to allow this, uncomment the rest:
           /*
-          let parser = generate_glr_parser(&productions, 0); // This will fail due to left-nullable left recursion
+          let parser = generate_glr_parser(&productions, 0, None); // This will fail due to left-nullable left recursion
           println!("Parser: {}", parser);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
 
@@ -5587,7 +5604,7 @@ local_system:
           // Validation should pass as it's not length-1 recursion
           assert!(analyze::validate(&productions).is_ok());
 
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
 
           let test_cases = [
@@ -5625,7 +5642,7 @@ local_system:
           // Validation should pass for this grammar
           assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
 
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           let eof_token_id = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let c_token_id = *parser.terminal_map.get_by_left(&Terminal("c".to_string())).unwrap();
           let d_token_id = *parser.terminal_map.get_by_left(&Terminal("d".to_string())).unwrap();
@@ -5739,7 +5756,7 @@ local_system:
           // Validate the grammar
           assert!(analyze::validate(&productions).is_ok(), "Validation failed for standard expression grammar");
 
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           println!("Parser: {}", parser); // Useful for debugging the generated table
 
           // Helper to tokenize space-separated terminal names
@@ -6428,7 +6445,7 @@ local_system:
       use crate::constraint::GrammarConstraint;
       use crate::debug;
       use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
-      use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
+      use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex,};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::GLRParser;
       use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
@@ -6440,7 +6457,7 @@ local_system:
       use std::fmt::{Debug, Display, Formatter};
       use std::sync::Arc;
       use std::fs;
-      use std::collections::BTreeMap as StdMap;
+      use std::collections::BTreeMap as StdMap; 
       use crate::glr::analyze::{insert_ignore_symbol_in_productions, simplify_grammar};
 
       type LLMToken<'a> = &'a [u8];
@@ -6557,6 +6574,7 @@ local_system:
           pub start_production_id: usize, // Index into productions
           pub terminal_name_to_group_id: BiBTreeMap<String, usize>, // Maps terminal names (used in Productions) to group IDs
           pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,   // Maps regex Exprs to group IDs
+          pub ignore_terminal_id: Option<TerminalID>,
       }
 
       impl JSONConvertible for GrammarDefinition {
@@ -6564,6 +6582,7 @@ local_system:
               let mut obj = StdMap::new();
               obj.insert("productions".to_string(), self.productions.to_json());
               obj.insert("start_production_id".to_string(), self.start_production_id.to_json());
+              obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
 
               let mut terminals_json_list = Vec::new();
               let mut sorted_terminals_info: Vec<(usize, String, Expr)> = Vec::new();
@@ -6601,6 +6620,9 @@ local_system:
                       let start_production_id = obj.remove("start_production_id")
                           .ok_or_else(|| "Missing field start_production_id for GrammarDefinition".to_string())
                           .and_then(usize::from_json)?;
+                      let ignore_terminal_id = obj.remove("ignore_terminal_id")
+                          .ok_or_else(|| "Missing field ignore_terminal_id for GrammarDefinition".to_string())
+                          .and_then(Option::<TerminalID>::from_json)?;
 
                       let terminals_node = obj.remove("terminals")
                           .ok_or_else(|| "Missing field terminals for GrammarDefinition".to_string())?;
@@ -6630,6 +6652,7 @@ local_system:
                           start_production_id,
                           terminal_name_to_group_id: new_terminal_name_to_group_id,
                           terminal_expr_to_group_id: new_terminal_expr_to_group_id,
+                          ignore_terminal_id,
                       })
                   }
                   _ => Err("Expected JSONNode::Object for GrammarDefinition".to_string()),
@@ -7164,6 +7187,7 @@ local_system:
                   start_production_id,
                   terminal_name_to_group_id,
                   terminal_expr_to_group_id,
+                  ignore_terminal_id: None,
               })
           }
 
@@ -7254,9 +7278,13 @@ local_system:
               let mut grammar_def = GrammarDefinition::from_exprs(rules)?;
               println!("GrammarDefinition from EBNF:");
               println!("{}", grammar_def);
+
               if let Some(ignore_name) = &ebnf.ignore_symbol_name {
-                  grammar_def.insert_ignore_symbol(ignore_name);
+                  let group_id = grammar_def.terminal_name_to_group_id.get_by_left(ignore_name)
+                      .ok_or_else(|| format!("Ignore symbol '{}' is not a defined terminal in the grammar.", ignore_name))?;
+                  grammar_def.ignore_terminal_id = Some(TerminalID(*group_id));
               }
+
               Ok(grammar_def)
           }
 
@@ -7344,7 +7372,12 @@ local_system:
 
               debug!(2, "Building GLR parser from definition");
               let terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.terminal_name_to_group_id.iter().map(|(name, group_id)| (Terminal(name.clone()), TerminalID(*group_id))).collect();
-              let glr_parser = generate_glr_parser_with_terminal_map(&definition.productions, definition.start_production_id, terminal_map);
+              let glr_parser = generate_glr_parser_with_terminal_map(
+                  &definition.productions,
+                  definition.start_production_id,
+                  terminal_map,
+                  definition.ignore_terminal_id,
+              );
 
               Self {
                   definition,
@@ -7689,7 +7722,7 @@ local_system:
               // To make it a meaningful test of the new structure, we'd need a GrammarConstraint.
               // Let's construct a dummy GLRParser for this.
               let dummy_productions = vec![Production { lhs: NonTerminal("S".to_string()), rhs: vec![] }];
-              let dummy_glr_parser = generate_glr_parser(&dummy_productions, 0);
+              let dummy_glr_parser = generate_glr_parser(&dummy_productions, 0, None);
 
               let constraint = GrammarConstraint::new(
                   tokenizer,
@@ -9768,6 +9801,7 @@ local_system:
               item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
               start_state_id: StateID,
               actions: BTreeMap<NonTerminal, ActionFn>, // Parameter type
+              ignore_terminal_id: Option<TerminalID>,
           ) -> Self {
               let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
                   .into_iter()
@@ -10834,7 +10868,7 @@ local_system:
           (stage_7_table, item_set_map, start_state_id)
       }
 
-      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>) -> GLRParser {
+      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
           let original_productions = productions.to_vec();
 
           crate::debug!(2, "Removing productions with undefined non-terminals");
@@ -10890,15 +10924,15 @@ local_system:
           GLRParser::new(stage_7_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions)
       }
 
-      pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
+      pub fn generate_glr_parser(productions: &[Production], start_production_id: usize, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
           let terminal_map = assign_terminal_ids(productions);
           let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new(), ignore_terminal_id)
       }
 
-      pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
+      pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
           let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new(), ignore_terminal_id)
       }
 
       pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
@@ -10952,7 +10986,7 @@ local_system:
               prod("A", vec![t("b")]),
           ];
 
-          generate_glr_parser(&productions, 0)
+          generate_glr_parser(&productions, 0, None)
       }
 
       fn create_expression_parser() -> GLRParser {
@@ -10974,7 +11008,7 @@ local_system:
               prod("F", vec![t("("), nt("E"), t(")")]),
               prod("F", vec![t("i")]),
           ];
-          generate_glr_parser(&productions, 0)
+          generate_glr_parser(&productions, 0, None)
       }
 
       fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
@@ -11311,7 +11345,7 @@ local_system:
               prod("Stmt", vec![t("other")]),
               prod("Expr", vec![t("id")]),
           ];
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let tokens = vec![
               *parser.terminal_map.get_by_left(&Terminal("if".to_string())).unwrap(),
@@ -11348,7 +11382,7 @@ local_system:
               prod("E", vec![nt("E"), t("*"), nt("E")]),
               prod("E", vec![t("id")]),
           ];
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let tokens = vec![
               *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
@@ -11381,7 +11415,7 @@ local_system:
               prod("A", vec![t("x")]),
               prod("B", vec![t("x")]),
           ];
-           let parser = generate_glr_parser(&productions, 0);
+           let parser = generate_glr_parser(&productions, 0, None);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let tokens = vec![
               *parser.terminal_map.get_by_left(&Terminal("x".to_string())).unwrap(),
@@ -11411,7 +11445,7 @@ local_system:
               prod("B", vec![t("x")]),
               prod("B", vec![]), // Epsilon
           ];
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           println!("Parser: {}", parser);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let tokens = vec![
@@ -11441,7 +11475,7 @@ local_system:
               prod("S", vec![nt("S"), nt("S")]),
               prod("S", vec![t("a")]),
           ];
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let tokens = vec![
               *parser.terminal_map.get_by_left(&Terminal("a".to_string())).unwrap(),
@@ -11480,7 +11514,7 @@ local_system:
           // until the validation logic is adjusted or skipped for testing purposes.
           // If validation is ever removed or changed to allow this, uncomment the rest:
           /*
-          let parser = generate_glr_parser(&productions, 0); // This will fail due to left-nullable left recursion
+          let parser = generate_glr_parser(&productions, 0, None); // This will fail due to left-nullable left recursion
           println!("Parser: {}", parser);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
 
@@ -11521,7 +11555,7 @@ local_system:
           // Validation should pass as it's not length-1 recursion
           assert!(analyze::validate(&productions).is_ok());
 
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
 
           let test_cases = [
@@ -11559,7 +11593,7 @@ local_system:
           // Validation should pass for this grammar
           assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
 
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           let eof_token_id = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let c_token_id = *parser.terminal_map.get_by_left(&Terminal("c".to_string())).unwrap();
           let d_token_id = *parser.terminal_map.get_by_left(&Terminal("d".to_string())).unwrap();
@@ -11673,7 +11707,7 @@ local_system:
           // Validate the grammar
           assert!(analyze::validate(&productions).is_ok(), "Validation failed for standard expression grammar");
 
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           println!("Parser: {}", parser); // Useful for debugging the generated table
 
           // Helper to tokenize space-separated terminal names
@@ -11899,7 +11933,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - gp
+    - copy-one/paste
   code_completion_model:
     - gemini/gemini-2.5-flash
   commit_message_model:
@@ -12404,7 +12438,7 @@ messages:
       use crate::constraint::GrammarConstraint;
       use crate::debug;
       use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
-      use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
+      use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex,};
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::parser::GLRParser;
       use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
@@ -12416,7 +12450,7 @@ messages:
       use std::fmt::{Debug, Display, Formatter};
       use std::sync::Arc;
       use std::fs;
-      use std::collections::BTreeMap as StdMap;
+      use std::collections::BTreeMap as StdMap; 
       use crate::glr::analyze::{insert_ignore_symbol_in_productions, simplify_grammar};
 
       type LLMToken<'a> = &'a [u8];
@@ -12533,6 +12567,7 @@ messages:
           pub start_production_id: usize, // Index into productions
           pub terminal_name_to_group_id: BiBTreeMap<String, usize>, // Maps terminal names (used in Productions) to group IDs
           pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,   // Maps regex Exprs to group IDs
+          pub ignore_terminal_id: Option<TerminalID>,
       }
 
       impl JSONConvertible for GrammarDefinition {
@@ -12540,6 +12575,7 @@ messages:
               let mut obj = StdMap::new();
               obj.insert("productions".to_string(), self.productions.to_json());
               obj.insert("start_production_id".to_string(), self.start_production_id.to_json());
+              obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
 
               let mut terminals_json_list = Vec::new();
               let mut sorted_terminals_info: Vec<(usize, String, Expr)> = Vec::new();
@@ -12577,6 +12613,9 @@ messages:
                       let start_production_id = obj.remove("start_production_id")
                           .ok_or_else(|| "Missing field start_production_id for GrammarDefinition".to_string())
                           .and_then(usize::from_json)?;
+                      let ignore_terminal_id = obj.remove("ignore_terminal_id")
+                          .ok_or_else(|| "Missing field ignore_terminal_id for GrammarDefinition".to_string())
+                          .and_then(Option::<TerminalID>::from_json)?;
 
                       let terminals_node = obj.remove("terminals")
                           .ok_or_else(|| "Missing field terminals for GrammarDefinition".to_string())?;
@@ -12606,6 +12645,7 @@ messages:
                           start_production_id,
                           terminal_name_to_group_id: new_terminal_name_to_group_id,
                           terminal_expr_to_group_id: new_terminal_expr_to_group_id,
+                          ignore_terminal_id,
                       })
                   }
                   _ => Err("Expected JSONNode::Object for GrammarDefinition".to_string()),
@@ -13140,6 +13180,7 @@ messages:
                   start_production_id,
                   terminal_name_to_group_id,
                   terminal_expr_to_group_id,
+                  ignore_terminal_id: None,
               })
           }
 
@@ -13230,9 +13271,13 @@ messages:
               let mut grammar_def = GrammarDefinition::from_exprs(rules)?;
               println!("GrammarDefinition from EBNF:");
               println!("{}", grammar_def);
+
               if let Some(ignore_name) = &ebnf.ignore_symbol_name {
-                  grammar_def.insert_ignore_symbol(ignore_name);
+                  let group_id = grammar_def.terminal_name_to_group_id.get_by_left(ignore_name)
+                      .ok_or_else(|| format!("Ignore symbol '{}' is not a defined terminal in the grammar.", ignore_name))?;
+                  grammar_def.ignore_terminal_id = Some(TerminalID(*group_id));
               }
+
               Ok(grammar_def)
           }
 
@@ -13320,7 +13365,12 @@ messages:
 
               debug!(2, "Building GLR parser from definition");
               let terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.terminal_name_to_group_id.iter().map(|(name, group_id)| (Terminal(name.clone()), TerminalID(*group_id))).collect();
-              let glr_parser = generate_glr_parser_with_terminal_map(&definition.productions, definition.start_production_id, terminal_map);
+              let glr_parser = generate_glr_parser_with_terminal_map(
+                  &definition.productions,
+                  definition.start_production_id,
+                  terminal_map,
+                  definition.ignore_terminal_id,
+              );
 
               Self {
                   definition,
@@ -13665,7 +13715,7 @@ messages:
               // To make it a meaningful test of the new structure, we'd need a GrammarConstraint.
               // Let's construct a dummy GLRParser for this.
               let dummy_productions = vec![Production { lhs: NonTerminal("S".to_string()), rhs: vec![] }];
-              let dummy_glr_parser = generate_glr_parser(&dummy_productions, 0);
+              let dummy_glr_parser = generate_glr_parser(&dummy_productions, 0, None);
 
               let constraint = GrammarConstraint::new(
                   tokenizer,
@@ -15784,6 +15834,7 @@ messages:
               item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
               start_state_id: StateID,
               actions: BTreeMap<NonTerminal, ActionFn>, // Parameter type
+              ignore_terminal_id: Option<TerminalID>,
           ) -> Self {
               let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
                   .into_iter()
@@ -16855,7 +16906,7 @@ messages:
           (stage_7_table, item_set_map, start_state_id)
       }
 
-      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>) -> GLRParser {
+      pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
           let original_productions = productions.to_vec();
 
           crate::debug!(2, "Removing productions with undefined non-terminals");
@@ -16911,15 +16962,15 @@ messages:
           GLRParser::new(stage_7_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions)
       }
 
-      pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
+      pub fn generate_glr_parser(productions: &[Production], start_production_id: usize, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
           let terminal_map = assign_terminal_ids(productions);
           let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new(), ignore_terminal_id)
       }
 
-      pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
+      pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
           let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
+          generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new(), ignore_terminal_id)
       }
 
       pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
@@ -16978,7 +17029,7 @@ messages:
               prod("A", vec![t("b")]),
           ];
 
-          generate_glr_parser(&productions, 0)
+          generate_glr_parser(&productions, 0, None)
       }
 
       fn create_expression_parser() -> GLRParser {
@@ -17000,7 +17051,7 @@ messages:
               prod("F", vec![t("("), nt("E"), t(")")]),
               prod("F", vec![t("i")]),
           ];
-          generate_glr_parser(&productions, 0)
+          generate_glr_parser(&productions, 0, None)
       }
 
       fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
@@ -17337,7 +17388,7 @@ messages:
               prod("Stmt", vec![t("other")]),
               prod("Expr", vec![t("id")]),
           ];
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let tokens = vec![
               *parser.terminal_map.get_by_left(&Terminal("if".to_string())).unwrap(),
@@ -17374,7 +17425,7 @@ messages:
               prod("E", vec![nt("E"), t("*"), nt("E")]),
               prod("E", vec![t("id")]),
           ];
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let tokens = vec![
               *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
@@ -17407,7 +17458,7 @@ messages:
               prod("A", vec![t("x")]),
               prod("B", vec![t("x")]),
           ];
-           let parser = generate_glr_parser(&productions, 0);
+           let parser = generate_glr_parser(&productions, 0, None);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let tokens = vec![
               *parser.terminal_map.get_by_left(&Terminal("x".to_string())).unwrap(),
@@ -17437,7 +17488,7 @@ messages:
               prod("B", vec![t("x")]),
               prod("B", vec![]), // Epsilon
           ];
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           println!("Parser: {}", parser);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let tokens = vec![
@@ -17467,7 +17518,7 @@ messages:
               prod("S", vec![nt("S"), nt("S")]),
               prod("S", vec![t("a")]),
           ];
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let tokens = vec![
               *parser.terminal_map.get_by_left(&Terminal("a".to_string())).unwrap(),
@@ -17506,7 +17557,7 @@ messages:
           // until the validation logic is adjusted or skipped for testing purposes.
           // If validation is ever removed or changed to allow this, uncomment the rest:
           /*
-          let parser = generate_glr_parser(&productions, 0); // This will fail due to left-nullable left recursion
+          let parser = generate_glr_parser(&productions, 0, None); // This will fail due to left-nullable left recursion
           println!("Parser: {}", parser);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
 
@@ -17547,7 +17598,7 @@ messages:
           // Validation should pass as it's not length-1 recursion
           assert!(analyze::validate(&productions).is_ok());
 
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
 
           let test_cases = [
@@ -17585,7 +17636,7 @@ messages:
           // Validation should pass for this grammar
           assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
 
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           let eof_token_id = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
           let c_token_id = *parser.terminal_map.get_by_left(&Terminal("c".to_string())).unwrap();
           let d_token_id = *parser.terminal_map.get_by_left(&Terminal("d".to_string())).unwrap();
@@ -17699,7 +17750,7 @@ messages:
           // Validate the grammar
           assert!(analyze::validate(&productions).is_ok(), "Validation failed for standard expression grammar");
 
-          let parser = generate_glr_parser(&productions, 0);
+          let parser = generate_glr_parser(&productions, 0, None);
           println!("Parser: {}", parser); // Useful for debugging the generated table
 
           // Helper to tokenize space-separated terminal names
@@ -17922,36 +17973,24 @@ messages:
       Instead, let's move it to the parser, especially `step`.
 
       Add it to `GrammarDefinition` too.
+
+      Obv a field will need to be added to `GLRParser`, and `step` modified, and functions like `generate_glr_parser` updated.
     metadata:
   - assistant: |-
-      Hello! As an AI assistant, I'd be happy to help you with your code. Dealing with "ignore" tokens can be tricky, and moving the logic to the parser is a solid approach to keep the grammar definition clean. Here are the diff patches for the requested changes.
+      Hello! As a helpful assistant, I'm here to help you with your code. Based on your request to change how ignore tokens are handled, I've prepared a set of patches.
 
-      I've updated `GrammarDefinition` to include an optional `ignore_terminal_id`. The EBNF parser now populates this field instead of modifying the grammar productions. This ID is then passed through to the `GLRParser`, where the `step` function now checks for and skips ignore tokens, effectively consuming them without changing the parser's state.
+      The new approach moves the ignore logic into the GLR parser's `step` function. An `ignore_terminal_id` is now stored in `GrammarDefinition` and `GLRParser`. When the parser encounters this token, it will simply skip it without changing its state, effectively ignoring it. This avoids modifying the grammar structure itself.
 
-      Here are the patches for each modified file:
+      Here are the required changes:
+
+      ### `src/interface/interface.rs`
+
+      I'll add an `ignore_terminal_id` field to `GrammarDefinition`, update its `JSONConvertible` implementation, and adjust the `from_ebnf` constructor to populate this new field. I'll also remove the now-obsolete `insert_ignore_symbol` method and ensure the `CompiledGrammar` constructor passes the ignore token information to the parser generator.
 
       ```diff
       --- a/src/interface/interface.rs
       +++ b/src/interface/interface.rs
-      @@ -1,7 +1,7 @@
-       use crate::constraint::GrammarConstraint;
-       use crate::debug;
-       use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
-      -use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
-      +use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex,};
-       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-       use crate::glr::parser::GLRParser;
-       use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
-      @@ -12,7 +12,7 @@
-       use std::fmt::{Debug, Display, Formatter};
-       use std::sync::Arc;
-       use std::fs;
-      -use std::collections::BTreeMap as StdMap;
-      +use std::collections::BTreeMap as StdMap; 
-       use crate::glr::analyze::{insert_ignore_symbol_in_productions, simplify_grammar};
-       
-       type LLMToken<'a> = &'a [u8];
-      @@ -130,6 +130,7 @@
+      @@ -150,6 +150,7 @@
            pub start_production_id: usize, // Index into productions
            pub terminal_name_to_group_id: BiBTreeMap<String, usize>, // Maps terminal names (used in Productions) to group IDs
            pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,   // Maps regex Exprs to group IDs
@@ -17959,7 +17998,7 @@ messages:
        }
        
        impl JSONConvertible for GrammarDefinition {
-      @@ -137,6 +138,7 @@
+      @@ -157,6 +158,7 @@
                let mut obj = StdMap::new();
                obj.insert("productions".to_string(), self.productions.to_json());
                obj.insert("start_production_id".to_string(), self.start_production_id.to_json());
@@ -17967,7 +18006,7 @@ messages:
        
                let mut terminals_json_list = Vec::new();
                let mut sorted_terminals_info: Vec<(usize, String, Expr)> = Vec::new();
-      @@ -169,6 +171,9 @@
+      @@ -191,6 +193,9 @@
                        let start_production_id = obj.remove("start_production_id")
                            .ok_or_else(|| "Missing field start_production_id for GrammarDefinition".to_string())
                            .and_then(usize::from_json)?;
@@ -17977,56 +18016,128 @@ messages:
        
                        let terminals_node = obj.remove("terminals")
                            .ok_or_else(|| "Missing field terminals for GrammarDefinition".to_string())?;
-      @@ -195,6 +200,7 @@
+      @@ -218,7 +223,7 @@
                            start_production_id,
                            terminal_name_to_group_id: new_terminal_name_to_group_id,
                            terminal_expr_to_group_id: new_terminal_expr_to_group_id,
+      -                    ignore_terminal_id,
       +                    ignore_terminal_id,
                        })
                    }
                    _ => Err("Expected JSONNode::Object for GrammarDefinition".to_string()),
-      @@ -582,6 +588,7 @@
+      @@ -257,20 +262,6 @@
+           pub fn simplify(&mut self) {
+               // Simplify the grammar definition
+               (self.productions, self.start_production_id) = simplify_grammar(&self.productions, self.start_production_id);
+      -    }
+      -
+      -    /// Inserts an "ignore" symbol between every pair of symbols in the RHS of productions.
+      -    /// This transformation is useful for grammars where whitespace or other separators
+      -    /// are allowed between any two tokens.
+      -    ///
+      -    /// For the start production, the ignore symbol is also added at the beginning and end.
+      -    pub fn insert_ignore_symbol(&mut self, ignore_symbol_name: &str) {
+      -        let start_id = self.start_production_id;
+      -        let ignore_sym = Symbol::NonTerminal(NonTerminal(ignore_symbol_name.to_string()));
+      -        insert_ignore_symbol_in_productions(
+      -            &mut self.productions,
+      -            &ignore_sym,
+      -            Some(start_id),
+      -        );
+           }
+       }
+       
+      @@ -700,7 +691,7 @@
                    start_production_id,
                    terminal_name_to_group_id,
                    terminal_expr_to_group_id,
+      -            ignore_terminal_id: None,
       +            ignore_terminal_id: None,
                })
            }
        
-      @@ -650,8 +657,13 @@
-               let mut grammar_def = GrammarDefinition::from_exprs(rules)?;
-               println!("GrammarDefinition from EBNF:");
-               println!("{}", grammar_def);
-      +
+      @@ -800,7 +791,7 @@
                if let Some(ignore_name) = &ebnf.ignore_symbol_name {
-      -            grammar_def.insert_ignore_symbol(ignore_name);
-      +            let group_id = grammar_def.terminal_name_to_group_id.get_by_left(ignore_name)
-      +                .ok_or_else(|| format!("Ignore symbol '{}' is not a defined terminal in the grammar.", ignore_name))?;
+                   let group_id = grammar_def.terminal_name_to_group_id.get_by_left(ignore_name)
+                       .ok_or_else(|| format!("Ignore symbol '{}' is not a defined terminal in the grammar.", ignore_name))?;
+      -            grammar_def.ignore_terminal_id = Some(TerminalID(*group_id));
       +            grammar_def.ignore_terminal_id = Some(TerminalID(*group_id));
                }
-      +
+       
                Ok(grammar_def)
-           }
-       
-      @@ -731,7 +743,12 @@
-       
-               debug!(2, "Building GLR parser from definition");
-               let terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.terminal_name_to_group_id.iter().map(|(name, group_id)| (Terminal(name.clone()), TerminalID(*group_id))).collect();
-      -        let glr_parser = generate_glr_parser_with_terminal_map(&definition.productions, definition.start_production_id, terminal_map);
-      +        let glr_parser = generate_glr_parser_with_terminal_map(
-      +            &definition.productions,
-      +            definition.start_production_id,
-      +            terminal_map,
+      @@ -863,6 +854,7 @@
+                   &definition.productions,
+                   definition.start_production_id,
+                   terminal_map,
       +            definition.ignore_terminal_id,
-      +        );
+               );
        
                Self {
-                   definition,
 
-      ``````diff
+      ```
+
+      ### `src/glr/analyze.rs`
+
+      I'll remove the `insert_ignore_symbol_in_productions` function, as it's no longer needed with the new parser-level handling.
+
+      ```diff
+      --- a/src/glr/analyze.rs
+      +++ b/src/glr/analyze.rs
+      @@ -580,36 +580,6 @@
+           kept_productions
+       }
+       
+      -/// Inserts an "ignore" symbol between every pair of symbols in the RHS of productions.
+      -///
+      -/// This transformation is useful for grammars where whitespace or other separators
+      -/// are allowed between any two tokens.
+      -///
+      -/// # Arguments
+      -/// * `productions` - A mutable slice of productions to be transformed in-place.
+      -/// * `ignore_symbol` - The symbol to insert (e.g., a non-terminal for whitespace).
+      -/// * `start_production_id` - An optional index of the grammar's start production. If provided,
+      -///   the ignore symbol will also be inserted at the very beginning and very end of the
+      -///   start production's RHS, in addition to being interspersed.
+      -pub fn insert_ignore_symbol_in_productions(
+      -    productions: &mut [Production],
+      -    ignore_symbol: &Symbol,
+      -    start_production_id: Option<usize>,
+      -) {
+      -    for (i, prod) in productions.iter_mut().enumerate() {
+      -        if prod.rhs.is_empty() {
+      -            continue;
+      -        }
+      -
+      -        let is_start_prod = start_production_id.map_or(false, |id| id == i);
+      -        let original_rhs = std::mem::take(&mut prod.rhs);
+      -        let mut new_rhs = Vec::with_capacity((original_rhs.len() * 2).saturating_sub(1));
+      -
+      -        if is_start_prod { new_rhs.push(ignore_symbol.clone()); }
+      -
+      -        for (j, symbol) in original_rhs.into_iter().enumerate() {
+      -            if j > 0 { new_rhs.push(ignore_symbol.clone()); }
+      -            new_rhs.push(symbol);
+      -        }
+      -
+      -        if is_start_prod { new_rhs.push(ignore_symbol.clone()); }
+      -        prod.rhs = new_rhs;
+      -    }
+      -}
+      -
+       pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {
+           todo!()
+       }
+
+      ```
+
+      ### `src/glr/parser.rs`
+
+      Here, I'll add the `ignore_terminal_id` to the `GLRParser` struct and its associated functions (`new`, `JSONConvertible`, `Debug`, `PartialEq`). Most importantly, I'll modify `GLRParserState::step` to check for and skip the ignore token.
+
+      ```diff
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@ -111,6 +111,7 @@
+      @@ -103,6 +103,7 @@
            pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
            pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
            pub start_state_id: StateID,
@@ -18034,7 +18145,7 @@ messages:
        }
        
        impl JSONConvertible for GLRParser {
-      @@ -122,6 +123,7 @@
+      @@ -114,6 +115,7 @@
                obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
                obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
                obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
@@ -18042,17 +18153,17 @@ messages:
                // Do not serialize self.actions
                JSONNode::Object(obj)
            }
-      @@ -141,6 +143,9 @@
+      @@ -132,6 +134,9 @@
                                              .and_then(|n| BiBTreeMap::<BTreeSet<Item>, StateID>::from_json(n))?;
                        let start_state_id = obj.remove("start_state_id").ok_or_else(|| "Missing field start_state_id".to_string())
                                                .and_then(StateID::from_json)?;
-      +                let ignore_terminal_id = obj.remove("ignore_terminal_id").ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
+      +                let ignore_terminal_id = obj.remove("ignore_terminal_id")
+      +                    .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
       +                    .and_then(Option::<TerminalID>::from_json)?;
-      +
                        Ok(GLRParser {
                            stage_7_table,
                            productions,
-      @@ -148,6 +153,7 @@
+      @@ -139,6 +144,7 @@
                            non_terminal_map,
                            item_set_map,
                            start_state_id,
@@ -18060,7 +18171,7 @@ messages:
                        })
                    }
                    _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
-      @@ -163,6 +169,7 @@
+      @@ -154,6 +160,7 @@
                    .field("non_terminal_map", &self.non_terminal_map)
                    .field("item_set_map", &self.item_set_map)
                    .field("start_state_id", &self.start_state_id)
@@ -18068,7 +18179,7 @@ messages:
                    .finish()
            }
        }
-      @@ -174,7 +181,8 @@
+      @@ -165,7 +172,8 @@
                self.terminal_map == other.terminal_map &&
                self.non_terminal_map == other.non_terminal_map &&
                self.item_set_map == other.item_set_map &&
@@ -18078,15 +18189,7 @@ messages:
            }
        }
        
-      @@ -188,6 +196,7 @@
-               non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
-               item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
-               start_state_id: StateID,
-      +        ignore_terminal_id: Option<TerminalID>,
-               actions: BTreeMap<NonTerminal, ActionFn>, // Parameter type
-           ) -> Self {
-               let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
-      @@ -206,6 +215,7 @@
+      @@ -199,6 +207,7 @@
                    non_terminal_map,
                    item_set_map,
                    start_state_id,
@@ -18094,88 +18197,751 @@ messages:
                }
            }
        
-      @@ -450,6 +460,15 @@
+      @@ -340,6 +349,12 @@
+       
            #[time_it("GLRParserState::step")]
            pub fn step(&mut self, token_id: TerminalID) {
-               // timeit!(format!("GLRParserState::step({} ({:?})", token_id.0, self.parser.terminal_map.get_by_right(&token_id)), {
-      +
-      +        if let Some(ignore_id) = self.parser.ignore_terminal_id {
-      +            if token_id == ignore_id {
-      +                // It's an ignore token. The parser state doesn't change.
-      +                // We just consume the token and do nothing.
-      +                crate::debug!(4, "Ignoring token {:?}", token_id);
-      +                return;
-      +            }
+      +        if Some(token_id) == self.parser.ignore_terminal_id {
+      +            crate::debug!(4, "Ignoring token {} ({:?})", token_id.0, self.parser.terminal_map.get_by_right(&token_id));
+      +            return;
       +        }
+      +
+               // timeit!(format!("GLRParserState::step({} ({:?})", token_id.0, self.parser.terminal_map.get_by_right(&token_id)), {
                crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
                self.log_gss("Step-start", token_id);
-       
 
-      ``````diff
+      ```
+
+      ### `src/glr/table.rs`
+
+      I'll update the parser generation functions to accept and pass through the `ignore_terminal_id`.
+
+      ```diff
       --- a/src/glr/table.rs
       +++ b/src/glr/table.rs
-      @@ -300,7 +300,14 @@
-           (stage_7_table, item_set_map, start_state_id)
-       }
-       
-      -pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>) -> GLRParser {
-      +pub fn generate_glr_parser_with_maps(
-      +    productions: &[Production],
-      +    start_production_id: usize,
-      +    terminal_map: BiBTreeMap<Terminal, TerminalID>,
-      +    mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
-      +    actions: BTreeMap<NonTerminal, ActionFn>,
-      +    ignore_terminal_id: Option<TerminalID>,
-      +) -> GLRParser {
-           let original_productions = productions.to_vec();
-       
-           crate::debug!(2, "Removing productions with undefined non-terminals");
-      @@ -344,17 +351,31 @@
+      @@ -318,7 +318,7 @@
            crate::debug!(2, "Done generating GLR parser");
        
       -    GLRParser::new(stage_7_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions)
       +    GLRParser::new(stage_7_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id)
        }
        
-       pub fn generate_glr_parser(productions: &[Production], start_production_id: usize) -> GLRParser {
-           let terminal_map = assign_terminal_ids(productions);
-           let non_terminal_map = assign_non_terminal_ids(productions);
-      -    generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
-      -}
-      -
-      -pub fn generate_glr_parser_with_terminal_map(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>) -> GLRParser {
-      +    generate_glr_parser_with_maps(
-      +        productions,
-      +        start_production_id,
-      +        terminal_map,
-      +        non_terminal_map,
-      +        BTreeMap::new(),
-      +        None,
-      +    )
-      +}
-      +
-      +pub fn generate_glr_parser_with_terminal_map(
-      +    productions: &[Production],
-      +    start_production_id: usize,
-      +    terminal_map: BiBTreeMap<Terminal, TerminalID>,
-      +    ignore_terminal_id: Option<TerminalID>,
-      +) -> GLRParser {
-           let non_terminal_map = assign_non_terminal_ids(productions);
-      -    generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new())
-      +    generate_glr_parser_with_maps(productions, start_production_id, terminal_map, non_terminal_map, BTreeMap::new(), ignore_terminal_id)
-       }
-       
-       pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
+       pub fn generate_glr_parser(productions: &[Production], start_production_id: usize, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
 
       ```
+
+      ### `src/glr/tests.rs`
+
+      Finally, I'll update the test suite to pass `None` for the new `ignore_terminal_id` parameter in calls to `generate_glr_parser`, ensuring the existing tests continue to compile and pass.
+
+      ```diff
+      --- a/src/glr/tests.rs
+      +++ b/src/glr/tests.rs
+      @@ -14,7 +14,7 @@
+               prod("A", vec![t("b")]),
+           ];
+       
+      -    generate_glr_parser(&productions, 0)
+      +    generate_glr_parser(&productions, 0, None)
+       }
+       
+       fn create_expression_parser() -> GLRParser {
+      @@ -33,7 +33,7 @@
+               prod("F", vec![t("("), nt("E"), t(")")]),
+               prod("F", vec![t("i")]),
+           ];
+      -    generate_glr_parser(&productions, 0)
+      +    generate_glr_parser(&productions, 0, None)
+       }
+       
+       fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
+      @@ -90,7 +90,7 @@
+               (")", false),    // Unmatched parenthesis
+               ("(i", false),   // Unmatched parenthesis
+           ];
+      -
+      + 
+           for (input, expected_match) in test_cases {
+               let tokens = tokenize(&parser, input);
+               let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+      @@ -238,7 +238,7 @@
+               prod("Stmt", vec![t("other")]),
+               prod("Expr", vec![t("id")]),
+           ];
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let tokens = vec![
+               *parser.terminal_map.get_by_left(&Terminal("if".to_string())).unwrap(),
+      @@ -268,7 +268,7 @@
+               prod("E", vec![nt("E"), t("*"), nt("E")]),
+               prod("E", vec![t("id")]),
+           ];
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let tokens = vec![
+               *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
+      @@ -294,7 +294,7 @@
+               prod("A", vec![t("x")]),
+               prod("B", vec![t("x")]),
+           ];
+      -     let parser = generate_glr_parser(&productions, 0);
+      +     let parser = generate_glr_parser(&productions, 0, None);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let tokens = vec![
+               *parser.terminal_map.get_by_left(&Terminal("x".to_string())).unwrap(),
+      @@ -319,7 +319,7 @@
+               prod("B", vec![t("x")]),
+               prod("B", vec![]), // Epsilon
+           ];
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let tokens = vec![
+      @@ -344,7 +344,7 @@
+               prod("S", vec![nt("S"), nt("S")]),
+               prod("S", vec![t("a")]),
+           ];
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let tokens = vec![
+               *parser.terminal_map.get_by_left(&Terminal("a".to_string())).unwrap(),
+      @@ -404,7 +404,7 @@
+           // Validation should pass as it's not length-1 recursion
+           assert!(analyze::validate(&productions).is_ok());
+       
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+       
+           let test_cases = [
+      @@ -438,7 +438,7 @@
+           // Validation should pass for this grammar
+           assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
+       
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           let eof_token_id = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let c_token_id = *parser.terminal_map.get_by_left(&Terminal("c".to_string())).unwrap();
+           let d_token_id = *parser.terminal_map.get_by_left(&Terminal("d".to_string())).unwrap();
+      @@ -524,7 +524,7 @@
+           // Validate the grammar
+           assert!(analyze::validate(&productions).is_ok(), "Validation failed for standard expression grammar");
+       
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser); // Useful for debugging the generated table
+       
+           // Helper to tokenize space-separated terminal names
+
+      ```
+
+      These changes should implement the desired behavior. Let me know if you have any other questions
     metadata:
   - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Git apply attempt failed (git-llm mode):
+      Found 5 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/interface/interface.rs
       Applying patch to 'src/interface/interface.rs' using custom patcher...
-      Successfully applied patch and wrote to src/interface/interface.rs.
+      Error applying patch to src/interface/interface.rs:
+      Hunk #1 (header: @@ -150,6 +150,7 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+          pub start_production_id: usize, // Index into productions
+          pub terminal_name_to_group_id: BiBTreeMap<String, usize>, // Maps terminal names (used in Productions) to group IDs
+          pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,   // Maps regex Exprs to group IDs
+      }
+
+      impl JSONConvertible for GrammarDefinition {
+      --- Expected Context (from patch, after normalization): ---
+      pub start_production_id: usize,
+      pub terminal_name_to_group_id: BiBTreeMap<String, usize>,
+      pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,
+      }
+
+      impl JSONConvertible for GrammarDefinition {
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 130 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        pub start_production_id: usize,
+        pub terminal_name_to_group_id: BiBTreeMap<String, usize>,
+        pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,
+      + pub ignore_terminal_id: Option<TerminalID>,
+        }
+        
+      - impl JSONConvertible for GrammarDefinition {
+      Problematic diff content:
+      ---
+      --- a/src/interface/interface.rs
+      +++ b/src/interface/interface.rs
+      @@ -150,6 +150,7 @@
+           pub start_production_id: usize, // Index into productions
+           pub terminal_name_to_group_id: BiBTreeMap<String, usize>, // Maps terminal names (used in Productions) to group IDs
+           pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,   // Maps regex Exprs to group IDs
+      +    pub ignore_terminal_id: Option<TerminalID>,
+       }
+       
+       impl JSONConvertible for GrammarDefinition {
+      @@ -157,6 +158,7 @@
+               let mut obj = StdMap::new();
+               obj.insert("productions".to_string(), self.productions.to_json());
+               obj.insert("start_production_id".to_string(), self.start_production_id.to_json());
+      +        obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
+       
+               let mut terminals_json_list = Vec::new();
+               let mut sorted_terminals_info: Vec<(usize, String, Expr)> = Vec::new();
+      @@ -191,6 +193,9 @@
+                       let start_production_id = obj.remove("start_production_id")
+                           .ok_or_else(|| "Missing field start_production_id for GrammarDefinition".to_string())
+                           .and_then(usize::from_json)?;
+      +                let ignore_terminal_id = obj.remove("ignore_terminal_id")
+      +                    .ok_or_else(|| "Missing field ignore_terminal_id for GrammarDefinition".to_string())
+      +                    .and_then(Option::<TerminalID>::from_json)?;
+       
+                       let terminals_node = obj.remove("terminals")
+                           .ok_or_else(|| "Missing field terminals for GrammarDefinition".to_string())?;
+      @@ -218,7 +223,7 @@
+                           start_production_id,
+                           terminal_name_to_group_id: new_terminal_name_to_group_id,
+                           terminal_expr_to_group_id: new_terminal_expr_to_group_id,
+      -                    ignore_terminal_id,
+      +                    ignore_terminal_id,
+                       })
+                   }
+                   _ => Err("Expected JSONNode::Object for GrammarDefinition".to_string()),
+      @@ -257,20 +262,6 @@
+           pub fn simplify(&mut self) {
+               // Simplify the grammar definition
+               (self.productions, self.start_production_id) = simplify_grammar(&self.productions, self.start_production_id);
+      -    }
+      -
+      -    /// Inserts an "ignore" symbol between every pair of symbols in the RHS of productions.
+      -    /// This transformation is useful for grammars where whitespace or other separators
+      -    /// are allowed between any two tokens.
+      -    ///
+      -    /// For the start production, the ignore symbol is also added at the beginning and end.
+      -    pub fn insert_ignore_symbol(&mut self, ignore_symbol_name: &str) {
+      -        let start_id = self.start_production_id;
+      -        let ignore_sym = Symbol::NonTerminal(NonTerminal(ignore_symbol_name.to_string()));
+      -        insert_ignore_symbol_in_productions(
+      -            &mut self.productions,
+      -            &ignore_sym,
+      -            Some(start_id),
+      -        );
+           }
+       }
+       
+      @@ -700,7 +691,7 @@
+                   start_production_id,
+                   terminal_name_to_group_id,
+                   terminal_expr_to_group_id,
+      -            ignore_terminal_id: None,
+      +            ignore_terminal_id: None,
+               })
+           }
+       
+      @@ -800,7 +791,7 @@
+               if let Some(ignore_name) = &ebnf.ignore_symbol_name {
+                   let group_id = grammar_def.terminal_name_to_group_id.get_by_left(ignore_name)
+                       .ok_or_else(|| format!("Ignore symbol '{}' is not a defined terminal in the grammar.", ignore_name))?;
+      -            grammar_def.ignore_terminal_id = Some(TerminalID(*group_id));
+      +            grammar_def.ignore_terminal_id = Some(TerminalID(*group_id));
+               }
+       
+               Ok(grammar_def)
+      @@ -863,6 +854,7 @@
+                   &definition.productions,
+                   definition.start_production_id,
+                   terminal_map,
+      +            definition.ignore_terminal_id,
+               );
+       
+               Self {
+
+      ---
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/analyze.rs
+      Applying patch to 'src/glr/analyze.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/analyze.rs.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/parser.rs.
+
+      --- Processing Diff Block 4 ---
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
+
+      --- Processing Diff Block 5 ---
+      Identified target file: src/glr/tests.rs
+      Applying patch to 'src/glr/tests.rs' using custom patcher...
+      Error applying patch to src/glr/tests.rs:
+      Hunk #1 (header: @@ -14,7 +14,7 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+              prod("A", vec![t("b")]),
+          ];
+
+          generate_glr_parser(&productions, 0)
+      }
+
+      fn create_expression_parser() -> GLRParser {
+      --- Expected Context (from patch, after normalization): ---
+      prod("A", vec![t("b")]),
+      ];
+
+      generate_glr_parser(&productions, 0)
+      }
+
+      fn create_expression_parser() -> GLRParser {
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 18 with ratio 0.86 (6/7 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        prod("A", vec![t("b")]),
+        ];
+        
+      - generate_glr_parser(&productions, 0)
+      + generate_glr_parser(&productions, 0, None)
+      ?                                    ++++++
+
+        }
+        
+        fn create_expression_parser() -> GLRParser {
+      Problematic diff content:
+      ---
+      --- a/src/glr/tests.rs
+      +++ b/src/glr/tests.rs
+      @@ -14,7 +14,7 @@
+               prod("A", vec![t("b")]),
+           ];
+       
+      -    generate_glr_parser(&productions, 0)
+      +    generate_glr_parser(&productions, 0, None)
+       }
+       
+       fn create_expression_parser() -> GLRParser {
+      @@ -33,7 +33,7 @@
+               prod("F", vec![t("("), nt("E"), t(")")]),
+               prod("F", vec![t("i")]),
+           ];
+      -    generate_glr_parser(&productions, 0)
+      +    generate_glr_parser(&productions, 0, None)
+       }
+       
+       fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
+      @@ -90,7 +90,7 @@
+               (")", false),    // Unmatched parenthesis
+               ("(i", false),   // Unmatched parenthesis
+           ];
+      -
+      + 
+           for (input, expected_match) in test_cases {
+               let tokens = tokenize(&parser, input);
+               let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+      @@ -238,7 +238,7 @@
+               prod("Stmt", vec![t("other")]),
+               prod("Expr", vec![t("id")]),
+           ];
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let tokens = vec![
+               *parser.terminal_map.get_by_left(&Terminal("if".to_string())).unwrap(),
+      @@ -268,7 +268,7 @@
+               prod("E", vec![nt("E"), t("*"), nt("E")]),
+               prod("E", vec![t("id")]),
+           ];
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let tokens = vec![
+               *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
+      @@ -294,7 +294,7 @@
+               prod("A", vec![t("x")]),
+               prod("B", vec![t("x")]),
+           ];
+      -     let parser = generate_glr_parser(&productions, 0);
+      +     let parser = generate_glr_parser(&productions, 0, None);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let tokens = vec![
+               *parser.terminal_map.get_by_left(&Terminal("x".to_string())).unwrap(),
+      @@ -319,7 +319,7 @@
+               prod("B", vec![t("x")]),
+               prod("B", vec![]), // Epsilon
+           ];
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let tokens = vec![
+      @@ -344,7 +344,7 @@
+               prod("S", vec![nt("S"), nt("S")]),
+               prod("S", vec![t("a")]),
+           ];
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let tokens = vec![
+               *parser.terminal_map.get_by_left(&Terminal("a".to_string())).unwrap(),
+      @@ -404,7 +404,7 @@
+           // Validation should pass as it's not length-1 recursion
+           assert!(analyze::validate(&productions).is_ok());
+       
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+       
+           let test_cases = [
+      @@ -438,7 +438,7 @@
+           // Validation should pass for this grammar
+           assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
+       
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           let eof_token_id = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let c_token_id = *parser.terminal_map.get_by_left(&Terminal("c".to_string())).unwrap();
+           let d_token_id = *parser.terminal_map.get_by_left(&Terminal("d".to_string())).unwrap();
+      @@ -524,7 +524,7 @@
+           // Validate the grammar
+           assert!(analyze::validate(&productions).is_ok(), "Validation failed for standard expression grammar");
+       
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser); // Useful for debugging the generated table
+       
+           // Helper to tokenize space-separated terminal names
+
+      ---
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Git apply failed. Fallback to LLM apply:
+      Found 5 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/interface/interface.rs
+      Applying patch to 'src/interface/interface.rs' using custom patcher...
+      Error applying patch to src/interface/interface.rs:
+      Hunk #1 (header: @@ -150,6 +150,7 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+          pub start_production_id: usize, // Index into productions
+          pub terminal_name_to_group_id: BiBTreeMap<String, usize>, // Maps terminal names (used in Productions) to group IDs
+          pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,   // Maps regex Exprs to group IDs
+      }
+
+      impl JSONConvertible for GrammarDefinition {
+      --- Expected Context (from patch, after normalization): ---
+      pub start_production_id: usize,
+      pub terminal_name_to_group_id: BiBTreeMap<String, usize>,
+      pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,
+      }
+
+      impl JSONConvertible for GrammarDefinition {
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 130 with ratio 0.83 (5/6 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        pub start_production_id: usize,
+        pub terminal_name_to_group_id: BiBTreeMap<String, usize>,
+        pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,
+      + pub ignore_terminal_id: Option<TerminalID>,
+        }
+        
+      - impl JSONConvertible for GrammarDefinition {
+      Problematic diff content:
+      ---
+      --- a/src/interface/interface.rs
+      +++ b/src/interface/interface.rs
+      @@ -150,6 +150,7 @@
+           pub start_production_id: usize, // Index into productions
+           pub terminal_name_to_group_id: BiBTreeMap<String, usize>, // Maps terminal names (used in Productions) to group IDs
+           pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,   // Maps regex Exprs to group IDs
+      +    pub ignore_terminal_id: Option<TerminalID>,
+       }
+       
+       impl JSONConvertible for GrammarDefinition {
+      @@ -157,6 +158,7 @@
+               let mut obj = StdMap::new();
+               obj.insert("productions".to_string(), self.productions.to_json());
+               obj.insert("start_production_id".to_string(), self.start_production_id.to_json());
+      +        obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
+       
+               let mut terminals_json_list = Vec::new();
+               let mut sorted_terminals_info: Vec<(usize, String, Expr)> = Vec::new();
+      @@ -191,6 +193,9 @@
+                       let start_production_id = obj.remove("start_production_id")
+                           .ok_or_else(|| "Missing field start_production_id for GrammarDefinition".to_string())
+                           .and_then(usize::from_json)?;
+      +                let ignore_terminal_id = obj.remove("ignore_terminal_id")
+      +                    .ok_or_else(|| "Missing field ignore_terminal_id for GrammarDefinition".to_string())
+      +                    .and_then(Option::<TerminalID>::from_json)?;
+       
+                       let terminals_node = obj.remove("terminals")
+                           .ok_or_else(|| "Missing field terminals for GrammarDefinition".to_string())?;
+      @@ -218,7 +223,7 @@
+                           start_production_id,
+                           terminal_name_to_group_id: new_terminal_name_to_group_id,
+                           terminal_expr_to_group_id: new_terminal_expr_to_group_id,
+      -                    ignore_terminal_id,
+      +                    ignore_terminal_id,
+                       })
+                   }
+                   _ => Err("Expected JSONNode::Object for GrammarDefinition".to_string()),
+      @@ -257,20 +262,6 @@
+           pub fn simplify(&mut self) {
+               // Simplify the grammar definition
+               (self.productions, self.start_production_id) = simplify_grammar(&self.productions, self.start_production_id);
+      -    }
+      -
+      -    /// Inserts an "ignore" symbol between every pair of symbols in the RHS of productions.
+      -    /// This transformation is useful for grammars where whitespace or other separators
+      -    /// are allowed between any two tokens.
+      -    ///
+      -    /// For the start production, the ignore symbol is also added at the beginning and end.
+      -    pub fn insert_ignore_symbol(&mut self, ignore_symbol_name: &str) {
+      -        let start_id = self.start_production_id;
+      -        let ignore_sym = Symbol::NonTerminal(NonTerminal(ignore_symbol_name.to_string()));
+      -        insert_ignore_symbol_in_productions(
+      -            &mut self.productions,
+      -            &ignore_sym,
+      -            Some(start_id),
+      -        );
+           }
+       }
+       
+      @@ -700,7 +691,7 @@
+                   start_production_id,
+                   terminal_name_to_group_id,
+                   terminal_expr_to_group_id,
+      -            ignore_terminal_id: None,
+      +            ignore_terminal_id: None,
+               })
+           }
+       
+      @@ -800,7 +791,7 @@
+               if let Some(ignore_name) = &ebnf.ignore_symbol_name {
+                   let group_id = grammar_def.terminal_name_to_group_id.get_by_left(ignore_name)
+                       .ok_or_else(|| format!("Ignore symbol '{}' is not a defined terminal in the grammar.", ignore_name))?;
+      -            grammar_def.ignore_terminal_id = Some(TerminalID(*group_id));
+      +            grammar_def.ignore_terminal_id = Some(TerminalID(*group_id));
+               }
+       
+               Ok(grammar_def)
+      @@ -863,6 +854,7 @@
+                   &definition.productions,
+                   definition.start_production_id,
+                   terminal_map,
+      +            definition.ignore_terminal_id,
+               );
+       
+               Self {
+
+      ---
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/analyze.rs
+      Applying patch to 'src/glr/analyze.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/analyze.rs.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/parser.rs.
+
+      --- Processing Diff Block 4 ---
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
+
+      --- Processing Diff Block 5 ---
+      Identified target file: src/glr/tests.rs
+      Applying patch to 'src/glr/tests.rs' using custom patcher...
+      Error applying patch to src/glr/tests.rs:
+      Hunk #1 (header: @@ -14,7 +14,7 @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+              prod("A", vec![t("b")]),
+          ];
+
+          generate_glr_parser(&productions, 0)
+      }
+
+      fn create_expression_parser() -> GLRParser {
+      --- Expected Context (from patch, after normalization): ---
+      prod("A", vec![t("b")]),
+      ];
+
+      generate_glr_parser(&productions, 0)
+      }
+
+      fn create_expression_parser() -> GLRParser {
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 18 with ratio 0.86 (6/7 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+        prod("A", vec![t("b")]),
+        ];
+        
+      - generate_glr_parser(&productions, 0)
+      + generate_glr_parser(&productions, 0, None)
+      ?                                    ++++++
+
+        }
+        
+        fn create_expression_parser() -> GLRParser {
+      Problematic diff content:
+      ---
+      --- a/src/glr/tests.rs
+      +++ b/src/glr/tests.rs
+      @@ -14,7 +14,7 @@
+               prod("A", vec![t("b")]),
+           ];
+       
+      -    generate_glr_parser(&productions, 0)
+      +    generate_glr_parser(&productions, 0, None)
+       }
+       
+       fn create_expression_parser() -> GLRParser {
+      @@ -33,7 +33,7 @@
+               prod("F", vec![t("("), nt("E"), t(")")]),
+               prod("F", vec![t("i")]),
+           ];
+      -    generate_glr_parser(&productions, 0)
+      +    generate_glr_parser(&productions, 0, None)
+       }
+       
+       fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
+      @@ -90,7 +90,7 @@
+               (")", false),    // Unmatched parenthesis
+               ("(i", false),   // Unmatched parenthesis
+           ];
+      -
+      + 
+           for (input, expected_match) in test_cases {
+               let tokens = tokenize(&parser, input);
+               let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
+      @@ -238,7 +238,7 @@
+               prod("Stmt", vec![t("other")]),
+               prod("Expr", vec![t("id")]),
+           ];
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let tokens = vec![
+               *parser.terminal_map.get_by_left(&Terminal("if".to_string())).unwrap(),
+      @@ -268,7 +268,7 @@
+               prod("E", vec![nt("E"), t("*"), nt("E")]),
+               prod("E", vec![t("id")]),
+           ];
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let tokens = vec![
+               *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
+      @@ -294,7 +294,7 @@
+               prod("A", vec![t("x")]),
+               prod("B", vec![t("x")]),
+           ];
+      -     let parser = generate_glr_parser(&productions, 0);
+      +     let parser = generate_glr_parser(&productions, 0, None);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let tokens = vec![
+               *parser.terminal_map.get_by_left(&Terminal("x".to_string())).unwrap(),
+      @@ -319,7 +319,7 @@
+               prod("B", vec![t("x")]),
+               prod("B", vec![]), // Epsilon
+           ];
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let tokens = vec![
+      @@ -344,7 +344,7 @@
+               prod("S", vec![nt("S"), nt("S")]),
+               prod("S", vec![t("a")]),
+           ];
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let tokens = vec![
+               *parser.terminal_map.get_by_left(&Terminal("a".to_string())).unwrap(),
+      @@ -404,7 +404,7 @@
+           // Validation should pass as it's not length-1 recursion
+           assert!(analyze::validate(&productions).is_ok());
+       
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+       
+           let test_cases = [
+      @@ -438,7 +438,7 @@
+           // Validation should pass for this grammar
+           assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
+       
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           let eof_token_id = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+           let c_token_id = *parser.terminal_map.get_by_left(&Terminal("c".to_string())).unwrap();
+           let d_token_id = *parser.terminal_map.get_by_left(&Terminal("d".to_string())).unwrap();
+      @@ -524,7 +524,7 @@
+           // Validate the grammar
+           assert!(analyze::validate(&productions).is_ok(), "Validation failed for standard expression grammar");
+       
+      -    let parser = generate_glr_parser(&productions, 0);
+      +    let parser = generate_glr_parser(&productions, 0, None);
+           println!("Parser: {}", parser); // Useful for debugging the generated table
+       
+           // Helper to tokenize space-separated terminal names
+
+      ---
+
+
+      LLM apply output:
+      Using model 'gemini/gemini-2.5-flash' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/interface/interface.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/interface/interface.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/interface/interface.rs
     metadata:
 ...

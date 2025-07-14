@@ -518,43 +518,6 @@ pub fn filter_productions_by_reachability(
     kept_productions
 }
 
-/// Inserts an "ignore" symbol between every pair of symbols in the RHS of productions.
-///
-/// This transformation is useful for grammars where whitespace or other separators
-/// are allowed between any two tokens.
-///
-/// # Arguments
-/// * `productions` - A mutable slice of productions to be transformed in-place.
-/// * `ignore_symbol` - The symbol to insert (e.g., a non-terminal for whitespace).
-/// * `start_production_id` - An optional index of the grammar's start production. If provided,
-///   the ignore symbol will also be inserted at the very beginning and very end of the
-///   start production's RHS, in addition to being interspersed.
-pub fn insert_ignore_symbol_in_productions(
-    productions: &mut [Production],
-    ignore_symbol: &Symbol,
-    start_production_id: Option<usize>,
-) {
-    for (i, prod) in productions.iter_mut().enumerate() {
-        if prod.rhs.is_empty() {
-            continue;
-        }
-
-        let is_start_prod = start_production_id.map_or(false, |id| id == i);
-        let original_rhs = std::mem::take(&mut prod.rhs);
-        let mut new_rhs = Vec::with_capacity((original_rhs.len() * 2).saturating_sub(1));
-
-        if is_start_prod { new_rhs.push(ignore_symbol.clone()); }
-
-        for (j, symbol) in original_rhs.into_iter().enumerate() {
-            if j > 0 { new_rhs.push(ignore_symbol.clone()); }
-            new_rhs.push(symbol);
-        }
-
-        if is_start_prod { new_rhs.push(ignore_symbol.clone()); }
-        prod.rhs = new_rhs;
-    }
-}
-
 pub fn simplify_grammar(initial_productions: &[Production], start_production_id: usize) -> (Vec<Production>, usize) {
     todo!()
 }
