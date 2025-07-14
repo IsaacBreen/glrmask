@@ -220,6 +220,7 @@ impl GLRParser {
         item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
         start_state_id: StateID,
         actions: BTreeMap<NonTerminal, ActionFn>, // Parameter type
+        ignore_terminal_id: Option<TerminalID>,
     ) -> Self {
         let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
             .into_iter()
