@@ -18,7 +18,7 @@ fn create_simple_parser() -> GLRParser {
         prod("A", vec![t("b")]),
     ];
 
-    generate_glr_parser(&productions, 0)
+    generate_glr_parser(&productions, 0, None)
 }
 
 fn create_expression_parser() -> GLRParser {
@@ -40,7 +40,7 @@ fn create_expression_parser() -> GLRParser {
         prod("F", vec![t("("), nt("E"), t(")")]),
         prod("F", vec![t("i")]),
     ];
-    generate_glr_parser(&productions, 0)
+    generate_glr_parser(&productions, 0, None)
 }
 
 fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
@@ -377,7 +377,7 @@ fn test_ambiguous_dangling_else() {
         prod("Stmt", vec![t("other")]),
         prod("Expr", vec![t("id")]),
     ];
-    let parser = generate_glr_parser(&productions, 0);
+    let parser = generate_glr_parser(&productions, 0, None);
     let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
     let tokens = vec![
         *parser.terminal_map.get_by_left(&Terminal("if".to_string())).unwrap(),
@@ -414,7 +414,7 @@ fn test_ambiguous_arithmetic() {
         prod("E", vec![nt("E"), t("*"), nt("E")]),
         prod("E", vec![t("id")]),
     ];
-    let parser = generate_glr_parser(&productions, 0);
+    let parser = generate_glr_parser(&productions, 0, None);
     let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
     let tokens = vec![
         *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
@@ -447,7 +447,7 @@ fn test_reduce_reduce_conflict() {
         prod("A", vec![t("x")]),
         prod("B", vec![t("x")]),
     ];
-     let parser = generate_glr_parser(&productions, 0);
+     let parser = generate_glr_parser(&productions, 0, None);
     let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
     let tokens = vec![
         *parser.terminal_map.get_by_left(&Terminal("x".to_string())).unwrap(),
@@ -477,7 +477,7 @@ fn test_epsilon_rules_ambiguity() {
         prod("B", vec![t("x")]),
         prod("B", vec![]), // Epsilon
     ];
-    let parser = generate_glr_parser(&productions, 0);
+    let parser = generate_glr_parser(&productions, 0, None);
     println!("Parser: {}", parser);
     let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
     let tokens = vec![
@@ -507,7 +507,7 @@ fn test_highly_ambiguous_potentially_slow() {
         prod("S", vec![nt("S"), nt("S")]),
         prod("S", vec![t("a")]),
     ];
-    let parser = generate_glr_parser(&productions, 0);
+    let parser = generate_glr_parser(&productions, 0, None);
     let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
     let tokens = vec![
         *parser.terminal_map.get_by_left(&Terminal("a".to_string())).unwrap(),
@@ -546,7 +546,7 @@ fn test_hidden_left_recursion() {
     // until the validation logic is adjusted or skipped for testing purposes.
     // If validation is ever removed or changed to allow this, uncomment the rest:
     /*
-    let parser = generate_glr_parser(&productions, 0); // This will fail due to left-nullable left recursion
+    let parser = generate_glr_parser(&productions, 0, None); // This will fail due to left-nullable left recursion
     println!("Parser: {}", parser);
     let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
 
@@ -587,7 +587,7 @@ fn test_hidden_right_recursion() {
     // Validation should pass as it's not length-1 recursion
     assert!(analyze::validate(&productions).is_ok());
 
-    let parser = generate_glr_parser(&productions, 0);
+    let parser = generate_glr_parser(&productions, 0, None);
     let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
 
     let test_cases = [
@@ -625,7 +625,7 @@ fn test_nullable_nonterminal_before_terminal() {
     // Validation should pass for this grammar
     assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
 
-    let parser = generate_glr_parser(&productions, 0);
+    let parser = generate_glr_parser(&productions, 0, None);
     let eof_token_id = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
     let c_token_id = *parser.terminal_map.get_by_left(&Terminal("c".to_string())).unwrap();
     let d_token_id = *parser.terminal_map.get_by_left(&Terminal("d".to_string())).unwrap();
@@ -739,7 +739,7 @@ fn test_standard_expression_grammar_parse() {
     // Validate the grammar
     assert!(analyze::validate(&productions).is_ok(), "Validation failed for standard expression grammar");
 
-    let parser = generate_glr_parser(&productions, 0);
+    let parser = generate_glr_parser(&productions, 0, None);
     println!("Parser: {}", parser); // Useful for debugging the generated table
 
     // Helper to tokenize space-separated terminal names

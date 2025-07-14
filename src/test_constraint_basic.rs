@@ -66,7 +66,7 @@ fn test_constraint_simple() {
         prod("X", vec![t("AB")]),             // X -> ab
     ];
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone());
+    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
     println!("{}", &parser);
 
     let mut token_name_map = BiBTreeMap::new();
@@ -183,7 +183,7 @@ fn test_constraint_expression() {
     grammar_token_map.insert(Terminal("I".to_string()), TerminalID(4));
     grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(5));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone()); // Start production is index 6
+    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None); // Start production is index 6
     println!("Parser: {}", parser);
 
     let mut token_name_map = BiBTreeMap::new();
@@ -370,7 +370,8 @@ fn test_aborted_tokenizer_restart_equivalence() {
         &productions,
         0, // Assuming S -> HASH_OPT_A is the first rule for start_production_id if S' is not explicit.
            // generate_glr_parser adds S' -> S EOF, so the first user prod is 0.
-        grammar_token_map.clone()
+        grammar_token_map.clone(),
+        None,
     );
 
     // LLM Tokens
@@ -457,7 +458,8 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
     let parser = generate_glr_parser_with_terminal_map(
         &productions,
         0, // start_production_id
-        grammar_token_map.clone()
+        grammar_token_map.clone(),
+        None,
     );
     println!("Parser: {}", parser);
 
@@ -549,7 +551,7 @@ fn test_a_plus_commit_equivalence() {
     grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0));
 
     // 4. Create the Parser
-    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone());
+    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
 
     // 5. LLM vocabulary: "a" and "aaa"
     let mut llm_token_map = LLMTokenMap::new();
@@ -617,7 +619,7 @@ fn test_hideous_ambiguity() {
     token_name_map.insert("FSTRING_MIDDLE".to_string(), 0);
 
     // 5. Create the Parser
-    let parser = generate_glr_parser(&productions, 0);
+    let parser = generate_glr_parser(&productions, 0, None);
     println!("{}", parser);
 
     // 6. Create the Constraint
@@ -680,7 +682,8 @@ fn test_simple_def_match_non_zero_llm_id() {
     let parser = generate_glr_parser_with_terminal_map(
         &productions,
         0, // start_production_id
-        grammar_token_map.clone()
+        grammar_token_map.clone(),
+        None,
     );
 
     // 5. Token name map for stats/debugging (maps grammar terminal name to tokenizer group ID)
@@ -737,7 +740,7 @@ fn test_precompute_a_plus_tokenizer() {
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
     grammar_token_map.insert(Terminal("A_PLUS".to_string()), TerminalID(0));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone());
+    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
 
     // Token name map for stats
     let mut token_name_map = BiBTreeMap::new();
@@ -805,7 +808,7 @@ fn test_precompute_x_eq() {
     grammar_token_map.insert(Terminal("EQUALS".to_string()), TerminalID(2)); // '=' is group 2
     grammar_token_map.insert(Terminal("ANY".to_string()), TerminalID(3));    // Anything else is group 3
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone());
+    let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
 
     // Token name map for stats
     let mut token_name_map = BiBTreeMap::new();

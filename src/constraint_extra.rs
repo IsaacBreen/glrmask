@@ -626,7 +626,7 @@ mod tests {
         grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(2)); // "$" from tokenizer
 
         // Generate parser
-        let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map);
+        let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map, None);
 
         let mut terminal_name_map = BiBTreeMap::new();
         terminal_name_map.insert("A".to_string(), 0);
