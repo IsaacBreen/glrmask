@@ -306,16 +306,8 @@ impl GrammarDefinition {
     ) -> (Vec<Symbol>, Vec<Production>) { // Return symbols and new productions
         match expr {
             GrammarExpr::Literal(bytes) => {
-                let terminal_name = Self::generate_unique_indexed_name_for_literal(
-                    bytes,
-                    per_base_counters,
-                    all_names,
-                );
-                let group_id = *next_terminal_group_id;
-                regex_name_to_group_id.insert(terminal_name.clone(), group_id);
-                regex_expr_to_group_id.insert(Expr::U8Seq(bytes.clone()), group_id);
-                *next_terminal_group_id += 1;
-                (vec![Symbol::Terminal(terminal(&terminal_name))], Vec::new())
+                // TODO: assign literal group IDs
+                (vec![Symbol::Terminal(Terminal::literal(bytes.clone()))], Vec::new())
             }
             GrammarExpr::Ref(name) => {
                 if nonterminal_names.contains(name.as_str()) {
@@ -510,6 +502,8 @@ impl GrammarDefinition {
         }
 
         let mut productions = Vec::new();
+        // TODO: assign literal IDs as well...
+        let mut literal_to_group_id: BiBTreeMap<String, usize> = BiBTreeMap::new();
         let mut regex_name_to_group_id: BiBTreeMap<String, usize> = BiBTreeMap::new();
         let mut regex_expr_to_group_id = BiBTreeMap::new();
         let mut next_terminal_group_id = 0;

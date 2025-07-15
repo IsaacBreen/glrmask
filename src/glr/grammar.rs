@@ -74,6 +74,20 @@ pub fn terminal(name: &str) -> Terminal {
     Terminal::Regex(name.to_string())
 }
 
+pub fn literal(bytes: Vec<u8>) -> Terminal {
+    Terminal::Literal(bytes)
+}
+
+impl Terminal {
+    pub fn terminal(name: &str) -> Self {
+        Terminal::Regex(name.to_string())
+    }
+
+    pub fn literal(bytes: Vec<u8>) -> Self {
+        Terminal::Literal(bytes)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Symbol {
     Terminal(Terminal),
