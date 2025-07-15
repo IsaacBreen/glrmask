@@ -579,8 +579,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
     }
 
-    #[time_it("GLRParserState::step")]
+    // #[time_it("GLRParserState::step")]
     pub fn step(&mut self, token_id: TerminalID) {
+        timeit!(format!("GLRParserState::step({} ({:?}))", token_id.0, self.parser.terminal_map.get_by_right(&token_id)), {
         if Some(token_id) == self.parser.ignore_terminal_id {
             crate::debug!(4, "Ignoring token {} ({:?})", token_id.0, self.parser.terminal_map.get_by_right(&token_id));
             return;
@@ -688,7 +689,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // self.action_not_found_states = ParseState::new(llm_vocab.clone()); // Reset if not needed beyond the step
 
         crate::debug!(4, "----------------------------------------------------------------");
-        // })
+        })
     }
 
     pub fn parse(&mut self, input: &[TerminalID]) {
