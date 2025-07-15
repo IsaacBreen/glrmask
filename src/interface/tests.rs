@@ -478,21 +478,21 @@ mod tests {
         let term_eps_expr = RegexExpr::Epsilon;
         let term_z_expr = eat_u8(b'z');
         use crate::glr::grammar::terminal;
-        let term_x_opt_gid = grammar_def.terminal_expr_to_group_id.get_by_left(&term_x_opt_expr)
+        let term_x_opt_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_x_opt_expr)
             .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
-        let name_term_x_opt = grammar_def.terminal_name_to_group_id.get_by_right(term_x_opt_gid)
+        let name_term_x_opt = grammar_def.regex_name_to_group_id.get_by_right(term_x_opt_gid)
             .unwrap_or_else(|| panic!("Could not find name for sometimes-null terminal group ID: {}", term_x_opt_gid))
             .clone();
 
-        let term_eps_gid = grammar_def.terminal_expr_to_group_id.get_by_left(&term_eps_expr)
+        let term_eps_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_eps_expr)
             .unwrap_or_else(|| panic!("Could not find group ID for always-null terminal expression: {:?}", term_eps_expr));
-        let name_term_eps = grammar_def.terminal_name_to_group_id.get_by_right(term_eps_gid)
+        let name_term_eps = grammar_def.regex_name_to_group_id.get_by_right(term_eps_gid)
             .unwrap_or_else(|| panic!("Could not find name for always-null terminal group ID: {}", term_eps_gid))
             .clone();
 
-        let term_z_gid = grammar_def.terminal_expr_to_group_id.get_by_left(&term_z_expr)
+        let term_z_gid = grammar_def.regex_expr_to_group_id.get_by_left(&term_z_expr)
             .unwrap_or_else(|| panic!("Could not find group ID for never-null terminal expression: {:?}", term_z_expr));
-        let name_term_z = grammar_def.terminal_name_to_group_id.get_by_right(term_z_gid)
+        let name_term_z = grammar_def.regex_name_to_group_id.get_by_right(term_z_gid)
             .unwrap_or_else(|| panic!("Could not find name for never-null terminal group ID: {}", term_z_gid))
             .clone();
 

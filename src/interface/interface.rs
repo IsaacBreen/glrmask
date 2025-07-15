@@ -118,25 +118,26 @@ pub fn literal(bytes: Vec<u8>) -> GrammarExpr { GrammarExpr::Literal(bytes) }
 pub struct GrammarDefinition {
     pub productions: Vec<Production>,
     pub start_production_id: usize, // Index into productions
-    pub terminal_name_to_group_id: BiBTreeMap<String, usize>, // Maps terminal names (used in Productions) to group IDs
-    pub terminal_expr_to_group_id: BiBTreeMap<Expr, usize>,   // Maps regex Exprs to group IDs
+    pub literal_to_group_id: BiBTreeMap<String, usize>,
+    pub regex_name_to_group_id: BiBTreeMap<String, usize>,
+    pub regex_expr_to_group_id: BiBTreeMap<Expr, usize>,
     pub ignore_terminal_id: Option<TerminalID>,
 }
 
 impl GrammarDefinition {
     pub fn terminal_to_group_id(&self) -> BiBTreeMap<Terminal, usize> {
         let mut terminal_to_group_id = BiBTreeMap::new();
-        for (name, group_id) in &self.terminal_name_to_group_id {
+        for (name, group_id) in &self.regex_name_to_group_id {
             let terminal = Terminal::Regex(name.clone());
             terminal_to_group_id.insert(terminal, *group_id);
         }
-        // TODO: literals
         terminal_to_group_id
     }
 }
 
 impl JSONConvertible for GrammarDefinition {
     fn to_json(&self) -> JSONNode {
+        // TODO: handle literals too
         let mut obj = StdMap::new();
         obj.insert("productions".to_string(), self.productions.to_json());
         obj.insert("start_production_id".to_string(), self.start_production_id.to_json());
@@ -145,10 +146,10 @@ impl JSONConvertible for GrammarDefinition {
         let mut terminals_json_list = Vec::new();
         let mut sorted_terminals_info: Vec<(usize, String, Expr)> = Vec::new();
 
-        for (name, group_id) in &self.terminal_name_to_group_id {
-            // Assuming consistency: if a name/group_id exists here, the group_id must exist in terminal_expr_to_group_id
-            let expr = self.terminal_expr_to_group_id.get_by_right(group_id)
-                .unwrap_or_else(|| panic!("Internal consistency error: group_id {} for name '{}' not found in terminal_expr_to_group_id.", group_id, name))
+        for (name, group_id) in &self.regex_name_to_group_id {
+            // Assuming consistency: if a name/group_id exists here, the group_id must exist in regex_expr_to_group_id
+            let expr = self.regex_expr_to_group_id.get_by_right(group_id)
+                .unwrap_or_else(|| panic!("Internal consistency error: group_id {} for name '{}' not found in regex_expr_to_group_id.", group_id, name))
                 .clone();
             sorted_terminals_info.push((*group_id, name.clone(), expr));
         }
@@ -185,31 +186,18 @@ impl JSONConvertible for GrammarDefinition {
                 let terminals_node = obj.remove("terminals")
                     .ok_or_else(|| "Missing field terminals for GrammarDefinition".to_string())?;
 
-                let mut new_terminal_name_to_group_id = BiBTreeMap::new();
-                let mut new_terminal_expr_to_group_id = BiBTreeMap::new();
+                let mut new_literal_to_group_id = BiBTreeMap::new(); // Not used in this context, but can be added if needed
+                let mut new_regex_name_to_group_id = BiBTreeMap::new();
+                let mut new_regex_expr_to_group_id = BiBTreeMap::new();
 
-                if let JSONNode::Array(terminals_array) = terminals_node {
-                    for terminal_item_node in terminals_array {
-                        if let JSONNode::Object(mut terminal_obj) = terminal_item_node {
-                            let name = terminal_obj.remove("name").ok_or_else(|| "Missing field name in terminal object".to_string()).and_then(String::from_json)?;
-                            let group_id = terminal_obj.remove("group_id").ok_or_else(|| "Missing field group_id in terminal object".to_string()).and_then(usize::from_json)?;
-                            let expr = terminal_obj.remove("expr").ok_or_else(|| "Missing field expr in terminal object".to_string()).and_then(Expr::from_json)?;
-
-                            new_terminal_name_to_group_id.insert_no_overwrite(name, group_id).map_err(|e| format!("Error inserting (name, group_id) into BiBTreeMap for names: {:?}", e))?;
-                            new_terminal_expr_to_group_id.insert_no_overwrite(expr, group_id).map_err(|e| format!("Error inserting (expr, group_id) into BiBTreeMap for exprs: {:?}", e))?;
-                        } else {
-                            return Err("Expected JSONNode::Object for terminal item".to_string());
-                        }
-                    }
-                } else {
-                    return Err("Expected JSONNode::Array for terminals field".to_string());
-                }
+                todo!("literals and regexes");
 
                 Ok(GrammarDefinition {
                     productions,
                     start_production_id,
-                    terminal_name_to_group_id: new_terminal_name_to_group_id,
-                    terminal_expr_to_group_id: new_terminal_expr_to_group_id,
+                    regex_name_to_group_id: new_regex_name_to_group_id,
+                    literal_to_group_id: new_literal_to_group_id, // Not used in this context, but can be added if needed
+                    regex_expr_to_group_id: new_regex_expr_to_group_id,
                     ignore_terminal_id,
                 })
             }
@@ -310,8 +298,8 @@ impl GrammarDefinition {
         current_rule_name_or_path: &str,
         // productions: &mut Vec<Production>, // This is now returned
         nonterminal_names: &HashSet<&str>,
-        terminal_name_to_group_id: &mut BiBTreeMap<String, usize>,
-        terminal_expr_to_group_id: &mut BiBTreeMap<Expr, usize>,
+        regex_name_to_group_id: &mut BiBTreeMap<String, usize>,
+        regex_expr_to_group_id: &mut BiBTreeMap<Expr, usize>,
         next_terminal_group_id: &mut usize,
         per_base_counters: &mut HashMap<String, usize>,
         all_names: &mut HashSet<String>,
@@ -324,8 +312,8 @@ impl GrammarDefinition {
                     all_names,
                 );
                 let group_id = *next_terminal_group_id;
-                terminal_name_to_group_id.insert(terminal_name.clone(), group_id);
-                terminal_expr_to_group_id.insert(Expr::U8Seq(bytes.clone()), group_id);
+                regex_name_to_group_id.insert(terminal_name.clone(), group_id);
+                regex_expr_to_group_id.insert(Expr::U8Seq(bytes.clone()), group_id);
                 *next_terminal_group_id += 1;
                 (vec![Symbol::Terminal(terminal(&terminal_name))], Vec::new())
             }
@@ -345,8 +333,8 @@ impl GrammarDefinition {
                         current_rule_name_or_path,
                         // productions, // No longer passed
                         nonterminal_names,
-                        terminal_name_to_group_id,
-                        terminal_expr_to_group_id,
+                        regex_name_to_group_id,
+                        regex_expr_to_group_id,
                         next_terminal_group_id,
                         per_base_counters,
                         all_names,
@@ -373,8 +361,8 @@ impl GrammarDefinition {
                         &choice_nt_name, // Children named relative to this new NT
                         // productions, // No longer passed
                         nonterminal_names,
-                        terminal_name_to_group_id,
-                        terminal_expr_to_group_id,
+                        regex_name_to_group_id,
+                        regex_expr_to_group_id,
                         next_terminal_group_id,
                         per_base_counters,
                         all_names,
@@ -397,8 +385,8 @@ impl GrammarDefinition {
                     current_rule_name_or_path,
                     // productions, // No longer passed
                     nonterminal_names,
-                    terminal_name_to_group_id,
-                    terminal_expr_to_group_id,
+                    regex_name_to_group_id,
+                    regex_expr_to_group_id,
                     next_terminal_group_id,
                     per_base_counters,
                     all_names,
@@ -417,8 +405,8 @@ impl GrammarDefinition {
                     &repeat_nt_name, // Children named relative to this new NT
                     // productions, // No longer passed
                     nonterminal_names,
-                    terminal_name_to_group_id,
-                    terminal_expr_to_group_id,
+                    regex_name_to_group_id,
+                    regex_expr_to_group_id,
                     next_terminal_group_id,
                     per_base_counters,
                     all_names,
@@ -649,7 +637,7 @@ impl GrammarDefinition {
         for (terminal_name, group_id) in regex_name_to_group_id.iter() {
             let expr = regex_expr_to_group_id
                 .get_by_right(group_id)
-                .expect("terminal_name_to_group_id / terminal_expr_to_group_id out of sync")
+                .expect("regex_name_to_group_id / regex_expr_to_group_id out of sync")
                 .clone();
 
             match get_nullability(expr) {
@@ -730,8 +718,9 @@ impl GrammarDefinition {
         Ok(GrammarDefinition {
             productions,
             start_production_id,
-            terminal_name_to_group_id: regex_name_to_group_id,
-            terminal_expr_to_group_id: regex_expr_to_group_id,
+            literal_to_group_id, // Not used in this context, but can be added if needed
+            regex_name_to_group_id,
+            regex_expr_to_group_id,
             ignore_terminal_id: None,
         })
     }
@@ -814,7 +803,7 @@ impl GrammarDefinition {
         println!("{}", grammar_def);
 
         if let Some(ignore_name) = &ebnf.ignore_symbol_name {
-            let group_id = grammar_def.terminal_name_to_group_id.get_by_left(ignore_name)
+            let group_id = grammar_def.regex_name_to_group_id.get_by_left(ignore_name)
                 .ok_or_else(|| format!("Ignore symbol '{}' is not a defined terminal in the grammar.", ignore_name))?;
             grammar_def.ignore_terminal_id = Some(TerminalID(*group_id));
         }
@@ -832,14 +821,14 @@ impl GrammarDefinition {
 
     /// Helper to get terminal expressions ordered by group ID for tokenizer construction.
     pub fn get_terminal_expressions_for_tokenizer(&self) -> Vec<ExprGroup> {
-        if self.terminal_expr_to_group_id.is_empty() {
+        if self.regex_expr_to_group_id.is_empty() {
             return Vec::new();
         }
 
-        let max_group_id = *self.terminal_expr_to_group_id.iter().map(|(_, id)| id).max().unwrap_or(&0);
+        let max_group_id = *self.regex_expr_to_group_id.iter().map(|(_, id)| id).max().unwrap_or(&0);
         let mut expr_groups_vec: Vec<ExprGroup> = vec![greedy_group(Expr::Epsilon); max_group_id + 1];
 
-        for (expr, group_id) in &self.terminal_expr_to_group_id {
+        for (expr, group_id) in &self.regex_expr_to_group_id {
             // Ensure the group_id is valid for the vector. This should hold if IDs are contiguous.
             if *group_id < expr_groups_vec.len() {
                  expr_groups_vec[*group_id] = greedy_group(expr.clone());
@@ -905,7 +894,7 @@ impl CompiledGrammar {
         let tokenizer = tokenizer_expr_groups_obj.build();
 
         debug!(2, "Building GLR parser from definition");
-        let terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.terminal_name_to_group_id.iter().map(|(name, group_id)| (terminal(name), TerminalID(*group_id))).collect();
+        let terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.regex_name_to_group_id.iter().map(|(name, group_id)| (terminal(name), TerminalID(*group_id))).collect();
         let glr_parser = generate_glr_parser_with_terminal_map(
             &definition.productions,
             definition.start_production_id,
@@ -923,8 +912,8 @@ impl CompiledGrammar {
     // Accessors
     pub fn productions(&self) -> &Vec<Production> { &self.definition.productions }
     pub fn start_production_id(&self) -> usize { self.definition.start_production_id }
-    pub fn terminal_name_to_group_id(&self) -> &BiBTreeMap<String, usize> { &self.definition.terminal_name_to_group_id }
-    // pub fn terminal_expr_to_group_id(&self) -> &BiBTreeMap<Expr, usize> { &self.definition.terminal_expr_to_group_id } // Less commonly needed directly by users
+    pub fn regex_name_to_group_id(&self) -> &BiBTreeMap<String, usize> { &self.definition.regex_name_to_group_id }
+    // pub fn regex_expr_to_group_id(&self) -> &BiBTreeMap<Expr, usize> { &self.definition.regex_expr_to_group_id } // Less commonly needed directly by users
     pub fn tokenizer(&self) -> &Regex { &self.tokenizer }
     pub fn glr_parser(&self) -> &GLRParser { &self.glr_parser }
 }
@@ -948,15 +937,15 @@ impl Display for CompiledGrammar {
             }
             writeln!(f)?;
         }
-        writeln!(f, "    Terminals (Name to GroupID, {}):", self.definition.terminal_name_to_group_id.len())?;
-        let mut terminals_sorted: Vec<_> = self.definition.terminal_name_to_group_id.iter().collect();
+        writeln!(f, "    Terminals (Name to GroupID, {}):", self.definition.regex_name_to_group_id.len())?;
+        let mut terminals_sorted: Vec<_> = self.definition.regex_name_to_group_id.iter().collect();
         terminals_sorted.sort_by_key(|&(_, group_id)| group_id);
         for (name, group_id) in terminals_sorted {
             writeln!(f, "      {}: {:?}", name, group_id)?;
         }
-        // Optionally, list terminal_expr_to_group_id if useful for debugging
-        // writeln!(f, "    Terminal Expressions (Expr to GroupID, {}):", self.definition.terminal_expr_to_group_id.len())?;
-        // let mut expr_terminals_sorted: Vec<_> = self.definition.terminal_expr_to_group_id.iter().collect();
+        // Optionally, list regex_expr_to_group_id if useful for debugging
+        // writeln!(f, "    Terminal Expressions (Expr to GroupID, {}):", self.definition.regex_expr_to_group_id.len())?;
+        // let mut expr_terminals_sorted: Vec<_> = self.definition.regex_expr_to_group_id.iter().collect();
         // expr_terminals_sorted.sort_by_key(|&(_, group_id)| group_id);
         // for (expr, group_id) in expr_terminals_sorted {
         //     writeln!(f, "      {:?}: {:?}", expr, group_id)?;
@@ -1003,7 +992,7 @@ impl<'a> IncrementalParser<'a> {
 
             crate::debug!(4, "Processing position {} in state {}. Matches: {}", position, current_tokenizer_state_id.0, results.matches.len());
             for token in results.matches {
-                crate::debug!(4, "Found match for token {:?} ({}) with width {}", token.id, self.grammar.definition.terminal_name_to_group_id.get_by_right(&token.id).unwrap_or(&"UNKNOWN_TOKEN_NAME".to_string()), token.width);
+                crate::debug!(4, "Found match for token {:?} ({}) with width {}", token.id, self.grammar.definition.regex_name_to_group_id.get_by_right(&token.id).unwrap_or(&"UNKNOWN_TOKEN_NAME".to_string()), token.width);
                 let grammar_token_id = TerminalID(token.id);
                 let mut next_glr_state = current_glr_state.clone();
                 next_glr_state.step(grammar_token_id);
@@ -1231,15 +1220,15 @@ mod tests {
         let llm_token_map: LLMTokenMap = llm_tokens.iter().enumerate().map(|(i, token)| (token.clone(), LLMTokenID(i))).collect();
         let max_llm_token_id = llm_tokens.len(); // For HybridBitset capacity
 
-        let mut terminal_name_to_group_id = BiBTreeMap::new();
-        terminal_name_to_group_id.insert(terminal(&"ignore"), 0);
-        terminal_name_to_group_id.insert(terminal(&"digit"), 1);
-        terminal_name_to_group_id.insert(terminal(&"alph_lower"), 2);
-        terminal_name_to_group_id.insert(terminal(&"alph_upper"), 3);
-        terminal_name_to_group_id.insert(terminal(&"underscore"), 4);
-        terminal_name_to_group_id.insert(terminal(&"name_start"), 5);
-        terminal_name_to_group_id.insert(terminal(&"name_middle"), 6);
-        terminal_name_to_group_id.insert(terminal(&"name"), 7);
+        let mut regex_name_to_group_id = BiBTreeMap::new();
+        regex_name_to_group_id.insert(terminal(&"ignore"), 0);
+        regex_name_to_group_id.insert(terminal(&"digit"), 1);
+        regex_name_to_group_id.insert(terminal(&"alph_lower"), 2);
+        regex_name_to_group_id.insert(terminal(&"alph_upper"), 3);
+        regex_name_to_group_id.insert(terminal(&"underscore"), 4);
+        regex_name_to_group_id.insert(terminal(&"name_start"), 5);
+        regex_name_to_group_id.insert(terminal(&"name_middle"), 6);
+        regex_name_to_group_id.insert(terminal(&"name"), 7);
 
         // This test was originally for GrammarConstraint::precompute, which is internal.
         // We can't directly test precompute without a full GrammarConstraint.
@@ -1255,7 +1244,7 @@ mod tests {
             tokenizer,
             dummy_glr_parser,
             llm_token_map,
-            terminal_name_to_group_id,
+            regex_name_to_group_id,
             max_llm_token_id,
         );
         // The test passes if it compiles and runs without panic.
