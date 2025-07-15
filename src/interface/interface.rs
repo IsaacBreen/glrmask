@@ -539,10 +539,10 @@ impl GrammarDefinition {
 
     /// Constructs a `GrammarDefinition` from a list of grammar expressions.
     pub fn from_exprs(
-        rules: Vec<(String, GrammarExpr)>,
-        terminals: Vec<(String, Expr)>,
+        grammar_exprs: Vec<(String, GrammarExpr)>,
+        regex_exprs: Vec<(String, Expr)>,
     ) -> Result<Self, String> {
-        if rules.is_empty() {
+        if grammar_exprs.is_empty() {
             return Err("Grammar expressions list cannot be empty.".to_string());
         }
 
@@ -553,7 +553,7 @@ impl GrammarDefinition {
         let mut next_terminal_group_id = 0;
 
         // Process predefined terminals
-        for (name, expr) in terminals {
+        for (name, expr) in regex_exprs {
             if regex_name_to_group_id.contains_left(&name) {
                 return Err(format!("Duplicate terminal name defined: {}", name));
             }
@@ -567,12 +567,12 @@ impl GrammarDefinition {
             }
         }
 
-        let mut all_names: HashSet<String> = rules.iter().map(|(name, _)| name.clone()).collect();
+        let mut all_names: HashSet<String> = grammar_exprs.iter().map(|(name, _)| name.clone()).collect();
         all_names.extend(regex_name_to_group_id.left_values().cloned());
         let mut per_base_counters: HashMap<String, usize> = HashMap::new();
 
         let mut start_production_name = "start'".to_string();
-        let nonterminal_names_from_rules: HashSet<&str> = rules.iter().map(|(name, _)| name.as_str()).collect();
+        let nonterminal_names_from_rules: HashSet<&str> = grammar_exprs.iter().map(|(name, _)| name.as_str()).collect();
         while nonterminal_names_from_rules.contains(start_production_name.as_str()) || all_names.contains(&start_production_name) {
             start_production_name.push('\'');
         }
@@ -581,11 +581,11 @@ impl GrammarDefinition {
 
         productions.push(Production {
             lhs: NonTerminal(start_production_name.clone()),
-            rhs: vec![Symbol::NonTerminal(NonTerminal(rules[0].0.clone()))],
+            rhs: vec![Symbol::NonTerminal(NonTerminal(grammar_exprs[0].0.clone()))],
         });
         let start_production_id = 0; // The augmented start production is always the first one.
 
-        for (name, expr) in tqdm!(rules.iter()) {
+        for (name, expr) in tqdm!(grammar_exprs.iter()) {
             let lhs = NonTerminal(name.clone());
             let lhs_name_str = name; // Base name for generated sub-rules/terminals
 
@@ -717,7 +717,7 @@ impl GrammarDefinition {
         // 3.  Turn the “sometimes null” terminals into *optional* non-terminals
         // ------------------------------------------------------------------
         println!("Processing may-be-null terminals: {:?}", may_be_null_terminals);
-        for terminal_name in may_be_null_terminals {
+        for terminal_name in &may_be_null_terminals {
             // (a) generate a fresh non-terminal name that will stand for
             //       “   <terminal> | ε   ”.
             let opt_nt_name = Self::generate_unique_indexed_name(
@@ -768,10 +768,10 @@ impl GrammarDefinition {
     /// Constructs a `GrammarDefinition` from an EBNF string.
     pub fn from_ebnf(ebnf_source: &str) -> Result<Self, String> {
         let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
-        let rules = ebnf.grammar_rules;
+        let grammar_exprs = ebnf.grammar_rules;
 
         println!("EBNF rules:");
-        for (rule_name, grammar_expr) in &rules {
+        for (rule_name, grammar_expr) in &grammar_exprs {
             println!("{} -> {:?}", rule_name, grammar_expr);
         }
 
@@ -781,7 +781,7 @@ impl GrammarDefinition {
         }
 
         let mut terminals: BTreeMap<String, GrammarExpr> = BTreeMap::new();
-        for (name, expr) in &rules {
+        for (name, expr) in &grammar_exprs {
             if is_terminal_name(name) {
                 terminals.insert(name.clone(), expr.clone());
             }
@@ -811,7 +811,7 @@ impl GrammarDefinition {
         }
 
         let mut referenced_terminals = HashSet::new();
-        for (name, expr) in rules.iter() {
+        for (name, expr) in grammar_exprs.iter() {
             if !is_terminal_name(name) {
                 gather_referenced_terminals(expr, &terminals, &mut referenced_terminals);
             }
@@ -824,7 +824,7 @@ impl GrammarDefinition {
 
         dbg!(&referenced_terminals);
 
-        let non_terminal_rules: Vec<(String, GrammarExpr)> = rules.into_iter()
+        let non_terminal_rules: Vec<(String, GrammarExpr)> = grammar_exprs.into_iter()
             .filter(|(name, _)| !is_terminal_name(name))
             .collect();
 
