@@ -1151,10 +1151,6 @@ impl<'a> GrammarConstraintState<'a> {
         let t1 = std::time::Instant::now();
         println!("after special_map: {:>15?}", t1.duration_since(t0));
 
-        crate::profiler::print_summary_flat();
-        crate::profiler::print_summary();
-        crate::profiler::reset();
-
         let counts = step_counts.lock().unwrap();
         if !counts.is_empty() {
             let mut sorted_counts: Vec<_> = counts.iter().collect();
@@ -1169,6 +1165,10 @@ impl<'a> GrammarConstraintState<'a> {
             }
             crate::debug!(3, "{}", log_msg);
         }
+
+        crate::profiler::print_summary_flat();
+        crate::profiler::print_summary();
+        crate::profiler::reset();
 
         // Log the GSSs
         crate::debug!(3, "Final GSS states after get_mask:");
