@@ -94,7 +94,7 @@ fn test_constraint_simple() {
     println!("{}", &constraint_state);
     constraint_state.commit(LLMTokenID(0));
     assert!(constraint_state.is_active());
-    
+
     // Mask after committing "ab"
     println!("Constraint state:\n{}", &constraint_state);
     let mask_after_commit = constraint_state.get_mask();
@@ -110,7 +110,7 @@ fn test_constraint_simple() {
     let llm_token = b"ab".to_vec();
     let grammar_tokenss = vec![vec!["A", "B_OR_C"], vec!["AB"]];
     let llm_token_id_for_comp = llm_token_map.get_by_left(&llm_token).unwrap();
-    
+
     let mut constraint_state_for_comp = constraint.init(); // This is fine, it's a comment
     // Mask before commit (optional, for debugging)
     let _mask_before = constraint_state_for_comp.get_mask();
@@ -223,7 +223,7 @@ fn test_constraint_expression() {
     let grammar_tokens = vec!["LPAREN", "I"];
     let llm_token_id_for_comp = llm_token_map.get_by_left(&llm_token).unwrap();
     let grammar_token_ids = grammar_tokens.iter().map(|token| grammar_token_map.get_by_left(&terminal(token)).unwrap()).collect::<Vec<_>>();
-    
+
     let mut constraint_state_for_comp = constraint.init();
     let _mask_before = constraint_state_for_comp.get_mask(); // Optional, for debugging
     constraint_state_for_comp.commit(*llm_token_id_for_comp);
@@ -641,7 +641,7 @@ fn test_hideous_ambiguity() {
         let mask = constraint_state.get_mask();
         if !mask.contains(a_id) {
             println!("Token 'a' (ID {}) not in mask. Mask: {:?}. Stopping.", a_id, mask);
-            break; 
+            break;
         }
         constraint_state.commit(LLMTokenID(a_id));
         if !constraint_state.is_active() {

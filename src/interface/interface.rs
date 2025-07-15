@@ -2,7 +2,7 @@ use crate::constraint::GrammarConstraint;
 use crate::debug;
 use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
 use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
-use crate::glr::grammar::{get_terminal_name, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
@@ -657,7 +657,7 @@ impl GrammarDefinition {
                 .into_iter()
                 .filter(|sym| {
                     match sym {
-                        Symbol::Terminal(t) => !always_null_terminals.contains(get_terminal_name(t)),
+                        Symbol::Terminal(Terminal::Regex(t)) => !always_null_terminals.contains(t),
                         _                   => true,
                     }
                 })
@@ -691,8 +691,8 @@ impl GrammarDefinition {
             //     productions with the new optional non-terminal.
             for prod in productions.iter_mut() {
                 for sym in &mut prod.rhs {
-                    if let Symbol::Terminal(t) = sym {
-                        if get_terminal_name(t) == terminal_name {
+                    if let Symbol::Terminal(Terminal::Regex(t)) = sym {
+                        if t == &terminal_name {
                             *sym = Symbol::NonTerminal(opt_nt.clone());
                         }
                     }
