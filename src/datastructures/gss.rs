@@ -134,7 +134,7 @@ impl Acc {
 
     /// Accumulates constraints sequentially (e.g., adding a new constraint to a path).
     /// This is a union of constraints.
-    #[time_it]
+    // #[time_it]
     pub fn accumulate_seq(&self, other: &Self) -> Self {
         // LLM tokens: union of disallowed sets
         let mut new_llm_tokens = self.llm_token_info.disallowed();
@@ -158,7 +158,7 @@ impl Acc {
     }
 
     /// Merges constraints from parallel paths (union of paths).
-    #[time_it]
+    // #[time_it]
     pub fn merge_parallel<'a>(accs: impl IntoIterator<Item = &'a Acc>, llm_vocab: Option<Arc<LLMVocab>>) -> Self {
         let accs_vec: Vec<&'a Acc> = accs.into_iter().collect();
         if accs_vec.is_empty() {
@@ -193,7 +193,7 @@ impl Acc {
     }
 
     /// Intersects constraints from parallel paths.
-    #[time_it]
+    // #[time_it]
     pub fn intersect_parallel<'a>(accs: impl IntoIterator<Item = &'a Acc>, llm_vocab: Option<Arc<LLMVocab>>) -> Self {
         let accs_vec: Vec<&'a Acc> = accs.into_iter().collect();
         if accs_vec.is_empty() {
@@ -290,7 +290,7 @@ fn compute_hash_key(predecessors: &NodeMap, acc_manager: &AccManager) -> u64 {
 
 /// Processes a set of incoming predecessors, grouping them by depth and edge,
 /// and merging nodes that share the same edge to create a canonical `NodeMap`.
-#[time_it]
+// #[time_it]
 fn process_predecessors(incoming: &NodeSet) -> NodeMap {
     let mut grouped_by_depth: BTreeMap<MaxDepth, BTreeMap<ParseStateEdgeContent, Vec<Arc<GSSNode>>>> = BTreeMap::new();
 
@@ -330,7 +330,7 @@ fn process_predecessors(incoming: &NodeSet) -> NodeMap {
 }
 
 /// Merges the `source` NodeMap into the `target` NodeMap.
-#[time_it]
+// #[time_it]
 fn merge_node_maps(target: &mut NodeMap, source: NodeMap) {
     for (depth, source_preds_for_depth) in source {
         let target_preds_for_depth = target.entry(depth).or_default();
@@ -399,13 +399,13 @@ impl GSSNode {
     pub fn acc_manager(&self) -> &AccManager { &self.acc_manager }
 
     /// Returns the full union of constraints for any path ending at this node.
-    #[time_it]
+    // #[time_it]
     pub fn full_union_acc(&self) -> Acc {
         self.acc_manager.union.accumulate_seq(&self.acc_manager.local)
     }
 
     /// Returns the full intersection of constraints for all paths ending at this node.
-    #[time_it]
+    // #[time_it]
     pub fn full_intersection_acc(&self) -> Acc {
         self.acc_manager.intersection.accumulate_seq(&self.acc_manager.local)
     }
@@ -418,14 +418,14 @@ impl GSSNode {
 // Core GSS operations
 impl GSSNode {
     /// Pushes a new state onto the stack(s) represented by this node.
-    #[time_it]
+    // #[time_it]
     pub fn push(&self, edge_value: ParseStateEdgeContent, local_acc_for_new_node: Acc) -> Self {
         Self::new_with_single_predecessor(Arc::new(self.clone()), edge_value, local_acc_for_new_node)
     }
 
     /// Pops the top state from the stack(s), returning a `GSSPop` structure.
     /// The accumulators of predecessors are adjusted to include this node's local constraints.
-    #[time_it]
+    // #[time_it]
     pub fn pop(&self) -> GSSPop {
         let mut new_node_map = NodeMap::new();
         let parent_local_acc = &self.acc_manager.local;
@@ -459,7 +459,7 @@ impl GSSNode {
     }
 
     /// Pops `n` levels from the GSS.
-    #[time_it]
+    // #[time_it]
     pub fn popn(&self, n: usize) -> Self {
         if n == 0 {
             return self.clone();
@@ -468,7 +468,7 @@ impl GSSNode {
     }
 
     /// Merges another `GSSNode` into this one.
-    #[time_it]
+    // #[time_it]
     pub fn merge(&mut self, other: &Self) {
         if self == other { return; }
 
@@ -523,13 +523,13 @@ impl GSSPop<'_> {
         combined_node_map
     }
 
-    #[time_it]
+    // #[time_it]
     pub fn pop(&self) -> GSSPop {
         let node_map = Self::_pop(&self.node_map);
         GSSPop { parent_node: self.parent_node, node_map }
     }
 
-    #[time_it]
+    // #[time_it]
     pub fn popn(&self, n: usize) -> GSSPop {
         if n == 0 {
             return self.clone();
@@ -554,7 +554,7 @@ impl<'a> GSSPeek<'a> {
     pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
     pub fn predecessor(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
 
-    #[time_it]
+    // #[time_it]
     pub fn to_node(&self) -> GSSNode {
         let local_acc = self.parent_node.acc_manager.local.accumulate_seq(&self.predecessor_node.full_union_acc());
         GSSNode::new_with_single_predecessor(
@@ -654,7 +654,7 @@ fn prune_and_transform_recursive(
     }
 }
 
-#[time_it]
+// #[time_it]
 pub fn allow_only_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     allowed_tokens: &LLMTokenBV,
@@ -668,7 +668,7 @@ pub fn allow_only_llm_tokens_and_prune_arc(
     );
 }
 
-#[time_it]
+// #[time_it]
 pub fn disallow_llm_tokens_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     tokens_to_disallow: &LLMTokenBV,
@@ -692,7 +692,7 @@ pub fn disallow_llm_tokens_and_prune_arc(
     }
 }
 
-#[time_it]
+// #[time_it]
 pub fn reset_llm_tokens(
     root_arc: &mut Arc<GSSNode>,
     memo: &mut HashMap<*const GSSNode, Option<Arc<GSSNode>>>,
@@ -710,7 +710,7 @@ pub fn reset_llm_tokens(
     }
 }
 
-#[time_it]
+// #[time_it]
 pub fn disallow_terminals_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     disallowed_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
@@ -730,7 +730,7 @@ pub fn disallow_terminals_and_prune_arc(
     }
 }
 
-#[time_it]
+// #[time_it]
 pub fn prune_disallowed_terminals(
     root_arc: &mut Arc<GSSNode>,
     matched_terminals: &BTreeMap<TokenizerStateID, TerminalBV>,
@@ -765,7 +765,7 @@ pub fn prune_disallowed_terminals(
     }
 }
 
-#[time_it]
+// #[time_it]
 pub fn map_allowed_terminals_tokenizer_states(
     root_arc: &mut Arc<GSSNode>,
     map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
@@ -871,7 +871,7 @@ impl GSSNode {
     ///
     /// The process is post-order: children are fused before their parents. This means that
     /// deeper parts of the graph are simplified first.
-    #[time_it]
+    // #[time_it]
     pub fn fuse_predecessors(&mut self, levels: usize) {
         if levels == 0 {
             return;
@@ -965,7 +965,7 @@ pub struct GSSStats {
 }
 
 /// Gathers statistics about the structure and complexity of a GSS forest.
-#[time_it]
+// #[time_it]
 pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
     let mut stats = GSSStats::default();
     stats.num_roots = roots.len();
@@ -1146,7 +1146,7 @@ pub fn sample_path(roots: &[&GSSNode], seed: u64) -> Option<Vec<ParseStateEdgeCo
 }
 
 /// Pretty-prints a GSS forest for debugging.
-#[time_it]
+// #[time_it]
 pub fn print_gss_forest(
     roots: &[Arc<GSSNode>],
     labels: Option<&[String]>,
