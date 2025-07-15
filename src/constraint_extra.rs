@@ -553,7 +553,7 @@ pub fn print_precompute_stats(
 mod tests {
     use std::collections::BTreeMap;
     use crate::finite_automata::{eat_u8, Regex};
-    use crate::glr::grammar::{nt, prod, t, Terminal};
+    use crate::glr::grammar::{nt, prod, t, terminal, Terminal};
     use crate::glr::parser::GLRParser;
     use crate::glr::table::generate_glr_parser_with_terminal_map;
     use crate::tokenizer::{LLMTokenID, LLMTokenMap};
@@ -621,9 +621,9 @@ mod tests {
 
         // Map grammar terminals to the tokenizer's token IDs
         let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-        grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0)); // "a" from tokenizer
-        grammar_token_map.insert(Terminal("AA".to_string()), TerminalID(1)); // "aa" from tokenizer
-        grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(2)); // "$" from tokenizer
+        grammar_token_map.insert(terminal("A"), TerminalID(0)); // "a" from tokenizer
+        grammar_token_map.insert(terminal("AA"), TerminalID(1)); // "aa" from tokenizer
+        grammar_token_map.insert(terminal("EOF"), TerminalID(2)); // "$" from tokenizer
 
         // Generate parser
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map, None);

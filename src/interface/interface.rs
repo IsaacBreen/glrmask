@@ -1,7 +1,7 @@
 use crate::constraint::GrammarConstraint;
 use crate::debug;
 use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
-use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex,};
+use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
@@ -13,8 +13,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 use std::fs;
-use std::collections::BTreeMap as StdMap; 
+use std::collections::BTreeMap as StdMap;
 use crate::glr::analyze::{simplify_grammar};
+use crate::glr::grammar::terminal;
 
 type LLMToken<'a> = &'a [u8];
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
@@ -320,7 +321,7 @@ impl GrammarDefinition {
                 if nonterminal_names.contains(name.as_str()) {
                     (vec![Symbol::NonTerminal(NonTerminal(name.clone()))], Vec::new())
                 } else {
-                    (vec![Symbol::Terminal(Terminal(name.clone()))], Vec::new())
+                    (vec![Symbol::Terminal(terminal(name))], Vec::new())
                 }
             }
             GrammarExpr::Sequence(exprs) => {
@@ -892,7 +893,7 @@ impl CompiledGrammar {
         let tokenizer = tokenizer_expr_groups_obj.build();
 
         debug!(2, "Building GLR parser from definition");
-        let terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.terminal_name_to_group_id.iter().map(|(name, group_id)| (Terminal(name.clone()), TerminalID(*group_id))).collect();
+        let terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.terminal_name_to_group_id.iter().map(|(name, group_id)| (terminal(name), TerminalID(*group_id))).collect();
         let glr_parser = generate_glr_parser_with_terminal_map(
             &definition.productions,
             definition.start_production_id,

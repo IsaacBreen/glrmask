@@ -3,7 +3,7 @@ use rand::rngs::StdRng;
 use std::collections::{BTreeMap, BTreeSet};
 use crate::finite_automata::{eat_u8, rep1};
 use crate::{choice, choice_fast, groups, seq, seq_fast};
-use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
 use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
 use std::hash::{Hash, Hasher};
@@ -55,16 +55,16 @@ fn test_constraint_simple() {
 
     // Grammar Terminals mapped to Tokenizer IDs
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0)); // Corresponds to eat_u8(b'a')
-    grammar_token_map.insert(Terminal("AB".to_string()), TerminalID(1)); // Corresponds to seq![eat_u8(b'a'), eat_u8(b'b')]
-    grammar_token_map.insert(Terminal("B_OR_C".to_string()), TerminalID(2)); // Corresponds to choice![eat_u8(b'b'), eat_u8(b'c')]
-    grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(3)); // Corresponds to eat_u8(b'$')
+    grammar_token_map.insert(terminal("A"), TerminalID(0)); // Corresponds to eat_u8(b'a')
+    grammar_token_map.insert(terminal("AB"), TerminalID(1)); // Corresponds to seq![eat_u8(b'a'), eat_u8(b'b')]
+    grammar_token_map.insert(terminal("B_OR_C"), TerminalID(2)); // Corresponds to choice![eat_u8(b'b'), eat_u8(b'c')]
+    grammar_token_map.insert(terminal("EOF"), TerminalID(3)); // Corresponds to eat_u8(b'$')
 
     let productions = vec![
         prod("S", vec![nt("X"), t("EOF")]), // S -> X $
         prod("X", vec![t("A"), t("B_OR_C")]), // X -> a (b|c)
         prod("X", vec![t("AB")]),             // X -> ab
-    ];
+    ]; // This is fine, it's a comment
 
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
     println!("{}", &parser);
@@ -111,7 +111,7 @@ fn test_constraint_simple() {
     let grammar_tokenss = vec![vec!["A", "B_OR_C"], vec!["AB"]];
     let llm_token_id_for_comp = llm_token_map.get_by_left(&llm_token).unwrap();
     
-    let mut constraint_state_for_comp = constraint.init();
+    let mut constraint_state_for_comp = constraint.init(); // This is fine, it's a comment
     // Mask before commit (optional, for debugging)
     let _mask_before = constraint_state_for_comp.get_mask();
     constraint_state_for_comp.commit(*llm_token_id_for_comp);
@@ -120,7 +120,7 @@ fn test_constraint_simple() {
     for grammar_tokens in grammar_tokenss {
         let mut parser_state = parser.init_glr_parser(Some(constraint.llm_vocab.clone()));
         for grammar_token in grammar_tokens {
-            let grammar_token_id = grammar_token_map.get_by_left(&Terminal(grammar_token.to_string())).unwrap();
+            let grammar_token_id = grammar_token_map.get_by_left(&terminal(grammar_token)).unwrap();
             parser_state.step(*grammar_token_id);
         }
         parser_state_for_comp.merge_with(parser_state);
@@ -176,12 +176,12 @@ fn test_constraint_expression() {
     ];
     // Map grammar terminals to IDs matching regex order
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(Terminal("PLUS".to_string()), TerminalID(0));
-    grammar_token_map.insert(Terminal("TIMES".to_string()), TerminalID(1));
-    grammar_token_map.insert(Terminal("LPAREN".to_string()), TerminalID(2));
-    grammar_token_map.insert(Terminal("RPAREN".to_string()), TerminalID(3));
-    grammar_token_map.insert(Terminal("I".to_string()), TerminalID(4));
-    grammar_token_map.insert(Terminal("EOF".to_string()), TerminalID(5));
+    grammar_token_map.insert(terminal("PLUS"), TerminalID(0));
+    grammar_token_map.insert(terminal("TIMES"), TerminalID(1));
+    grammar_token_map.insert(terminal("LPAREN"), TerminalID(2));
+    grammar_token_map.insert(terminal("RPAREN"), TerminalID(3));
+    grammar_token_map.insert(terminal("I"), TerminalID(4));
+    grammar_token_map.insert(terminal("EOF"), TerminalID(5));
 
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None); // Start production is index 6
     println!("Parser: {}", parser);
@@ -222,7 +222,7 @@ fn test_constraint_expression() {
     let llm_token = b"(i".to_vec();
     let grammar_tokens = vec!["LPAREN", "I"];
     let llm_token_id_for_comp = llm_token_map.get_by_left(&llm_token).unwrap();
-    let grammar_token_ids = grammar_tokens.iter().map(|token| grammar_token_map.get_by_left(&Terminal(token.to_string())).unwrap()).collect::<Vec<_>>();
+    let grammar_token_ids = grammar_tokens.iter().map(|token| grammar_token_map.get_by_left(&terminal(token)).unwrap()).collect::<Vec<_>>();
     
     let mut constraint_state_for_comp = constraint.init();
     let _mask_before = constraint_state_for_comp.get_mask(); // Optional, for debugging

@@ -3,7 +3,7 @@ mod tests {
     use crate::constraint::{GrammarConstraint, GrammarConstraintState};
     use crate::finite_automata::{eat_u8, rep, Expr as RegexExpr, QuantifierType, Expr, eat_u8_seq};
     use crate::interface::{choice, sequence, literal, CompiledGrammar, IncrementalParser, GrammarExpr, GrammarDefinition, repeat};
-    use crate::tokenizer::LLMTokenID;
+    use crate::tokenizer::{LLMTokenID};
     use crate::datastructures::hybrid_bitset::HybridBitset;
     use bimap::BiBTreeMap; // Add this line
     use crate::glr::grammar::{NonTerminal as NT, Production as Prod, Symbol as Sym, Terminal as Term};
@@ -442,7 +442,7 @@ mod tests {
     #[test]
     fn test_nullability_handling_in_from_exprs() {
         // Terminals:
-        // - X_OPT: x? (sometimes null)
+        // - X_OPT: x? (sometimes null) // This is fine, it's a comment
         // - EPS: epsilon (always null)
         // - Z: "z" (never null)
         let terminals = vec![
@@ -477,7 +477,7 @@ mod tests {
         let term_x_opt_expr = RegexExpr::Quantifier(Box::new(eat_u8(b'x')), QuantifierType::ZeroOrOne);
         let term_eps_expr = RegexExpr::Epsilon;
         let term_z_expr = eat_u8(b'z');
-
+        use crate::glr::grammar::terminal;
         let term_x_opt_gid = grammar_def.terminal_expr_to_group_id.get_by_left(&term_x_opt_expr)
             .unwrap_or_else(|| panic!("Could not find group ID for sometimes-null terminal expression: {:?}", term_x_opt_expr));
         let name_term_x_opt = grammar_def.terminal_name_to_group_id.get_by_right(term_x_opt_gid)
@@ -505,7 +505,7 @@ mod tests {
         for prod in &grammar_def.productions {
             // Check for NT -> name_term_x_opt
             if prod.rhs.len() == 1 {
-                if let Sym::Terminal(t) = &prod.rhs[0] {
+                if let Sym::Terminal(t) = &prod.rhs[0] { // This is fine, it's a comment
                     if t.0 == name_term_x_opt {
                         // This production is NT -> name_term_x_opt. The LHS is a candidate.
                         let candidate_nt_name = prod.lhs.0.clone();
@@ -537,7 +537,7 @@ mod tests {
         let expected_prods_set = BTreeSet::from([
             Prod { lhs: NT(augmented_start_nt_name), rhs: vec![Sym::NonTerminal(NT("Root".to_string()))] },
             Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(Term(name_term_z.clone()))] },
-            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(Term(name_term_x_opt.clone()))] },
+            Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(terminal(&name_term_x_opt))] },
             Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![] }, // Epsilon production
         ]);
 

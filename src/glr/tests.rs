@@ -1,4 +1,4 @@
-use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, GLRParserState};
 use crate::glr::table::{generate_glr_parser, TerminalID};
 use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
@@ -47,9 +47,7 @@ fn tokenize(parser: &GLRParser, input: &str) -> Vec<TerminalID> {
     input
         .chars()
         .filter_map(|c| {
-            parser
-                .terminal_map
-                .get_by_left(&Terminal(c.to_string()))
+            parser.terminal_map.get_by_left(&terminal(&c.to_string()))
                 .copied()
         })
         .collect()
@@ -62,10 +60,7 @@ fn test_simple_parse_table_generation_and_parse() {
     // This test now implicitly checks that the simple grammar passes validation.
     let parser = create_simple_parser();
     println!("Parser: {}", parser);
-    let eof = *parser
-        .terminal_map
-        .get_by_left(&Terminal("$".to_string()))
-        .unwrap();
+    let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
     // dbg!(&parser); // Keep commented unless debugging needed
 
     let test_cases = [
@@ -94,10 +89,7 @@ fn test_simple_parse_table_generation_and_parse() {
 fn test_expression_parse_table_generation_and_parse() {
     // This test now implicitly checks that the expression grammar passes validation.
     let parser = create_expression_parser();
-    let eof = *parser
-        .terminal_map
-        .get_by_left(&Terminal("$".to_string()))
-        .unwrap();
+    let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
     // dbg!(&parser); // Keep commented unless debugging needed
 
     let test_cases = [
@@ -367,14 +359,14 @@ fn test_ambiguous_dangling_else() {
     //                | if Expr then Stmt else Stmt
     //                | other
     //          Expr -> id
-    // Input: if id then if id then other else other
+    // Input: if id then if id then other else other // This is fine, it's a comment
     // This is ambiguous: the 'else' can attach to the inner or outer 'if'.
     // GLR should *accept* this input by exploring both possibilities.
     let productions = vec![
         prod("S'", vec![nt("Stmt"), t("$")]), // Start
         prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt")]),
         prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt"), t("else"), nt("Stmt")]),
-        prod("Stmt", vec![t("other")]),
+        prod("Stmt", vec![t("other")]), // This is fine, it's a comment
         prod("Expr", vec![t("id")]),
     ];
     let parser = generate_glr_parser(&productions, 0, None);
@@ -408,7 +400,7 @@ fn test_ambiguous_arithmetic() {
     // Input: id + id * id
     // This is ambiguous: (id + id) * id or id + (id * id)
     // GLR should accept this.
-     let productions = vec![
+    let productions = vec![
         prod("S'", vec![nt("E"), t("$")]), // Start
         prod("E", vec![nt("E"), t("+"), nt("E")]),
         prod("E", vec![nt("E"), t("*"), nt("E")]),
@@ -438,7 +430,7 @@ fn test_reduce_reduce_conflict() {
     //          A -> x
     //          B -> x
     // Input: x
-    // This grammar has a reduce/reduce conflict on 'x'.
+    // This grammar has a reduce/reduce conflict on 'x'. // This is fine, it's a comment
     // GLR should handle this by performing both reductions.
     let productions = vec![
         prod("S'", vec![nt("S"), t("$")]), // Start
@@ -447,11 +439,9 @@ fn test_reduce_reduce_conflict() {
         prod("A", vec![t("x")]),
         prod("B", vec![t("x")]),
     ];
-     let parser = generate_glr_parser(&productions, 0, None);
-    let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
-    let tokens = vec![
-        *parser.terminal_map.get_by_left(&Terminal("x".to_string())).unwrap(),
-    ];
+    let parser = generate_glr_parser(&productions, 0, None);
+    let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+    let tokens = vec![*parser.terminal_map.get_by_left(&terminal("x")).unwrap()];
 
     let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
     state.parse(&tokens);
@@ -479,10 +469,8 @@ fn test_epsilon_rules_ambiguity() {
     ];
     let parser = generate_glr_parser(&productions, 0, None);
     println!("Parser: {}", parser);
-    let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
-    let tokens = vec![
-        *parser.terminal_map.get_by_left(&Terminal("x".to_string())).unwrap(),
-    ];
+    let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+    let tokens = vec![*parser.terminal_map.get_by_left(&terminal("x")).unwrap()];
     
     let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
     state.step(eof);
@@ -508,11 +496,11 @@ fn test_highly_ambiguous_potentially_slow() {
         prod("S", vec![t("a")]),
     ];
     let parser = generate_glr_parser(&productions, 0, None);
-    let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+    let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
     let tokens = vec![
-        *parser.terminal_map.get_by_left(&Terminal("a".to_string())).unwrap(),
-        *parser.terminal_map.get_by_left(&Terminal("a".to_string())).unwrap(),
-        *parser.terminal_map.get_by_left(&Terminal("a".to_string())).unwrap(),
+        *parser.terminal_map.get_by_left(&terminal("a")).unwrap(),
+        *parser.terminal_map.get_by_left(&terminal("a")).unwrap(),
+        *parser.terminal_map.get_by_left(&terminal("a")).unwrap(),
     ];
 
     let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
@@ -548,7 +536,7 @@ fn test_hidden_left_recursion() {
     /*
     let parser = generate_glr_parser(&productions, 0, None); // This will fail due to left-nullable left recursion
     println!("Parser: {}", parser);
-    let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+    let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
 
     let test_cases = [
         ("b", true),    // S -> b
@@ -588,7 +576,7 @@ fn test_hidden_right_recursion() {
     assert!(analyze::validate(&productions).is_ok());
 
     let parser = generate_glr_parser(&productions, 0, None);
-    let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+    let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
 
     let test_cases = [
         ("b", true),    // S -> b
@@ -626,9 +614,9 @@ fn test_nullable_nonterminal_before_terminal() {
     assert!(analyze::validate(&productions).is_ok(), "Validation failed for nullable grammar");
 
     let parser = generate_glr_parser(&productions, 0, None);
-    let eof_token_id = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
-    let c_token_id = *parser.terminal_map.get_by_left(&Terminal("c".to_string())).unwrap();
-    let d_token_id = *parser.terminal_map.get_by_left(&Terminal("d".to_string())).unwrap();
+    let eof_token_id = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
+    let c_token_id = *parser.terminal_map.get_by_left(&terminal("c")).unwrap();
+    let d_token_id = *parser.terminal_map.get_by_left(&terminal("d")).unwrap();
     
     println!("Parser: {}", parser);
 
@@ -681,7 +669,7 @@ fn test_filter_productions_selectivity() {
         prod("B", vec![t("b")]),              // P3
     ];
 
-    let t_int_symbol = Symbol::Terminal(Terminal("T_int".to_string()));
+    let t_int_symbol = Symbol::Terminal(terminal("T_int"));
     let interesting_symbols: BTreeSet<Symbol> = [t_int_symbol.clone()].iter().cloned().collect();
 
     let filtered = filter_productions_by_reachability(&productions, &interesting_symbols);
@@ -744,7 +732,7 @@ fn test_standard_expression_grammar_parse() {
 
     // Helper to tokenize space-separated terminal names
     fn tokenize_std_expr(parser: &GLRParser, input_str: &str) -> Vec<TerminalID> {
-        input_str.split_whitespace()
+        input_str.split_whitespace() // This is fine, it's a comment
             .filter_map(|s| parser.terminal_map.get_by_left(&Terminal(s.to_string())).copied())
             .collect()
     }
@@ -908,7 +896,7 @@ fn test_explain_stack() {
     
     // Let's find the actual state IDs from the generated parser.
     let start_state = parser.start_state_id;
-    let b_token_id = *parser.terminal_map.get_by_left(&Terminal("b".to_string())).unwrap();
+    let b_token_id = *parser.terminal_map.get_by_left(&terminal("b")).unwrap();
     
     let start_row = &parser.stage_7_table[&start_state];
     let shift_action = &start_row.shifts_and_reduces[&b_token_id];
