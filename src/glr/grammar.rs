@@ -22,27 +22,37 @@ impl Display for NonTerminal {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Terminal(String);
+pub enum Terminal {
+    Regex(String),
+}
 
 impl JSONConvertible for Terminal {
-    fn to_json(&self) -> JSONNode { self.0.to_json() }
+    fn to_json(&self) -> JSONNode {
+        match self {
+            Terminal::Regex(name) => JSONNode::String(name.clone()),
+        }
+    }
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        String::from_json(node).map(Terminal)
+        String::from_json(node).map(Terminal::Regex)
     }
 }
 
 impl Display for Terminal {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        match self {
+            Terminal::Regex(name) => write!(f, "{}", name),
+        }
     }
 }
 
 pub fn terminal(name: &str) -> Terminal {
-    Terminal(name.to_string())
+    Terminal::Regex(name.to_string())
 }
 
 pub fn get_terminal_name(terminal: &Terminal) -> &str {
-    &terminal.0
+    match terminal {
+        Terminal::Regex(name) => name,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -117,7 +127,7 @@ impl Display for Production {
         write!(f, "{} ->", self.lhs.0)?;
         for symbol in &self.rhs {
             match symbol {
-                Symbol::Terminal(terminal) => write!(f, " {}", terminal.0)?,
+                Symbol::Terminal(terminal) => write!(f, " {}", terminal)?,
                 Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0)?,
             }
         }
@@ -130,7 +140,7 @@ pub fn nt(name: &str) -> Symbol {
 }
 
 pub fn t(name: &str) -> Symbol {
-    Symbol::Terminal(Terminal(name.to_string()))
+    Symbol::Terminal(terminal(name))
 }
 
 pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {
