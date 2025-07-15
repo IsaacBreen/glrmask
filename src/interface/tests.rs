@@ -6,7 +6,7 @@ mod tests {
     use crate::tokenizer::{LLMTokenID};
     use crate::datastructures::hybrid_bitset::HybridBitset;
     use bimap::BiBTreeMap; // Add this line
-    use crate::glr::grammar::{NonTerminal as NT, Production as Prod, Symbol as Sym, Terminal as Term};
+    use crate::glr::grammar::{get_terminal_name, NonTerminal as NT, Production as Prod, Symbol as Sym, Terminal as Term};
     use std::collections::{BTreeSet, HashSet};
 
     #[test]
@@ -506,7 +506,7 @@ mod tests {
             // Check for NT -> name_term_x_opt
             if prod.rhs.len() == 1 {
                 if let Sym::Terminal(t) = &prod.rhs[0] { // This is fine, it's a comment
-                    if t.0 == name_term_x_opt {
+                    if get_terminal_name(t) == name_term_x_opt {
                         // This production is NT -> name_term_x_opt. The LHS is a candidate.
                         let candidate_nt_name = prod.lhs.0.clone();
                         // Verify this candidate also has a production to epsilon
@@ -536,7 +536,7 @@ mod tests {
         // Define the set of expected productions
         let expected_prods_set = BTreeSet::from([
             Prod { lhs: NT(augmented_start_nt_name), rhs: vec![Sym::NonTerminal(NT("Root".to_string()))] },
-            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(Term(name_term_z.clone()))] },
+            Prod { lhs: NT("Root".to_string()), rhs: vec![Sym::NonTerminal(NT(nt_optional_term_x_opt_name.clone())), Sym::Terminal(terminal(&name_term_z))] },
             Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![Sym::Terminal(terminal(&name_term_x_opt))] },
             Prod { lhs: NT(nt_optional_term_x_opt_name.clone()), rhs: vec![] }, // Epsilon production
         ]);
@@ -548,11 +548,11 @@ mod tests {
             println!("Expected productions ({}) vs Actual productions ({})", expected_prods_set.len(), actual_prods_set.len());
             println!("Expected (not found in actual):");
             for p in expected_prods_set.difference(&actual_prods_set) {
-                 println!("  {} -> {}", p.lhs.0, p.rhs.iter().map(|s| match s { Sym::Terminal(t) => t.0.clone(), Sym::NonTerminal(nt) => nt.0.clone() }).collect::<Vec<_>>().join(" "));
+                 println!("  {} -> {}", p.lhs.0, p.rhs.iter().map(|s| match s { Sym::Terminal(t) => t.to_string(), Sym::NonTerminal(nt) => nt.to_string() }).collect::<Vec<_>>().join(" "));
             }
             println!("Actual (not found in expected):");
             for p in actual_prods_set.difference(&expected_prods_set) {
-                 println!("  {} -> {}", p.lhs.0, p.rhs.iter().map(|s| match s { Sym::Terminal(t) => t.0.clone(), Sym::NonTerminal(nt) => nt.0.clone() }).collect::<Vec<_>>().join(" "));
+                 println!("  {} -> {}", p.lhs.0, p.rhs.iter().map(|s| match s { Sym::Terminal(t) => t.to_string(), Sym::NonTerminal(nt) => nt.to_string() }).collect::<Vec<_>>().join(" "));
             }
         }
 
@@ -563,7 +563,7 @@ mod tests {
         for prod in &grammar_def.productions {
             for sym in &prod.rhs {
                 if let Sym::Terminal(t) = sym {
-                    assert_ne!(t.0, name_term_eps, "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
+                    assert_ne!(t, &terminal(&name_term_eps), "Always-null terminal '{}' should not appear in the RHS of any final production (found in {} -> ...)", name_term_eps, prod.lhs.0);
                 }
             }
         }

@@ -15,9 +15,14 @@ impl JSONConvertible for NonTerminal {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[derive(Hash)]
-pub struct Terminal(pub String);
+impl Display for NonTerminal {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Terminal(String);
 
 impl JSONConvertible for Terminal {
     fn to_json(&self) -> JSONNode { self.0.to_json() }
@@ -26,8 +31,18 @@ impl JSONConvertible for Terminal {
     }
 }
 
+impl Display for Terminal {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 pub fn terminal(name: &str) -> Terminal {
     Terminal(name.to_string())
+}
+
+pub fn get_terminal_name(terminal: &Terminal) -> &str {
+    &terminal.0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

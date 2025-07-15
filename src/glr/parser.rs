@@ -344,8 +344,8 @@ impl GLRParser {
                     sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
 
                     for (terminal_id, action) in sorted_actions {
-                        let terminal_name = &self.terminal_map.get_by_right(terminal_id).unwrap().0;
-                        write!(&mut result, "    - On '{}': ", terminal_name).unwrap();
+                        let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
+                        write!(&mut result, "    - On '{}': ", terminal).unwrap();
                         match action {
                             Stage7ShiftsAndReduces::Shift(next_state_id) => {
                                 writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
@@ -426,7 +426,7 @@ impl Display for GLRParser {
                         write!(f, " •")?;
                     }
                     match symbol {
-                        Symbol::Terminal(terminal) => write!(f, " {}", terminal.0),
+                        Symbol::Terminal(terminal) => write!(f, " {}", terminal),
                         Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
                     }?;
                 }
@@ -446,7 +446,7 @@ impl Display for GLRParser {
                             write!(f, " •")?;
                         }
                         match symbol {
-                            Symbol::Terminal(terminal) => write!(f, " {}", terminal.0),
+                            Symbol::Terminal(terminal) => write!(f, " {}", terminal),
                             Symbol::NonTerminal(non_terminal) => write!(f, " {}", non_terminal.0),
                         }?;
                     }
@@ -462,14 +462,14 @@ impl Display for GLRParser {
                 let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
                 match action {
                     Stage7ShiftsAndReduces::Shift(next_state_id) => {
-                        writeln!(f, "      - {} -> Shift {}", terminal.0, next_state_id.0)?;
+                        writeln!(f, "      - {} -> Shift {}", terminal, next_state_id.0)?;
                     }
                     Stage7ShiftsAndReduces::Reduce { production_id: _ , nonterminal_id: nonterminal, len } => { // production_id ignored
                         let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-                        writeln!(f, "      - {} -> Reduce {} (len {})", terminal.0, nt_name.0, len)?;
+                        writeln!(f, "      - {} -> Reduce {} (len {})", terminal, nt_name.0, len)?;
                     }
                     Stage7ShiftsAndReduces::Split { shift, reduces } => {
-                        writeln!(f, "      - {} -> Conflict:", terminal.0)?;
+                        writeln!(f, "      - {} -> Conflict:", terminal)?;
                         if let Some(shift_state) = shift {
                             writeln!(f, "        - Shift {}", shift_state.0)?;
                         }
@@ -501,7 +501,7 @@ impl Display for GLRParser {
 
         writeln!(f, "\nTerminal Map (name to terminal ID):")?;
         for (terminal, terminal_id) in terminal_map {
-            writeln!(f, "  {} -> {}", terminal.0, terminal_id.0)?;
+            writeln!(f, "  {} -> {}", terminal, terminal_id.0)?;
         }
 
         writeln!(f, "\nNon-Terminal Map:")?;
@@ -737,7 +737,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let roots: Vec<_> = vec![self.active_state.stack.clone()];
         let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
         crate::debug!(4, "{} - token {} ({:?}) - nodes: {:?}",
-                      phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0), stats);
+                      phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| t), stats);
 
         let make_msg = |print_full_forest, max_nodes_to_print| {
             if print_full_forest {

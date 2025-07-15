@@ -1283,7 +1283,7 @@ fn format_acc(
             .map(|(state_id, bv)| {
                 let names: Vec<_> = bv.iter()
                     .map(|tid_val| terminal_map.get_by_right(&TerminalID(tid_val))
-                        .map_or_else(|| format!("<ID:{}>", tid_val), |t| t.0.clone()))
+                        .map_or_else(|| format!("<ID:{}>", tid_val), |t| t.to_string()))
                     .collect();
                 format!("State {}:[{}]", state_id.0, names.join(", "))
             })

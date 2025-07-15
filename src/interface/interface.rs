@@ -2,7 +2,7 @@ use crate::constraint::GrammarConstraint;
 use crate::debug;
 use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
 use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
-use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{get_terminal_name, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
@@ -215,7 +215,7 @@ impl Display for GrammarDefinition {
             write!(f, "    {} -> ", production.lhs.0)?;
             for (i, symbol) in production.rhs.iter().enumerate() {
                 match symbol {
-                    Symbol::Terminal(terminal) => write!(f, "{}", terminal.0)?,
+                    Symbol::Terminal(terminal) => write!(f, "{}", terminal.to_string())?,
                     Symbol::NonTerminal(non_terminal) => write!(f, "{}", non_terminal.0)?,
                 }
                 if i < production.rhs.len() - 1 {
@@ -232,7 +232,7 @@ pub fn display_productions(productions: &[Production]) -> String {
     let mut result = String::new();
     for prod in productions {
         result.push_str(&format!("{} -> {}\n", prod.lhs.0, prod.rhs.iter().map(|symbol| match symbol {
-            Symbol::Terminal(t) => t.0.clone(),
+            Symbol::Terminal(t) => t.to_string(),
             Symbol::NonTerminal(nt) => nt.0.clone(),
         }).collect::<Vec<_>>().join(" ")));
     }
@@ -315,7 +315,7 @@ impl GrammarDefinition {
                 terminal_name_to_group_id.insert(terminal_name.clone(), group_id);
                 terminal_expr_to_group_id.insert(Expr::U8Seq(bytes.clone()), group_id);
                 *next_terminal_group_id += 1;
-                (vec![Symbol::Terminal(Terminal(terminal_name))], Vec::new())
+                (vec![Symbol::Terminal(terminal(&terminal_name))], Vec::new())
             }
             GrammarExpr::Ref(name) => {
                 if nonterminal_names.contains(name.as_str()) {
@@ -510,27 +510,27 @@ impl GrammarDefinition {
         }
 
         let mut productions = Vec::new();
-        let mut terminal_name_to_group_id = BiBTreeMap::new();
-        let mut terminal_expr_to_group_id = BiBTreeMap::new();
+        let mut regex_name_to_group_id: BiBTreeMap<String, usize> = BiBTreeMap::new();
+        let mut regex_expr_to_group_id = BiBTreeMap::new();
         let mut next_terminal_group_id = 0;
 
         // Process predefined terminals
         for (name, expr) in terminals {
-            if terminal_name_to_group_id.contains_left(&name) {
+            if regex_name_to_group_id.contains_left(&name) {
                 return Err(format!("Duplicate terminal name defined: {}", name));
             }
-            if let Some(group_id) = terminal_expr_to_group_id.get_by_left(&expr) {
-                terminal_name_to_group_id.insert(name, *group_id);
+            if let Some(group_id) = regex_expr_to_group_id.get_by_left(&expr) {
+                regex_name_to_group_id.insert(name, *group_id);
             } else {
                 let group_id = next_terminal_group_id;
-                terminal_name_to_group_id.insert(name, group_id);
-                terminal_expr_to_group_id.insert(expr, group_id);
+                regex_name_to_group_id.insert(name, group_id);
+                regex_expr_to_group_id.insert(expr, group_id);
                 next_terminal_group_id += 1;
             }
         }
 
         let mut all_names: HashSet<String> = rules.iter().map(|(name, _)| name.clone()).collect();
-        all_names.extend(terminal_name_to_group_id.left_values().cloned());
+        all_names.extend(regex_name_to_group_id.left_values().cloned());
         let mut per_base_counters: HashMap<String, usize> = HashMap::new();
 
         let mut start_production_name = "start'".to_string();
@@ -557,8 +557,8 @@ impl GrammarDefinition {
                         choice_expr,
                         lhs_name_str,
                         &nonterminal_names_from_rules,
-                        &mut terminal_name_to_group_id,
-                        &mut terminal_expr_to_group_id,
+                        &mut regex_name_to_group_id,
+                        &mut regex_expr_to_group_id,
                         &mut next_terminal_group_id,
                         &mut per_base_counters,
                         &mut all_names,
@@ -571,8 +571,8 @@ impl GrammarDefinition {
                     expr,
                     lhs_name_str,
                     &nonterminal_names_from_rules,
-                    &mut terminal_name_to_group_id,
-                    &mut terminal_expr_to_group_id,
+                    &mut regex_name_to_group_id,
+                    &mut regex_expr_to_group_id,
                     &mut next_terminal_group_id,
                     &mut per_base_counters,
                     &mut all_names,
@@ -634,8 +634,8 @@ impl GrammarDefinition {
         let mut always_null_terminals: HashSet<String>   = HashSet::new();
         let mut may_be_null_terminals:    HashSet<String> = HashSet::new();
 
-        for (terminal_name, group_id) in terminal_name_to_group_id.iter() {
-            let expr = terminal_expr_to_group_id
+        for (terminal_name, group_id) in regex_name_to_group_id.iter() {
+            let expr = regex_expr_to_group_id
                 .get_by_right(group_id)
                 .expect("terminal_name_to_group_id / terminal_expr_to_group_id out of sync")
                 .clone();
@@ -657,7 +657,7 @@ impl GrammarDefinition {
                 .into_iter()
                 .filter(|sym| {
                     match sym {
-                        Symbol::Terminal(t) => !always_null_terminals.contains(&t.0),
+                        Symbol::Terminal(t) => !always_null_terminals.contains(get_terminal_name(t)),
                         _                   => true,
                     }
                 })
@@ -692,7 +692,7 @@ impl GrammarDefinition {
             for prod in productions.iter_mut() {
                 for sym in &mut prod.rhs {
                     if let Symbol::Terminal(t) = sym {
-                        if t.0 == terminal_name {
+                        if get_terminal_name(t) == terminal_name {
                             *sym = Symbol::NonTerminal(opt_nt.clone());
                         }
                     }
@@ -704,7 +704,7 @@ impl GrammarDefinition {
             //         <opt_nt>  ->  ε
             productions.push(Production {
                 lhs: opt_nt.clone(),
-                rhs: vec![Symbol::Terminal(Terminal(terminal_name.clone()))],
+                rhs: vec![Symbol::Terminal(terminal(&terminal_name))],
             });
             productions.push(Production {
                 lhs: opt_nt.clone(),
@@ -718,8 +718,8 @@ impl GrammarDefinition {
         Ok(GrammarDefinition {
             productions,
             start_production_id,
-            terminal_name_to_group_id,
-            terminal_expr_to_group_id,
+            terminal_name_to_group_id: regex_name_to_group_id,
+            terminal_expr_to_group_id: regex_expr_to_group_id,
             ignore_terminal_id: None,
         })
     }
@@ -927,7 +927,7 @@ impl Display for CompiledGrammar {
             write!(f, "      {} -> ", production.lhs.0)?;
             for (i, symbol) in production.rhs.iter().enumerate() {
                 match symbol {
-                    Symbol::Terminal(terminal) => write!(f, "{}", terminal.0)?,
+                    Symbol::Terminal(terminal) => write!(f, "{}", terminal)?,
                     Symbol::NonTerminal(non_terminal) => write!(f, "{}", non_terminal.0)?,
                 }
                 if i < production.rhs.len() - 1 {

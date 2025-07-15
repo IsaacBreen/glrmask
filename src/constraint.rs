@@ -282,7 +282,7 @@ impl GrammarConstraint {
         let terminal_follow_sets_named = compute_terminal_follow_sets(grammar_productions);
         crate::debug!(3, "terminal_follow_sets_named:");
         for (terminal, following_terminals) in &terminal_follow_sets_named {
-            crate::debug!(3, "{} -> {}", terminal.0, following_terminals.iter().map(|t| t.0.clone()).collect::<Vec<_>>().join(", "));
+            crate::debug!(3, "{} -> {}", terminal, following_terminals.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
         }
 
         let mut terminal_follow_map_ids: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> = BTreeMap::new();
@@ -1096,8 +1096,8 @@ impl<'a> GrammarConstraintState<'a> {
                             entry.total += 1;
 
                             let terminal_name = self.parent.parser.terminal_map.get_by_right(gtid)
-                                .map(|s| s.0.as_str())
-                                .unwrap_or("UNKNOWN_TERMINAL");
+                                .map(|s| s.to_string())
+                                .unwrap_or("UNKNOWN_TERMINAL".to_string());
                             Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                             timeit!(format!("get_mask step for terminal '{}'", terminal_name), {
                                 glr_s.step(*gtid);
@@ -1162,8 +1162,8 @@ impl<'a> GrammarConstraintState<'a> {
             let mut log_msg = String::from("get_mask step() counts:");
             for (terminal_id, count) in sorted_counts {
                 let terminal_name = self.parent.parser.terminal_map.get_by_right(terminal_id)
-                    .map(|s| s.0.as_str())
-                    .unwrap_or("UNKNOWN_TERMINAL");
+                    .map(|s| s.to_string())
+                    .unwrap_or("UNKNOWN_TERMINAL".to_string());
                 log_msg.push_str(&format!("\n  - '{}': {}/{} successful", terminal_name, count.successful, count.total));
             }
             crate::debug!(3, "{}", log_msg);

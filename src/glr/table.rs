@@ -317,7 +317,7 @@ fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Resu
     let follow_sets = compute_follow_sets(productions);
     crate::debug!(3, "Follow sets:");
     for (nt, follow_set) in &follow_sets {
-        crate::debug!(3, "  {}: {}", nt.0, follow_set.iter().map(|t| t.0.to_string()).collect::<Vec<_>>().join(", "));
+        crate::debug!(3, "  {}: {}", nt.0, follow_set.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
     }
 
     let mut stage_3_table = BTreeMap::new();
@@ -457,7 +457,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
         let mut gotos = BTreeMap::new();
 
         for (terminal, action) in row.shifts_and_reduces {
-            let terminal_id = *terminal_map.get_by_left(&terminal).expect(format!("{:?} not found in terminal map {:?}", terminal, terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
+            let terminal_id = *terminal_map.get_by_left(&terminal).expect(format!("{:?} not found in terminal map {:?}", terminal, terminal_map.left_values().map(|t| t.to_string()).collect::<Vec<String>>()).as_str());
             let converted_action = match action {
                 Stage6ShiftsAndReduces::Shift(next_item_set) => {
                     let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();

@@ -3,7 +3,7 @@ use rand::rngs::StdRng;
 use std::collections::{BTreeMap, BTreeSet};
 use crate::finite_automata::{eat_u8, rep1};
 use crate::{choice, choice_fast, groups, seq, seq_fast};
-use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{get_terminal_name, nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map};
 use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
 use std::hash::{Hash, Hasher};
@@ -71,7 +71,7 @@ fn test_constraint_simple() {
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
-        token_name_map.insert(term.0.clone(), id.0);
+        token_name_map.insert(get_terminal_name(term).to_string(), id.0);
     }
 
     let constraint = GrammarConstraint::new(
@@ -188,7 +188,7 @@ fn test_constraint_expression() {
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
-        token_name_map.insert(term.0.clone(), id.0);
+        token_name_map.insert(get_terminal_name(term).to_string(), id.0);
     }
 
     let constraint = GrammarConstraint::new(

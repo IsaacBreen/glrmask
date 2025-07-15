@@ -733,7 +733,7 @@ fn test_standard_expression_grammar_parse() {
     // Helper to tokenize space-separated terminal names
     fn tokenize_std_expr(parser: &GLRParser, input_str: &str) -> Vec<TerminalID> {
         input_str.split_whitespace() // This is fine, it's a comment
-            .filter_map(|s| parser.terminal_map.get_by_left(&Terminal(s.to_string())).copied())
+            .filter_map(|s| parser.terminal_map.get_by_left(&terminal(s)).copied())
             .collect()
     }
 

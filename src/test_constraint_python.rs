@@ -3,7 +3,7 @@ use rand::rngs::StdRng;
 use std::collections::{BTreeMap, BTreeSet};
 use crate::finite_automata::{eat_u8, Match};
 use crate::{choice, choice_fast, groups, seq, seq_fast};
-use crate::glr::grammar::{nt, prod, t, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, StateID};
 use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
 use std::hash::{Hash, Hasher};
@@ -147,7 +147,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
         // prod("S", vec![t("FSTRING_MIDDLE"), t("DEF")]),
         prod("A", vec![]),
     ];
-    let terminal_map: BiBTreeMap<Terminal, TerminalID> = token_name_map.iter().map(|(name, id)| (Terminal(name.clone()), TerminalID(*id))).collect();
+    let terminal_map: BiBTreeMap<Terminal, TerminalID> = token_name_map.iter().map(|(name, id)| (terminal(name), TerminalID(*id))).collect();
     let parser = generate_glr_parser(&productions, 0, None);
 
     // Ensure that "def" is a valid initial LLM token
@@ -431,7 +431,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         let mut current_sequence_token_names_valid = true;
 
         for token_name in seq_terminal_names {
-            if let Some(terminal_id_val) = compiled_grammar.glr_parser.terminal_map.get_by_left(&Terminal(token_name.to_string())) {
+            if let Some(terminal_id_val) = compiled_grammar.glr_parser.terminal_map.get_by_left(&terminal(token_name)) {
                 terminal_id_sequence.push(terminal_id_val);
             } else {
                 println!(
@@ -533,7 +533,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
             for _ in 0..num_tokens_this_attempt {
                 let random_terminal_id = all_grammar_terminal_ids.choose(&mut rng).unwrap();
                 // For debugging, you could find the name:
-                let token_name = compiled_grammar.glr_parser.terminal_map.get_by_right(random_terminal_id).map(|t| t.0.clone()).unwrap_or_else(|| "UNKNOWN_TOKEN".to_string());
+                let token_name = compiled_grammar.glr_parser.terminal_map.get_by_right(random_terminal_id).map(|t| t.to_string()).unwrap_or_else(|| "UNKNOWN_TOKEN".to_string());
                 current_fuzz_sequence_names.push(token_name);
                 current_fuzz_sequence_ids.push(*random_terminal_id);
             }
@@ -715,7 +715,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         // 2. Get the TerminalID for the terminal we are interested in.
         let newline_terminal_name = "IGNORE[0][0][1]".to_string();
         let newline_terminal_id = grammar_constraint.parser.terminal_map
-            .get_by_left(&Terminal(newline_terminal_name.clone()))
+            .get_by_left(&terminal(&newline_terminal_name))
             .unwrap_or_else(|| panic!("Terminal '{}' not found in parser's terminal map.", newline_terminal_name));
 
         // 3. Get the LLMTokenID for the newline character.
@@ -1011,7 +1011,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         for grammar_tokens in grammar_tokenss_for_comp {
             let mut this_parser_state = grammar_constraint.parser.init_glr_parser(Some(constraint_state.parent.llm_vocab.clone()));
             for grammar_token in &grammar_tokens {
-                let grammar_token_id = grammar_constraint.parser.terminal_map.get_by_left(&Terminal(grammar_token.to_string())).unwrap();
+                let grammar_token_id = grammar_constraint.parser.terminal_map.get_by_left(&terminal(grammar_token)).unwrap();
                 this_parser_state.step(*grammar_token_id);
                 assert!(this_parser_state.is_ok(), "Parser failed to step with token {:?} in sequence {:?}", grammar_token, grammar_tokens);
             }
@@ -1450,7 +1450,7 @@ fn causes_specific_panic(
 
     let mut sequence_terminal_ids = Vec::new();
     for name_str in sequence_to_test_names {
-        let terminal_to_find = Terminal(name_str.to_string());
+        let terminal_to_find = terminal(name_str);
         if let Some(term_id) = current_terminal_map.get_by_left(&terminal_to_find) {
             sequence_terminal_ids.push(*term_id);
         } else {
@@ -1701,7 +1701,7 @@ where
 
         if let Some((nt_to_inline, alpha_rhs_to_substitute, original_prod_idx_to_remove)) = candidate_to_inline_info {
             println!("[Simplifier-Sole] Attempting to inline {} -> {:?} (from P{})",
-                     nt_to_inline.0, alpha_rhs_to_substitute.iter().map(|s| match s { Symbol::Terminal(t) => t.0.clone(), Symbol::NonTerminal(n) => n.0.clone() }).collect::<Vec<_>>(), original_prod_idx_to_remove);
+                     nt_to_inline.0, alpha_rhs_to_substitute.iter().map(|s| match s { Symbol::Terminal(t) => t.to_string(), Symbol::NonTerminal(n) => n.to_string() }).collect::<Vec<_>>(), original_prod_idx_to_remove);
 
             let mut temp_productions_after_inlining = Vec::new();
             for (idx, p) in productions.iter().enumerate() {
@@ -1827,7 +1827,7 @@ fn test_minimized_grammar_causes_panic() -> Result<(), Box<dyn std::error::Error
     // 4. Convert input sequence names to TerminalIDs using the new map
     let mut input_sequence_ids = Vec::new();
     for name_str in &input_sequence_names {
-        let terminal_to_find = Terminal(name_str.to_string());
+        let terminal_to_find = terminal(name_str);
         if let Some(term_id) = terminal_map_for_minimized.get_by_left(&terminal_to_find) {
             input_sequence_ids.push(*term_id);
         } else {
