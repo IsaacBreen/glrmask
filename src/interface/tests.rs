@@ -6,7 +6,7 @@ mod tests {
     use crate::tokenizer::{LLMTokenID};
     use crate::datastructures::hybrid_bitset::HybridBitset;
     use bimap::BiBTreeMap; // Add this line
-    use crate::glr::grammar::{get_terminal_name, NonTerminal as NT, Production as Prod, Symbol as Sym, Terminal as Term, Terminal};
+    use crate::glr::grammar::{NonTerminal as NT, Production as Prod, Symbol as Sym, Terminal as Term, Terminal};
     use std::collections::{BTreeSet, HashSet};
 
     #[test]

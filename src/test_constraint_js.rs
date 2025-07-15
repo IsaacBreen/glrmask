@@ -3,7 +3,7 @@ use rand::rngs::StdRng;
 use std::collections::{BTreeMap, BTreeSet};
 use crate::finite_automata::{eat_u8, Match};
 use crate::{choice, choice_fast, groups, seq, seq_fast};
-use crate::glr::grammar::{get_terminal_name, nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{assign_non_terminal_ids, assign_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, StateID};
 use crate::datastructures::hybrid_bitset::HybridBitset; // Explicitly import HybridBitset
 use std::hash::{Hash, Hasher};
@@ -444,7 +444,7 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
             for _ in 0..num_tokens_this_attempt {
                 let random_terminal_id = all_grammar_terminal_ids.choose(&mut rng).unwrap();
                 // For debugging, you could find the name:
-                let token_name = compiled_grammar.glr_parser.terminal_map.get_by_right(random_terminal_id).map(|t| get_terminal_name(t).to_string()).unwrap_or_else(|| "UNKNOWN_TOKEN".to_string());
+                let token_name = compiled_grammar.glr_parser.terminal_map.get_by_right(random_terminal_id).map(|t| t.to_string()).unwrap_or_else(|| "UNKNOWN_TOKEN".to_string());
                 current_fuzz_sequence_names.push(token_name);
                 current_fuzz_sequence_ids.push(*random_terminal_id);
             }

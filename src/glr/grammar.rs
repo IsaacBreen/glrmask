@@ -74,13 +74,6 @@ pub fn terminal(name: &str) -> Terminal {
     Terminal::Regex(name.to_string())
 }
 
-pub fn get_terminal_name(terminal: &Terminal) -> &str {
-    match terminal {
-        Terminal::Regex(name) => name,
-        Terminal::Literal(bytes) => panic!("Cannot get name of literal terminal: {:?}", String::from_utf8_lossy(bytes)),
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Symbol {
     Terminal(Terminal),
