@@ -26,6 +26,10 @@ impl JSONConvertible for Terminal {
     }
 }
 
+pub fn terminal(name: &str) -> Terminal {
+    Terminal(name.to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Symbol {
     Terminal(Terminal),
