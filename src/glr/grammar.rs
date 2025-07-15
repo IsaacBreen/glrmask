@@ -24,16 +24,40 @@ impl Display for NonTerminal {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Terminal {
     Regex(String),
+    Literal(Vec<u8>),
 }
 
 impl JSONConvertible for Terminal {
     fn to_json(&self) -> JSONNode {
         match self {
-            Terminal::Regex(name) => JSONNode::String(name.clone()),
+            Terminal::Regex(name) => JSONNode::Object({
+                let mut obj = StdMap::new();
+                obj.insert("type".to_string(), JSONNode::String("Regex".to_string()));
+                obj.insert("value".to_string(), JSONNode::String(name.clone()));
+                obj
+            }),
+            Terminal::Literal(bytes) => JSONNode::Object({
+                let mut obj = StdMap::new();
+                obj.insert("type".to_string(), JSONNode::String("Literal".to_string()));
+                obj.insert("value".to_string(), JSONNode::String(String::from_utf8_lossy(bytes).to_string()));
+                obj
+            }),
         }
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        String::from_json(node).map(Terminal::Regex)
+        match node {
+            JSONNode::Object(mut obj) => {
+                let type_field = obj.remove("type").ok_or_else(|| "Missing field type for Terminal".to_string())?;
+                let value_field = obj.remove("value").ok_or_else(|| "Missing field value for Terminal".to_string())?;
+
+                match String::from_json(type_field)?.as_str() {
+                    "Regex" => Ok(Terminal::Regex(String::from_json(value_field)?)),
+                    "Literal" => Ok(Terminal::Literal(Vec::from_json(value_field)?)),
+                    _ => Err("Unknown type for Terminal".to_string()),
+                }
+            }
+            _ => Err("Expected JSONNode::Object for Terminal".to_string()),
+        }
     }
 }
 
@@ -41,6 +65,7 @@ impl Display for Terminal {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Terminal::Regex(name) => write!(f, "{}", name),
+            Terminal::Literal(bytes) => write!(f, "{:?}", String::from_utf8_lossy(bytes)),
         }
     }
 }
@@ -52,6 +77,7 @@ pub fn terminal(name: &str) -> Terminal {
 pub fn get_terminal_name(terminal: &Terminal) -> &str {
     match terminal {
         Terminal::Regex(name) => name,
+        Terminal::Literal(bytes) => panic!("Cannot get name of literal terminal: {:?}", String::from_utf8_lossy(bytes)),
     }
 }
 
