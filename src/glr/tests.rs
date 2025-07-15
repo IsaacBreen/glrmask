@@ -370,17 +370,17 @@ fn test_ambiguous_dangling_else() {
         prod("Expr", vec![t("id")]),
     ];
     let parser = generate_glr_parser(&productions, 0, None);
-    let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+    let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
     let tokens = vec![
-        *parser.terminal_map.get_by_left(&Terminal("if".to_string())).unwrap(),
-        *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
-        *parser.terminal_map.get_by_left(&Terminal("then".to_string())).unwrap(),
-        *parser.terminal_map.get_by_left(&Terminal("if".to_string())).unwrap(),
-        *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
-        *parser.terminal_map.get_by_left(&Terminal("then".to_string())).unwrap(),
-        *parser.terminal_map.get_by_left(&Terminal("other".to_string())).unwrap(),
-        *parser.terminal_map.get_by_left(&Terminal("else".to_string())).unwrap(),
-        *parser.terminal_map.get_by_left(&Terminal("other".to_string())).unwrap(),
+        *parser.terminal_map.get_by_left(&terminal("if")).unwrap(),
+        *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
+        *parser.terminal_map.get_by_left(&terminal("then")).unwrap(),
+        *parser.terminal_map.get_by_left(&terminal("if")).unwrap(),
+        *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
+        *parser.terminal_map.get_by_left(&terminal("then")).unwrap(),
+        *parser.terminal_map.get_by_left(&terminal("other")).unwrap(),
+        *parser.terminal_map.get_by_left(&terminal("else")).unwrap(),
+        *parser.terminal_map.get_by_left(&terminal("other")).unwrap(),
     ];
 
     let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
@@ -407,13 +407,13 @@ fn test_ambiguous_arithmetic() {
         prod("E", vec![t("id")]),
     ];
     let parser = generate_glr_parser(&productions, 0, None);
-    let eof = *parser.terminal_map.get_by_left(&Terminal("$".to_string())).unwrap();
+    let eof = *parser.terminal_map.get_by_left(&terminal("$")).unwrap();
     let tokens = vec![
-        *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
-        *parser.terminal_map.get_by_left(&Terminal("+".to_string())).unwrap(),
-        *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
-        *parser.terminal_map.get_by_left(&Terminal("*".to_string())).unwrap(),
-        *parser.terminal_map.get_by_left(&Terminal("id".to_string())).unwrap(),
+        *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
+        *parser.terminal_map.get_by_left(&terminal("+")).unwrap(),
+        *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
+        *parser.terminal_map.get_by_left(&terminal("*")).unwrap(),
+        *parser.terminal_map.get_by_left(&terminal("id")).unwrap(),
     ];
 
     let mut state: GLRParserState<'_> = parser.init_glr_parser(None);

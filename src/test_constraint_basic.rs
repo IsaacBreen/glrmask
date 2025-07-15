@@ -361,8 +361,8 @@ fn test_aborted_tokenizer_restart_equivalence() {
     ];
 
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    let terminal_a = Terminal("A".to_string());
-    let terminal_hash_opt_a = Terminal("HASH_OPT_A".to_string());
+    let terminal_a = terminal("A");
+    let terminal_hash_opt_a = terminal("HASH_OPT_A");
     grammar_token_map.insert(terminal_a.clone(), TerminalID(0)); // Maps to tokenizer group 0
     grammar_token_map.insert(terminal_hash_opt_a.clone(), TerminalID(1)); // Maps to tokenizer group 1
 
@@ -450,8 +450,8 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
     ];
 
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    let terminal_a = Terminal("A".to_string());
-    let terminal_hash_opt_aa = Terminal("HASH_OPT_AA".to_string());
+    let terminal_a = terminal("A");
+    let terminal_hash_opt_aa = terminal("HASH_OPT_AA");
     grammar_token_map.insert(terminal_a.clone(), TerminalID(0)); // Maps to tokenizer group 0
     grammar_token_map.insert(terminal_hash_opt_aa.clone(), TerminalID(1)); // Maps to tokenizer group 1
 
@@ -548,7 +548,7 @@ fn test_a_plus_commit_equivalence() {
 
     // 3. Map grammar terminal "A" to tokenizer group ID 0
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(Terminal("A".to_string()), TerminalID(0));
+    grammar_token_map.insert(terminal("A"), TerminalID(0));
 
     // 4. Create the Parser
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
@@ -673,7 +673,7 @@ fn test_simple_def_match_non_zero_llm_id() {
 
     // 4. Map grammar terminals "DEF_T" to tokenizer group ID 0
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(Terminal("DEF_T".to_string()), TerminalID(0));
+    grammar_token_map.insert(terminal("DEF_T"), TerminalID(0));
     // Note: For this minimal test focusing on the initial mask for "def",
     // we don't strictly need an EOF terminal in the grammar or tokenizer if
     // the goal is just to see "def" allowed initially.
@@ -738,7 +738,7 @@ fn test_precompute_a_plus_tokenizer() {
 
     // Map grammar terminal to tokenizer group
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(Terminal("A_PLUS".to_string()), TerminalID(0));
+    grammar_token_map.insert(terminal("A_PLUS"), TerminalID(0));
 
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
 
@@ -803,10 +803,10 @@ fn test_precompute_x_eq() {
 
     // Map grammar terminal to tokenizer group
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(Terminal("X".to_string()), TerminalID(0));      // 'x' is group 0
-    grammar_token_map.insert(Terminal("SPACE".to_string()), TerminalID(1));  // ' ' is group 1
-    grammar_token_map.insert(Terminal("EQUALS".to_string()), TerminalID(2)); // '=' is group 2
-    grammar_token_map.insert(Terminal("ANY".to_string()), TerminalID(3));    // Anything else is group 3
+    grammar_token_map.insert(terminal("X"), TerminalID(0));      // 'x' is group 0
+    grammar_token_map.insert(terminal("SPACE"), TerminalID(1));  // ' ' is group 1
+    grammar_token_map.insert(terminal("EQUALS"), TerminalID(2)); // '=' is group 2
+    grammar_token_map.insert(terminal("ANY"), TerminalID(3));    // Anything else is group 3
 
     let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map.clone(), None);
 
@@ -840,9 +840,9 @@ fn test_precompute_x_eq() {
     assert_eq!(root_node.children().len(), 3, "Root node should have three outgoing edge keys");
 
     // Get the grammar token IDs for our terminals
-    let x_tid = *grammar_token_map.get_by_left(&Terminal("X".to_string())).unwrap();
-    let space_tid = *grammar_token_map.get_by_left(&Terminal("SPACE".to_string())).unwrap();
-    let equals_tid = *grammar_token_map.get_by_left(&Terminal("EQUALS".to_string())).unwrap();
+    let x_tid = *grammar_token_map.get_by_left(&terminal("X")).unwrap();
+    let space_tid = *grammar_token_map.get_by_left(&terminal("SPACE")).unwrap();
+    let equals_tid = *grammar_token_map.get_by_left(&terminal("EQUALS")).unwrap();
 
     // Get the LLM token IDs
     let x_llm_id = constraint.original_id_to_internal(*llm_token_map.get_by_left(b"x".as_ref()).unwrap()).unwrap().0;
