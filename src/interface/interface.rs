@@ -137,7 +137,6 @@ impl GrammarDefinition {
 
 impl JSONConvertible for GrammarDefinition {
     fn to_json(&self) -> JSONNode {
-        // TODO: handle literals too
         let mut obj = StdMap::new();
         obj.insert("productions".to_string(), self.productions.to_json());
         obj.insert("start_production_id".to_string(), self.start_production_id.to_json());
@@ -190,7 +189,28 @@ impl JSONConvertible for GrammarDefinition {
                 let mut new_regex_name_to_group_id = BiBTreeMap::new();
                 let mut new_regex_expr_to_group_id = BiBTreeMap::new();
 
-                todo!("literals and regexes");
+                if let JSONNode::Array(terminals_list) = terminals_node {
+                    for terminal_node in terminals_list {
+                        if let JSONNode::Object(mut terminal_obj) = terminal_node {
+                            let name = terminal_obj.remove("name")
+                                .ok_or_else(|| "Missing 'name' in terminal object".to_string())
+                                .and_then(String::from_json)?;
+                            let group_id = terminal_obj.remove("group_id")
+                                .ok_or_else(|| "Missing 'group_id' in terminal object".to_string())
+                                .and_then(usize::from_json)?;
+                            let expr_node = terminal_obj.remove("expr")
+                                .ok_or_else(|| "Missing 'expr' in terminal object".to_string())?;
+                            let expr = Expr::from_json(expr_node)?;
+
+                            new_regex_name_to_group_id.insert(name, group_id);
+                            new_regex_expr_to_group_id.insert(expr, group_id);
+                        } else {
+                            return Err("Expected terminal definition to be a JSON object".to_string());
+                        }
+                    }
+                } else {
+                    return Err("Expected 'terminals' to be a JSON array".to_string());
+                }
 
                 Ok(GrammarDefinition {
                     productions,
@@ -306,8 +326,27 @@ impl GrammarDefinition {
     ) -> (Vec<Symbol>, Vec<Production>) { // Return symbols and new productions
         match expr {
             GrammarExpr::Literal(bytes) => {
-                // TODO: assign literal group IDs
-                (vec![Symbol::Terminal(Terminal::literal(bytes.clone()))], Vec::new())
+                let literal_expr = Expr::U8Seq(bytes.clone());
+
+                let group_id = if let Some(gid) = regex_expr_to_group_id.get_by_left(&literal_expr) {
+                    *gid
+                } else {
+                    let gid = *next_terminal_group_id;
+                    *next_terminal_group_id += 1;
+
+                    let terminal_name = Self::generate_unique_indexed_name_for_literal(
+                        bytes,
+                        per_base_counters,
+                        all_names,
+                    );
+
+                    regex_name_to_group_id.insert(terminal_name.clone(), gid);
+                    regex_expr_to_group_id.insert(literal_expr, gid);
+                    gid
+                };
+
+                let terminal_name = regex_name_to_group_id.get_by_right(&group_id).unwrap();
+                (vec![Symbol::Terminal(terminal(terminal_name))], vec![])
             }
             GrammarExpr::Ref(name) => {
                 if nonterminal_names.contains(name.as_str()) {
