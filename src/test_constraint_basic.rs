@@ -71,7 +71,7 @@ fn test_constraint_simple() {
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
-        token_name_map.insert(get_terminal_name(term).to_string(), id.0);
+        token_name_map.insert(term.clone(), id.0);
     }
 
     let constraint = GrammarConstraint::new(
@@ -188,7 +188,7 @@ fn test_constraint_expression() {
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
-        token_name_map.insert(get_terminal_name(term).to_string(), id.0);
+        token_name_map.insert(term.clone(), id.0);
     }
 
     let constraint = GrammarConstraint::new(
@@ -387,8 +387,8 @@ fn test_aborted_tokenizer_restart_equivalence() {
 
     // Token name map for GrammarConstraint (maps grammar terminal name to tokenizer group ID)
     let mut token_name_map_for_constraint = BiBTreeMap::new();
-    token_name_map_for_constraint.insert("A".to_string(), 0);
-    token_name_map_for_constraint.insert("HASH_OPT_A".to_string(), 1);
+    token_name_map_for_constraint.insert(terminal("A"), 0);
+    token_name_map_for_constraint.insert(terminal("HASH_OPT_A"), 1);
 
     let constraint = GrammarConstraint::new(
         tokenizer,
@@ -475,8 +475,8 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
     let max_original_llm_token_id = 2;
 
     let mut token_name_map_for_constraint = BiBTreeMap::new();
-    token_name_map_for_constraint.insert("A".to_string(), 0);
-    token_name_map_for_constraint.insert("HASH_OPT_AA".to_string(), 1);
+    token_name_map_for_constraint.insert(terminal("A"), 0);
+    token_name_map_for_constraint.insert(terminal("HASH_OPT_AA"), 1);
 
     let constraint = GrammarConstraint::new(
         tokenizer,
@@ -563,7 +563,7 @@ fn test_a_plus_commit_equivalence() {
 
     // 6. Token name map for stats/debugging
     let mut token_name_map = BiBTreeMap::new();
-    token_name_map.insert("A".to_string(), 0);
+    token_name_map.insert(terminal("A"), 0); // Maps "A" to tokenizer group ID 0
 
     // 7. Create the GrammarConstraint
     let constraint = GrammarConstraint::new(
@@ -616,7 +616,7 @@ fn test_hideous_ambiguity() {
 
     // 4. Token Name Map
     let mut token_name_map = BiBTreeMap::new();
-    token_name_map.insert("FSTRING_MIDDLE".to_string(), 0);
+    token_name_map.insert(terminal("FSTRING_MIDDLE"), 0); // Maps "FSTRING_MIDDLE" to tokenizer group ID 0
 
     // 5. Create the Parser
     let parser = generate_glr_parser(&productions, 0, None);
@@ -688,7 +688,7 @@ fn test_simple_def_match_non_zero_llm_id() {
 
     // 5. Token name map for stats/debugging (maps grammar terminal name to tokenizer group ID)
     let mut token_name_map_for_stats = BiBTreeMap::new();
-    token_name_map_for_stats.insert("DEF_T".to_string(), 0);
+    token_name_map_for_stats.insert(terminal("DEF_T"), 0);
 
     // 6. Create the GrammarConstraint
     let constraint = GrammarConstraint::new(
@@ -744,7 +744,7 @@ fn test_precompute_a_plus_tokenizer() {
 
     // Token name map for stats
     let mut token_name_map = BiBTreeMap::new();
-    token_name_map.insert("A_PLUS".to_string(), 0);
+    token_name_map.insert(terminal("A_PLUS"), 0);
 
     // Create the constraint, which runs precomputation
     let constraint = GrammarConstraint::new(
@@ -812,10 +812,10 @@ fn test_precompute_x_eq() {
 
     // Token name map for stats
     let mut token_name_map = BiBTreeMap::new();
-    token_name_map.insert("X".to_string(), 0);
-    token_name_map.insert("SPACE".to_string(), 1);
-    token_name_map.insert("EQUALS".to_string(), 2);
-    token_name_map.insert("ANY".to_string(), 3);
+    token_name_map.insert(terminal("X"), 0);
+    token_name_map.insert(terminal("SPACE"), 1);
+    token_name_map.insert(terminal("EQUALS"), 2);
+    token_name_map.insert(terminal("ANY"), 3);
 
     // Create the constraint, which runs precomputation
     let constraint = GrammarConstraint::new(

@@ -127,9 +127,9 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Create token_name_map for grammar tokens
     // Our tokenizer has one grammar token (GroupID 0)
-    let mut token_name_map: BiBTreeMap<String, usize> = BiBTreeMap::new();
-    token_name_map.insert("FSTRING_MIDDLE".to_string(), 0 as usize);
-    token_name_map.insert("DEF".to_string(), 1 as usize);
+    let mut token_name_map: BiBTreeMap<Terminal, usize> = BiBTreeMap::new();
+    token_name_map.insert(terminal("FSTRING_MIDDLE"), 0);
+    token_name_map.insert(terminal("DEF"), 1); // "def" token
 
     // 4. Call precompute
     println!(
@@ -147,7 +147,7 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
         // prod("S", vec![t("FSTRING_MIDDLE"), t("DEF")]),
         prod("A", vec![]),
     ];
-    let terminal_map: BiBTreeMap<Terminal, TerminalID> = token_name_map.iter().map(|(name, id)| (terminal(name), TerminalID(*id))).collect();
+    let terminal_map: BiBTreeMap<Terminal, TerminalID> = token_name_map.iter().map(|(name, id)| (name.clone(), TerminalID(*id))).collect();
     let parser = generate_glr_parser(&productions, 0, None);
 
     // Ensure that "def" is a valid initial LLM token

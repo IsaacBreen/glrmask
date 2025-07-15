@@ -6,7 +6,7 @@ mod tests {
     use crate::tokenizer::{LLMTokenID};
     use crate::datastructures::hybrid_bitset::HybridBitset;
     use bimap::BiBTreeMap; // Add this line
-    use crate::glr::grammar::{get_terminal_name, NonTerminal as NT, Production as Prod, Symbol as Sym, Terminal as Term};
+    use crate::glr::grammar::{get_terminal_name, NonTerminal as NT, Production as Prod, Symbol as Sym, Terminal as Term, Terminal};
     use std::collections::{BTreeSet, HashSet};
 
     #[test]
@@ -505,8 +505,8 @@ mod tests {
         for prod in &grammar_def.productions {
             // Check for NT -> name_term_x_opt
             if prod.rhs.len() == 1 {
-                if let Sym::Terminal(t) = &prod.rhs[0] { // This is fine, it's a comment
-                    if get_terminal_name(t) == name_term_x_opt {
+                if let Sym::Terminal(Terminal::Regex(t)) = &prod.rhs[0] { // This is fine, it's a comment
+                    if t == &name_term_x_opt {
                         // This production is NT -> name_term_x_opt. The LHS is a candidate.
                         let candidate_nt_name = prod.lhs.0.clone();
                         // Verify this candidate also has a production to epsilon

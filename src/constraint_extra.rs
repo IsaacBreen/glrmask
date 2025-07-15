@@ -11,6 +11,7 @@ use bimap::BiBTreeMap;
 use crate::datastructures::ArcPtrWrapper;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
+use crate::glr::grammar::Terminal;
 
 /// Creates a neat string representation of a HybridBitset, showing values as ranges.
 fn format_hybrid_bitset_neatly(bv: &HybridBitset) -> String {
@@ -90,7 +91,7 @@ pub fn dump_precompute_trie_recursive(
     prefix: String,
     visited: &mut HashSet<*const PrecomputeNode>,
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
-    token_name_map: Option<&BiBTreeMap<String, usize>>,
+    token_name_map: Option<&BiBTreeMap<Terminal, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
 ) {
     let children_to_visit;
@@ -447,7 +448,7 @@ pub fn calculate_final_stats(
 
 pub fn print_precompute_stats(
     stats: &PrecomputeStats,
-    token_name_map: &BiBTreeMap<String, usize>, // Used to get token names from GrammarTokenID
+    token_name_map: &BiBTreeMap<Terminal, usize>, // Used to get token names from GrammarTokenID
 ) {
     let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
         stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
@@ -518,7 +519,10 @@ pub fn print_precompute_stats(
         let name = token_name_map
             .get_by_right(&gtid.0) // gtid is GrammarTokenID
             .cloned()
-            .unwrap_or_else(|| gtid.0.to_string());
+            .map_or(
+                format!("ID:{}", gtid.0),
+                |t| t.to_string()
+            );
 
         let (sum_child, avg_child, med_child) = child_stats;
         let (sum_toks, avg_toks, med_toks) = toks_stats;
@@ -629,9 +633,9 @@ mod tests {
         let parser = generate_glr_parser_with_terminal_map(&productions, 0, grammar_token_map, None);
 
         let mut terminal_name_map = BiBTreeMap::new();
-        terminal_name_map.insert("A".to_string(), 0);
-        terminal_name_map.insert("AA".to_string(), 1);
-        terminal_name_map.insert("EOF".to_string(), 2);
+        terminal_name_map.insert(terminal("A"), 0);
+        terminal_name_map.insert(terminal("AA"), 1);
+        terminal_name_map.insert(terminal("EOF"), 2);
 
         // Create constraint (this runs precomputation)
         GrammarConstraint::new(tokenizer, parser, llm_token_map, terminal_name_map, max_llm_token_id)

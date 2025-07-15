@@ -123,6 +123,18 @@ pub struct GrammarDefinition {
     pub ignore_terminal_id: Option<TerminalID>,
 }
 
+impl GrammarDefinition {
+    pub fn terminal_to_group_id(&self) -> BiBTreeMap<Terminal, usize> {
+        let mut terminal_to_group_id = BiBTreeMap::new();
+        for (name, group_id) in &self.terminal_name_to_group_id {
+            let terminal = Terminal::Regex(name.clone());
+            terminal_to_group_id.insert(terminal, *group_id);
+        }
+        // TODO: literals
+        terminal_to_group_id
+    }
+}
+
 impl JSONConvertible for GrammarDefinition {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
@@ -1220,14 +1232,14 @@ mod tests {
         let max_llm_token_id = llm_tokens.len(); // For HybridBitset capacity
 
         let mut terminal_name_to_group_id = BiBTreeMap::new();
-        terminal_name_to_group_id.insert("ignore".to_string(), 0);
-        terminal_name_to_group_id.insert("digit".to_string(), 1);
-        terminal_name_to_group_id.insert("alph_lower".to_string(), 2);
-        terminal_name_to_group_id.insert("alph_upper".to_string(), 3);
-        terminal_name_to_group_id.insert("underscore".to_string(), 4);
-        terminal_name_to_group_id.insert("name_start".to_string(), 5);
-        terminal_name_to_group_id.insert("name_middle".to_string(), 6);
-        terminal_name_to_group_id.insert("name".to_string(), 7);
+        terminal_name_to_group_id.insert(terminal(&"ignore"), 0);
+        terminal_name_to_group_id.insert(terminal(&"digit"), 1);
+        terminal_name_to_group_id.insert(terminal(&"alph_lower"), 2);
+        terminal_name_to_group_id.insert(terminal(&"alph_upper"), 3);
+        terminal_name_to_group_id.insert(terminal(&"underscore"), 4);
+        terminal_name_to_group_id.insert(terminal(&"name_start"), 5);
+        terminal_name_to_group_id.insert(terminal(&"name_middle"), 6);
+        terminal_name_to_group_id.insert(terminal(&"name"), 7);
 
         // This test was originally for GrammarConstraint::precompute, which is internal.
         // We can't directly test precompute without a full GrammarConstraint.

@@ -35,6 +35,7 @@ use std::collections::BTreeMap as StdMap;
 use profiler_macro::{time_it, timeit};
 use crate::datastructures::gss::Acc;
 use crate::glr::analyze::{compute_nullable_nonterminals, compute_terminal_follow_sets};
+use crate::glr::grammar::Terminal;
 use crate::interface::CompiledGrammar;
 
 pub type LLMTokenBV = HybridBitset;
@@ -98,7 +99,7 @@ pub struct GrammarConstraint {
     pub(crate) parser:           GLRParser,
     pub(crate) precomputed:      Precomputed,
     pub(crate) llm_vocab:        Arc<LLMVocab>,
-    pub(crate) token_name_map:   BiBTreeMap<String, usize>,
+    pub(crate) token_name_map:   BiBTreeMap<Terminal, usize>,
     pub(crate) possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
 }
 
@@ -150,7 +151,7 @@ impl JSONConvertible for GrammarConstraint {
                 let llm_token_map = obj.remove("llm_token_map").ok_or_else(|| "Missing field llm_token_map".to_string())
                                        .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
                 let token_name_map = obj.remove("token_name_map").ok_or_else(|| "Missing field token_name_map".to_string())
-                                        .and_then(|n| BiBTreeMap::<String, usize>::from_json(n))?;
+                                        .and_then(|n| BiBTreeMap::<Terminal, usize>::from_json(n))?;
                 let max_original_llm_token_id = obj.remove("max_original_llm_token_id").ok_or_else(|| "Missing field max_original_llm_token_id".to_string())
                                                    .and_then(usize::from_json)?;
                 let original_to_internal_id_bimap = obj.remove("original_to_internal_id_bimap").ok_or_else(|| "Missing field original_to_internal_id_bimap".to_string())
@@ -181,7 +182,7 @@ impl GrammarConstraint {
         _eof_token_id: LLMTokenID,
         max_original_llm_token_id: usize,
     ) -> Self {
-        let token_name_map = compiled_grammar.definition.terminal_name_to_group_id.clone();
+        let token_name_map = compiled_grammar.definition.terminal_to_group_id().clone();
 
         Self::new(
             compiled_grammar.tokenizer,
@@ -225,11 +226,11 @@ impl GrammarConstraint {
         tokenizer:        Regex,
         parser:           GLRParser,
         llm_token_map:    LLMTokenMap, 
-        token_name_map:   BiBTreeMap<String, usize>,
+        token_name_map:   BiBTreeMap<Terminal, usize>,
         max_original_llm_token_id: usize, 
     ) -> Self {
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
-        let epsilon_terminals: BTreeSet<&String> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
+        let epsilon_terminals: BTreeSet<&Terminal> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
         assert!(epsilon_terminals.is_empty(), "Epsilon tokens (tokens that can match an empty string) are not supported by the grammar constraint. Got: {:?}", epsilon_terminals);
         let original_to_internal_id_bimap = Self::setup_llm_token_mappings(&llm_token_map);
 
@@ -326,7 +327,7 @@ impl GrammarConstraint {
     pub fn precompute(
         tokenizer:        &Regex,
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-        token_name_map:   &BiBTreeMap<String, usize>,
+        token_name_map:   &BiBTreeMap<Terminal, usize>,
         internal_max_llm_token: usize,
         terminal_follow_map_ids: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
@@ -768,7 +769,7 @@ impl<'r> Precomputer<'r> {
 
     fn finish(
         mut self,
-        token_name_map: &BiBTreeMap<String, usize>,
+        token_name_map: &BiBTreeMap<Terminal, usize>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
         internal_max_llm_token: usize,
     ) -> BTreeMap<TokenizerStateID, Arc<Mutex<PrecomputeNode>>> {
