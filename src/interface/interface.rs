@@ -732,7 +732,7 @@ impl GrammarDefinition {
             for prod in productions.iter_mut() {
                 for sym in &mut prod.rhs {
                     if let Symbol::Terminal(Terminal::Regex(t)) = sym {
-                        if t == &terminal_name {
+                        if t == terminal_name {
                             *sym = Symbol::NonTerminal(opt_nt.clone());
                         }
                     }
