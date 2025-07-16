@@ -55,8 +55,8 @@ impl LLMTokenInfo {
     pub fn is_all(&self) -> bool {
         self.disallowed() == LLMTokenBV::ones(self.max_num_llm_tokens())
     }
-    pub fn llm_vocab(&self) -> Option<Arc<LLMVocab>> {
-        self.llm_vocab.clone()
+    pub fn llm_vocab(&self) -> &Option<Arc<LLMVocab>> {
+        &self.llm_vocab
     }
     pub fn max_num_llm_tokens(&self) -> usize {
         self.llm_vocab.as_ref().map_or(0, |vocab| vocab.internal_max_llm_token.saturating_add(1))
@@ -141,7 +141,7 @@ impl Acc {
         new_llm_tokens |= &other.llm_token_info.disallowed();
         let new_llm_info = LLMTokenInfo {
             llm_tokens: if new_llm_tokens.is_empty() { None } else { Some(new_llm_tokens) },
-            llm_vocab: self.llm_token_info.llm_vocab().or_else(|| other.llm_token_info.llm_vocab()),
+            llm_vocab: self.llm_token_info.llm_vocab().clone().or_else(|| other.llm_token_info.llm_vocab().clone()),
         };
 
         // Terminals: union of disallowed sets
@@ -351,7 +351,7 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap) {
 impl GSSNode {
     /// Creates a new GSS root node with no predecessors.
     pub fn new(local_acc: Acc) -> Self {
-        let llm_vocab = local_acc.llm_tokens().llm_vocab();
+        let llm_vocab = local_acc.llm_tokens().llm_vocab().clone();
         let acc_manager = AccManager {
             local: Arc::new(local_acc),
             union: Arc::new(Acc::new_fresh(llm_vocab.clone())),
@@ -367,7 +367,7 @@ impl GSSNode {
     // #[time_it]
     fn new_with_map(local_acc: Arc<Acc>, predecessors: NodeMap) -> Self {
         let llm_vocab = local_acc.llm_tokens().llm_vocab();
-        
+
         let pred_full_unions: Vec<_> = predecessors.values().flat_map(|m| m.values()).map(|p| p.full_union_acc()).collect();
         let pred_full_intersections: Vec<_> = predecessors.values().flat_map(|m| m.values()).map(|p| p.full_intersection_acc()).collect();
 
@@ -481,7 +481,7 @@ impl GSSNode {
         }
 
         // Merge local accumulators
-        let llm_vocab = self.acc_manager.local.llm_tokens().llm_vocab().or_else(|| other.acc_manager.local.llm_tokens().llm_vocab());
+        let llm_vocab = self.acc_manager.local.llm_tokens().llm_vocab().clone().or_else(|| other.acc_manager.local.llm_tokens().llm_vocab().clone());
         let merged_local = Acc::merge_parallel([self.acc_manager.local.as_ref(), other.acc_manager.local.as_ref()], llm_vocab);
         
         // Merge predecessor maps
@@ -546,7 +546,7 @@ impl GSSPop<'_> {
 
     /// Converts the `GSSPop` into a single `GSSNode`.
     pub fn to_node(&self) -> GSSNode {
-        let llm_vocab = self.parent_node.llm_tokens().llm_vocab();
+        let llm_vocab = self.parent_node.llm_tokens().llm_vocab().clone();
         // The new node is an aggregation point, so it has no local constraints of its own.
         let local_acc = Arc::new(Acc::new_fresh(llm_vocab));
         GSSNode::new_with_map(local_acc, self.node_map.clone())
@@ -691,7 +691,7 @@ pub fn disallow_llm_tokens_and_prune_arc(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
-        *root_arc = Arc::new(GSSNode::new(Acc::new_fresh(root_arc.llm_tokens().llm_vocab())));
+        *root_arc = Arc::new(GSSNode::new(Acc::new_fresh(root_arc.llm_tokens().llm_vocab().clone())));
     }
 }
 
@@ -703,13 +703,13 @@ pub fn reset_llm_tokens(
     let closure = |node: &GSSNode| -> Option<(Acc, bool)> {
         let mut new_local_acc = (*node.acc_manager.local).clone();
         let continue_recursion = !new_local_acc.llm_tokens().is_empty();
-        new_local_acc.llm_token_info = LLMTokenInfo::none(new_local_acc.llm_tokens().llm_vocab());
+        new_local_acc.llm_token_info = LLMTokenInfo::none(new_local_acc.llm_tokens().llm_vocab().clone());
         Some((new_local_acc, continue_recursion))
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
-        *root_arc = Arc::new(GSSNode::new(Acc::new_fresh(root_arc.llm_tokens().llm_vocab())));
+        *root_arc = Arc::new(GSSNode::new(Acc::new_fresh(root_arc.llm_tokens().llm_vocab().clone())));
     }
 }
 
@@ -729,7 +729,7 @@ pub fn disallow_terminals_and_prune_arc(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
-        *root_arc = Arc::new(GSSNode::new(Acc::new_fresh(root_arc.llm_tokens().llm_vocab())));
+        *root_arc = Arc::new(GSSNode::new(Acc::new_fresh(root_arc.llm_tokens().llm_vocab().clone())));
     }
 }
 
@@ -764,7 +764,7 @@ pub fn prune_disallowed_terminals(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
-        *root_arc = Arc::new(GSSNode::new(Acc::new_fresh(root_arc.llm_tokens().llm_vocab())));
+        *root_arc = Arc::new(GSSNode::new(Acc::new_fresh(root_arc.llm_tokens().llm_vocab().clone())));
     }
 }
 
@@ -800,7 +800,7 @@ pub fn map_allowed_terminals_tokenizer_states(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &closure, memo) {
         *root_arc = new_root;
     } else {
-        *root_arc = Arc::new(GSSNode::new(Acc::new_fresh(root_arc.llm_tokens().llm_vocab())));
+        *root_arc = Arc::new(GSSNode::new(Acc::new_fresh(root_arc.llm_tokens().llm_vocab().clone())));
     }
 }
 
@@ -828,7 +828,7 @@ fn simplify_node_recursive(
 
     let cached_structural_node = cache.entry(simplified_predecessors_map.clone())
         .or_insert_with(|| {
-            let llm_vocab = node_arc.llm_tokens().llm_vocab();
+            let llm_vocab = node_arc.llm_tokens().llm_vocab().clone();
             let canonical_local_acc = Arc::new(Acc::new_fresh(llm_vocab));
             Arc::new(GSSNode::new_with_map(canonical_local_acc, simplified_predecessors_map))
         });

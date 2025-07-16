@@ -103,7 +103,7 @@ impl ParseState {
         ParseState { stack: Arc::new(GSSNode::new(Acc::new_fresh(llm_vocab))) }
     }
     pub fn from_existing(existing: Self) -> Self {
-        ParseState::new(existing.stack.llm_tokens().llm_vocab())
+        ParseState::new(existing.stack.llm_tokens().llm_vocab().clone())
     }
 }
 
@@ -290,7 +290,7 @@ impl GLRParser {
         let initial_content = ParseStateEdgeContent {
             state_id: self.start_state_id,
         };
-        let llm_vocab = initial_acc.llm_tokens().llm_vocab();
+        let llm_vocab = initial_acc.llm_tokens().llm_vocab().clone();
         let root = Arc::new(GSSNode::new(Acc::new_fresh(llm_vocab))); // root has empty acc
         let stack = Arc::new(root.as_ref().push(initial_content, initial_acc)); // pushed node has initial_acc
         ParseState { stack }
@@ -527,7 +527,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         stack: &Arc<GSSNode>, 
         new_content: ParseStateEdgeContent,
     ) -> ParseState {
-        let llm_vocab = stack.llm_tokens().llm_vocab();
+        let llm_vocab = stack.llm_tokens().llm_vocab().clone();
         crate::debug!(4, "Pushing new state with content: {:?}", new_content);
         let new_gss_node_instance = stack.as_ref().push(new_content, Acc::new_fresh(llm_vocab));
         ParseState { stack: Arc::new(new_gss_node_instance) }
@@ -571,7 +571,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         });
         timeit!("GLRParserState::reduce_and_goto::merge_results", {
         if out.is_empty() {
-            let llm_vocab = self.active_state.stack.llm_tokens().llm_vocab();
+            let llm_vocab = self.active_state.stack.llm_tokens().llm_vocab().clone();
             Arc::new(GSSNode::new(Acc::new_fresh(llm_vocab)))
         } else if out.len() == 1 {
             Arc::new(out.into_iter().next().unwrap())
