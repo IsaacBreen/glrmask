@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// Estimated overhead per timing measurement (~1.2 µs)
+const MEASUREMENT_OVERHEAD: Duration = Duration::from_nanos(1_200);
+
 /// A node in the profiler's call tree.
 #[derive(Default, Clone)]
 pub struct ProfileNode {
@@ -266,7 +269,11 @@ fn time_block_start(name: String) {
     // If there is a parent, pause its own-time clock.
     if let Some(parent_own_time_start) = parent_own_time_start_opt {
         let own_time_lapsed = now.duration_since(parent_own_time_start);
-        current_node.own_time += own_time_lapsed;
+        // Subtract measurement overhead
+        let corrected = own_time_lapsed
+            .checked_sub(MEASUREMENT_OVERHEAD)
+            .unwrap_or_else(|| Duration::ZERO);
+        current_node.own_time += corrected;
     }
 
     // `current_node` is now the parent. Get or insert the new node and increment its hit count.
@@ -284,7 +291,14 @@ fn time_block_end() {
     // Pop the current timer from the stack.
     if let Some((name, total_start_time, own_start_time)) = data.timing_stack.pop() {
         let total_duration = now.duration_since(total_start_time);
-        let own_duration = now.duration_since(own_start_time);
+        let own_duration   = now.duration_since(own_start_time);
+        // Subtract measurement overhead from each duration
+        let corrected_total = total_duration
+            .checked_sub(MEASUREMENT_OVERHEAD)
+            .unwrap_or_else(|| Duration::ZERO);
+        let corrected_own = own_duration
+            .checked_sub(MEASUREMENT_OVERHEAD)
+            .unwrap_or_else(|| Duration::ZERO);
 
         // The `timing_stack` has been popped, so it now represents the parent path.
         // Collect the path to avoid conflicting borrows.
@@ -298,8 +312,8 @@ fn time_block_end() {
 
         // Get the node that ended and update its timings.
         let ended_node = parent_node.children.get_mut(&name).unwrap();
-        ended_node.total_time += total_duration;
-        ended_node.own_time += own_duration;
+        ended_node.total_time += corrected_total;
+        ended_node.own_time  += corrected_own;
     }
 
     // Resume the new parent timer by updating its own-time start time.
