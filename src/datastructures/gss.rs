@@ -427,7 +427,7 @@ impl GSSNode {
 
     /// Pops the top state from the stack(s), returning a `GSSPop` structure.
     /// The accumulators of predecessors are adjusted to include this node's local constraints.
-    // #[time_it]
+    #[time_it("GSSNode::pop")]
     pub fn pop(&self) -> GSSPop {
         let mut new_node_map = NodeMap::new();
         let parent_local_acc = &self.acc_manager.local;
