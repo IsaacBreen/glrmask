@@ -106,6 +106,13 @@ impl JSONNode {
             .map_err(|e| format!("Failed to parse JSON string with serde_json: {}", e))?;
         Self::from_serde_value(serde_value)
     }
+
+    pub fn into_object(self) -> Result<BTreeMap<String, JSONNode>, String> {
+        match self {
+            JSONNode::Object(obj) => Ok(obj),
+            _ => Err("Expected JSONNode::Object".to_string()),
+        }
+    }
 }
 
 // --- JSONConvertible Trait ---
