@@ -370,7 +370,8 @@ impl Drop for TimedBlockGuard {
 #[macro_export]
 macro_rules! time {
     ($name:expr, $block:expr) => {{
-        let _guard = $crate::profiler::TimedBlockGuard::new(String::from($name));
+        let timer_name = String::from($name);
+        let _guard = $crate::profiler::TimedBlockGuard::new(timer_name);
         $block
     }};
 }
