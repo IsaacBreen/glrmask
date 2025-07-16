@@ -586,7 +586,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         })
     }
 
-    // #[time_it("GLRParserState::step")]
+    #[time_it("GLRParserState::step")]
     pub fn step(&mut self, token_id: TerminalID) {
         // timeit!(format!("GLRParserState::step({})", self.parser.terminal_map.get_by_right(&token_id).map_or("Unknown".to_string(), |t| t.to_string())), {
         if Some(token_id) == self.parser.ignore_terminal_id {
