@@ -26,10 +26,7 @@ pub fn time_it(attr: TokenStream, item: TokenStream) -> TokenStream {
     let result = quote! {
         #(#fn_attrs)*
         #fn_vis #fn_sig {
-            let _guard = crate::profiler::TimedBlockGuard::new(
-                #timer_name_expr,
-                ::std::time::Duration::from_nanos(1200),
-            );
+            let _guard = crate::profiler::TimedBlockGuard::new(#timer_name_expr);
             #fn_block
         }
     };
@@ -71,10 +68,7 @@ pub fn timeit(input: TokenStream) -> TokenStream {
     };
 
     let result = quote! {{
-        let _guard = crate::profiler::TimedBlockGuard::new(
-            #name_code,
-            ::std::time::Duration::from_nanos(1200),
-        );
+        let _guard = crate::profiler::TimedBlockGuard::new(#name_code);
         #expr
     }};
 
