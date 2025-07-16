@@ -552,6 +552,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let goto = self.parser.stage_7_table.get(&popped_peek.edge_value().state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", popped_peek.edge_value().state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor ??)", nt.0, popped_peek.edge_value().state_id)), |state_id| Ok(*state_id))).unwrap();
             match goto {
                 Goto::State(goto_state_id) => {
+                    timeit!("GLRParserState::reduce_and_goto::process_peaks::push_with_existing_acc", {
                     // crate::debug!(4, " ...and edge value {:?}, predecessor {:p}, goto state ID {}", edge_value.state_id, Arc::as_ptr(&predecessor_arc), goto_state_id.0);
                     crate::debug!(6, "Popped peek parent node: {}", print_gss_forest(&[Arc::new(popped_peek.parent_node.clone())], None, 30, &self.parser.terminal_map, None, None));
                     crate::debug!(6, "Popped peek predecessor node: {}", print_gss_forest(&[popped_peek.predecessor_node.clone()], None, 30, &self.parser.terminal_map, None, None));
@@ -559,6 +560,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     crate::debug!(6, "Popped peek node to_node: {}", print_gss_forest(&[Arc::new(popped_peek.to_node())], None, 30, &self.parser.terminal_map, None, None));
                     crate::debug!(6, "New GSS node after reduction: {}", print_gss_forest(&[Arc::new(new_gss_node.clone())], None, 30, &self.parser.terminal_map, None, None));
                     out.push(new_gss_node);
+                    });
                 }
                 Goto::Accept => {
                     // No action needed for Accept
