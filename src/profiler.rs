@@ -5,6 +5,9 @@ use std::time::{Duration, Instant};
 /// The measured overhead of a single timing block, used for correction.
 const PROFILER_CORRECTION: Duration = Duration::from_nanos(1300);
 
+/// Set this to `false` to completely disable profiling at runtime.
+pub const PROFILING_ENABLED: bool = true;
+
 /// A node in the profiler's call tree.
 #[derive(Default, Clone)]
 pub struct ProfileNode {
@@ -39,8 +42,10 @@ fn profiler() -> &'static Mutex<ProfilerData> {
 
 /// Records a single hit for a named event (for use with `hit!` macro).
 pub fn hit(name: &str) {
-    let mut data = profiler().lock().unwrap();
-    *data.hits.entry(name.to_string()).or_insert(0) += 1;
+    if PROFILING_ENABLED {
+        let mut data = profiler().lock().unwrap();
+        *data.hits.entry(name.to_string()).or_insert(0) += 1;
+    }
 }
 
 /// Resets all profiling data (hits and timings).
@@ -356,20 +361,30 @@ fn time_block_end() {
 /// A guard object for timing a block of code using RAII.
 /// Its creation marks the start of the block, and its destruction (when it goes out of scope)
 /// marks the end. This is intended for use by the `time!` macro.
+/// When profiling is disabled, this is a no-op.
 #[must_use]
-pub struct TimedBlockGuard;
+pub struct TimedBlockGuard {
+    enabled: bool,
+}
 
 impl TimedBlockGuard {
     /// Creates a new guard, starting a timer for the given name.
+    /// If profiling is disabled, returns a no-op guard.
     pub fn new(name: String) -> Self {
-        time_block_start(name);
-        TimedBlockGuard
+        if PROFILING_ENABLED {
+            time_block_start(name);
+            TimedBlockGuard { enabled: true }
+        } else {
+            TimedBlockGuard { enabled: false }
+        }
     }
 }
 
 impl Drop for TimedBlockGuard {
     fn drop(&mut self) {
-        time_block_end();
+        if self.enabled {
+            time_block_end();
+        }
     }
 }
 
