@@ -557,7 +557,7 @@ impl<'a> GSSPeek<'a> {
     pub fn edge_value(&self) -> &'a ParseStateEdgeContent { self.edge_value }
     pub fn predecessor(&self) -> &'a Arc<GSSNode> { self.predecessor_node }
 
-    // #[time_it]
+    #[time_it]
     pub fn to_node(&self) -> GSSNode {
         let local_acc = self.parent_node.acc_manager.local.accumulate_seq(&self.predecessor_node.full_union_acc());
         GSSNode::new_with_single_predecessor(
