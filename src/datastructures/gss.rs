@@ -16,7 +16,7 @@ use crate::glr::grammar::Terminal;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID;
 use std::ops::{BitOr, BitOrAssign};
-use profiler_macro::time_it;
+use profiler_macro::{time_it, timeit};
 // --- Type Aliases ---
 
 pub type MaxDepth = usize;
@@ -366,13 +366,13 @@ impl GSSNode {
     /// Private constructor for internal methods that build a node from a pre-computed map.
     // #[time_it]
     fn new_with_map(local_acc: Arc<Acc>, predecessors: NodeMap) -> Self {
-        let llm_vocab = local_acc.llm_tokens().llm_vocab();
+        let llm_vocab = timeit!(local_acc.llm_tokens().llm_vocab().clone());
 
         let pred_full_unions: Vec<_> = predecessors.values().flat_map(|m| m.values()).map(|p| p.full_union_acc()).collect();
         let pred_full_intersections: Vec<_> = predecessors.values().flat_map(|m| m.values()).map(|p| p.full_intersection_acc()).collect();
 
         let final_union = Arc::new(Acc::merge_parallel(pred_full_unions.iter(), llm_vocab.clone()));
-        let final_intersection = Arc::new(Acc::intersect_parallel(pred_full_intersections.iter(), llm_vocab.clone()));
+        let final_intersection = Arc::new(Acc::intersect_parallel(pred_full_intersections.iter(), llm_vocab));
 
         let acc_manager = AccManager {
             local: local_acc,
