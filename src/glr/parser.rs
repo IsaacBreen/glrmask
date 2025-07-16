@@ -533,7 +533,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         ParseState { stack: Arc::new(new_gss_node_instance) }
     }
 
-    // #[time_it("GLRParserState::reduce_and_goto")]
+    #[time_it("GLRParserState::reduce_and_goto")]
     fn reduce_and_goto(
         &self,
         peek: &GSSPeek,
@@ -547,6 +547,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(6, "...and popped peek node: {}", print_gss_forest(&[popped.clone()], None, 30, &self.parser.terminal_map, None, None));
         // let mut out = GSSNode::new(Acc::new_for_merging()); // Start with a default acc
         let mut out = Vec::new();
+        timeit!("GLRParserState::reduce_and_goto::process_peeks", {
         for popped_peek in popped.peek_iter() { // Renamed predecessor to predecessor_arc
             let goto = self.parser.stage_7_table.get(&popped_peek.edge_value().state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", popped_peek.edge_value().state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor ??)", nt.0, popped_peek.edge_value().state_id)), |state_id| Ok(*state_id))).unwrap();
             match goto {
@@ -564,6 +565,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
             }
         }
+        });
+        timeit!("GLRParserState::reduce_and_goto::merge_results", {
         if out.is_empty() {
             let llm_vocab = self.active_state.stack.llm_tokens().llm_vocab();
             Arc::new(GSSNode::new(Acc::new_fresh(llm_vocab)))
@@ -577,6 +580,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
             Arc::new(out_node)
         }
+        })
     }
 
     // #[time_it("GLRParserState::step")]
