@@ -588,7 +588,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     // #[time_it("GLRParserState::step")]
     pub fn step(&mut self, token_id: TerminalID) {
-        timeit!(format!("GLRParserState::step({})", self.parser.terminal_map.get_by_right(&token_id).map_or("Unknown".to_string(), |t| t.to_string())), {
+        // timeit!(format!("GLRParserState::step({})", self.parser.terminal_map.get_by_right(&token_id).map_or("Unknown".to_string(), |t| t.to_string())), {
         if Some(token_id) == self.parser.ignore_terminal_id {
             crate::debug!(4, "Ignoring token {} ({:?})", token_id.0, self.parser.terminal_map.get_by_right(&token_id));
             return;
@@ -631,13 +631,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                          }) => {
                         let nonterminal = self.parser.non_terminal_map.get_by_right(nt).unwrap();
                         // timeit!("GLRParserState::step::reduce", {
-                        timeit!(format!("GLRParserState::step::reduce ({} -> {}) (pid {})", nonterminal.0, len, production_id.0), {
+                        // timeit!(format!("GLRParserState::step::reduce ({} -> {}) (pid {})", nonterminal.0, len, production_id.0), {
                         crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", peek.edge_value().state_id.0, token_id.0, nonterminal.0, len);
                         let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                         if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
                            todo.push(ParseState { stack: s_new_arc });
                         }
-                        })
+                        // })
                     }
 
                     Some(Stage7ShiftsAndReduces::Split { shift, reduces }) => {
@@ -696,7 +696,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // self.action_not_found_states = ParseState::new(llm_vocab.clone()); // Reset if not needed beyond the step
 
         crate::debug!(4, "----------------------------------------------------------------");
-        })
+        // })
     }
 
     pub fn parse(&mut self, input: &[TerminalID]) {
