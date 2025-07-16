@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// The measured overhead of a single timing block, used for correction.
+const PROFILER_CORRECTION: Duration = Duration::from_nanos(1300);
+
 /// A node in the profiler's call tree.
 #[derive(Default, Clone)]
 pub struct ProfileNode {
@@ -21,8 +24,8 @@ pub struct ProfilerData {
     /// The root of the call tree. Its children are the top-level timed blocks.
     call_tree: ProfileNode,
     /// A stack to keep track of the current path in the call tree.
-    /// Each element is (name, start_time_for_total, start_time_for_own)
-    timing_stack: Vec<(String, Instant, Instant)>,
+    /// Each element is (name, start_time_for_total, start_time_for_own, sub_calls_count)
+    timing_stack: Vec<(String, Instant, Instant, u64)>,
     /// Separate hits counter for the `hit!` macro.
     hits: HashMap<String, u64>,
 }
@@ -251,11 +254,16 @@ fn time_block_start(name: String) {
     let mut data = profiler().lock().unwrap();
     let now = Instant::now();
 
+    // Increment sub-call counter for the parent.
+    if let Some(parent) = data.timing_stack.last_mut() {
+        parent.3 += 1;
+    }
+
     // Get parent's own time start if it exists. This immutable borrow ends immediately.
-    let parent_own_time_start_opt = data.timing_stack.last().map(|(_, _, t)| *t);
+    let parent_own_time_start_opt = data.timing_stack.last().map(|(_, _, t, _)| *t);
 
     // Collect the path to the parent node to avoid conflicting borrows.
-    let path: Vec<String> = data.timing_stack.iter().map(|(s, _, _)| s.clone()).collect();
+    let path: Vec<String> = data.timing_stack.iter().map(|(s, _, _, _)| s.clone()).collect();
 
     // Now, get a mutable reference to the parent node and traverse.
     let mut current_node = &mut data.call_tree;
@@ -274,7 +282,7 @@ fn time_block_start(name: String) {
     new_node.hits += 1;
 
     // Push the new timer onto the stack.
-    data.timing_stack.push((name, now, now));
+    data.timing_stack.push((name, now, now, 0));
 }
 
 fn time_block_end() {
@@ -282,13 +290,21 @@ fn time_block_end() {
     let now = Instant::now();
 
     // Pop the current timer from the stack.
-    if let Some((name, total_start_time, own_start_time)) = data.timing_stack.pop() {
+    if let Some((name, total_start_time, own_start_time, sub_calls)) = data.timing_stack.pop() {
         let total_duration = now.duration_since(total_start_time);
         let own_duration = now.duration_since(own_start_time);
 
+        // Total time correction: 1 for this block, +1 for each direct and indirect sub-call.
+        let total_correction = PROFILER_CORRECTION.saturating_mul((sub_calls + 1) as u32);
+
+        let corrected_total_duration = total_duration.saturating_sub(total_correction);
+        // Own time is only corrected for its own measurement overhead.
+        let corrected_own_duration = own_duration.saturating_sub(PROFILER_CORRECTION);
+
         // The `timing_stack` has been popped, so it now represents the parent path.
         // Collect the path to avoid conflicting borrows.
-        let parent_path: Vec<String> = data.timing_stack.iter().map(|(s, _, _)| s.clone()).collect();
+        let parent_path: Vec<String> =
+            data.timing_stack.iter().map(|(s, _, _, _)| s.clone()).collect();
 
         // Get a mutable reference to the parent of the node that just ended.
         let mut parent_node = &mut data.call_tree;
@@ -298,8 +314,8 @@ fn time_block_end() {
 
         // Get the node that ended and update its timings.
         let ended_node = parent_node.children.get_mut(&name).unwrap();
-        ended_node.total_time += total_duration;
-        ended_node.own_time += own_duration;
+        ended_node.total_time += corrected_total_duration;
+        ended_node.own_time += corrected_own_duration;
     }
 
     // Resume the new parent timer by updating its own-time start time.
@@ -353,7 +369,8 @@ impl Drop for TimedBlockGuard {
 #[macro_export]
 macro_rules! time {
     ($name:expr, $block:expr) => {{
-        let _guard = $crate::profiler::TimedBlockGuard::new(String::from($name));
+        let __profiler_name = ($name).into();
+        let _guard = $crate::profiler::TimedBlockGuard::new(__profiler_name);
         $block
     }};
 }
