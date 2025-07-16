@@ -461,7 +461,7 @@ impl GSSNode {
     }
 
     /// Pops `n` levels from the GSS.
-    #[time_it]
+    #[time_it("GSSNode::popn")]
     pub fn popn(&self, n: usize) -> Self {
         if n == 0 {
             return self.clone();
@@ -532,7 +532,7 @@ impl GSSPop<'_> {
         GSSPop { parent_node: self.parent_node, node_map }
     }
 
-    #[time_it]
+    #[time_it("GSSPop::popn")]
     pub fn popn(&self, n: usize) -> GSSPop {
         if n == 0 {
             return self.clone();
@@ -571,6 +571,7 @@ impl<'a> GSSPeek<'a> {
         Arc::new(self.to_node())
     }
 
+    #[time_it("GSSPeek::popn")]
     pub fn popn(&self, n: usize) -> Arc<GSSNode> {
         Arc::new(self.to_arc_node().popn(n))
     }
