@@ -1,6 +1,6 @@
 use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::{GLRParser, GLRParserState};
-use crate::glr::table::{generate_glr_parser, TerminalID};
+use crate::glr::table::{generate_glr_parser, Stage7ShiftsAndReduces, TerminalID};
 use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
 use bimap::BiBTreeMap;
 use std::collections::BTreeSet;
@@ -898,12 +898,9 @@ fn test_explain_stack() {
     let start_state = parser.start_state_id;
     let b_token_id = *parser.terminal_map.get_by_left(&terminal("b")).unwrap();
     
-    let start_row = &parser.stage_7_table[&start_state];
-    let shift_action = &start_row.shifts_and_reduces[&b_token_id];
-    let state_after_b = match shift_action {
-        crate::glr::table::Stage7ShiftsAndReduces::Shift(id) => *id,
-        _ => panic!("Expected shift on 'b' from start state"),
-    };
+    let start_row = &parser.stage_8_table[&start_state];
+    let state_after_b = *start_row.shifts.get(&b_token_id)
+        .expect("Expected shift on 'b' from start state");
 
     let stack_to_explain = vec![start_state, state_after_b];
     let explanation = parser.explain_stack(&stack_to_explain);
@@ -923,8 +920,8 @@ fn test_explain_stack() {
     assert!(explanation.contains(&format!("State {}:", state_after_b.0)));
     assert!(explanation.contains("Core Items:"));
     assert!(explanation.contains("A -> 'b' •"));
-    assert!(explanation.contains("On 'a': Reduce by rule #2 (A -> 'b')"));
-    assert!(explanation.contains("On '$': Reduce by rule #2 (A -> 'b')"));
+    assert!(explanation.contains("On 'a': Reduce by rules #2 (len 1)"));
+    assert!(explanation.contains("On '$': Reduce by rules #2 (len 1)"));
 }
 // --- Notes on Limitations Not Easily Tested Here ---
 // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
