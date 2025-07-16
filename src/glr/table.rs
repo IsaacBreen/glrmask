@@ -768,14 +768,14 @@ fn stage_8(stage_7_table: Stage7Table, item_set_map: BiBTreeMap<BTreeSet<Item>, 
             // A full implementation would filter `s7_action` based on `most_common_reduce`.
             let s8_action = match s7_action {
                 Stage7ShiftsAndReduces::Shift(s) => Stage8ShiftsAndReduces::Shift(s),
-                Stage7ShiftsAndReduces::Reduce(r) => Stage8ShiftsAndReduces::Reduce(Stage8Reduce { nonterminal_id: r.nonterminal_id, len: r.len, production_ids: r.production_ids }),
-                Stage7ShiftsAndReduces::Split { shift, reduces } => Stage8ShiftsAndReduces::Split { shift, reduces },
+                Stage7ShiftsAndReduces::Reduce(ref r) => Stage8ShiftsAndReduces::Reduce(Stage8Reduce { nonterminal_id: r.nonterminal_id, len: r.len, production_ids: r.production_ids.clone() }),
+                Stage7ShiftsAndReduces::Split { shift, ref reduces } => Stage8ShiftsAndReduces::Split { shift, reduces: reduces.clone() },
             };
             s8_row.shifts_and_reduces.insert(tid, s8_action.clone());
 
             // Filter for non-defaultable actions
-            let is_defaultable = if let Stage7ShiftsAndReduces::Reduce(r) = &s7_action {
-                most_common_reduce.as_ref() == Some(r)
+            let is_defaultable = if let Stage7ShiftsAndReduces::Reduce(r) = s7_action {
+                most_common_reduce.as_ref() == Some(&r)
             } else { false };
 
             if !is_defaultable {
