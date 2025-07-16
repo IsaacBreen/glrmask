@@ -49,19 +49,19 @@ struct Stage6Row {
 }
 
 #[derive(Debug)]
-enum Stage6ShiftsAndReduces {
-    Shift(BTreeSet<Item>),
-    Reduce(ProductionID),
-    Split {
-        shift: Option<BTreeSet<Item>>,
-        reduces: BTreeSet<ProductionID>,
-    },
+struct Stage6ShiftsAndReduces {
+    shift: Option<BTreeSet<Item>>,
+    reduces: BTreeSet<ProductionID>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stage7ShiftsAndReduces {
     Shift(StateID),
-    Reduce { production_id: ProductionID, nonterminal_id: NonTerminalID, len: usize },
+    Reduce {
+        nonterminal_id: NonTerminalID,
+        len: usize,
+        production_ids: BTreeSet<ProductionID>,
+    },
     Split {
         shift: Option<StateID>,
         reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>,
@@ -76,11 +76,11 @@ impl JSONConvertible for Stage7ShiftsAndReduces {
                 obj.insert("variant".to_string(), JSONNode::String("Shift".to_string()));
                 obj.insert("state_id".to_string(), state_id.to_json());
             }
-            Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len } => {
+            Stage7ShiftsAndReduces::Reduce { nonterminal_id, len, production_ids } => {
                 obj.insert("variant".to_string(), JSONNode::String("Reduce".to_string()));
-                obj.insert("production_id".to_string(), production_id.to_json());
                 obj.insert("nonterminal_id".to_string(), nonterminal_id.to_json());
                 obj.insert("len".to_string(), len.to_json());
+                obj.insert("production_ids".to_string(), production_ids.to_json());
             }
             Stage7ShiftsAndReduces::Split { shift, reduces } => {
                 obj.insert("variant".to_string(), JSONNode::String("Split".to_string()));
@@ -103,13 +103,13 @@ impl JSONConvertible for Stage7ShiftsAndReduces {
                         Ok(Stage7ShiftsAndReduces::Shift(state_id))
                     }
                     "Reduce" => {
-                        let production_id = obj.remove("production_id").ok_or_else(|| "Missing field production_id for Reduce".to_string())
-                                               .and_then(ProductionID::from_json)?;
                         let nonterminal_id = obj.remove("nonterminal_id").ok_or_else(|| "Missing field nonterminal_id for Reduce".to_string())
                                                 .and_then(NonTerminalID::from_json)?;
                         let len = obj.remove("len").ok_or_else(|| "Missing field len for Reduce".to_string())
                                      .and_then(usize::from_json)?;
-                        Ok(Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len })
+                        let production_ids = obj.remove("production_ids").ok_or_else(|| "Missing field production_ids for Reduce".to_string())
+                                                .and_then(|n| BTreeSet::<ProductionID>::from_json(n))?;
+                        Ok(Stage7ShiftsAndReduces::Reduce { nonterminal_id, len, production_ids })
                     }
                     "Split" => {
                         let shift = obj.remove("shift").ok_or_else(|| "Missing field shift for Split".to_string())
@@ -405,15 +405,10 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
             let shift = row.shifts.get(&terminal).cloned();
             let reduces = row.reduces.get(&terminal).cloned().unwrap_or_default();
 
-            let action = match (shift, reduces.len()) {
-                // Only shift, no reduces
-                (Some(shift_target), 0) => Stage6ShiftsAndReduces::Shift(shift_target),
-                // Only one reduce, no shift
-                (None, 1) => Stage6ShiftsAndReduces::Reduce(reduces.into_iter().next().unwrap()),
-                // Either: shift + reduces, multiple reduces, or no shift + multiple reduces
-                (shift, _) => Stage6ShiftsAndReduces::Split { shift, reduces },
+            let action = Stage6ShiftsAndReduces {
+                shift,
+                reduces,
             };
-
             shifts_and_reduces.insert(terminal, action);
         }
 
@@ -458,28 +453,47 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 
         for (terminal, action) in row.shifts_and_reduces {
             let terminal_id = *terminal_map.get_by_left(&terminal).expect(format!("{:?} not found in terminal map {:?}", terminal, terminal_map.left_values().map(|t| t.to_string()).collect::<Vec<String>>()).as_str());
-            let converted_action = match action {
-                Stage6ShiftsAndReduces::Shift(next_item_set) => {
-                    let next_state_id = *item_set_map.get_by_left(&next_item_set).unwrap();
-                    Stage7ShiftsAndReduces::Shift(next_state_id)
+
+            let shift_state_id = action.shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
+
+            // Group reduces by len and then by nonterminal_id
+            let mut reduces_by_len_and_nt: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
+            for production_id in action.reduces {
+                let production = &productions[production_id.0];
+                let len = production.rhs.len();
+                let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
+                reduces_by_len_and_nt
+                    .entry(len)
+                    .or_default()
+                    .entry(nonterminal_id)
+                    .or_default()
+                    .insert(production_id);
+            }
+
+            let converted_action = if let Some(shift_id) = shift_state_id {
+                if reduces_by_len_and_nt.is_empty() {
+                    // Shift only
+                    Stage7ShiftsAndReduces::Shift(shift_id)
+                } else {
+                    // Shift-Reduce conflict
+                    Stage7ShiftsAndReduces::Split { shift: Some(shift_id), reduces: reduces_by_len_and_nt }
                 }
-                Stage6ShiftsAndReduces::Reduce(production_id) => {
-                    let production = productions.get(production_id.0).unwrap();
-                    let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).expect(format!("{:?} not found in non_terminal_map {:?}", production.lhs, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
-                    let len = production.rhs.len();
-                    Stage7ShiftsAndReduces::Reduce { production_id, nonterminal_id, len }
-                }
-                Stage6ShiftsAndReduces::Split { shift, reduces } => {
-                    let shift_state_id = shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
-                    let mut len_to_nt_to_production_id: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
-                    for production_id in reduces {
-                        let production = productions.get(production_id.0).unwrap();
-                        let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).expect(format!("{:?} not found in non_terminal_map {:?}", production.lhs, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
-                        let len = production.rhs.len();
-                        len_to_nt_to_production_id.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id);
+            } else { // No shift
+                if reduces_by_len_and_nt.is_empty() {
+                    panic!("Action without shift or reduce for terminal {:?}", terminal);
+                } else if reduces_by_len_and_nt.len() == 1 {
+                    let (len, mut nts) = reduces_by_len_and_nt.into_iter().next().unwrap();
+                    if nts.len() == 1 {
+                        // Single reduce action (possibly with multiple productions for same NT/len)
+                        let (nonterminal_id, production_ids) = nts.into_iter().next().unwrap();
+                        Stage7ShiftsAndReduces::Reduce { nonterminal_id, len, production_ids }
+                    } else {
+                        // Reduce-Reduce conflict (different NTs, same length)
+                        Stage7ShiftsAndReduces::Split { shift: None, reduces: BTreeMap::from([(len, nts)]) }
                     }
-                    assert!(shift_state_id.is_some() && len_to_nt_to_production_id.len() > 0 || shift_state_id.is_none() && len_to_nt_to_production_id.len() > 1 || shift_state_id.is_none() && len_to_nt_to_production_id.len() == 1 && len_to_nt_to_production_id.iter().next().unwrap().1.len() > 1);
-                    Stage7ShiftsAndReduces::Split { shift: shift_state_id, reduces: len_to_nt_to_production_id }
+                } else {
+                    // Reduce-Reduce conflict (different lengths)
+                    Stage7ShiftsAndReduces::Split { shift: None, reduces: reduces_by_len_and_nt }
                 }
             };
             shifts_and_reduces.insert(terminal_id, converted_action);

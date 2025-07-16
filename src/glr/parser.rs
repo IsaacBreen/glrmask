@@ -350,9 +350,15 @@ impl GLRParser {
                             Stage7ShiftsAndReduces::Shift(next_state_id) => {
                                 writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
                             }
-                            Stage7ShiftsAndReduces::Reduce { production_id, .. } => {
-                                let prod = &self.productions[production_id.0];
-                                writeln!(&mut result, "Reduce by rule #{} ({})", production_id.0, prod).unwrap();
+                            Stage7ShiftsAndReduces::Reduce { production_ids, .. } => {
+                                if production_ids.len() == 1 {
+                                    let prod_id = production_ids.iter().next().unwrap();
+                                    let prod = &self.productions[prod_id.0];
+                                    writeln!(&mut result, "Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                } else {
+                                    let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
+                                    writeln!(&mut result, "Reduce by rules {}", pids.join(", ")).unwrap();
+                                }
                             }
                             Stage7ShiftsAndReduces::Split { shift, reduces } => {
                                 writeln!(&mut result, "Conflict:").unwrap();
@@ -464,9 +470,10 @@ impl Display for GLRParser {
                     Stage7ShiftsAndReduces::Shift(next_state_id) => {
                         writeln!(f, "      - {} -> Shift {}", terminal, next_state_id.0)?;
                     }
-                    Stage7ShiftsAndReduces::Reduce { production_id: _ , nonterminal_id: nonterminal, len } => { // production_id ignored
+                    Stage7ShiftsAndReduces::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
                         let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-                        writeln!(f, "      - {} -> Reduce {} (len {})", terminal, nt_name.0, len)?;
+                        let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
+                        writeln!(f, "      - {} -> Reduce {} (len {}) via rules [{}]", terminal, nt_name.0, len, pids.join(", "))?;
                     }
                     Stage7ShiftsAndReduces::Split { shift, reduces } => {
                         writeln!(f, "      - {} -> Conflict:", terminal)?;
@@ -627,11 +634,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     Some(Stage7ShiftsAndReduces::Reduce {
                              nonterminal_id: nt,
                              len,
-                            production_id,
+                            production_ids,
                          }) => {
                         let nonterminal = self.parser.non_terminal_map.get_by_right(nt).unwrap();
                         // timeit!("GLRParserState::step::reduce", {
-                        // timeit!(format!("GLRParserState::step::reduce ({} -> {}) (pid {})", nonterminal.0, len, production_id.0), {
+                        // timeit!(format!("GLRParserState::step::reduce ({} -> {}) (pids {:?})", nonterminal.0, len, production_ids), {
                         crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", peek.edge_value().state_id.0, token_id.0, nonterminal.0, len);
                         let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                         if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
