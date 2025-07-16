@@ -113,32 +113,22 @@ impl JSONNode {
             _ => Err("Expected JSONNode::Object".to_string()),
         }
     }
+
+    /// Convenience method to convert JSONNode to a specific type
+    pub fn into_type<T: JSONConvertible>(self) -> T {
+        T::from_json(self).expect("Failed to convert JSONNode to type")
+    }
+
+    /// Convenience method to try converting JSONNode to a specific type
+    pub fn try_into_type<T: JSONConvertible>(self) -> Result<T, String> {
+        T::from_json(self)
+    }
 }
 
 // --- JSONConvertible Trait ---
 pub trait JSONConvertible: Sized {
     fn to_json(&self) -> JSONNode;
     fn from_json(node: JSONNode) -> Result<Self, String>;
-}
-
-impl<T> From<JSONNode> for T
-where
-    T: JSONConvertible,
-{
-    fn from(node: JSONNode) -> T {
-        T::from_json(node).expect("Failed to convert JSONNode to type")
-    }
-}
-
-impl<T> TryFrom<JSONNode> for T
-where
-    T: JSONConvertible,
-{
-    type Error = String;
-
-    fn try_from(node: JSONNode) -> Result<T, Self::Error> {
-        T::from_json(node)
-    }
 }
 
 // --- Implementations for Primitives ---
