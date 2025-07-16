@@ -277,7 +277,7 @@ fn compute_max_depth(predecessors: &NodeMap) -> MaxDepth {
 
 fn compute_hash_key(predecessors: &NodeMap, acc_manager: &AccManager) -> u64 {
     let mut hasher = DeterministicHasher::new(DefaultHasher::new());
-    acc_manager.hash(&mut hasher);
+    // acc_manager.hash(&mut hasher);
     for (depth, preds_for_depth) in predecessors {
         depth.hash(&mut hasher);
         for (edge_val, pred_arc) in preds_for_depth {
