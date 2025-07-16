@@ -364,6 +364,7 @@ impl GSSNode {
     }
 
     /// Private constructor for internal methods that build a node from a pre-computed map.
+    // #[time_it]
     fn new_with_map(local_acc: Arc<Acc>, predecessors: NodeMap) -> Self {
         let llm_vocab = local_acc.llm_tokens().llm_vocab();
         
@@ -385,6 +386,7 @@ impl GSSNode {
     }
 
     /// Helper to create a GSSNode with a single predecessor, used by `push`.
+    // #[time_it]
     fn new_with_single_predecessor(predecessor_arc: Arc<GSSNode>, edge_value: ParseStateEdgeContent, local_acc: Acc) -> Self {
         let mut predecessors_map = NodeMap::new();
         let mut inner_map = BTreeMap::new();
