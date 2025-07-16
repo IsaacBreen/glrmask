@@ -3,7 +3,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Estimated overhead per timing measurement (~1.2 µs)
-const MEASUREMENT_OVERHEAD: Duration = Duration::from_nanos(1_350);
+const MEASUREMENT_OVERHEAD: Duration = Duration::from_nanos(1_300);
 
 /// A node in the profiler's call tree.
 #[derive(Default, Clone)]
