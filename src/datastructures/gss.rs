@@ -371,8 +371,8 @@ impl GSSNode {
         let pred_full_unions: Vec<_> = predecessors.values().flat_map(|m| m.values()).map(|p| p.full_union_acc()).collect();
         let pred_full_intersections: Vec<_> = predecessors.values().flat_map(|m| m.values()).map(|p| p.full_intersection_acc()).collect();
 
-        let final_union = timeit!(Arc::new(Acc::merge_parallel(pred_full_unions.iter(), llm_vocab.clone())));
-        let final_intersection = timeit!(Arc::new(Acc::intersect_parallel(pred_full_intersections.iter(), llm_vocab)));
+        let final_union = Arc::new(Acc::merge_parallel(pred_full_unions.iter(), llm_vocab.clone()));
+        let final_intersection = Arc::new(Acc::intersect_parallel(pred_full_intersections.iter(), llm_vocab));
 
         let acc_manager = AccManager {
             local: local_acc,
@@ -381,7 +381,7 @@ impl GSSNode {
         };
 
         let hash_key_cache = timeit!(compute_hash_key(&predecessors, &acc_manager));
-        let max_depth = timeit!(compute_max_depth(&predecessors));
+        let max_depth = compute_max_depth(&predecessors);
         Self { acc_manager, predecessors, hash_key_cache, max_depth }
     }
 
