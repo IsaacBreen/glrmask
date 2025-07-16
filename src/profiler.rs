@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// Measured overhead per `time!` / `time_it!` invocation (1.3 µs).
+const MEASUREMENT_OVERHEAD: Duration = Duration::from_nanos(1_300);
+
 /// A node in the profiler's call tree.
 #[derive(Default, Clone)]
 pub struct ProfileNode {
@@ -62,32 +65,72 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
+/// Recursively counts the number of timed-block hits inside `node`
+/// (including the node itself).
+fn count_subtree_hits(node: &ProfileNode) -> u64 {
+    let mut hits = node.hits;
+    for child in node.children.values() {
+        hits += count_subtree_hits(child);
+    }
+    hits
+}
+
+/// Returns `(corrected_total, corrected_own, subtree_hits)` for `node`.
+///
+/// * `corrected_total`  – `total_time` with the overhead of **all** timed blocks
+///   executed inside this node (including itself) subtracted.
+/// * `corrected_own`    – `own_time` with only the node’s own overhead
+///   subtracted.
+/// * `subtree_hits`     – number of timed-block hits in the whole subtree.
+fn corrected_times(node: &ProfileNode) -> (Duration, Duration, u64) {
+    let subtree_hits = count_subtree_hits(node);
+
+    // Helper to build a `Duration` from `subtree_hits * MEASUREMENT_OVERHEAD`
+    let mul_overhead = |hits: u64| -> Duration {
+        let nanos = (MEASUREMENT_OVERHEAD.as_nanos() as u128)
+            .saturating_mul(hits as u128)
+            .min(u64::MAX as u128) as u64;
+        Duration::from_nanos(nanos)
+    };
+
+    let total_overhead = mul_overhead(subtree_hits);
+    let own_overhead = mul_overhead(node.hits);
+
+    (
+        node.total_time.saturating_sub(total_overhead),
+        node.own_time.saturating_sub(own_overhead),
+        subtree_hits,
+    )
+}
+
 fn print_node_recursive(
     node: &ProfileNode,
     name: &str,
     indent_level: usize,
     parent_total_time: Duration,
 ) {
+    let (corrected_total, corrected_own, _) = corrected_times(node);
+
     let indent = "  ".repeat(indent_level);
     let name_with_indent = format!("{}{}", indent, name);
 
     let (total_per_hit, own_per_hit) = if node.hits > 0 {
         (
-            node.total_time.mul_f64(1.0 / node.hits as f64),
-            node.own_time.mul_f64(1.0 / node.hits as f64),
+            corrected_total.mul_f64(1.0 / node.hits as f64),
+            corrected_own.mul_f64(1.0 / node.hits as f64),
         )
     } else {
         (Duration::from_secs(0), Duration::from_secs(0))
     };
 
     let percentage = if !parent_total_time.is_zero() {
-        (node.total_time.as_secs_f64() / parent_total_time.as_secs_f64()) * 100.0
+        (corrected_total.as_secs_f64() / parent_total_time.as_secs_f64()) * 100.0
     } else {
         0.0
     };
 
-    let total_str = format_duration(node.total_time);
-    let own_str = format_duration(node.own_time);
+    let total_str = format_duration(corrected_total);
+    let own_str = format_duration(corrected_own);
     let total_per_hit_str = format_duration(total_per_hit);
     let own_per_hit_str = format_duration(own_per_hit);
     let percentage_str = format!("{:.1}%", percentage);
@@ -107,7 +150,7 @@ fn print_node_recursive(
     sorted_children.sort_by_key(|(name, _)| *name);
 
     for (child_name, child_node) in sorted_children {
-        print_node_recursive(child_node, child_name, indent_level + 1, node.total_time);
+        print_node_recursive(child_node, child_name, indent_level + 1, corrected_total);
     }
 }
 
@@ -136,7 +179,7 @@ pub fn print_summary() {
             .call_tree
             .children
             .values()
-            .map(|node| node.total_time)
+            .map(|node| corrected_times(node).0)
             .sum();
 
         let mut sorted_children: Vec<_> = data.call_tree.children.iter().collect();
@@ -203,23 +246,39 @@ pub fn print_summary_flat() {
         sorted_list.sort_by(|a, b| b.1.total_time.cmp(&a.1.total_time));
 
         for (name, node) in sorted_list {
+            // For the flat view we can only correct for the node’s own hits
+            // (we no longer have hierarchical information).
+            let overhead = Duration::from_nanos(
+                (MEASUREMENT_OVERHEAD.as_nanos() as u128)
+                    .saturating_mul(node.hits as u128)
+                    .min(u64::MAX as u128) as u64,
+            );
+
+            let corrected_total = node.total_time.saturating_sub(overhead);
+            let corrected_own = node.own_time.saturating_sub(overhead);
+
             let (total_per_hit, own_per_hit) = if node.hits > 0 {
                 (
-                    node.total_time.mul_f64(1.0 / node.hits as f64),
-                    node.own_time.mul_f64(1.0 / node.hits as f64),
+                    corrected_total.mul_f64(1.0 / node.hits as f64),
+                    corrected_own.mul_f64(1.0 / node.hits as f64),
                 )
             } else {
                 (Duration::from_secs(0), Duration::from_secs(0))
             };
 
-            let total_str = format_duration(node.total_time);
-            let own_str = format_duration(node.own_time);
+            let total_str = format_duration(corrected_total);
+            let own_str = format_duration(corrected_own);
             let total_per_hit_str = format_duration(total_per_hit);
             let own_per_hit_str = format_duration(own_per_hit);
 
             println!(
                 "{:>10} {:>15} {:>15} {:>15} {:>15}  {}",
-                node.hits, total_str, total_per_hit_str, own_str, own_per_hit_str, name
+                node.hits,
+                total_str,
+                total_per_hit_str,
+                own_str,
+                own_per_hit_str,
+                name
             );
         }
     }
@@ -353,7 +412,10 @@ impl Drop for TimedBlockGuard {
 #[macro_export]
 macro_rules! time {
     ($name:expr, $block:expr) => {{
-        let _guard = $crate::profiler::TimedBlockGuard::new(String::from($name));
+        // Evaluate the name before starting the timer so the construction
+        // itself is not part of the measurement.
+        let __profiler_name: String = ($name).into();
+        let _guard = $crate::profiler::TimedBlockGuard::new(__profiler_name);
         $block
     }};
 }
