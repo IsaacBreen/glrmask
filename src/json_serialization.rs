@@ -121,6 +121,26 @@ pub trait JSONConvertible: Sized {
     fn from_json(node: JSONNode) -> Result<Self, String>;
 }
 
+impl<T> Into<T> for JSONNode
+where
+    T: JSONConvertible,
+{
+    fn into(self) -> T {
+        T::from_json(self).expect("Failed to convert JSONNode to type")
+    }
+}
+
+impl<T> TryInto<T> for JSONNode
+where
+    T: JSONConvertible,
+{
+    type Error = String;
+
+    fn try_into(self) -> Result<T, Self::Error> {
+        T::from_json(self)
+    }
+}
+
 // --- Implementations for Primitives ---
 
 impl JSONConvertible for () {
