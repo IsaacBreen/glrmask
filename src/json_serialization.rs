@@ -9,7 +9,7 @@ use json_convertible_derive::JSONConvertible;
 // Add these lines for serde_json
 use serde_json::Value as SerdeValue;
 use serde_json::Map as SerdeMap; // BTreeMap<String, SerdeValue> is SerdeMap
-use std::convert::TryInto;
+use std::convert::{TryFrom, TryInto};
 
 // --- JSONNode Enum ---
 #[derive(Debug, Clone, PartialEq)]
@@ -121,23 +121,20 @@ pub trait JSONConvertible: Sized {
     fn from_json(node: JSONNode) -> Result<Self, String>;
 }
 
-impl<T> Into<T> for JSONNode
-where
-    T: JSONConvertible,
-{
-    fn into(self) -> T {
-        T::from_json(self).expect("Failed to convert JSONNode to type")
-    }
-}
-
-impl<T> TryInto<T> for JSONNode
+// By implementing TryFrom<JSONNode> for any T that is JSONConvertible,
+// we automatically get TryInto<T> for JSONNode for free, thanks to
+// the blanket implementation in the standard library. This avoids
+// the conflicting implementation error (E0119).
+// The panicking `Into` implementation has been removed in favor of users
+// calling `.try_into().unwrap()` if they want panicking behavior.
+impl<T> TryFrom<JSONNode> for T
 where
     T: JSONConvertible,
 {
     type Error = String;
 
-    fn try_into(self) -> Result<T, Self::Error> {
-        T::from_json(self)
+    fn try_from(node: JSONNode) -> Result<Self, Self::Error> {
+        T::from_json(node)
     }
 }
 
