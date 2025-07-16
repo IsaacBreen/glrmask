@@ -123,6 +123,10 @@ impl JSONNode {
     pub fn try_into_type<T: JSONConvertible>(self) -> Result<T, String> {
         T::from_json(self)
     }
+
+    pub fn from_json<T: JSONConvertible>(self) -> Result<T, String> {
+        todo!()
+    }
 }
 
 // --- JSONConvertible Trait ---
@@ -130,6 +134,7 @@ pub trait JSONConvertible: Sized {
     fn to_json(&self) -> JSONNode;
     fn from_json(node: JSONNode) -> Result<Self, String>;
 }
+
 
 // --- Implementations for Primitives ---
 
