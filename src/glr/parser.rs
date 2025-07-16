@@ -546,7 +546,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(6, "...and predecessor node: {}", print_gss_forest(&[peek.predecessor_node.clone()], None, 30, &self.parser.terminal_map, None, None));
         crate::debug!(6, "...and popped peek node: {}", print_gss_forest(&[popped.clone()], None, 30, &self.parser.terminal_map, None, None));
         // let mut out = GSSNode::new(Acc::new_for_merging()); // Start with a default acc
-        let mut out = Vec::new();
+        let mut out = timeit!(Vec::new());
         timeit!("GLRParserState::reduce_and_goto::process_peeks", {
         for popped_peek in popped.peek_iter() { // Renamed predecessor to predecessor_arc
             let goto = self.parser.stage_7_table.get(&popped_peek.edge_value().state_id).map_or_else(|| Err(format!("State {} not found in stage_7_table", popped_peek.edge_value().state_id.0)), |row| row.gotos.get(&nt).map_or_else(|| Err(format!("Non-terminal {} not found in gotos for {:?} (processing predecessor ??)", nt.0, popped_peek.edge_value().state_id)), |state_id| Ok(*state_id))).unwrap();
