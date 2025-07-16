@@ -380,7 +380,7 @@ impl GSSNode {
             intersection: final_intersection,
         };
 
-        let hash_key_cache = timeit!(compute_hash_key(&predecessors, &acc_manager));
+        let hash_key_cache = compute_hash_key(&predecessors, &acc_manager);
         let max_depth = compute_max_depth(&predecessors);
         Self { acc_manager, predecessors, hash_key_cache, max_depth }
     }
