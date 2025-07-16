@@ -83,8 +83,14 @@ fn print_node_recursive(
         (Duration::from_secs(0), Duration::from_secs(0))
     };
 
-    let percentage = if !parent_total_time.is_zero() {
+    let percentage_of_parent = if !parent_total_time.is_zero() {
         (node.total_time.as_secs_f64() / parent_total_time.as_secs_f64()) * 100.0
+    } else {
+        0.0
+    };
+
+    let percentage_own = if !node.total_time.is_zero() {
+        (node.own_time.as_secs_f64() / node.total_time.as_secs_f64()) * 100.0
     } else {
         0.0
     };
@@ -93,16 +99,18 @@ fn print_node_recursive(
     let own_str = format_duration(node.own_time);
     let total_per_hit_str = format_duration(total_per_hit);
     let own_per_hit_str = format_duration(own_per_hit);
-    let percentage_str = format!("{:.1}%", percentage);
+    let percentage_of_parent_str = format!("{:.1}%", percentage_of_parent);
+    let percentage_own_str = format!("{:.1}%", percentage_own);
 
     println!(
-        "{:>10} {:>15} {:>15} {:>15} {:>15} {:>15}  {}",
+        "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10} {:>15}  {}",
         node.hits,
         total_str,
         total_per_hit_str,
         own_str,
         own_per_hit_str,
-        percentage_str,
+        percentage_own_str,
+        percentage_of_parent_str,
         name_with_indent
     );
 
@@ -131,8 +139,15 @@ pub fn print_summary() {
     if !no_timing_data {
         println!("\n[Hierarchical Timings]");
         println!(
-            "{:>10} {:>15} {:>15} {:>15} {:>15} {:>15}  {}",
-            "Hits", "Total Time", "Total/Hit", "Own Time", "Own/Hit", "% of Parent", "Name"
+            "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10} {:>15}  {}",
+            "Hits",
+            "Total Time",
+            "Total/Hit",
+            "Own Time",
+            "Own/Hit",
+            "% Own",
+            "% of Parent",
+            "Name"
         );
 
         let root_total_time: Duration = data
@@ -198,8 +213,14 @@ pub fn print_summary_flat() {
 
         println!("\n[Flat Timings]");
         println!(
-            "{:>10} {:>15} {:>15} {:>15} {:>15}  {}",
-            "Hits", "Total Time", "Total/Hit", "Own Time", "Own/Hit", "Name"
+            "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10}  {}",
+            "Hits",
+            "Total Time",
+            "Total/Hit",
+            "Own Time",
+            "Own/Hit",
+            "% Own",
+            "Name"
         );
 
         let mut sorted_list: Vec<_> = flat_map.iter().collect();
@@ -215,14 +236,22 @@ pub fn print_summary_flat() {
                 (Duration::from_secs(0), Duration::from_secs(0))
             };
 
+            let percentage_own = if !node.total_time.is_zero() {
+                (node.own_time.as_secs_f64() / node.total_time.as_secs_f64()) * 100.0
+            } else {
+                0.0
+            };
+
             let total_str = format_duration(node.total_time);
             let own_str = format_duration(node.own_time);
             let total_per_hit_str = format_duration(total_per_hit);
             let own_per_hit_str = format_duration(own_per_hit);
+            let percentage_own_str = format!("{:.1}%", percentage_own);
 
             println!(
-                "{:>10} {:>15} {:>15} {:>15} {:>15}  {}",
-                node.hits, total_str, total_per_hit_str, own_str, own_per_hit_str, name
+                "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10}  {}",
+                node.hits, total_str, total_per_hit_str, own_str, own_per_hit_str,
+                percentage_own_str, name
             );
         }
     }

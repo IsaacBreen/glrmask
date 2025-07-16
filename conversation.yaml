@@ -34,7 +34,8 @@ local_system:
           let result = quote! {
               #(#fn_attrs)*
               #fn_vis #fn_sig {
-                  let _guard = crate::profiler::TimedBlockGuard::new(#timer_name_expr);
+                  let __profiler_name = #timer_name_expr;
+                  let _guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
                   #fn_block
               }
           };
@@ -76,7 +77,8 @@ local_system:
           };
 
           let result = quote! {{
-              let _guard = crate::profiler::TimedBlockGuard::new(#name_code);
+              let __profiler_name = #name_code;
+              let _guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
               #expr
           }};
 
@@ -86,6 +88,9 @@ local_system:
       use std::collections::HashMap;
       use std::sync::{Mutex, OnceLock};
       use std::time::{Duration, Instant};
+
+      /// The measured overhead of a single timing block, used for correction.
+      const PROFILER_CORRECTION: Duration = Duration::from_nanos(1300);
 
       /// A node in the profiler's call tree.
       #[derive(Default, Clone)]
@@ -106,8 +111,8 @@ local_system:
           /// The root of the call tree. Its children are the top-level timed blocks.
           call_tree: ProfileNode,
           /// A stack to keep track of the current path in the call tree.
-          /// Each element is (name, start_time_for_total, start_time_for_own)
-          timing_stack: Vec<(String, Instant, Instant)>,
+          /// Each element is (name, start_time_for_total, start_time_for_own, sub_calls_count)
+          timing_stack: Vec<(String, Instant, Instant, u64)>,
           /// Separate hits counter for the `hit!` macro.
           hits: HashMap<String, u64>,
       }
@@ -336,11 +341,16 @@ local_system:
           let mut data = profiler().lock().unwrap();
           let now = Instant::now();
 
+          // Increment sub-call counter for the parent.
+          if let Some(parent) = data.timing_stack.last_mut() {
+              parent.3 += 1;
+          }
+
           // Get parent's own time start if it exists. This immutable borrow ends immediately.
-          let parent_own_time_start_opt = data.timing_stack.last().map(|(_, _, t)| *t);
+          let parent_own_time_start_opt = data.timing_stack.last().map(|(_, _, t, _)| *t);
 
           // Collect the path to the parent node to avoid conflicting borrows.
-          let path: Vec<String> = data.timing_stack.iter().map(|(s, _, _)| s.clone()).collect();
+          let path: Vec<String> = data.timing_stack.iter().map(|(s, _, _, _)| s.clone()).collect();
 
           // Now, get a mutable reference to the parent node and traverse.
           let mut current_node = &mut data.call_tree;
@@ -359,7 +369,7 @@ local_system:
           new_node.hits += 1;
 
           // Push the new timer onto the stack.
-          data.timing_stack.push((name, now, now));
+          data.timing_stack.push((name, now, now, 0));
       }
 
       fn time_block_end() {
@@ -367,13 +377,21 @@ local_system:
           let now = Instant::now();
 
           // Pop the current timer from the stack.
-          if let Some((name, total_start_time, own_start_time)) = data.timing_stack.pop() {
+          if let Some((name, total_start_time, own_start_time, sub_calls)) = data.timing_stack.pop() {
               let total_duration = now.duration_since(total_start_time);
               let own_duration = now.duration_since(own_start_time);
 
+              // Total time correction: 1 for this block, +1 for each direct and indirect sub-call.
+              let total_correction = PROFILER_CORRECTION.saturating_mul((sub_calls + 1) as u32);
+
+              let corrected_total_duration = total_duration.saturating_sub(total_correction);
+              // Own time is only corrected for its own measurement overhead.
+              let corrected_own_duration = own_duration.saturating_sub(PROFILER_CORRECTION);
+
               // The `timing_stack` has been popped, so it now represents the parent path.
               // Collect the path to avoid conflicting borrows.
-              let parent_path: Vec<String> = data.timing_stack.iter().map(|(s, _, _)| s.clone()).collect();
+              let parent_path: Vec<String> =
+                  data.timing_stack.iter().map(|(s, _, _, _)| s.clone()).collect();
 
               // Get a mutable reference to the parent of the node that just ended.
               let mut parent_node = &mut data.call_tree;
@@ -383,8 +401,8 @@ local_system:
 
               // Get the node that ended and update its timings.
               let ended_node = parent_node.children.get_mut(&name).unwrap();
-              ended_node.total_time += total_duration;
-              ended_node.own_time += own_duration;
+              ended_node.total_time += corrected_total_duration;
+              ended_node.own_time += corrected_own_duration;
           }
 
           // Resume the new parent timer by updating its own-time start time.
@@ -438,7 +456,8 @@ local_system:
       #[macro_export]
       macro_rules! time {
           ($name:expr, $block:expr) => {{
-              let _guard = $crate::profiler::TimedBlockGuard::new(String::from($name));
+              let __profiler_name = ($name).into();
+              let _guard = $crate::profiler::TimedBlockGuard::new(__profiler_name);
               $block
           }};
       }
@@ -492,7 +511,8 @@ local_system:
           let result = quote! {
               #(#fn_attrs)*
               #fn_vis #fn_sig {
-                  let _guard = crate::profiler::TimedBlockGuard::new(#timer_name_expr);
+                  let __profiler_name = #timer_name_expr;
+                  let _guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
                   #fn_block
               }
           };
@@ -534,7 +554,8 @@ local_system:
           };
 
           let result = quote! {{
-              let _guard = crate::profiler::TimedBlockGuard::new(#name_code);
+              let __profiler_name = #name_code;
+              let _guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
               #expr
           }};
 
@@ -544,6 +565,9 @@ local_system:
       use std::collections::HashMap;
       use std::sync::{Mutex, OnceLock};
       use std::time::{Duration, Instant};
+
+      /// The measured overhead of a single timing block, used for correction.
+      const PROFILER_CORRECTION: Duration = Duration::from_nanos(1300);
 
       /// A node in the profiler's call tree.
       #[derive(Default, Clone)]
@@ -564,8 +588,8 @@ local_system:
           /// The root of the call tree. Its children are the top-level timed blocks.
           call_tree: ProfileNode,
           /// A stack to keep track of the current path in the call tree.
-          /// Each element is (name, start_time_for_total, start_time_for_own)
-          timing_stack: Vec<(String, Instant, Instant)>,
+          /// Each element is (name, start_time_for_total, start_time_for_own, sub_calls_count)
+          timing_stack: Vec<(String, Instant, Instant, u64)>,
           /// Separate hits counter for the `hit!` macro.
           hits: HashMap<String, u64>,
       }
@@ -794,11 +818,16 @@ local_system:
           let mut data = profiler().lock().unwrap();
           let now = Instant::now();
 
+          // Increment sub-call counter for the parent.
+          if let Some(parent) = data.timing_stack.last_mut() {
+              parent.3 += 1;
+          }
+
           // Get parent's own time start if it exists. This immutable borrow ends immediately.
-          let parent_own_time_start_opt = data.timing_stack.last().map(|(_, _, t)| *t);
+          let parent_own_time_start_opt = data.timing_stack.last().map(|(_, _, t, _)| *t);
 
           // Collect the path to the parent node to avoid conflicting borrows.
-          let path: Vec<String> = data.timing_stack.iter().map(|(s, _, _)| s.clone()).collect();
+          let path: Vec<String> = data.timing_stack.iter().map(|(s, _, _, _)| s.clone()).collect();
 
           // Now, get a mutable reference to the parent node and traverse.
           let mut current_node = &mut data.call_tree;
@@ -817,7 +846,7 @@ local_system:
           new_node.hits += 1;
 
           // Push the new timer onto the stack.
-          data.timing_stack.push((name, now, now));
+          data.timing_stack.push((name, now, now, 0));
       }
 
       fn time_block_end() {
@@ -825,13 +854,21 @@ local_system:
           let now = Instant::now();
 
           // Pop the current timer from the stack.
-          if let Some((name, total_start_time, own_start_time)) = data.timing_stack.pop() {
+          if let Some((name, total_start_time, own_start_time, sub_calls)) = data.timing_stack.pop() {
               let total_duration = now.duration_since(total_start_time);
               let own_duration = now.duration_since(own_start_time);
 
+              // Total time correction: 1 for this block, +1 for each direct and indirect sub-call.
+              let total_correction = PROFILER_CORRECTION.saturating_mul((sub_calls + 1) as u32);
+
+              let corrected_total_duration = total_duration.saturating_sub(total_correction);
+              // Own time is only corrected for its own measurement overhead.
+              let corrected_own_duration = own_duration.saturating_sub(PROFILER_CORRECTION);
+
               // The `timing_stack` has been popped, so it now represents the parent path.
               // Collect the path to avoid conflicting borrows.
-              let parent_path: Vec<String> = data.timing_stack.iter().map(|(s, _, _)| s.clone()).collect();
+              let parent_path: Vec<String> =
+                  data.timing_stack.iter().map(|(s, _, _, _)| s.clone()).collect();
 
               // Get a mutable reference to the parent of the node that just ended.
               let mut parent_node = &mut data.call_tree;
@@ -841,8 +878,8 @@ local_system:
 
               // Get the node that ended and update its timings.
               let ended_node = parent_node.children.get_mut(&name).unwrap();
-              ended_node.total_time += total_duration;
-              ended_node.own_time += own_duration;
+              ended_node.total_time += corrected_total_duration;
+              ended_node.own_time += corrected_own_duration;
           }
 
           // Resume the new parent timer by updating its own-time start time.
@@ -896,7 +933,8 @@ local_system:
       #[macro_export]
       macro_rules! time {
           ($name:expr, $block:expr) => {{
-              let _guard = $crate::profiler::TimedBlockGuard::new(String::from($name));
+              let __profiler_name = ($name).into();
+              let _guard = $crate::profiler::TimedBlockGuard::new(__profiler_name);
               $block
           }};
       }
@@ -973,7 +1011,8 @@ messages:
           let result = quote! {
               #(#fn_attrs)*
               #fn_vis #fn_sig {
-                  let _guard = crate::profiler::TimedBlockGuard::new(#timer_name_expr);
+                  let __profiler_name = #timer_name_expr;
+                  let _guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
                   #fn_block
               }
           };
@@ -1015,7 +1054,8 @@ messages:
           };
 
           let result = quote! {{
-              let _guard = crate::profiler::TimedBlockGuard::new(#name_code);
+              let __profiler_name = #name_code;
+              let _guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
               #expr
           }};
 
@@ -1030,6 +1070,9 @@ messages:
       use std::collections::HashMap;
       use std::sync::{Mutex, OnceLock};
       use std::time::{Duration, Instant};
+
+      /// The measured overhead of a single timing block, used for correction.
+      const PROFILER_CORRECTION: Duration = Duration::from_nanos(1300);
 
       /// A node in the profiler's call tree.
       #[derive(Default, Clone)]
@@ -1050,8 +1093,8 @@ messages:
           /// The root of the call tree. Its children are the top-level timed blocks.
           call_tree: ProfileNode,
           /// A stack to keep track of the current path in the call tree.
-          /// Each element is (name, start_time_for_total, start_time_for_own)
-          timing_stack: Vec<(String, Instant, Instant)>,
+          /// Each element is (name, start_time_for_total, start_time_for_own, sub_calls_count)
+          timing_stack: Vec<(String, Instant, Instant, u64)>,
           /// Separate hits counter for the `hit!` macro.
           hits: HashMap<String, u64>,
       }
@@ -1280,11 +1323,16 @@ messages:
           let mut data = profiler().lock().unwrap();
           let now = Instant::now();
 
+          // Increment sub-call counter for the parent.
+          if let Some(parent) = data.timing_stack.last_mut() {
+              parent.3 += 1;
+          }
+
           // Get parent's own time start if it exists. This immutable borrow ends immediately.
-          let parent_own_time_start_opt = data.timing_stack.last().map(|(_, _, t)| *t);
+          let parent_own_time_start_opt = data.timing_stack.last().map(|(_, _, t, _)| *t);
 
           // Collect the path to the parent node to avoid conflicting borrows.
-          let path: Vec<String> = data.timing_stack.iter().map(|(s, _, _)| s.clone()).collect();
+          let path: Vec<String> = data.timing_stack.iter().map(|(s, _, _, _)| s.clone()).collect();
 
           // Now, get a mutable reference to the parent node and traverse.
           let mut current_node = &mut data.call_tree;
@@ -1303,7 +1351,7 @@ messages:
           new_node.hits += 1;
 
           // Push the new timer onto the stack.
-          data.timing_stack.push((name, now, now));
+          data.timing_stack.push((name, now, now, 0));
       }
 
       fn time_block_end() {
@@ -1311,13 +1359,21 @@ messages:
           let now = Instant::now();
 
           // Pop the current timer from the stack.
-          if let Some((name, total_start_time, own_start_time)) = data.timing_stack.pop() {
+          if let Some((name, total_start_time, own_start_time, sub_calls)) = data.timing_stack.pop() {
               let total_duration = now.duration_since(total_start_time);
               let own_duration = now.duration_since(own_start_time);
 
+              // Total time correction: 1 for this block, +1 for each direct and indirect sub-call.
+              let total_correction = PROFILER_CORRECTION.saturating_mul((sub_calls + 1) as u32);
+
+              let corrected_total_duration = total_duration.saturating_sub(total_correction);
+              // Own time is only corrected for its own measurement overhead.
+              let corrected_own_duration = own_duration.saturating_sub(PROFILER_CORRECTION);
+
               // The `timing_stack` has been popped, so it now represents the parent path.
               // Collect the path to avoid conflicting borrows.
-              let parent_path: Vec<String> = data.timing_stack.iter().map(|(s, _, _)| s.clone()).collect();
+              let parent_path: Vec<String> =
+                  data.timing_stack.iter().map(|(s, _, _, _)| s.clone()).collect();
 
               // Get a mutable reference to the parent of the node that just ended.
               let mut parent_node = &mut data.call_tree;
@@ -1327,8 +1383,8 @@ messages:
 
               // Get the node that ended and update its timings.
               let ended_node = parent_node.children.get_mut(&name).unwrap();
-              ended_node.total_time += total_duration;
-              ended_node.own_time += own_duration;
+              ended_node.total_time += corrected_total_duration;
+              ended_node.own_time += corrected_own_duration;
           }
 
           // Resume the new parent timer by updating its own-time start time.
@@ -1382,7 +1438,8 @@ messages:
       #[macro_export]
       macro_rules! time {
           ($name:expr, $block:expr) => {{
-              let _guard = $crate::profiler::TimedBlockGuard::new(String::from($name));
+              let __profiler_name = ($name).into();
+              let _guard = $crate::profiler::TimedBlockGuard::new(__profiler_name);
               $block
           }};
       }
@@ -1410,165 +1467,125 @@ messages:
       ```
     metadata:
       filename: src/profiler.rs
-  - user: |-
-      Modify this so each time a time is registered, a small correction is made to account for the time it took to actually make that measurement. I've measured that correction to be 1.3 microseconds.
-
-      Subtract it from own time, of course. But also subtract it from total time. Account for all subcalls, ie all timings that occur within the scope of this timing. Multiply this number by the correction amount and subtract it from the total. (You don't have to compute it this way - I'm just describing the mathematical properties it should have.)
-
-      Also, there can be a 'name' expression passed to the macro. This expression might contain code that needs to execute. We don't want to include the time it takes to construct the name. Account for that too.
+  - user: Include a column for percentage own time.
     metadata:
   - assistant: |-
-      Hello! As a helpful assistant, I'd be happy to help you with your code. Modifying a profiler to account for its own overhead is a great way to improve its accuracy. Here are the necessary changes to implement the timing correction and ensure name-creation time is not measured.
+      Hello! I've updated your profiler to include a column for the percentage of own time in both the hierarchical and flat summaries. This new column, labeled "% Own", shows what percentage of a function's total execution time was spent within the function itself, as opposed to its children.
 
-      ### `profiler_macro/src/lib.rs`
-
-      I'll adjust the macros to explicitly evaluate the timer name before creating the `TimedBlockGuard`. This ensures that any computation for the name happens before the timer starts.
-
-      ```diff
-      --- a/profiler_macro/src/lib.rs
-      +++ b/profiler_macro/src/lib.rs
-      @@ -23,8 +23,9 @@
-           let result = quote! {
-               #(#fn_attrs)*
-               #fn_vis #fn_sig {
-      -            let _guard = crate::profiler::TimedBlockGuard::new(#timer_name_expr);
-      +            let __profiler_name = #timer_name_expr;
-      +            let _guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
-                   #fn_block
-               }
-           };
-      @@ -60,8 +61,9 @@
-           };
-       
-           let result = quote! {{
-      -        let _guard = crate::profiler::TimedBlockGuard::new(#name_code);
-      +        let __profiler_name = #name_code;
-      +        let _guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
-               #expr
-           }};
-       
-           result.into()
-       }
-
-      ```
-
-      ### `src/profiler.rs`
-
-      Here, I'll introduce the 1.3 microsecond correction. I'll track the number of sub-calls to correctly adjust the `total_time` and apply a single correction to `own_time`. I'll also update the `time!` macro for consistency.
+      Here are the changes for `src/profiler.rs`:
 
       ```diff
       --- a/src/profiler.rs
       +++ b/src/profiler.rs
-      @@ -1,6 +1,9 @@
-       use std::collections::HashMap;
-       use std::sync::{Mutex, OnceLock};
-       use std::time::{Duration, Instant};
+      @@ -90,30 +90,37 @@
+               (Duration::from_secs(0), Duration::from_secs(0))
+           };
+       
+      -    let percentage = if !parent_total_time.is_zero() {
+      +    let percentage_of_parent = if !parent_total_time.is_zero() {
+               (node.total_time.as_secs_f64() / parent_total_time.as_secs_f64()) * 100.0
+           } else {
+               0.0
+           };
+       
+      +    let percentage_own = if !node.total_time.is_zero() {
+      +        (node.own_time.as_secs_f64() / node.total_time.as_secs_f64()) * 100.0
+      +    } else {
+      +        0.0
+      +    };
       +
-      +/// The measured overhead of a single timing block, used for correction.
-      +const PROFILER_CORRECTION: Duration = Duration::from_nanos(1300);
+           let total_str = format_duration(node.total_time);
+           let own_str = format_duration(node.own_time);
+           let total_per_hit_str = format_duration(total_per_hit);
+           let own_per_hit_str = format_duration(own_per_hit);
+      -    let percentage_str = format!("{:.1}%", percentage);
+      +    let percentage_of_parent_str = format!("{:.1}%", percentage_of_parent);
+      +    let percentage_own_str = format!("{:.1}%", percentage_own);
        
-       /// A node in the profiler's call tree.
-       #[derive(Default, Clone)]
-      @@ -20,8 +23,8 @@
-           /// The root of the call tree. Its children are the top-level timed blocks.
-           call_tree: ProfileNode,
-           /// A stack to keep track of the current path in the call tree.
-      -    /// Each element is (name, start_time_for_total, start_time_for_own)
-      -    timing_stack: Vec<(String, Instant, Instant)>,
-      +    /// Each element is (name, start_time_for_total, start_time_for_own, sub_calls_count)
-      +    timing_stack: Vec<(String, Instant, Instant, u64)>,
-           /// Separate hits counter for the `hit!` macro.
-           hits: HashMap<String, u64>,
-       }
-      @@ -263,13 +266,18 @@
-       fn time_block_start(name: String) {
-           let mut data = profiler().lock().unwrap();
-           let now = Instant::now();
+           println!(
+      -        "{:>10} {:>15} {:>15} {:>15} {:>15} {:>15}  {}",
+      +        "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10} {:>15}  {}",
+               node.hits,
+               total_str,
+               total_per_hit_str,
+               own_str,
+               own_per_hit_str,
+      -        percentage_str,
+      +        percentage_own_str,
+      +        percentage_of_parent_str,
+               name_with_indent
+           );
+       
+      @@ -142,8 +149,15 @@
+           if !no_timing_data {
+               println!("\n[Hierarchical Timings]");
+               println!(
+      -            "{:>10} {:>15} {:>15} {:>15} {:>15} {:>15}  {}",
+      -            "Hits", "Total Time", "Total/Hit", "Own Time", "Own/Hit", "% of Parent", "Name"
+      +            "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10} {:>15}  {}",
+      +            "Hits",
+      +            "Total Time",
+      +            "Total/Hit",
+      +            "Own Time",
+      +            "Own/Hit",
+      +            "% Own",
+      +            "% of Parent",
+      +            "Name"
+               );
+       
+               let root_total_time: Duration = data
+      @@ -198,8 +212,15 @@
+       
+               println!("\n[Flat Timings]");
+               println!(
+      -            "{:>10} {:>15} {:>15} {:>15} {:>15}  {}",
+      -            "Hits", "Total Time", "Total/Hit", "Own Time", "Own/Hit", "Name"
+      +            "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10}  {}",
+      +            "Hits",
+      +            "Total Time",
+      +            "Total/Hit",
+      +            "Own Time",
+      +            "Own/Hit",
+      +            "% Own",
+      +            "Name"
+               );
+       
+               let mut sorted_list: Vec<_> = flat_map.iter().collect();
+      @@ -216,15 +237,22 @@
+                       (Duration::from_secs(0), Duration::from_secs(0))
+                   };
+       
+      +            let percentage_own = if !node.total_time.is_zero() {
+      +                (node.own_time.as_secs_f64() / node.total_time.as_secs_f64()) * 100.0
+      +            } else {
+      +                0.0
+      +            };
       +
-      +    // Increment sub-call counter for the parent.
-      +    if let Some(parent) = data.timing_stack.last_mut() {
-      +        parent.3 += 1;
-      +    }
+                   let total_str = format_duration(node.total_time);
+                   let own_str = format_duration(node.own_time);
+                   let total_per_hit_str = format_duration(total_per_hit);
+                   let own_per_hit_str = format_duration(own_per_hit);
+      +            let percentage_own_str = format!("{:.1}%", percentage_own);
        
-           // Get parent's own time start if it exists. This immutable borrow ends immediately.
-      -    let parent_own_time_start_opt = data.timing_stack.last().map(|(_, _, t)| *t);
-      +    let parent_own_time_start_opt = data.timing_stack.last().map(|(_, _, t, _)| *t);
-       
-           // Collect the path to the parent node to avoid conflicting borrows.
-      -    let path: Vec<String> = data.timing_stack.iter().map(|(s, _, _)| s.clone()).collect();
-      +    let path: Vec<String> = data.timing_stack.iter().map(|(s, _, _, _)| s.clone()).collect();
-       
-           // Now, get a mutable reference to the parent node and traverse.
-           let mut current_node = &mut data.call_tree;
-      @@ -287,7 +295,7 @@
-           new_node.hits += 1;
-       
-           // Push the new timer onto the stack.
-      -    data.timing_stack.push((name, now, now));
-      +    data.timing_stack.push((name, now, now, 0));
-       }
-       
-       fn time_block_end() {
-      @@ -295,14 +303,23 @@
-           let now = Instant::now();
-       
-           // Pop the current timer from the stack.
-      -    if let Some((name, total_start_time, own_start_time)) = data.timing_stack.pop() {
-      +    if let Some((name, total_start_time, own_start_time, sub_calls)) = data.timing_stack.pop() {
-               let total_duration = now.duration_since(total_start_time);
-               let own_duration = now.duration_since(own_start_time);
-       
-      +        // Total time correction: 1 for this block, +1 for each direct and indirect sub-call.
-      +        let total_correction = PROFILER_CORRECTION.saturating_mul((sub_calls + 1) as u32);
-      +
-      +        let corrected_total_duration = total_duration.saturating_sub(total_correction);
-      +        // Own time is only corrected for its own measurement overhead.
-      +        let corrected_own_duration = own_duration.saturating_sub(PROFILER_CORRECTION);
-      +
-               // The `timing_stack` has been popped, so it now represents the parent path.
-               // Collect the path to avoid conflicting borrows.
-      -        let parent_path: Vec<String> = data.timing_stack.iter().map(|(s, _, _)| s.clone()).collect();
-      +        let parent_path: Vec<String> =
-      +            data.timing_stack.iter().map(|(s, _, _, _)| s.clone()).collect();
-       
-               // Get a mutable reference to the parent of the node that just ended.
-               let mut parent_node = &mut data.call_tree;
-      @@ -312,8 +329,8 @@
-       
-               // Get the node that ended and update its timings.
-               let ended_node = parent_node.children.get_mut(&name).unwrap();
-      -        ended_node.total_time += total_duration;
-      -        ended_node.own_time += own_duration;
-      +        ended_node.total_time += corrected_total_duration;
-      +        ended_node.own_time += corrected_own_duration;
+                   println!(
+      -                "{:>10} {:>15} {:>15} {:>15} {:>15}  {}",
+      -                node.hits, total_str, total_per_hit_str, own_str, own_per_hit_str, name
+      +                "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10}  {}",
+      +                node.hits, total_str, total_per_hit_str, own_str, own_per_hit_str,
+      +                percentage_own_str, name
+                   );
+               }
            }
-       
-           // Resume the new parent timer by updating its own-time start time.
-      @@ -356,8 +373,9 @@
-       #[macro_export]
-       macro_rules! time {
-           ($name:expr, $block:expr) => {{
-      -        let _guard = $crate::profiler::TimedBlockGuard::new(String::from($name));
-      +        let __profiler_name = ($name).into();
-      +        let _guard = $crate::profiler::TimedBlockGuard::new(__profiler_name);
-               $block
-           }};
-       }
 
       ```
 
-      These changes should correctly implement the desired profiling adjustments. Let me know if you have any other questions
+      No changes were necessary for `profiler_macro/src/lib.rs`. Let me know if you have any other questions
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: profiler_macro/src/lib.rs
-      Applying patch to 'profiler_macro/src/lib.rs' using custom patcher...
-      Successfully applied patch and wrote to profiler_macro/src/lib.rs.
-
-      --- Processing Diff Block 2 ---
       Identified target file: src/profiler.rs
       Applying patch to 'src/profiler.rs' using custom patcher...
       Successfully applied patch and wrote to src/profiler.rs.
