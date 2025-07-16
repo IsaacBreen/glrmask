@@ -545,6 +545,7 @@ impl GSSPop<'_> {
     }
 
     /// Converts the `GSSPop` into a single `GSSNode`.
+    #[time_it("GSSPop::to_node")]
     pub fn to_node(&self) -> GSSNode {
         let llm_vocab = self.parent_node.llm_tokens().llm_vocab().clone();
         // The new node is an aggregation point, so it has no local constraints of its own.
