@@ -1135,13 +1135,16 @@ impl<'a> IncrementalParser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*; // Imports GrammarDefinition, CompiledGrammar, etc.
-    use crate::finite_automata::eat_u8;
+    use crate::finite_automata::{eat_u8, eat_u8_seq};
     use crate::interface::tokenizer_combinators::{eat_u8_fast, eat_u8_negation_fast, eat_u8_range_fast, repeat0_fast};
     use crate::{choice_fast, groups, seq_fast};
     use bitvec::prelude::*;
     use std::sync::{Arc, Mutex};
     use crate::constraint::LLMTokenBV;
     use crate::datastructures::hybrid_bitset::HybridBitset;
+
+    use crate::glr::grammar::{NonTerminal as NT, Production as Prod, Symbol as Sym, Terminal};
+    use crate::finite_automata::{Expr as RegexExpr};
 
     fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> HybridBitset {
         let mut bitvec = BitVec::new();
@@ -1657,7 +1660,7 @@ mod tests {
 
         println!("Building grammar for sentence test...");
         let grammar_def = GrammarDefinition::from_exprs(grammar_exprs, terminals).expect("Failed to create grammar definition");
-        let compiled_grammar = Compiled_Grammar::from_definition(std::sync::Arc::new(grammar_def));
+        let compiled_grammar = CompiledGrammar::from_definition(std::sync::Arc::new(grammar_def));
         println!("{}", compiled_grammar); // For debugging grammar structure
 
         // Setup LLMTokenMap
