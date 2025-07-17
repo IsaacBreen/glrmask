@@ -396,29 +396,58 @@ impl BitAndAssign for U8Set {
 
 impl std::fmt::Debug for U8Set {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // To avoid overly long debug output for dense sets,
-        // consider using the Display format or a summary if it's very full.
-        // For now, let's keep it similar to Display but with a "U8Set" prefix.
-        let mut items_str = String::new();
-        let mut count = 0;
-        const MAX_DEBUG_ITEMS: usize = 16; // Show up to 16 items then "..."
+        let mut ranges = Vec::new();
+        if !self.is_empty() {
+            let mut iter = self.iter();
+            // Safe to unwrap due to is_empty check
+            let first = iter.next().unwrap();
+            let mut current_start = first;
+            let mut current_prev = first;
 
-        for item in self.iter() {
-            if count > 0 {
-                items_str.push_str(", ");
-            }
-            if count < MAX_DEBUG_ITEMS {
-                 if item.is_ascii_graphic() || item == b' ' {
-                    items_str.push_str(&format!("'{}'", item as char));
+            for i in iter {
+                if i == current_prev + 1 {
+                    current_prev = i;
                 } else {
-                    items_str.push_str(&format!("0x{:02x}", item));
+                    ranges.push((current_start, current_prev));
+                    current_start = i;
+                    current_prev = i;
                 }
-            } else if count == MAX_DEBUG_ITEMS {
-                items_str.push_str("...");
             }
-            count += 1;
+            ranges.push((current_start, current_prev));
         }
-        write!(f, "U8Set([{}] len: {})", items_str, self.len())
+
+        let format_byte = |b: u8| -> String {
+            if b.is_ascii_graphic() || b == b' ' {
+                format!("'{}'", b as char)
+            } else {
+                format!("0x{:02x}", b)
+            }
+        };
+
+        let mut parts = Vec::new();
+        for &(start_val, end_val) in &ranges {
+            // Using saturating_sub to handle u8 boundaries gracefully.
+            let len = end_val.saturating_sub(start_val) as usize + 1;
+            if len >= 3 {
+                parts.push(format!("{} - {}", format_byte(start_val), format_byte(end_val)));
+            } else {
+                parts.push(format_byte(start_val));
+                if len == 2 {
+                    parts.push(format_byte(end_val));
+                }
+            }
+        }
+
+        const MAX_DEBUG_PARTS: usize = 16;
+        let parts_str = if parts.len() > MAX_DEBUG_PARTS {
+            let mut s = parts[..MAX_DEBUG_PARTS].join(", ");
+            s.push_str(", ...");
+            s
+        } else {
+            parts.join(", ")
+        };
+
+        write!(f, "U8Set([{}], len: {})", parts_str, self.len())
     }
 }
 
@@ -619,12 +648,19 @@ mod tests {
         assert_eq!(format!("{}", set4), "['e', 'h', 'l', 'o']"); // 'l' is unique
 
         // Debug format
-        let debug_str = format!("{:?}", set1);
-        assert!(debug_str.starts_with("U8Set(["));
-        assert!(debug_str.contains("0x00, 0x01, 0x02"));
-        assert!(debug_str.contains("'a', 'b', 'c'"));
-        assert!(debug_str.contains("'z'"));
-        assert!(debug_str.contains("0x0f"));
-        assert!(debug_str.ends_with("] len: 8)"));
+        assert_eq!(format!("{:?}", set1), "U8Set([0x00 - 0x02, 0x0f, 'a' - 'c', 'z'], len: 8)");
+        assert_eq!(format!("{:?}", set2), "U8Set(['a', 'c', 'e'], len: 3)");
+        assert_eq!(format!("{:?}", set3), "U8Set([0x0a - 0x0c], len: 3)");
+        assert_eq!(format!("{:?}", set4), "U8Set(['e', 'h', 'l', 'o'], len: 4)");
+
+        // Test with many non-consecutive items to check truncation
+        let mut many_items_set = U8Set::new();
+        for i in (0..50).step_by(2) {
+            many_items_set.insert(i); // 0, 2, 4, ... 48. 25 items.
+        }
+        assert_eq!(
+            format!("{:?}", many_items_set),
+            "U8Set([0x00, 0x02, 0x04, 0x06, 0x08, 0x0a, 0x0c, 0x0e, 0x10, 0x12, 0x14, 0x16, 0x18, 0x1a, 0x1c, 0x1e, ...], len: 25)"
+        );
     }
 }
