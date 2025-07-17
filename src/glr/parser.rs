@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use crate::datastructures::gss::{print_gss_forest};
 use crate::datastructures::gss::{gather_gss_stats, find_longest_path, GSSNode, GSSStats, GSSPeek};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReduces, Stage7ShiftsAndReducesLookaheadValue, Stage7Table, StateID, TerminalID};
+use crate::glr::table::{Goto, NonTerminalID, ProductionID, Stage7ShiftsAndReducesLookaheadValue, Stage7Table, StateID, TerminalID};
 use crate::constraint::{LLMTokenBV, LLMVocab}; // Import LLMTokenInfo
 
 use bimap::BiBTreeMap;
@@ -17,6 +17,7 @@ use std::collections::BTreeMap as StdMap;
 use profiler_macro::{time_it, timeit};
 use crate::datastructures::gss::Acc;
 use crate::glr::items::{compute_closure, Item};
+use crate::glr::table::{Stage7Phase1ShiftsAndReduces, Stage7Phase2ShiftsAndReduces, Stage7Phase3DefaultReduce, Reduce};
 
 pub trait DynEq {
     fn dyn_eq(&self, other: &dyn Any) -> bool;
@@ -257,7 +258,7 @@ impl GLRParser {
     pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
         GLRParserState {
             parser: self,
-            active_state: ParseState::new(llm_vocab.clone()),
+            active_state: ParseState::new(None),
             action_not_found_states: ParseState::new(None),
             cycled_states: ParseState::new(None),
         }
@@ -265,20 +266,66 @@ impl GLRParser {
 
     pub fn init_glr_parser_with_acc(&self, initial_acc: Acc) -> GLRParserState { // No longer generic
         let initial_parse_state = self.init_parse_state_with_acc(initial_acc);
-        GLRParserState {
+        let mut parser_state = GLRParserState {
             parser: self,
             active_state: initial_parse_state,
             action_not_found_states: ParseState::new(None),
             cycled_states: ParseState::new(None),
+        };
+        // Mini phase 3 on initialization
+        let mut post_shift_todo: VecDeque<ParseState> = VecDeque::new();
+        post_shift_todo.push_back(parser_state.active_state.clone());
+        let mut next = ParseState::from_existing(parser_state.active_state.clone());
+
+        while let Some(state) = post_shift_todo.pop_front() {
+            let mut has_default_reduce = false;
+            for peek in state.stack.peek_iter() {
+                let row = &parser_state.parser.stage_7_table[&peek.edge_value().state_id];
+                if let Some(ref r) = row.phase3_default_reduces.reduce {
+                    has_default_reduce = true;
+                    let new_stack = parser_state.reduce_and_goto(&peek, r.nonterminal_id, r.len);
+                    if !new_stack.is_empty() {
+                        post_shift_todo.push_back(ParseState { stack: new_stack });
+                    }
+                }
+            }
+            if !has_default_reduce {
+                next.merge(state);
+            }
         }
+        parser_state.active_state = next;
+        parser_state
     }
     pub fn init_glr_parser_from_parse_state(&self, parse_state: ParseState) -> GLRParserState { // No longer generic
-        GLRParserState {
+        let mut parser_state = GLRParserState {
             parser: self,
             active_state: parse_state,
             action_not_found_states: ParseState::new(None),
             cycled_states: ParseState::new(None),
+        };
+        // Mini phase 3 on initialization
+        let mut post_shift_todo: VecDeque<ParseState> = VecDeque::new();
+        post_shift_todo.push_back(parser_state.active_state.clone());
+        let mut next = ParseState::from_existing(parser_state.active_state.clone());
+
+        while let Some(state) = post_shift_todo.pop_front() {
+            let mut has_default_reduce = false;
+            for peek in state.stack.peek_iter() {
+                let row = &parser_state.parser.stage_7_table[&peek.edge_value().state_id];
+                if let Some(ref r) = row.phase3_default_reduces.reduce {
+                    has_default_reduce = true;
+                    let new_stack = parser_state.reduce_and_goto(&peek, r.nonterminal_id, r.len);
+                    if !new_stack.is_empty() {
+                        post_shift_todo.push_back(ParseState { stack: new_stack });
+                    }
+                }
+            }
+            if !has_default_reduce {
+                next.merge(state);
+            }
         }
+        parser_state.active_state = next;
+        parser_state
     }
 
     pub fn init_parse_state(&self, llm_vocab: Option<Arc<LLMVocab>>) -> ParseState { // No longer generic
@@ -335,57 +382,59 @@ impl GLRParser {
 
             // Get and print actions
             if let Some(row) = self.stage_7_table.get(&state_id) {
-                writeln!(&mut result, "  Actions:").unwrap();
-                match &row.shifts_and_reduces {
-                    Stage7ShiftsAndReduces::Lookahead(actions) => {
-                        if actions.is_empty() {
-                            writeln!(&mut result, "    (No shift/reduce actions)").unwrap();
-                        } else {
-                            // Sort by terminal name for consistent output
-                            let mut sorted_actions: Vec<_> = actions.iter().collect();
-                            sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
+                writeln!(&mut result, "  Phase 2 Actions (Full Lookahead):").unwrap();
+                let actions = &row.phase2_shifts_and_reduces;
+                if actions.is_empty() {
+                    writeln!(&mut result, "    (No lookahead actions)").unwrap();
+                } else {
+                    // Sort by terminal name for consistent output
+                    let mut sorted_actions: Vec<_> = actions.iter().collect();
+                    sorted_actions.sort_by_key(|(tid, _)| self.terminal_map.get_by_right(tid).unwrap());
 
-                            for (terminal_id, action) in sorted_actions {
-                                let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
-                                write!(&mut result, "    - On '{}': ", terminal).unwrap();
-                                match action {
-                                    Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-                                        writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
-                                    }
-                                    Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
-                                        if production_ids.len() == 1 {
-                                            let prod_id = production_ids.iter().next().unwrap();
+                    for (terminal_id, action) in sorted_actions {
+                        let terminal = &self.terminal_map.get_by_right(terminal_id).unwrap();
+                        write!(&mut result, "    - On '{}': ", terminal).unwrap();
+                        match action {
+                            Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                                writeln!(&mut result, "Shift to State {}", next_state_id.0).unwrap();
+                            }
+                            Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
+                                if production_ids.len() == 1 {
+                                    let prod_id = production_ids.iter().next().unwrap();
+                                    let prod = &self.productions[prod_id.0];
+                                    writeln!(&mut result, "Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
+                                } else {
+                                    let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
+                                    writeln!(&mut result, "Reduce by rules {}", pids.join(", ")).unwrap();
+                                }
+                            }
+                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                writeln!(&mut result, "Conflict:").unwrap();
+                                if let Some(shift_state) = shift {
+                                    writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
+                                }
+                                for (_len, nts) in reduces {
+                                    for (_nt_id, prod_ids) in nts {
+                                        for prod_id in prod_ids {
                                             let prod = &self.productions[prod_id.0];
-                                            writeln!(&mut result, "Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
-                                        } else {
-                                            let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
-                                            writeln!(&mut result, "Reduce by rules {}", pids.join(", ")).unwrap();
-                                        }
-                                    }
-                                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                                        writeln!(&mut result, "Conflict:").unwrap();
-                                        if let Some(shift_state) = shift {
-                                            writeln!(&mut result, "      - Shift to State {}", shift_state.0).unwrap();
-                                        }
-                                        for (_len, nts) in reduces {
-                                            for (_nt_id, prod_ids) in nts {
-                                                for prod_id in prod_ids {
-                                                    let prod = &self.productions[prod_id.0];
-                                                    writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
-                                                }
-                                            }
+                                            writeln!(&mut result, "      - Reduce by rule #{} ({})", prod_id.0, prod).unwrap();
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                    Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, production_ids } => {
-                        let nt_name = self.non_terminal_map.get_by_right(nonterminal_id).unwrap();
-                        let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-                        writeln!(&mut result, "    - Default Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", ")).unwrap();
-                    }
                 }
+
+                writeln!(&mut result, "  Phase 3 Default Action:").unwrap();
+                if let Some(reduce_action) = &row.phase3_default_reduces.reduce {
+                    let nt_name = self.non_terminal_map.get_by_right(&reduce_action.nonterminal_id).unwrap();
+                    let pids: Vec<String> = reduce_action.production_ids.iter().map(|p| p.0.to_string()).collect();
+                    writeln!(&mut result, "    - Default Reduce {} (len {}) via rules [{}]", nt_name.0, reduce_action.len, pids.join(", ")).unwrap();
+                } else {
+                    writeln!(&mut result, "    (None - state will be merged after shift)").unwrap();
+                }
+
 
                 writeln!(&mut result, "  Gotos:").unwrap();
                 if row.gotos.is_empty() {
@@ -472,44 +521,45 @@ impl Display for GLRParser {
                 }
             }
 
-            writeln!(f, "    Actions:")?;
-            match &row.shifts_and_reduces {
-                Stage7ShiftsAndReduces::Lookahead(actions) => {
-                    for (&terminal_id, action) in actions {
-                        let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
-                        match action {
-                            Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
-                                writeln!(f, "      - {} -> Shift {}", terminal, next_state_id.0)?;
-                            }
-                            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
-                                let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
-                                let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-                                writeln!(f, "      - {} -> Reduce {} (len {}) via rules [{}]", terminal, nt_name.0, len, pids.join(", "))?;
-                            }
-                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                                writeln!(f, "      - {} -> Conflict:", terminal)?;
-                                if let Some(shift_state) = shift {
-                                    writeln!(f, "        - Shift {}", shift_state.0)?;
-                                }
-                                for (len, nts) in reduces {
-                                    writeln!(f, "        - Reduce (len {}):", len)?;
-                                    for (nt_id, prod_ids) in nts {
-                                        let nt = non_terminal_map.get_by_right(nt_id).unwrap();
-                                        for prod_id_val in prod_ids {
-                                            let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
-                                            writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
-                                        }
-                                    }
+            writeln!(f, "    Actions (Phase 2):")?;
+            let actions = &row.phase2_shifts_and_reduces;
+            for (&terminal_id, action) in actions {
+                let terminal = terminal_map.get_by_right(&terminal_id).unwrap();
+                match action {
+                    Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                        writeln!(f, "      - {} -> Shift {}", terminal, next_state_id.0)?;
+                    }
+                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nonterminal, len, production_ids } => {
+                        let nt_name = non_terminal_map.get_by_right(nonterminal).unwrap();
+                        let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
+                        writeln!(f, "      - {} -> Reduce {} (len {}) via rules [{}]", terminal, nt_name.0, len, pids.join(", "))?;
+                    }
+                    Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                        writeln!(f, "      - {} -> Conflict:", terminal)?;
+                        if let Some(shift_state) = shift {
+                            writeln!(f, "        - Shift {}", shift_state.0)?;
+                        }
+                        for (len, nts) in reduces {
+                            writeln!(f, "        - Reduce (len {}):", len)?;
+                            for (nt_id, prod_ids) in nts {
+                                let nt = non_terminal_map.get_by_right(nt_id).unwrap();
+                                for prod_id_val in prod_ids {
+                                    let prod = self.productions.get(prod_id_val.0).expect(format!("Production ID {} not found in productions", prod_id_val.0).as_str());
+                                    writeln!(f, "          - {} -> {}", nt.0, prod.lhs.0)?;
                                 }
                             }
                         }
                     }
                 }
-                Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, production_ids } => {
-                    let nt_name = non_terminal_map.get_by_right(nonterminal_id).unwrap();
-                    let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-                    writeln!(f, "      - Default Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
-                }
+            }
+
+            writeln!(f, "    Default Action (Phase 3):")?;
+            if let Some(reduce) = &row.phase3_default_reduces.reduce {
+                let nt_name = non_terminal_map.get_by_right(&reduce.nonterminal_id).unwrap();
+                let pids: Vec<String> = reduce.production_ids.iter().map(|p| p.0.to_string()).collect();
+                writeln!(f, "      - Default Reduce {} (len {}) via rules [{}]", nt_name.0, reduce.len, pids.join(", "))?;
+            } else {
+                writeln!(f, "      - None (Merge state)")?;
             }
 
             writeln!(f, "    Gotos:")?;
@@ -612,192 +662,85 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     #[time_it("GLRParserState::step")]
     pub fn step(&mut self, token_id: TerminalID) {
-        // timeit!(format!("GLRParserState::step({})", self.parser.terminal_map.get_by_right(&token_id).map_or("Unknown".to_string(), |t| t.to_string())), {
         if Some(token_id) == self.parser.ignore_terminal_id {
             crate::debug!(4, "Ignoring token {} ({:?})", token_id.0, self.parser.terminal_map.get_by_right(&token_id));
             return;
         }
 
-        // timeit!(format!("GLRParserState::step({} ({:?})", token_id.0, self.parser.terminal_map.get_by_right(&token_id)), {
         crate::debug!(4, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
         self.log_gss("Step-start", token_id);
 
-        let mut todo: Vec<ParseState> = Vec::new();
-        todo.push(ParseState { stack: self.active_state.stack.clone() });
+        let mut reducers_todo: VecDeque<ParseState> = VecDeque::new();
+        reducers_todo.push_back(ParseState { stack: self.active_state.stack.clone() });
 
-        // States obtainable through *shift* actions.  We will process any
-        // cascading `DefaultReduce` actions on these after the initial loop.
         let mut post_shift_todo: VecDeque<ParseState> = VecDeque::new();
-
         let mut next = ParseState::from_existing(self.active_state.clone());
-        // let mut not_found = ParseState::new(llm_vocab.clone());
 
-        while let Some(state) = todo.pop() {
-            crate::debug!(6, "Processing state: {}", print_gss_forest(&[state.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
+        // --- Phase 1/2: Process lookahead-based actions ---
+        while let Some(state) = reducers_todo.pop_front() {
             for peek in state.stack.peek_iter() {
                 let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-                match &row.shifts_and_reduces {
-                    Stage7ShiftsAndReduces::Lookahead(actions) => {
-                        match actions.get(&token_id) {
-                            Some(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
-                                timeit!("GLRParserState::step::shift", {
-                                crate::debug!(4, "Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
+                // We use phase1 actions here, which exclude the default reduce action,
+                // as that should have been handled at the end of the previous step.
+                if let Some(action) = row.phase1_shifts_and_reduces.get(&token_id) {
+                    match action {
+                        Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
+                            let stack_for_push = peek.to_arc_node();
+                            let new_content = ParseStateEdgeContent { state_id: *to };
+                            let new_parse_state = self.push_state(&stack_for_push, new_content);
+                            post_shift_todo.push_back(new_parse_state);
+                        }
+                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, .. } => {
+                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+                            if !s_new_arc.is_empty() {
+                                reducers_todo.push_back(ParseState { stack: s_new_arc });
+                            }
+                        }
+                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                            if let Some(to) = shift {
                                 let stack_for_push = peek.to_arc_node();
                                 let new_content = ParseStateEdgeContent { state_id: *to };
-                                crate::debug!(6, "Pushing to next state: {}", print_gss_forest(&[stack_for_push.clone()], None, 30, &self.parser.terminal_map, None, None));
                                 let new_parse_state = self.push_state(&stack_for_push, new_content);
-                                // Do *not* merge into `next` yet.  We first have to
-                                // process any automatic `DefaultReduce` steps that
-                                // may apply *after* the shift.
                                 post_shift_todo.push_back(new_parse_state);
-                                })
                             }
-
-                            Some(Stage7ShiftsAndReducesLookaheadValue::Reduce {
-                                     nonterminal_id: nt,
-                                     len,
-                                    production_ids,
-                                 }) => {
-                                let nonterminal = self.parser.non_terminal_map.get_by_right(nt).unwrap();
-                                // timeit!("GLRParserState::step::reduce", {
-                                let productions_strs: Vec<String> = production_ids.iter()
-                                    .map(|pid| format!("#{} ({})", pid.0, self.parser.productions[pid.0].to_string()))
-                                    .collect();
-                                let productions_str = if productions_strs.len() == 1 {
-                                    productions_strs[0].clone()
-                                } else {
-                                    format!("[{}]", productions_strs.join(", "))
-                                };
-                                timeit!(format!("GLRParserState::step::reduce ({} -> {}) (state: {}) (productions: {:?})", nonterminal.0, len, peek.edge_value().state_id.0, productions_str), {
-                                crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", peek.edge_value().state_id.0, token_id.0, nonterminal.0, len);
-                                let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                                if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
-                                   todo.push(ParseState { stack: s_new_arc });
-                                }
-                                })
-                            }
-
-                            Some(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
-                                timeit!("GLRParserState::step::split", {
-                                crate::debug!(4, "Split from state {} via token {}", peek.edge_value().state_id.0, token_id.0);
-                                if let Some(to) = shift {
-                                    timeit!("GLRParserState::step::split::shift", {
-                                    crate::debug!(4, " Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
-                                    let stack_for_push = peek.to_arc_node();
-                                    let new_content = ParseStateEdgeContent { state_id: *to };
-                                    let new_parse_state = self.push_state(&stack_for_push, new_content);
-                                    // Do *not* merge into `next` yet.  We first have to
-                                    // process any automatic `DefaultReduce` steps that
-                                    // may apply *after* the shift.
-                                    post_shift_todo.push_back(new_parse_state);
-                                    })
-                                }
-                                for (len, nts) in reduces {
-                                    let nts_mapped = nts.iter()
-                                        .map(|(nt, pids)| (self.parser.non_terminal_map.get_by_right(nt).unwrap().clone().0, pids.iter()
-                                            .map(|pid| pid.0)
-                                            .collect::<BTreeSet<_>>()))
-                                        .collect::<BTreeMap<_, _>>();
-                                    // timeit!("GLRParserState::step::split::reduce", {
-                                    timeit!(format!("GLRParserState::step::split::reduce ({:?} -> {})", nts_mapped, len), {
-                                    crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", peek.edge_value().state_id.0, token_id.0, nts_mapped);
-                                    for (nt, _prod_ids) in nts {
-                                        crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
-                                        let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                                        if !s_new_arc.is_empty() {
-                                            todo.push(ParseState { stack: s_new_arc });
-                                        }
+                            for (len, nts) in reduces {
+                                for (nt, _prod_ids) in nts {
+                                    let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+                                    if !s_new_arc.is_empty() {
+                                        reducers_todo.push_back(ParseState { stack: s_new_arc });
                                     }
-                                    })
                                 }
-                                })
                             }
-
-                            None => {
-                                crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, peek.edge_value().state_id.0);
-                                // Reconstruct the ParseState for this specific path and add to not_found.
-                                // not_found.merge(ParseState { stack: peek.to_arc_node() });
-                            },
                         }
-                    }
-                    Stage7ShiftsAndReduces::DefaultReduce {
-                        nonterminal_id: nt,
-                        len,
-                        production_ids,
-                    } => {
-                        let nonterminal = self.parser.non_terminal_map.get_by_right(nt).unwrap();
-                        let productions_strs: Vec<String> = production_ids.iter()
-                            .map(|pid| format!("#{} ({})", pid.0, self.parser.productions[pid.0].to_string()))
-                            .collect();
-                        let productions_str = if productions_strs.len() == 1 {
-                            productions_strs[0].clone()
-                        } else {
-                            format!("[{}]", productions_strs.join(", "))
-                        };
-                        timeit!(format!("GLRParserState::step::phase1::default_reduce ({} -> {}) (state: {}) (productions: {:?})", nonterminal.0, len, peek.edge_value().state_id.0, productions_str), {
-                        crate::debug!(4, "Default Reduce from state {} to nonterminal {} of length {}", peek.edge_value().state_id.0, nonterminal.0, len);
-                        let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                        if !s_new_arc.is_empty() {
-                           todo.push(ParseState { stack: s_new_arc });
-                        }
-                        })
                     }
                 }
             }
         }
 
-        // ------------------------------------------------------------------
-        // SECOND PASS: follow cascades of DefaultReduce actions that may
-        // trigger *immediately* after a shift.
-        // ------------------------------------------------------------------
+        // --- Phase 3: Process default reductions on post-shift states ---
         while let Some(state) = post_shift_todo.pop_front() {
+            let mut has_default_reduce = false;
             for peek in state.stack.peek_iter() {
                 let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-                if let Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, production_ids } = &row.shifts_and_reduces {
-                    let nonterminal = self.parser.non_terminal_map.get_by_right(nonterminal_id).unwrap();
-                    let productions_strs: Vec<String> = production_ids.iter()
-                        .map(|pid| format!("#{} ({})", pid.0, self.parser.productions[pid.0].to_string()))
-                        .collect();
-                    let productions_str = if productions_strs.len() == 1 {
-                        productions_strs[0].clone()
-                    } else {
-                        format!("[{}]", productions_strs.join(", "))
-                    };
-                    timeit!(format!("GLRParserState::step::phase2::default_reduce ({} -> {}) (state: {}) (productions: {:?})", nonterminal.0, len, peek.edge_value().state_id.0, productions_str), {
-                    crate::debug!(4, "Default Reduce from state {} to nonterminal {} of length {}", peek.edge_value().state_id.0, nonterminal.0, len);
-                    let new_stack = self.reduce_and_goto(&peek, *nonterminal_id, *len);
+                if let Some(ref r) = row.phase3_default_reduces.reduce {
+                    has_default_reduce = true;
+                    let new_stack = self.reduce_and_goto(&peek, r.nonterminal_id, r.len);
                     if !new_stack.is_empty() {
                         post_shift_todo.push_back(ParseState { stack: new_stack });
                     }
-                    });
-                } else {
-                    // If no default reduction was applicable in this parse state, it is a final state for this token: merge it into `next`.
-                    crate::debug!(4, "No default reduction applicable for state {} after shift", peek.edge_value().state_id.0);
-                    let new_stack = peek.to_arc_node();
-                    let new_parse_state = ParseState { stack: new_stack };
-                    next.merge(new_parse_state);
                 }
+            }
+            if !has_default_reduce {
+                next.merge(state);
             }
         }
 
-        // ------------------------------------------------------------------
-        // Commit results
-        // ------------------------------------------------------------------
         self.active_state = next;
-        // self.action_not_found_states = not_found; // Retain for potential inspection, though current design drops them.
-
-        // Simplify the active GSS forest at the end of the step
-        if !self.active_state.stack.is_empty() {
-            // Arc::make_mut(&mut self.active_state.stack).simplify();
-        }
 
         if !self.active_state.stack.is_empty() {
             self.log_gss("Step-end", token_id);
         }
-        // self.action_not_found_states = ParseState::new(llm_vocab.clone()); // Reset if not needed beyond the step
-
         crate::debug!(4, "----------------------------------------------------------------");
-        // })
     }
 
     pub fn parse(&mut self, input: &[TerminalID]) {

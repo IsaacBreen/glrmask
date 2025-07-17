@@ -126,49 +126,90 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
     }
 }
 
+pub type Stage7Phase1ShiftsAndReduces = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
+pub type Stage7Phase2ShiftsAndReduces = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
-pub enum Stage7ShiftsAndReduces {
-    Lookahead(BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>),
-    DefaultReduce {
-        nonterminal_id: NonTerminalID,
-        len: usize,
-        production_ids: BTreeSet<ProductionID>,
-    },
+pub struct Reduce {
+    pub nonterminal_id: NonTerminalID,
+    pub len: usize,
+    pub production_ids: BTreeSet<ProductionID>,
 }
 
-impl JSONConvertible for Stage7ShiftsAndReduces {
+impl JSONConvertible for Reduce {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
-        match self {
-            Stage7ShiftsAndReduces::Lookahead(actions) => {
-                obj.insert("variant".to_string(), JSONNode::String("Lookahead".to_string()));
-                obj.insert("actions".to_string(), actions.to_json());
-            }
-            Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, production_ids } => {
-                obj.insert("variant".to_string(), JSONNode::String("DefaultReduce".to_string()));
-                obj.insert("nonterminal_id".to_string(), nonterminal_id.to_json());
-                obj.insert("len".to_string(), len.to_json());
-                obj.insert("production_ids".to_string(), production_ids.to_json());
-            }
-        }
+        obj.insert("nonterminal_id".to_string(), self.nonterminal_id.to_json());
+        obj.insert("len".to_string(), self.len.to_json());
+        obj.insert("production_ids".to_string(), self.production_ids.to_json());
         JSONNode::Object(obj)
     }
-
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Object(mut obj) => {
-                let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for Stage7ShiftsAndReduces".to_string())
-                    .and_then(String::from_json)?;
-                match variant.as_str() {
-                    "Lookahead" => BTreeMap::<TerminalID, Stage7ShiftsAndReducesLookaheadValue>::from_json(obj.remove("actions").ok_or_else(|| "Missing field actions for Lookahead".to_string())?).map(Stage7ShiftsAndReduces::Lookahead),
-                    "DefaultReduce" => Ok(Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id: NonTerminalID::from_json(obj.remove("nonterminal_id").ok_or_else(|| "Missing field nonterminal_id for DefaultReduce".to_string())?)?, len: usize::from_json(obj.remove("len").ok_or_else(|| "Missing field len for DefaultReduce".to_string())?)?, production_ids: BTreeSet::<ProductionID>::from_json(obj.remove("production_ids").ok_or_else(|| "Missing field production_ids for DefaultReduce".to_string())?)? }),
-                    _ => Err(format!("Unknown variant {} for Stage7ShiftsAndReduces", variant)),
-                }
-            }
-            _ => Err("Expected JSONNode::Object for Stage7ShiftsAndReduces".to_string()),
+            JSONNode::Object(mut obj) => Ok(Reduce {
+                nonterminal_id: NonTerminalID::from_json(obj.remove("nonterminal_id").ok_or_else(|| "Missing field nonterminal_id for Reduce".to_string())?)?,
+                len: usize::from_json(obj.remove("len").ok_or_else(|| "Missing field len for Reduce".to_string())?)?,
+                production_ids: BTreeSet::<ProductionID>::from_json(obj.remove("production_ids").ok_or_else(|| "Missing field production_ids for Reduce".to_string())?)?,
+            }),
+            _ => Err("Expected JSONNode::Object for Reduce".to_string()),
         }
     }
 }
+
+#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub struct Stage7Phase3DefaultReduce {
+    pub clone_and_merge: bool,
+    pub reduce: Option<Reduce>,
+}
+
+impl JSONConvertible for Stage7Phase3DefaultReduce {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("clone_and_merge".to_string(), self.clone_and_merge.to_json());
+        obj.insert("reduce".to_string(), self.reduce.to_json());
+        JSONNode::Object(obj)
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => Ok(Stage7Phase3DefaultReduce {
+                clone_and_merge: bool::from_json(obj.remove("clone_and_merge").ok_or_else(|| "Missing field clone_and_merge for Stage7Phase3DefaultReduce".to_string())?)?,
+                reduce: Option::<Reduce>::from_json(obj.remove("reduce").ok_or_else(|| "Missing field reduce for Stage7Phase3DefaultReduce".to_string())?)?,
+            }),
+            _ => Err("Expected JSONNode::Object for Stage7Phase3DefaultReduce".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stage7Row {
+    pub phase1_shifts_and_reduces: Stage7Phase1ShiftsAndReduces,
+    pub phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces,
+    pub phase3_default_reduces: Stage7Phase3DefaultReduce,
+    pub gotos: BTreeMap<NonTerminalID, Goto>,
+}
+
+// Manual impl for Stage7Row (could be derived)
+impl JSONConvertible for Stage7Row {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("phase1_shifts_and_reduces".to_string(), self.phase1_shifts_and_reduces.to_json());
+        obj.insert("phase2_shifts_and_reduces".to_string(), self.phase2_shifts_and_reduces.to_json());
+        obj.insert("phase3_default_reduces".to_string(), self.phase3_default_reduces.to_json());
+        obj.insert("gotos".to_string(), self.gotos.to_json());
+        JSONNode::Object(obj)
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => Ok(Stage7Row {
+                phase1_shifts_and_reduces: Stage7Phase1ShiftsAndReduces::from_json(obj.remove("phase1_shifts_and_reduces").ok_or_else(|| "Missing field phase1_shifts_and_reduces for Stage7Row".to_string())?)?,
+                phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces::from_json(obj.remove("phase2_shifts_and_reduces").ok_or_else(|| "Missing field phase2_shifts_and_reduces for Stage7Row".to_string())?)?,
+                phase3_default_reduces: Stage7Phase3DefaultReduce::from_json(obj.remove("phase3_default_reduces").ok_or_else(|| "Missing field phase3_default_reduces for Stage7Row".to_string())?)?,
+                gotos: BTreeMap::<NonTerminalID, Goto>::from_json(obj.remove("gotos").ok_or_else(|| "Missing field gotos for Stage7Row".to_string())?)?,
+            }),
+            _ => Err("Expected JSONNode::Object for Stage7Row".to_string()),
+        }
+    }
+}
+
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Goto {
@@ -210,35 +251,6 @@ impl JSONConvertible for Goto {
         }
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Stage7Row {
-    pub shifts_and_reduces: Stage7ShiftsAndReduces,
-    pub gotos: BTreeMap<NonTerminalID, Goto>,
-}
-
-// Manual impl for Stage7Row (could be derived)
-impl JSONConvertible for Stage7Row {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("shifts_and_reduces".to_string(), self.shifts_and_reduces.to_json());
-        obj.insert("gotos".to_string(), self.gotos.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let shifts_and_reduces = obj.remove("shifts_and_reduces").ok_or_else(|| "Missing field shifts_and_reduces for Stage7Row".to_string())
-                                            .and_then(Stage7ShiftsAndReduces::from_json)?;
-                let gotos = obj.remove("gotos").ok_or_else(|| "Missing field gotos for Stage7Row".to_string())
-                               .and_then(|n| BTreeMap::<NonTerminalID, Goto>::from_json(n))?;
-                Ok(Stage7Row { shifts_and_reduces, gotos })
-            }
-            _ => Err("Expected JSONNode::Object for Stage7Row".to_string()),
-        }
-    }
-}
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StateID(pub usize);
@@ -472,87 +484,120 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
     let mut item_set_map = BiBTreeMap::new();
     let mut next_state_id = 0;
 
-    let mut terminals = BTreeSet::new();
-    let mut non_terminals = BTreeSet::new();
-
-    for (item_set, row) in &stage_6_table {
+    for item_set in stage_6_table.keys() {
         item_set_map.insert(item_set.clone(), StateID(next_state_id));
         next_state_id += 1;
-
-        for t in row.shifts_and_reduces.keys() {
-            terminals.insert(t.clone());
-        }
-
-        for nt in row.gotos.keys() {
-            non_terminals.insert(nt.clone());
-        }
     }
 
     let mut stage_7_table = BTreeMap::new();
 
     for (item_set, row) in stage_6_table {
         let state_id = *item_set_map.get_by_left(&item_set).unwrap();
-        let mut shifts_and_reduces_lookahead = BTreeMap::new();
-        let mut gotos = BTreeMap::new();
+        
+        // Phase 2 map contains all possible actions for a state.
+        let mut phase2_shifts_and_reduces: Stage7Phase2ShiftsAndReduces = BTreeMap::new();
 
-        for (terminal, action) in row.shifts_and_reduces {
-            let terminal_id = *terminal_map.get_by_left(&terminal).expect(format!("{:?} not found in terminal map {:?}", terminal, terminal_map.left_values().map(|t| t.to_string()).collect::<Vec<String>>()).as_str());
-
+        for (terminal, action) in &row.shifts_and_reduces {
+            let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
             let shift_state_id = action.shift.as_ref().map(|set| *item_set_map.get_by_left(set).unwrap());
 
-            // Group reduces by len and then by nonterminal_id
             let mut reduces_by_len_and_nt: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
-            for production_id in action.reduces {
+            for &production_id in &action.reduces {
                 let production = &productions[production_id.0];
                 let len = production.rhs.len();
                 let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
-                reduces_by_len_and_nt
-                    .entry(len)
-                    .or_default()
-                    .entry(nonterminal_id)
-                    .or_default()
-                    .insert(production_id);
+                reduces_by_len_and_nt.entry(len).or_default().entry(nonterminal_id).or_default().insert(production_id);
             }
 
             let converted_action = if let Some(shift_id) = shift_state_id {
                 if reduces_by_len_and_nt.is_empty() {
-                    // Shift only
                     Stage7ShiftsAndReducesLookaheadValue::Shift(shift_id)
                 } else {
-                    // Shift-Reduce conflict
                     Stage7ShiftsAndReducesLookaheadValue::Split { shift: Some(shift_id), reduces: reduces_by_len_and_nt }
                 }
-            } else { // No shift
+            } else {
                 if reduces_by_len_and_nt.is_empty() {
                     panic!("Action without shift or reduce for terminal {:?}", terminal);
                 } else if reduces_by_len_and_nt.len() == 1 {
                     let (len, nts) = reduces_by_len_and_nt.into_iter().next().unwrap();
                     if nts.len() == 1 {
-                        // Single reduce action (possibly with multiple productions for same NT/len)
                         let (nonterminal_id, production_ids) = nts.into_iter().next().unwrap();
                         Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids }
                     } else {
-                        // Reduce-Reduce conflict (different NTs, same length)
                         Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: BTreeMap::from([(len, nts)]) }
                     }
                 } else {
-                    // Reduce-Reduce conflict (different lengths)
                     Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: reduces_by_len_and_nt }
                 }
             };
-            shifts_and_reduces_lookahead.insert(terminal_id, converted_action);
+            phase2_shifts_and_reduces.insert(terminal_id, converted_action);
         }
 
-        let shifts_and_reduces = Stage7ShiftsAndReduces::Lookahead(shifts_and_reduces_lookahead);
-        
+        // --- Promotion Logic ---
+        let mut reduce_counts: BTreeMap<(NonTerminalID, usize), (usize, BTreeSet<ProductionID>)> = BTreeMap::new();
+        for action in phase2_shifts_and_reduces.values() {
+            let process_reduces = |reduces: &BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>| {
+                for (&len, nts) in reduces {
+                    for (&nt_id, pids) in nts {
+                        let entry = reduce_counts.entry((nt_id, len)).or_default();
+                        entry.0 += 1; // Count how many terminals trigger this kind of reduce
+                        entry.1.extend(pids.iter().cloned());
+                    }
+                }
+            };
+            match action {
+                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+                    let entry = reduce_counts.entry((*nonterminal_id, *len)).or_default();
+                    entry.0 += 1;
+                    entry.1.extend(production_ids.iter().cloned());
+                },
+                Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => process_reduces(reduces),
+                _ => {}
+            }
+        }
+
+        let promoted_reduce_key = reduce_counts.iter().max_by_key(|(_, (count, _))| *count).map(|(key, _)| *key);
+
+        let phase3_default_reduces = if let Some((nonterminal_id, len)) = promoted_reduce_key {
+            let (_, production_ids) = reduce_counts.remove(&(nonterminal_id, len)).unwrap();
+            Stage7Phase3DefaultReduce {
+                clone_and_merge: false,
+                reduce: Some(Reduce { nonterminal_id, len, production_ids }),
+            }
+        } else {
+            Stage7Phase3DefaultReduce {
+                clone_and_merge: true,
+                reduce: None,
+            }
+        };
+
+        let phase1_shifts_and_reduces = if let Some(ref promoted) = phase3_default_reduces.reduce {
+            phase2_shifts_and_reduces.iter().filter_map(|(&tid, action)| {
+                match action {
+                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } if *nonterminal_id == promoted.nonterminal_id && *len == promoted.len => {
+                        None // Filter out the action that was promoted
+                    },
+                    _ => Some((tid, action.clone()))
+                }
+            }).collect()
+        } else {
+            phase2_shifts_and_reduces.clone()
+        };
+
+        let mut gotos = BTreeMap::new();
         for (nonterminal, next_item_set) in row.gotos {
-            let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(format!("{:?} not found in non_terminal_map {:?}", nonterminal, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
-            let goto = item_set_map.get_by_left(&next_item_set).map_or(Goto::Accept, |&next_state_id| Goto::State(next_state_id));
+            let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
+            let goto = item_set_map.get_by_left(&next_item_set).map_or(Goto::Accept, |&id| Goto::State(id));
             if goto == Goto::Accept { assert!(next_item_set.is_empty()); }
             gotos.insert(non_terminal_id, goto);
         }
 
-        stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces, gotos });
+        stage_7_table.insert(state_id, Stage7Row {
+            phase1_shifts_and_reduces,
+            phase2_shifts_and_reduces,
+            phase3_default_reduces,
+            gotos,
+        });
     }
 
     let start_item = Item {
@@ -563,49 +608,6 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
     let start_state_id = *item_set_map.get_by_left(&start_item_set).unwrap();
 
     (stage_7_table, item_set_map, start_state_id)
-}
-
-/// Optimizes the parse table by replacing states that only have a single, identical reduce action
-/// for all lookaheads with a more compact `DefaultReduce` action.
-fn optimize_with_default_reductions(table: &mut Stage7Table) {
-    for (state_id, row) in table.iter_mut() {
-        if let Stage7ShiftsAndReduces::Lookahead(actions) = &row.shifts_and_reduces {
-            if actions.is_empty() {
-                continue;
-            }
-
-            // Get the first action to compare against others.
-            let first_action = actions.values().next().unwrap();
-
-            // Check if it's a pure Reduce action.
-            if let Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } = first_action {
-                // If it is a pure Reduce action, check if all other actions in this state are identical ( except for production IDs, which we accumulate).
-                let mut all_production_ids = production_ids.clone();
-                let mut all_same = true;
-                for (terminal_id, action) in actions {
-                    if let Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nonterminal_id, len: action_len, production_ids: action_production_ids } = action {
-                        if action_nonterminal_id != nonterminal_id || action_len != len {
-                            all_same = false;
-                            break;
-                        }
-                        all_production_ids.extend(action_production_ids.iter().cloned());
-                    } else {
-                        all_same = false;
-                        break;
-                    }
-                }
-                if all_same {
-                    // All conditions met, replace with DefaultReduce.
-                    crate::debug!(3, "Optimizing state {:?} to DefaultReduce", state_id);
-                    row.shifts_and_reduces = Stage7ShiftsAndReduces::DefaultReduce {
-                        nonterminal_id: *nonterminal_id,
-                        len: *len,
-                        production_ids: all_production_ids,
-                    };
-                }
-            }
-        }
-    }
 }
 
 pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
@@ -659,9 +661,6 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     crate::debug!(2, "Stage 7");
     let (mut stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
-
-    crate::debug!(2, "Optimizing with default reductions");
-    optimize_with_default_reductions(&mut stage_7_table);
 
     crate::debug!(2, "Done generating GLR parser");
 
