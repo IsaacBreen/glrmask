@@ -536,7 +536,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
         // --- Promotion Logic ---
         let mut reduce_counts: BTreeMap<(NonTerminalID, usize), (usize, BTreeSet<ProductionID>)> = BTreeMap::new();
         for action in phase2_shifts_and_reduces.values() {
-            let process_reduces = |reduces: &BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>| {
+            let mut process_reduces = |reduces: &BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>| {
                 for (&len, nts) in reduces {
                     for (&nt_id, pids) in nts {
                         let entry = reduce_counts.entry((nt_id, len)).or_default();

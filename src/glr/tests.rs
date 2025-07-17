@@ -900,10 +900,7 @@ fn test_explain_stack() {
     let b_token_id = *parser.terminal_map.get_by_left(&terminal("b")).unwrap();
     
     let start_row = &parser.stage_7_table[&start_state];
-    let shift_action = match &start_row.shifts_and_reduces {
-        crate::glr::table::Stage7ShiftsAndReduces::Lookahead(actions) => &actions[&b_token_id],
-        _ => panic!("Expected lookahead actions in start state"),
-    };
+    let shift_action = &start_row.phase2_shifts_and_reduces[&b_token_id];
 
     let state_after_b = match shift_action {
         crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(id) => *id,
