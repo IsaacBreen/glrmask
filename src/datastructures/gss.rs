@@ -59,7 +59,7 @@ impl LLMTokenInfo {
         &self.llm_vocab
     }
     pub fn max_num_llm_tokens(&self) -> usize {
-        self.llm_vocab.as_ref().map_or(0, |vocab| vocab.internal_max_llm_token.saturating_add(1))
+        self.llm_vocab.as_ref().map_or(usize::MAX, |vocab| vocab.internal_max_llm_token.saturating_add(1))
     }
 }
 
