@@ -5,7 +5,7 @@ use std::iter::Peekable;
 use std::sync::OnceLock;
 use std::vec::IntoIter;
 use crate::finite_automata::{Expr, QuantifierType};
-use crate::interface::GrammarExpr::CharClass;
+use crate::interface::GrammarExpr::{CharClass, AnyChar};
 
 #[derive(Debug, Clone, PartialEq)]
 enum EbnfToken {
@@ -23,7 +23,7 @@ fn get_token_regex() -> &'static Regex {
         (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
         (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
         (?P<charclass>\[([^\]\\]|\\.)*\]) |
-        (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!) |
+        (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.) |
         (?P<comment>//[^\r\n]*|/\*([^*]|\*[^/])*\*/) |
         (?P<ws>\s+) |
         (?P<error>.)
@@ -189,7 +189,10 @@ impl EbnfParser {
     }
 
     fn parse_grammar_factor(&mut self) -> Result<GrammarExpr, String> {
-        if let Some(EbnfToken::Ident(id)) = self.tokens.peek().cloned() {
+        if self.peek_grammar_op(".") {
+            self.consume_grammar_op(".")?;
+            Ok(GrammarExpr::AnyChar)
+        } else if let Some(EbnfToken::Ident(id)) = self.tokens.peek().cloned() {
             self.tokens.next();
             Ok(r#ref(&id))
         } else if let Some(EbnfToken::Literal(lit)) = self.tokens.peek().cloned() {
@@ -215,7 +218,7 @@ impl EbnfParser {
             Ok(repeat(expr))
         } else {
             Err(format!(
-                "Expected identifier, literal, or group, found {:?}",
+                "Expected identifier, literal, group, or '.', found {:?}",
                 self.tokens.peek()
             ))
         }
@@ -295,3 +298,4 @@ mod tests {
             .contains_left("\"b\""));
     }
 }
+
