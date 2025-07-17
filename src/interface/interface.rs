@@ -349,6 +349,46 @@ impl GrammarDefinition {
         all_names: &mut HashSet<String>,
     ) -> (Vec<Symbol>, Vec<Production>) { // Return symbols and new productions
         match expr {
+            GrammarExpr::CharClass(class_def) => {
+                // This logic is duplicated from convert_grammar_expr_to_regex_expr.
+                // It should be extracted into a helper function.
+                let content = &class_def[1..class_def.len() - 1];
+                let (negated, content) = if content.starts_with('^') {
+                    (true, &content[1..])
+                } else {
+                    (false, content)
+                };
+                let mut u8set = U8Set::none();
+                let mut it = content.chars().peekable();
+                while let Some(c) = it.next() {
+                    if c == '\\' {
+                        if let Some(escaped) = it.next() {
+                            u8set.insert(escaped as u8);
+                        }
+                    } else if it.peek() == Some(&'-') {
+                        it.next(); // consume '-'
+                        if let Some(end) = it.next() {
+                            for i in (c as u8)..=(end as u8) {
+                                u8set.insert(i);
+                            }
+                        } else { // trailing dash
+                            u8set.insert(c as u8);
+                            u8set.insert(b'-');
+                        }
+                    } else {
+                        u8set.insert(c as u8);
+                    }
+                }
+                let char_class_expr = Expr::U8Class(if negated { u8set.complement() } else { u8set });
+                let terminal_name = class_def.clone();
+                if !regex_name_to_group_id.contains_left(&terminal_name) {
+                    let gid = *next_terminal_group_id;
+                    *next_terminal_group_id += 1;
+                    regex_expr_to_group_id.insert(char_class_expr.clone(), gid);
+                    regex_name_to_group_id.insert(terminal_name.clone(), gid);
+                }
+                (vec![Symbol::Terminal(Terminal::Regex(terminal_name))], Vec::new())
+            }
             GrammarExpr::Literal(bytes) => {
                 let literal_expr = Expr::U8Seq(bytes.clone());
 
@@ -359,7 +399,7 @@ impl GrammarDefinition {
                     literal_to_group_id.insert(bytes.clone(), gid);
                 }
 
-                (vec![Symbol::Terminal(Terminal::literal(bytes.clone()))], Vec::new())
+                (vec![Symbol::Terminal(Terminal::Literal(bytes.clone()))], Vec::new())
             }
             GrammarExpr::Ref(name) => {
                 if nonterminal_names.contains(name.as_str()) {
@@ -837,6 +877,7 @@ impl GrammarDefinition {
             referenced_terminals: &mut HashSet<String>,
         ) {
             match expr {
+                GrammarExpr::CharClass(_) => {}
                 GrammarExpr::Literal(_) => {} // Literals are handled separately, not by ref
                 GrammarExpr::Ref(name) => {
                     if terminals.contains_key(name) {

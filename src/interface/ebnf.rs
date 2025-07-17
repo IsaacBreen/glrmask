@@ -11,6 +11,7 @@ use crate::interface::GrammarExpr::CharClass;
 enum EbnfToken {
     Ident(String),
     Literal(String),
+    CharClass(String),
     Op(String),
 }
 
