@@ -1,1563 +1,1020 @@
 local_system:
   attached_files:
-    - src/json_serialization.rs
-  conversation_file: conversation.yaml
+    - profiler_macro/src/lib.rs
+    - src/profiler.rs
+  conversation_file:
   compile_command:
   initial_file_contents:
-    src/json_serialization.rs: |
-      use std::collections::{BTreeMap, HashMap, BTreeSet, HashSet};
-      use std::hash::Hash;
-      use std::marker::Sized;
-      use bimap::BiBTreeMap;
+    profiler_macro/src/lib.rs: |
+      use proc_macro::TokenStream;
+      use quote::quote;
+      use syn::{
+          parse::{Parse, ParseStream},
+          parse_macro_input, Expr, ItemFn, LitStr, Token,
+      };
 
-      // Import the derive macro
-      use json_convertible_derive::JSONConvertible;
+      #[proc_macro_attribute]
+      pub fn time_it(attr: TokenStream, item: TokenStream) -> TokenStream {
+          let item_fn = parse_macro_input!(item as ItemFn);
 
-      // Add these lines for serde_json
-      use serde_json::Value as SerdeValue;
-      use serde_json::Map as SerdeMap; // BTreeMap<String, SerdeValue> is SerdeMap
-      use std::convert::TryInto;
-
-      // --- JSONNode Enum ---
-      #[derive(Debug, Clone, PartialEq)]
-      pub enum JSONNode {
-          Null,
-          Bool(bool),
-          Int(i128),
-          UInt(u128),
-          Float(f64),
-          String(String),
-          Array(Vec<JSONNode>),
-          Object(BTreeMap<String, JSONNode>), // BTreeMap for sorted keys
-      }
-
-      impl JSONNode {
-          // New method to convert JSONNode to serde_json::Value
-          fn to_serde_value(&self) -> SerdeValue {
-              match self {
-                  JSONNode::Null => SerdeValue::Null,
-                  JSONNode::Bool(b) => SerdeValue::Bool(*b),
-                  JSONNode::Int(i) => SerdeValue::Number(serde_json::Number::from_i128(*i).expect(format!("Int {} out of range for serde_json::Value", i).as_str())),
-                  JSONNode::UInt(u) => SerdeValue::Number(serde_json::Number::from_u128(*u).expect(format!("UInt {} out of range for serde_json::Value", u).as_str())),
-                  JSONNode::Float(f) => {
-                      // serde_json::Number::from_f64 returns None for NaN/Infinity
-                      // We'll convert such cases to SerdeValue::Null, a common practice.
-                      serde_json::Number::from_f64(*f)
-                          .map(SerdeValue::Number)
-                          .unwrap_or(SerdeValue::Null)
-                  }
-                  JSONNode::String(s) => SerdeValue::String(s.clone()),
-                  JSONNode::Array(arr) => {
-                      SerdeValue::Array(arr.iter().map(|node| node.to_serde_value()).collect())
-                  }
-                  JSONNode::Object(obj) => {
-                      let mut map = SerdeMap::new();
-                      for (k, v) in obj {
-                          map.insert(k.clone(), v.to_serde_value());
-                      }
-                      SerdeValue::Object(map)
-                  }
-              }
-          }
-
-          // New method to convert serde_json::Value to JSONNode
-          fn from_serde_value(s_val: SerdeValue) -> Result<Self, String> {
-              match s_val {
-                  SerdeValue::Null => Ok(JSONNode::Null),
-                  SerdeValue::Bool(b) => Ok(JSONNode::Bool(b)),
-                  SerdeValue::Number(n) => {
-                      if let Some(i) = n.as_i64() {
-                          Ok(JSONNode::Int(i as i128))
-                      } else if let Some(u) = n.as_u64() {
-                          Ok(JSONNode::UInt(u as u128))
-                      } else if let Some(f) = n.as_f64() {
-                          Ok(JSONNode::Float(f))
-                      } else {
-                          Err(format!("Unsupported number type in serde_json::Value: {}", n))
-                      }
-                  }
-                  SerdeValue::String(s) => Ok(JSONNode::String(s)),
-                  SerdeValue::Array(arr) => {
-                      let mut nodes = Vec::with_capacity(arr.len());
-                      for val in arr {
-                          nodes.push(Self::from_serde_value(val)?);
-                      }
-                      Ok(JSONNode::Array(nodes))
-                  }
-                  SerdeValue::Object(obj_map) => {
-                      let mut btree_map = BTreeMap::new();
-                      for (k, v) in obj_map {
-                          btree_map.insert(k, Self::from_serde_value(v)?);
-                      }
-                      Ok(JSONNode::Object(btree_map))
-                  }
-              }
-          }
-
-          // Update to_json_string to use serde_json
-          pub fn to_json_string(&self) -> String {
-              let serde_value = self.to_serde_value();
-              // serde_json::to_string can fail, though less likely for SerdeValue -> String
-              // For simplicity here, unwrap, but consider error handling for production
-              serde_json::to_string(&serde_value).unwrap_or_else(|e| {
-                  // Fallback or panic for critical error
-                  eprintln!("Critical error: Failed to serialize SerdeValue to string: {}", e);
-                  // A minimal JSON representation of an error or "null"
-                  "{\"error\":\"serialization_failed\"}".to_string()
-              })
-          }
-
-          // Update from_json_string to use serde_json
-          pub fn from_json_string(s: &str) -> Result<JSONNode, String> {
-              let serde_value: SerdeValue = serde_json::from_str(s)
-                  .map_err(|e| format!("Failed to parse JSON string with serde_json: {}", e))?;
-              Self::from_serde_value(serde_value)
-          }
-
-          pub fn into_object(self) -> Result<BTreeMap<String, JSONNode>, String> {
-              match self {
-                  JSONNode::Object(obj) => Ok(obj),
-                  _ => Err("Expected JSONNode::Object".to_string()),
-              }
-          }
-      }
-
-      // --- JSONConvertible Trait ---
-      pub trait JSONConvertible: Sized {
-          fn to_json(&self) -> JSONNode;
-          fn from_json(node: JSONNode) -> Result<Self, String>;
-      }
-
-      impl<T> Into<T> for JSONNode
-      where
-          T: JSONConvertible,
-      {
-          fn into(self) -> T {
-              T::from_json(self).expect("Failed to convert JSONNode to type")
-          }
-      }
-
-      impl<T> TryInto<T> for JSONNode
-      where
-          T: JSONConvertible,
-      {
-          type Error = String;
-
-          fn try_into(self) -> Result<T, Self::Error> {
-              T::from_json(self)
-          }
-      }
-
-      // --- Implementations for Primitives ---
-
-      impl JSONConvertible for () {
-          fn to_json(&self) -> JSONNode { JSONNode::Null }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Null => Ok(()),
-                  _ => Err("Expected JSONNode::Null for unit type".to_string()),
-              }
-          }
-      }
-
-      impl JSONConvertible for bool {
-          fn to_json(&self) -> JSONNode { JSONNode::Bool(*self) }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Bool(b) => Ok(b),
-                  _ => Err("Expected JSONNode::Bool for bool".to_string()),
-              }
-          }
-      }
-
-      // --- Implementations for numeric primitives without precision loss ---
-      macro_rules! impl_json_for_signed {
-          ($($t:ty),*) => {
-              $(
-                  impl JSONConvertible for $t {
-                      fn to_json(&self) -> JSONNode { JSONNode::Int(*self as i128) }
-                      fn from_json(node: JSONNode) -> Result<Self, String> {
-                          match node {
-                              JSONNode::Int(n)   => {
-                                  if n >= (<$t>::MIN as i128) && n <= (<$t>::MAX as i128) {
-                                      Ok(n as $t)
-                                  } else {
-                                      Err(format!("Integer {} out of range for {}", n, stringify!($t)))
-                                  }
-                              },
-                              JSONNode::UInt(u)  => {
-                                  // Check if u fits into the positive range of $t
-                                  if u <= (<$t>::MAX as u128) {
-                                      Ok(u as $t)
-                                  } else {
-                                      Err(format!("Unsigned integer {} too large for {}", u, stringify!($t)))
-                                  }
-                              },
-                              other => Err(format!("Expected JSONNode::Int or JSONNode::UInt for {}, got {:?}", stringify!($t), other)),
-                          }
-                      }
-                  }
-              )*
+          let timer_name_expr = if attr.is_empty() {
+              let fn_name = item_fn.sig.ident.to_string();
+              quote! { format!("{}::{}", module_path!(), #fn_name) }
+          } else {
+              let attr_str = parse_macro_input!(attr as LitStr);
+              let name = attr_str.value();
+              quote! { String::from(#name) }
           };
-      }
 
-      macro_rules! impl_json_for_unsigned {
-          ($($t:ty),*) => {
-              $(
-                  impl JSONConvertible for $t {
-                      fn to_json(&self) -> JSONNode { JSONNode::UInt(*self as u128) }
-                      fn from_json(node: JSONNode) -> Result<Self, String> {
-                          match node {
-                              JSONNode::UInt(u) => {
-                                  if u <= (<$t>::MAX as u128) {
-                                      Ok(u as $t)
-                                  } else {
-                                      Err(format!("Unsigned integer {} out of range for {}", u, stringify!($t)))
-                                  }
-                              },
-                              JSONNode::Int(n)  => {
-                                  if n >= 0 {
-                                      let u_n = n as u128;
-                                      if u_n <= (<$t>::MAX as u128) {
-                                          Ok(u_n as $t)
-                                      } else {
-                                          Err(format!("Integer {} (as u128) out of range for {}", n, stringify!($t)))
-                                      }
-                                  } else {
-                                      Err(format!("Negative integer {} cannot be converted to {}", n, stringify!($t)))
-                                  }
-                              },
-                              other => Err(format!("Expected JSONNode::UInt or non-negative JSONNode::Int for {}, got {:?}", stringify!($t), other)),
-                          }
-                      }
-                  }
-              )*
+          let fn_vis = &item_fn.vis;
+          let fn_sig = &item_fn.sig;
+          let fn_block = &item_fn.block;
+          let fn_attrs = &item_fn.attrs;
+
+          let result = quote! {
+              #(#fn_attrs)*
+              #fn_vis #fn_sig {
+                  let __profiler_name = #timer_name_expr;
+                  let _guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
+                  #fn_block
+              }
           };
+
+          result.into()
       }
 
-      macro_rules! impl_json_for_float {
-          ($($t:ty),*) => {
-              $(
-                  impl JSONConvertible for $t {
-                      fn to_json(&self) -> JSONNode { JSONNode::Float(*self as f64) }
-                      fn from_json(node: JSONNode) -> Result<Self, String> {
-                          match node {
-                              JSONNode::Float(f) => Ok(f as $t),
-                              JSONNode::Int(n)   => Ok(n as $t), // Standard Rust cast behavior, potential precision loss for large i128
-                              JSONNode::UInt(u)  => Ok(u as $t), // Standard Rust cast behavior, potential precision loss for large u128
-                              other => Err(format!("Expected JSONNode::Float, ::Int, or ::UInt for {}, got {:?}", stringify!($t), other)),
-                          }
-                      }
-                  }
-              )*
+      enum TimeitArgs {
+          Named { name: Expr, expr: Expr },
+          Unnamed { expr: Expr },
+      }
+
+      impl Parse for TimeitArgs {
+          fn parse(input: ParseStream) -> syn::Result<Self> {
+              let first_expr = input.parse::<Expr>()?;
+              if input.peek(Token![,]) {
+                  let _: Token![,] = input.parse()?;
+                  let expr = input.parse::<Expr>()?;
+                  Ok(TimeitArgs::Named {
+                      name: first_expr,
+                      expr,
+                  })
+              } else {
+                  Ok(TimeitArgs::Unnamed { expr: first_expr })
+              }
+          }
+      }
+
+      #[proc_macro]
+      pub fn timeit(input: TokenStream) -> TokenStream {
+          let args = parse_macro_input!(input as TimeitArgs);
+
+          let (name_code, expr) = match args {
+              TimeitArgs::Named { name, expr } => (quote! { (#name).into() }, expr),
+              TimeitArgs::Unnamed { expr } => {
+                  let expr_str = quote! { #expr }.to_string();
+                  (quote! { String::from(#expr_str) }, expr)
+              }
           };
+
+          let result = quote! {{
+              let __profiler_name = #name_code;
+              let _guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
+              #expr
+          }};
+
+          result.into()
+      }
+    src/profiler.rs: |
+      use std::collections::HashMap;
+      use std::sync::{Mutex, OnceLock};
+      use std::time::{Duration, Instant};
+
+      /// The measured overhead of a single timing block, used for correction.
+      const PROFILER_CORRECTION: Duration = Duration::from_nanos(1300);
+
+      /// A node in the profiler's call tree.
+      #[derive(Default, Clone)]
+      pub struct ProfileNode {
+          /// Number of times this block was entered.
+          pub hits: u64,
+          /// Time spent in this block, excluding children.
+          pub own_time: Duration,
+          /// Time spent in this block, including children.
+          pub total_time: Duration,
+          /// Children nodes in the call tree.
+          pub children: HashMap<String, ProfileNode>,
       }
 
-      // Signed integers
-      impl_json_for_signed!(i8, i16, i32, i64, isize, i128);
-      // Unsigned integers
-      impl_json_for_unsigned!(u8, u16, u32, u64, usize, u128);
-      // Floating-point types
-      impl_json_for_float!(f32, f64);
+      /// Holds all profiling data.
+      #[derive(Default)]
+      pub struct ProfilerData {
+          /// The root of the call tree. Its children are the top-level timed blocks.
+          call_tree: ProfileNode,
+          /// A stack to keep track of the current path in the call tree.
+          /// Each element is (name, start_time_for_total, start_time_for_own, sub_calls_count)
+          timing_stack: Vec<(String, Instant, Instant, u64)>,
+          /// Separate hits counter for the `hit!` macro.
+          hits: HashMap<String, u64>,
+      }
 
+      // Global, thread-safe profiler data instance.
+      static PROFILER: OnceLock<Mutex<ProfilerData>> = OnceLock::new();
 
-      impl JSONConvertible for String {
-          fn to_json(&self) -> JSONNode { JSONNode::String(self.clone()) }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::String(s) => Ok(s),
-                  _ => Err("Expected JSONNode::String for String".to_string()),
+      fn profiler() -> &'static Mutex<ProfilerData> {
+          PROFILER.get_or_init(|| Mutex::new(ProfilerData::default()))
+      }
+
+      /// Records a single hit for a named event (for use with `hit!` macro).
+      pub fn hit(name: &str) {
+          let mut data = profiler().lock().unwrap();
+          *data.hits.entry(name.to_string()).or_insert(0) += 1;
+      }
+
+      /// Resets all profiling data (hits and timings).
+      pub fn reset() {
+          let mut data = profiler().lock().unwrap();
+          data.call_tree = ProfileNode::default();
+          data.timing_stack.clear();
+          data.hits.clear();
+      }
+
+      /// Formats a `Duration` into a human-readable string with appropriate units (s, ms, µs, ns).
+      fn format_duration(duration: Duration) -> String {
+          let total_nanos = duration.as_nanos();
+          if total_nanos >= 1_000_000_000 {
+              format!("{:.3}s", duration.as_secs_f64())
+          } else if total_nanos >= 1_000_000 {
+              format!("{:.3}ms", duration.as_micros() as f64 / 1000.0)
+          } else if total_nanos >= 1_000 {
+              format!("{:.3}µs", duration.as_nanos() as f64 / 1000.0)
+          } else {
+              format!("{}ns", total_nanos)
+          }
+      }
+
+      fn print_node_recursive(
+          node: &ProfileNode,
+          name: &str,
+          indent_level: usize,
+          parent_total_time: Duration,
+      ) {
+          let indent = "  ".repeat(indent_level);
+          let name_with_indent = format!("{}{}", indent, name);
+
+          let (total_per_hit, own_per_hit) = if node.hits > 0 {
+              (
+                  node.total_time.mul_f64(1.0 / node.hits as f64),
+                  node.own_time.mul_f64(1.0 / node.hits as f64),
+              )
+          } else {
+              (Duration::from_secs(0), Duration::from_secs(0))
+          };
+
+          let percentage_of_parent = if !parent_total_time.is_zero() {
+              (node.total_time.as_secs_f64() / parent_total_time.as_secs_f64()) * 100.0
+          } else {
+              0.0
+          };
+
+          let percentage_own = if !node.total_time.is_zero() {
+              (node.own_time.as_secs_f64() / node.total_time.as_secs_f64()) * 100.0
+          } else {
+              0.0
+          };
+
+          let total_str = format_duration(node.total_time);
+          let own_str = format_duration(node.own_time);
+          let total_per_hit_str = format_duration(total_per_hit);
+          let own_per_hit_str = format_duration(own_per_hit);
+          let percentage_of_parent_str = format!("{:.1}%", percentage_of_parent);
+          let percentage_own_str = format!("{:.1}%", percentage_own);
+
+          println!(
+              "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10} {:>15}  {}",
+              node.hits,
+              total_str,
+              total_per_hit_str,
+              own_str,
+              own_per_hit_str,
+              percentage_own_str,
+              percentage_of_parent_str,
+              name_with_indent
+          );
+
+          let mut sorted_children: Vec<_> = node.children.iter().collect();
+          sorted_children.sort_by_key(|(name, _)| *name);
+
+          for (child_name, child_node) in sorted_children {
+              print_node_recursive(child_node, child_name, indent_level + 1, node.total_time);
+          }
+      }
+
+      /// Prints a summary of the collected profiling data to stdout.
+      pub fn print_summary() {
+          let data = profiler().lock().unwrap();
+          println!("--- Profiler Summary ---");
+
+          let no_timing_data = data.call_tree.children.is_empty();
+          let no_hit_data = data.hits.is_empty();
+
+          if no_timing_data && no_hit_data {
+              println!("No data collected.");
+              println!("--- End Profiler Summary ---");
+              return;
+          }
+
+          if !no_timing_data {
+              println!("\n[Hierarchical Timings]");
+              println!(
+                  "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10} {:>15}  {}",
+                  "Hits",
+                  "Total Time",
+                  "Total/Hit",
+                  "Own Time",
+                  "Own/Hit",
+                  "% Own",
+                  "% of Parent",
+                  "Name"
+              );
+
+              let root_total_time: Duration = data
+                  .call_tree
+                  .children
+                  .values()
+                  .map(|node| node.total_time)
+                  .sum();
+
+              let mut sorted_children: Vec<_> = data.call_tree.children.iter().collect();
+              sorted_children.sort_by_key(|(name, _)| *name);
+
+              for (name, node) in sorted_children {
+                  print_node_recursive(node, name, 0, root_total_time);
+              }
+          }
+
+          if !no_hit_data {
+              println!("\n[Hits]");
+              let mut sorted_hits: Vec<_> = data.hits.iter().collect();
+              sorted_hits.sort_by_key(|k| k.0);
+              for (name, count) in sorted_hits {
+                  println!("  {:>10}x: {}", count, name);
+              }
+          }
+
+          println!("\n--- End Profiler Summary ---");
+      }
+
+      fn flatten_tree_recursive(
+          nodes: &HashMap<String, ProfileNode>,
+          flat_map: &mut HashMap<String, ProfileNode>,
+      ) {
+          for (name, node) in nodes {
+              let entry = flat_map.entry(name.clone()).or_default();
+              entry.hits += node.hits;
+              entry.own_time += node.own_time;
+              entry.total_time += node.total_time;
+
+              if !node.children.is_empty() {
+                  flatten_tree_recursive(&node.children, flat_map);
               }
           }
       }
 
-      impl<'a> JSONConvertible for &'a str {
-          fn to_json(&self) -> JSONNode { JSONNode::String(self.to_string()) }
-          fn from_json(_node: JSONNode) -> Result<Self, String> {
-              Err("Cannot deserialize into &str, deserialize into String instead".to_string())
-          }
-      }
+      /// Prints a summary of the collected profiling data as a flat list, merging all calls to the same function.
+      pub fn print_summary_flat() {
+          let data = profiler().lock().unwrap();
+          println!("--- Profiler Summary (Flat) ---");
 
-      // --- Implementations for Option ---
-      impl<T: JSONConvertible> JSONConvertible for Option<T> {
-          fn to_json(&self) -> JSONNode {
-              match self {
-                  Some(val) => val.to_json(),
-                  None => JSONNode::Null,
-              }
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Null => Ok(None),
-                  _ => T::from_json(node).map(Some),
-              }
-          }
-      }
+          let no_timing_data = data.call_tree.children.is_empty();
+          let no_hit_data = data.hits.is_empty();
 
-      // --- Implementations for Collections ---
-
-      // Generic Vec<T>
-      impl<T: JSONConvertible> JSONConvertible for Vec<T> {
-          fn to_json(&self) -> JSONNode {
-              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
-                  _ => Err("Expected JSONNode::Array for Vec<T>".to_string()),
-              }
-          }
-      }
-
-      // Generic array
-      impl<T: JSONConvertible, const N: usize> JSONConvertible for [T; N] {
-          fn to_json(&self) -> JSONNode {
-              // Convert array elements to JSONNode and wrap in a JSON array
-              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
+          if no_timing_data && no_hit_data {
+              println!("No data collected.");
+              println!("--- End Profiler Summary (Flat) ---");
+              return;
           }
 
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => {
-                      // First convert each JSONNode into T, collecting into a Vec<T>
-                      let vec: Vec<T> = arr
-                          .into_iter()
-                          .map(T::from_json)
-                          .collect::<Result<_, _>>()?;
-                      // Then try to convert Vec<T> into [T; N]; error if length mismatch
-                      vec.try_into()
-                          .map_err(|v: Vec<T>| {
-                              format!(
-                                  "Expected array of length {} for [T; N], got length {}",
-                                  N,
-                                  v.len()
-                              )
-                          })
-                  }
-                  _ => Err(format!("Expected JSONNode::Array for [T; {}]", N)),
-              }
-          }
-      }
+          if !no_timing_data {
+              let mut flat_map: HashMap<String, ProfileNode> = HashMap::new();
+              flatten_tree_recursive(&data.call_tree.children, &mut flat_map);
 
+              println!("\n[Flat Timings]");
+              println!(
+                  "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10}  {}",
+                  "Hits",
+                  "Total Time",
+                  "Total/Hit",
+                  "Own Time",
+                  "Own/Hit",
+                  "% Own",
+                  "Name"
+              );
 
-      impl<T: JSONConvertible + Ord> JSONConvertible for BTreeSet<T> {
-          fn to_json(&self) -> JSONNode {
-              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
-                  _ => Err("Expected JSONNode::Array for BTreeSet<T>".to_string()),
-              }
-          }
-      }
+              let mut sorted_list: Vec<_> = flat_map.iter().collect();
+              sorted_list.sort_by(|a, b| b.1.total_time.cmp(&a.1.total_time));
 
-      impl<T: JSONConvertible + Eq + Hash + Ord> JSONConvertible for HashSet<T> {
-          fn to_json(&self) -> JSONNode {
-              let mut vec: Vec<_> = self.iter().collect();
-              vec.sort(); // Sort for deterministic output
-              JSONNode::Array(vec.iter().map(|item| item.to_json()).collect())
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
-                  _ => Err("Expected JSONNode::Array for HashSet<T>".to_string()),
-              }
-          }
-      }
-
-      impl<K, V> JSONConvertible for BTreeMap<K, V>
-      where
-          K: JSONConvertible + Ord, // Keys in BTreeMap must be Ord
-          V: JSONConvertible,
-      {
-          fn to_json(&self) -> JSONNode {
-              // BTreeMap is already sorted by key, so iter() gives deterministic order
-              let pairs = self.iter().map(|(k, v)| {
-                  JSONNode::Array(vec![k.to_json(), v.to_json()])
-              }).collect();
-              JSONNode::Array(pairs)
-          }
-
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => {
-                      let mut map = BTreeMap::new();
-                      for pair_node in arr {
-                          match pair_node {
-                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
-                                  let v_node = pair_vec.pop().unwrap();
-                                  let k_node = pair_vec.pop().unwrap();
-                                  map.insert(K::from_json(k_node)?, V::from_json(v_node)?);
-                              }
-                              _ => return Err("Expected 2-element array for BTreeMap entry".to_string()),
-                          }
-                      }
-                      Ok(map)
-                  }
-                  _ => Err("Expected JSONNode::Array for BTreeMap<K, V>".to_string()),
-              }
-          }
-      }
-
-      impl<K, V> JSONConvertible for HashMap<K, V>
-      where
-          K: JSONConvertible + Eq + Hash + Ord, // Ord needed for sorting for deterministic JSON
-          V: JSONConvertible,
-      {
-          fn to_json(&self) -> JSONNode {
-              let mut sorted_pairs: Vec<_> = self.iter().collect();
-              // Sort by key for deterministic JSON output
-              sorted_pairs.sort_by_key(|(k, _)| *k); // Requires K: Ord
-
-              let pairs = sorted_pairs.into_iter().map(|(k, v)| {
-                  JSONNode::Array(vec![k.to_json(), v.to_json()])
-              }).collect();
-              JSONNode::Array(pairs)
-          }
-
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => {
-                      let mut map = HashMap::new();
-                      for pair_node in arr {
-                          match pair_node {
-                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
-                                  let v_node = pair_vec.pop().unwrap();
-                                  let k_node = pair_vec.pop().unwrap();
-                                  map.insert(K::from_json(k_node)?, V::from_json(v_node)?);
-                              }
-                              _ => return Err("Expected 2-element array for HashMap entry".to_string()),
-                          }
-                      }
-                      Ok(map)
-                  }
-                  _ => Err("Expected JSONNode::Array for HashMap<K, V>".to_string()),
-              }
-          }
-      }
-
-      impl<L, R> JSONConvertible for BiBTreeMap<L, R>
-      where
-          L: JSONConvertible + Ord + Eq, // BiBTreeMap requires Ord + Eq for both left and right
-          R: JSONConvertible + Ord + Eq,
-      {
-          fn to_json(&self) -> JSONNode {
-              // BiBTreeMap iter() is sorted by the left value (L)
-              let pairs = self.iter().map(|(l, r)| {
-                  JSONNode::Array(vec![l.to_json(), r.to_json()])
-              }).collect();
-              JSONNode::Array(pairs)
-          }
-
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => {
-                      let mut map = BiBTreeMap::new();
-                      for pair_node in arr {
-                          match pair_node {
-                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
-                                  let r_node = pair_vec.pop().unwrap();
-                                  let l_node = pair_vec.pop().unwrap();
-                                  map.insert(L::from_json(l_node)?, R::from_json(r_node)?);
-                              }
-                              _ => return Err("Expected 2-element array for BiBTreeMap entry".to_string()),
-                          }
-                      }
-                      Ok(map)
-                  }
-                  _ => Err("Expected JSONNode::Array for BiBTreeMap<L, R>".to_string()),
-              }
-          }
-      }
-
-      // --- Tests (optional, but good for verifying) ---
-      #[cfg(test)]
-      mod tests {
-          use super::*; // Imports JSONNode, JSONConvertible, MyStruct, etc.
-
-          // Example struct using the derive
-          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
-          struct MyStruct {
-              field1: i32,
-              field2: String,
-              optional_field: Option::<bool>,
-              list_of_numbers: Vec::<u32>,
-              byte_buffer: Vec::<u8>,
-          }
-
-          // Example generic struct using the derive
-          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
-          struct GenericStruct<T: JSONConvertible, U: JSONConvertible> {
-              item_t: T,
-              item_u: U,
-              description: String,
-          }
-
-          // Example unit struct using the derive
-          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
-          struct MyUnitStruct;
-
-          #[test]
-          fn test_my_struct_serialization_deserialization() {
-              let original = MyStruct {
-                  field1: 42,
-                  field2: "hello".to_string(),
-                  optional_field: Some(true),
-                  list_of_numbers: vec![1, 2, 3],
-                  byte_buffer: vec![10, 20, 30],
-              };
-
-              let json_node = original.to_json();
-
-              // Expected JSON structure (BTreeMap for object means fields are sorted by key)
-              // {
-              //   "byte_buffer": [UInt(10), UInt(20), UInt(30)],
-              //   "field1": Int(42),
-              //   "field2": "hello",
-              //   "list_of_numbers": [UInt(1), UInt(2), UInt(3)],
-              //   "optional_field": true
-              // }
-
-              if let JSONNode::Object(obj) = &json_node {
-                  assert_eq!(obj.get("field1"), Some(&JSONNode::Int(42)));
-                  assert_eq!(obj.get("field2"), Some(&JSONNode::String("hello".to_string())));
-                  assert_eq!(obj.get("optional_field"), Some(&JSONNode::Bool(true)));
-                  if let Some(JSONNode::Array(arr)) = obj.get("list_of_numbers") {
-                       assert_eq!(arr, &vec![JSONNode::UInt(1), JSONNode::UInt(2), JSONNode::UInt(3)]);
+              for (name, node) in sorted_list {
+                  let (total_per_hit, own_per_hit) = if node.hits > 0 {
+                      (
+                          node.total_time.mul_f64(1.0 / node.hits as f64),
+                          node.own_time.mul_f64(1.0 / node.hits as f64),
+                      )
                   } else {
-                      panic!("list_of_numbers not found or not an array");
-                  }
-                  if let Some(JSONNode::Array(arr)) = obj.get("byte_buffer") {
-                       assert_eq!(arr, &vec![JSONNode::UInt(10), JSONNode::UInt(20), JSONNode::UInt(30)]);
+                      (Duration::from_secs(0), Duration::from_secs(0))
+                  };
+
+                  let percentage_own = if !node.total_time.is_zero() {
+                      (node.own_time.as_secs_f64() / node.total_time.as_secs_f64()) * 100.0
                   } else {
-                      panic!("byte_buffer not found or not an array");
-                  }
-              } else {
-                  panic!("Expected JSONNode::Object, got {:?}", json_node);
+                      0.0
+                  };
+
+                  let total_str = format_duration(node.total_time);
+                  let own_str = format_duration(node.own_time);
+                  let total_per_hit_str = format_duration(total_per_hit);
+                  let own_per_hit_str = format_duration(own_per_hit);
+                  let percentage_own_str = format!("{:.1}%", percentage_own);
+
+                  println!(
+                      "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10}  {}",
+                      node.hits, total_str, total_per_hit_str, own_str, own_per_hit_str,
+                      percentage_own_str, name
+                  );
+              }
+          }
+
+          if !no_hit_data {
+              println!("\n[Hits]");
+              let mut sorted_hits: Vec<_> = data.hits.iter().collect();
+              sorted_hits.sort_by_key(|k| k.0);
+              for (name, count) in sorted_hits {
+                  println!("  {:>10}x: {}", count, name);
+              }
+          }
+
+          println!("\n--- End Profiler Summary (Flat) ---");
+      }
+
+      /// Returns a clone of the hits data from `hit!` macro.
+      pub fn get_hits() -> HashMap<String, u64> {
+          profiler().lock().unwrap().hits.clone()
+      }
+
+      /// Returns a clone of the call tree.
+      pub fn get_call_tree() -> ProfileNode {
+          profiler().lock().unwrap().call_tree.clone()
+      }
+
+      // Internal functions for timing blocks
+      fn time_block_start(name: String) {
+          let mut data = profiler().lock().unwrap();
+          let now = Instant::now();
+
+          // Increment sub-call counter for the parent.
+          if let Some(parent) = data.timing_stack.last_mut() {
+              parent.3 += 1;
+          }
+
+          // Get parent's own time start if it exists. This immutable borrow ends immediately.
+          let parent_own_time_start_opt = data.timing_stack.last().map(|(_, _, t, _)| *t);
+
+          // Collect the path to the parent node to avoid conflicting borrows.
+          let path: Vec<String> = data.timing_stack.iter().map(|(s, _, _, _)| s.clone()).collect();
+
+          // Now, get a mutable reference to the parent node and traverse.
+          let mut current_node = &mut data.call_tree;
+          for node_name in &path {
+              current_node = current_node.children.get_mut(node_name).unwrap();
+          }
+
+          // If there is a parent, pause its own-time clock.
+          if let Some(parent_own_time_start) = parent_own_time_start_opt {
+              let own_time_lapsed = now.duration_since(parent_own_time_start);
+              current_node.own_time += own_time_lapsed;
+          }
+
+          // `current_node` is now the parent. Get or insert the new node and increment its hit count.
+          let new_node = current_node.children.entry(name.clone()).or_default();
+          new_node.hits += 1;
+
+          // Push the new timer onto the stack.
+          data.timing_stack.push((name, now, now, 0));
+      }
+
+      fn time_block_end() {
+          let mut data = profiler().lock().unwrap();
+          let now = Instant::now();
+
+          // Pop the current timer from the stack.
+          if let Some((name, total_start_time, own_start_time, sub_calls)) = data.timing_stack.pop() {
+              let total_duration = now.duration_since(total_start_time);
+              let own_duration = now.duration_since(own_start_time);
+
+              // Total time correction: 1 for this block, +1 for each direct and indirect sub-call.
+              let total_correction = PROFILER_CORRECTION.saturating_mul((sub_calls + 1) as u32);
+
+              let corrected_total_duration = total_duration.saturating_sub(total_correction);
+              // Own time is only corrected for its own measurement overhead.
+              let corrected_own_duration = own_duration.saturating_sub(PROFILER_CORRECTION);
+
+              // The `timing_stack` has been popped, so it now represents the parent path.
+              // Collect the path to avoid conflicting borrows.
+              let parent_path: Vec<String> =
+                  data.timing_stack.iter().map(|(s, _, _, _)| s.clone()).collect();
+
+              // Get a mutable reference to the parent of the node that just ended.
+              let mut parent_node = &mut data.call_tree;
+              for node_name in &parent_path {
+                  parent_node = parent_node.children.get_mut(node_name).unwrap();
               }
 
-              let deserialized = MyStruct::from_json(json_node).expect("Deserialization failed");
-              assert_eq!(original, deserialized);
+              // Get the node that ended and update its timings.
+              let ended_node = parent_node.children.get_mut(&name).unwrap();
+              ended_node.total_time += corrected_total_duration;
+              ended_node.own_time += corrected_own_duration;
           }
 
-          #[test]
-          fn test_my_struct_optional_none() {
-              let original = MyStruct {
-                  field1: 1,
-                  field2: "world".to_string(),
-                  optional_field: None,
-                  list_of_numbers: vec![],
-                  byte_buffer: vec![],
-              };
-              let json_node = original.to_json();
-              // { "byte_buffer": [], "field1": Int(1), "field2": "world", "list_of_numbers": [], "optional_field": null }
-              if let JSONNode::Object(obj) = &json_node {
-                   assert_eq!(obj.get("optional_field"), Some(&JSONNode::Null));
-                   assert_eq!(obj.get("field1"), Some(&JSONNode::Int(1)));
-              } else {
-                  panic!("Expected JSONNode::Object");
-              }
-              let deserialized = MyStruct::from_json(json_node).expect("Deserialization failed");
-              assert_eq!(original, deserialized);
+          // Resume the new parent timer by updating its own-time start time.
+          if let Some(parent) = data.timing_stack.last_mut() {
+              parent.2 = now; // parent.2 is own_time_start
           }
+      }
 
-          #[test]
-          fn test_generic_struct_serialization() {
-              let original = GenericStruct {
-                  item_t: 123i32,
-                  item_u: "test_string".to_string(),
-                  description: "A generic item".to_string(),
-              };
-              let json_node = original.to_json();
-              // {
-              //   "description": "A generic item",
-              //   "item_t": Int(123),
-              //   "item_u": "test_string"
-              // }
-              if let JSONNode::Object(obj) = &json_node {
-                  assert_eq!(obj.get("item_t"), Some(&JSONNode::Int(123)));
-              } else {
-                  panic!("Expected JSONNode::Object");
-              }
-              let deserialized = GenericStruct::<i32, String>::from_json(json_node).expect("Deserialization failed");
-              assert_eq!(original, deserialized);
+      /// A guard object for timing a block of code using RAII.
+      /// Its creation marks the start of the block, and its destruction (when it goes out of scope)
+      /// marks the end. This is intended for use by the `time!` macro.
+      #[must_use]
+      pub struct TimedBlockGuard;
+
+      impl TimedBlockGuard {
+          /// Creates a new guard, starting a timer for the given name.
+          pub fn new(name: String) -> Self {
+              time_block_start(name);
+              TimedBlockGuard
           }
+      }
 
-          #[test]
-          fn test_generic_struct_with_custom_type() {
-              let my_s = MyStruct {
-                  field1: 1, field2: "inner".to_string(), optional_field: None, list_of_numbers: vec![], byte_buffer: vec![]
-              };
-              let original = GenericStruct {
-                  item_t: my_s.clone(),
-                  item_u: MyUnitStruct,
-                  description: "Struct with custom types".to_string(),
-              };
-              let json_node = original.to_json();
-              let deserialized = GenericStruct::<MyStruct, MyUnitStruct>::from_json(json_node).expect("Deserialization failed");
-              assert_eq!(original, deserialized);
+      impl Drop for TimedBlockGuard {
+          fn drop(&mut self) {
+              time_block_end();
           }
+      }
 
-          #[test]
-          fn test_unit_struct_serialization() {
-              let original = MyUnitStruct;
-              let json_node = original.to_json();
-              assert_eq!(json_node, JSONNode::Object(BTreeMap::new())); // Derive macro makes unit structs empty objects
-              let deserialized = MyUnitStruct::from_json(json_node).expect("Deserialization failed");
-              assert_eq!(original, deserialized);
-          }
+      /// Macro to time a block of code or an expression.
+      ///
+      /// It measures the "own time" of the block, excluding time spent in nested
+      /// `time!` blocks. Timing a block also increments its "hit" count.
+      ///
+      /// # Examples
+      ///
+      /// ```ignore
+      /// use sep1::profiler::{time, print_summary, reset};
+      ///
+      /// fn my_function() {
+      ///     std::thread::sleep(std::time::Duration::from_millis(50));
+      /// }
+      ///
+      /// time!("total", {
+      ///     let result = time!("calculation", 1 + 1);
+      ///     time!("my_function_call", my_function());
+      /// });
+      ///
+      /// print_summary();
+      /// reset();
+      /// ```
+      #[macro_export]
+      macro_rules! time {
+          ($name:expr, $block:expr) => {{
+              let __profiler_name = ($name).into();
+              let _guard = $crate::profiler::TimedBlockGuard::new(__profiler_name);
+              $block
+          }};
+      }
 
-          #[test]
-          fn test_btreemap_serialization() {
-              let mut map = BTreeMap::new();
-              map.insert("b_key".to_string(), 20i32);
-              map.insert("a_key".to_string(), 10i32);
-
-              let json_node = map.to_json();
-              // Expected: [["a_key", Int(10)], ["b_key", Int(20)]] (sorted by key)
-              match json_node {
-                  JSONNode::Array(pairs) => {
-                      assert_eq!(pairs.len(), 2);
-                      // Check first pair
-                      match &pairs[0] {
-                          JSONNode::Array(pair1) => {
-                              assert_eq!(pair1[0], JSONNode::String("a_key".to_string()));
-                              assert_eq!(pair1[1], JSONNode::Int(10));
-                          }
-                          _ => panic!("Expected array for pair"),
-                      }
-                      // Check second pair
-                      match &pairs[1] {
-                          JSONNode::Array(pair2) => {
-                              assert_eq!(pair2[0], JSONNode::String("b_key".to_string()));
-                              assert_eq!(pair2[1], JSONNode::Int(20));
-                          }
-                          _ => panic!("Expected array for pair"),
-                      }
-                  }
-                  _ => panic!("Expected JSONNode::Array for BTreeMap"),
-              }
-
-              let deserialized: BTreeMap<String, i32> = BTreeMap::from_json(map.to_json()).unwrap();
-              assert_eq!(map, deserialized);
-          }
-
-          #[test]
-          fn test_vec_u8_specialization() {
-              let data: Vec<u8> = vec![1, 2, 255];
-              let json_node = data.to_json();
-              // Expected: [UInt(1), UInt(2), UInt(255)]
-              match json_node {
-                  JSONNode::Array(ref nums) => {
-                      assert_eq!(nums.len(), 3);
-                      assert_eq!(nums[0], JSONNode::UInt(1));
-                      assert_eq!(nums[1], JSONNode::UInt(2));
-                      assert_eq!(nums[2], JSONNode::UInt(255));
-                  }
-                  _ => panic!("Expected JSONNode::Array for Vec<u8>"),
-              }
-              let deserialized: Vec<u8> = Vec::from_json(json_node).unwrap();
-              assert_eq!(data, deserialized);
-
-              // Test invalid u8 from various JSONNode number types
-              let invalid_json_uint_too_large = JSONNode::Array(vec![JSONNode::UInt(256)]);
-              assert!(Vec::<u8>::from_json(invalid_json_uint_too_large).is_err());
-
-              let invalid_json_int_too_large = JSONNode::Array(vec![JSONNode::Int(256)]);
-              assert!(Vec::<u8>::from_json(invalid_json_int_too_large).is_err());
-
-              let invalid_json_int_neg = JSONNode::Array(vec![JSONNode::Int(-1)]);
-              assert!(Vec::<u8>::from_json(invalid_json_int_neg).is_err());
-
-              let invalid_json_float = JSONNode::Array(vec![JSONNode::Float(10.5)]);
-              assert!(Vec::<u8>::from_json(invalid_json_float).is_err()); // Floats not convertible to u8 by default
-
-              // Test valid u8 from Int
-              let valid_json_int = JSONNode::Array(vec![JSONNode::Int(128)]);
-              let deserialized_from_int: Vec<u8> = Vec::from_json(valid_json_int).unwrap();
-              assert_eq!(deserialized_from_int, vec![128u8]);
-          }
-
-          #[test]
-          fn test_large_numbers() {
-              let large_u128 = u128::MAX;
-              let json_u128 = large_u128.to_json();
-              assert_eq!(json_u128, JSONNode::UInt(u128::MAX));
-              let deserialized_u128 = u128::from_json(json_u128).unwrap();
-              assert_eq!(large_u128, deserialized_u128);
-
-              let large_i128 = i128::MIN;
-              let json_i128 = large_i128.to_json();
-              assert_eq!(json_i128, JSONNode::Int(i128::MIN));
-              let deserialized_i128 = i128::from_json(json_i128).unwrap();
-              assert_eq!(large_i128, deserialized_i128);
-
-              let float_val = 123.456f64;
-              let json_float = float_val.to_json();
-              assert_eq!(json_float, JSONNode::Float(123.456f64));
-              let deserialized_float = f64::from_json(json_float).unwrap();
-              assert_eq!(float_val, deserialized_float);
-
-              // Test conversion from Int to Float
-              let int_node = JSONNode::Int(123);
-              let float_from_int = f64::from_json(int_node).unwrap();
-              assert_eq!(float_from_int, 123.0f64);
-
-              // Test conversion from UInt to Float
-              let uint_node = JSONNode::UInt(456);
-              let float_from_uint = f64::from_json(uint_node).unwrap();
-              assert_eq!(float_from_uint, 456.0f64);
-
-              // Test that integer types do not deserialize from Float
-              let float_node_exact_int = JSONNode::Float(123.0);
-              assert!(i32::from_json(float_node_exact_int.clone()).is_err());
-              assert!(u32::from_json(float_node_exact_int.clone()).is_err());
-
-              let float_node_inexact_int = JSONNode::Float(123.7);
-              assert!(i32::from_json(float_node_inexact_int.clone()).is_err());
-              assert!(u32::from_json(float_node_inexact_int.clone()).is_err());
-
-              // Test range errors for integer types
-              assert!(i8::from_json(JSONNode::Int(128)).is_err()); // 128 is out of range for i8
-              assert!(i8::from_json(JSONNode::UInt(128)).is_err());// 128 is out of range for i8
-              assert!(u8::from_json(JSONNode::Int(256)).is_err()); // 256 is out of range for u8
-              assert!(u8::from_json(JSONNode::UInt(256)).is_err());// 256 is out of range for u8
-              assert!(u8::from_json(JSONNode::Int(-1)).is_err());  // -1 is out of range for u8
-          }
-
-          #[test]
-          fn test_json_string_conversion() {
-              let original = MyStruct {
-                  field1: 42,
-                  field2: "hello \"world\" \\ / \\b \\f \n \r \t".to_string(),
-                  optional_field: Some(true),
-                  list_of_numbers: vec![1, 2, 3],
-                  byte_buffer: vec![10, 20, 30],
-              };
-
-              let json_node_via_trait = original.to_json();
-              let json_string = json_node_via_trait.to_json_string();
-
-              // Expected string from serde_json (keys will be sorted due to BTreeMap in JSONNode::Object
-              // and SerdeMap in serde_json::Value::Object if built from a sorted iterator,
-              // or if serde_json::to_string sorts them by default for `Map`).
-              // serde_json sorts object keys by default when serializing.
-              let expected_json_string = r#"{"byte_buffer":[10,20,30],"field1":42,"field2":"hello \"world\" \\ / \b \f \n \r \t","list_of_numbers":[1,2,3],"optional_field":true}"#;
-
-              // We can parse the expected string and our generated string to SerdeValue and compare them
-              // to avoid issues with exact string formatting (e.g. spacing if pretty print was used).
-              let serde_val_generated: SerdeValue = serde_json::from_str(&json_string).unwrap();
-              let serde_val_expected: SerdeValue = serde_json::from_str(expected_json_string).unwrap();
-
-              assert_eq!(serde_val_generated, serde_val_expected);
-
-              // Test deserialization from string
-              let parsed_node = JSONNode::from_json_string(&json_string).expect("Failed to parse JSON string back to JSONNode");
-              assert_eq!(json_node_via_trait, parsed_node);
-
-              let deserialized_struct = MyStruct::from_json(parsed_node).expect("Deserialization from parsed_node failed");
-              assert_eq!(original, deserialized_struct);
-          }
-
-          #[test]
-          fn test_non_finite_float_serialization() {
-              let node_nan = JSONNode::Float(f64::NAN);
-              assert_eq!(node_nan.to_json_string(), "null");
-
-              let node_inf = JSONNode::Float(f64::INFINITY);
-              assert_eq!(node_inf.to_json_string(), "null");
-
-              let node_neg_inf = JSONNode::Float(f64::NEG_INFINITY);
-              assert_eq!(node_neg_inf.to_json_string(), "null");
-
-              // Test deserialization of null back to float (will become 0.0 or error based on from_serde_value)
-              // Current from_serde_value for SerdeValue::Null will become JSONNode::Null.
-              // If you want null in JSON to become a specific float (e.g. 0.0 or NaN),
-              // you'd adjust JSONConvertible for Option<f64> or f64 itself.
-              // Here, we are testing JSONNode::from_json_string directly.
-              let parsed_nan_node = JSONNode::from_json_string("null").unwrap();
-              assert_eq!(parsed_nan_node, JSONNode::Null); // serde_json parses "null" to SerdeValue::Null
-                                                           // then from_serde_value converts SerdeValue::Null to JSONNode::Null
-          }
+      /// Macro to record a single hit for a named event.
+      ///
+      /// # Example
+      ///
+      /// ```ignore
+      /// use sep1::profiler::{hit, print_summary};
+      ///
+      /// if true {
+      ///     hit!("some_condition was true");
+      /// }
+      ///
+      /// print_summary();
+      /// ```
+      #[macro_export]
+      macro_rules! hit {
+          ($name:expr) => {
+              $crate::profiler::hit($name)
+          };
       }
   prev_file_contents:
-    src/json_serialization.rs: |
-      use std::collections::{BTreeMap, HashMap, BTreeSet, HashSet};
-      use std::hash::Hash;
-      use std::marker::Sized;
-      use bimap::BiBTreeMap;
+    profiler_macro/src/lib.rs: |
+      use proc_macro::TokenStream;
+      use quote::quote;
+      use syn::{
+          parse::{Parse, ParseStream},
+          parse_macro_input, Expr, ItemFn, LitStr, Token,
+      };
 
-      // Import the derive macro
-      use json_convertible_derive::JSONConvertible;
+      #[proc_macro_attribute]
+      pub fn time_it(attr: TokenStream, item: TokenStream) -> TokenStream {
+          let item_fn = parse_macro_input!(item as ItemFn);
 
-      // Add these lines for serde_json
-      use serde_json::Value as SerdeValue;
-      use serde_json::Map as SerdeMap; // BTreeMap<String, SerdeValue> is SerdeMap
-      use std::convert::TryInto;
-
-      // --- JSONNode Enum ---
-      #[derive(Debug, Clone, PartialEq)]
-      pub enum JSONNode {
-          Null,
-          Bool(bool),
-          Int(i128),
-          UInt(u128),
-          Float(f64),
-          String(String),
-          Array(Vec<JSONNode>),
-          Object(BTreeMap<String, JSONNode>), // BTreeMap for sorted keys
-      }
-
-      impl JSONNode {
-          // New method to convert JSONNode to serde_json::Value
-          fn to_serde_value(&self) -> SerdeValue {
-              match self {
-                  JSONNode::Null => SerdeValue::Null,
-                  JSONNode::Bool(b) => SerdeValue::Bool(*b),
-                  JSONNode::Int(i) => SerdeValue::Number(serde_json::Number::from_i128(*i).expect(format!("Int {} out of range for serde_json::Value", i).as_str())),
-                  JSONNode::UInt(u) => SerdeValue::Number(serde_json::Number::from_u128(*u).expect(format!("UInt {} out of range for serde_json::Value", u).as_str())),
-                  JSONNode::Float(f) => {
-                      // serde_json::Number::from_f64 returns None for NaN/Infinity
-                      // We'll convert such cases to SerdeValue::Null, a common practice.
-                      serde_json::Number::from_f64(*f)
-                          .map(SerdeValue::Number)
-                          .unwrap_or(SerdeValue::Null)
-                  }
-                  JSONNode::String(s) => SerdeValue::String(s.clone()),
-                  JSONNode::Array(arr) => {
-                      SerdeValue::Array(arr.iter().map(|node| node.to_serde_value()).collect())
-                  }
-                  JSONNode::Object(obj) => {
-                      let mut map = SerdeMap::new();
-                      for (k, v) in obj {
-                          map.insert(k.clone(), v.to_serde_value());
-                      }
-                      SerdeValue::Object(map)
-                  }
-              }
-          }
-
-          // New method to convert serde_json::Value to JSONNode
-          fn from_serde_value(s_val: SerdeValue) -> Result<Self, String> {
-              match s_val {
-                  SerdeValue::Null => Ok(JSONNode::Null),
-                  SerdeValue::Bool(b) => Ok(JSONNode::Bool(b)),
-                  SerdeValue::Number(n) => {
-                      if let Some(i) = n.as_i64() {
-                          Ok(JSONNode::Int(i as i128))
-                      } else if let Some(u) = n.as_u64() {
-                          Ok(JSONNode::UInt(u as u128))
-                      } else if let Some(f) = n.as_f64() {
-                          Ok(JSONNode::Float(f))
-                      } else {
-                          Err(format!("Unsupported number type in serde_json::Value: {}", n))
-                      }
-                  }
-                  SerdeValue::String(s) => Ok(JSONNode::String(s)),
-                  SerdeValue::Array(arr) => {
-                      let mut nodes = Vec::with_capacity(arr.len());
-                      for val in arr {
-                          nodes.push(Self::from_serde_value(val)?);
-                      }
-                      Ok(JSONNode::Array(nodes))
-                  }
-                  SerdeValue::Object(obj_map) => {
-                      let mut btree_map = BTreeMap::new();
-                      for (k, v) in obj_map {
-                          btree_map.insert(k, Self::from_serde_value(v)?);
-                      }
-                      Ok(JSONNode::Object(btree_map))
-                  }
-              }
-          }
-
-          // Update to_json_string to use serde_json
-          pub fn to_json_string(&self) -> String {
-              let serde_value = self.to_serde_value();
-              // serde_json::to_string can fail, though less likely for SerdeValue -> String
-              // For simplicity here, unwrap, but consider error handling for production
-              serde_json::to_string(&serde_value).unwrap_or_else(|e| {
-                  // Fallback or panic for critical error
-                  eprintln!("Critical error: Failed to serialize SerdeValue to string: {}", e);
-                  // A minimal JSON representation of an error or "null"
-                  "{\"error\":\"serialization_failed\"}".to_string()
-              })
-          }
-
-          // Update from_json_string to use serde_json
-          pub fn from_json_string(s: &str) -> Result<JSONNode, String> {
-              let serde_value: SerdeValue = serde_json::from_str(s)
-                  .map_err(|e| format!("Failed to parse JSON string with serde_json: {}", e))?;
-              Self::from_serde_value(serde_value)
-          }
-
-          pub fn into_object(self) -> Result<BTreeMap<String, JSONNode>, String> {
-              match self {
-                  JSONNode::Object(obj) => Ok(obj),
-                  _ => Err("Expected JSONNode::Object".to_string()),
-              }
-          }
-      }
-
-      // --- JSONConvertible Trait ---
-      pub trait JSONConvertible: Sized {
-          fn to_json(&self) -> JSONNode;
-          fn from_json(node: JSONNode) -> Result<Self, String>;
-      }
-
-      impl<T> Into<T> for JSONNode
-      where
-          T: JSONConvertible,
-      {
-          fn into(self) -> T {
-              T::from_json(self).expect("Failed to convert JSONNode to type")
-          }
-      }
-
-      impl<T> TryInto<T> for JSONNode
-      where
-          T: JSONConvertible,
-      {
-          type Error = String;
-
-          fn try_into(self) -> Result<T, Self::Error> {
-              T::from_json(self)
-          }
-      }
-
-      // --- Implementations for Primitives ---
-
-      impl JSONConvertible for () {
-          fn to_json(&self) -> JSONNode { JSONNode::Null }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Null => Ok(()),
-                  _ => Err("Expected JSONNode::Null for unit type".to_string()),
-              }
-          }
-      }
-
-      impl JSONConvertible for bool {
-          fn to_json(&self) -> JSONNode { JSONNode::Bool(*self) }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Bool(b) => Ok(b),
-                  _ => Err("Expected JSONNode::Bool for bool".to_string()),
-              }
-          }
-      }
-
-      // --- Implementations for numeric primitives without precision loss ---
-      macro_rules! impl_json_for_signed {
-          ($($t:ty),*) => {
-              $(
-                  impl JSONConvertible for $t {
-                      fn to_json(&self) -> JSONNode { JSONNode::Int(*self as i128) }
-                      fn from_json(node: JSONNode) -> Result<Self, String> {
-                          match node {
-                              JSONNode::Int(n)   => {
-                                  if n >= (<$t>::MIN as i128) && n <= (<$t>::MAX as i128) {
-                                      Ok(n as $t)
-                                  } else {
-                                      Err(format!("Integer {} out of range for {}", n, stringify!($t)))
-                                  }
-                              },
-                              JSONNode::UInt(u)  => {
-                                  // Check if u fits into the positive range of $t
-                                  if u <= (<$t>::MAX as u128) {
-                                      Ok(u as $t)
-                                  } else {
-                                      Err(format!("Unsigned integer {} too large for {}", u, stringify!($t)))
-                                  }
-                              },
-                              other => Err(format!("Expected JSONNode::Int or JSONNode::UInt for {}, got {:?}", stringify!($t), other)),
-                          }
-                      }
-                  }
-              )*
+          let timer_name_expr = if attr.is_empty() {
+              let fn_name = item_fn.sig.ident.to_string();
+              quote! { format!("{}::{}", module_path!(), #fn_name) }
+          } else {
+              let attr_str = parse_macro_input!(attr as LitStr);
+              let name = attr_str.value();
+              quote! { String::from(#name) }
           };
-      }
 
-      macro_rules! impl_json_for_unsigned {
-          ($($t:ty),*) => {
-              $(
-                  impl JSONConvertible for $t {
-                      fn to_json(&self) -> JSONNode { JSONNode::UInt(*self as u128) }
-                      fn from_json(node: JSONNode) -> Result<Self, String> {
-                          match node {
-                              JSONNode::UInt(u) => {
-                                  if u <= (<$t>::MAX as u128) {
-                                      Ok(u as $t)
-                                  } else {
-                                      Err(format!("Unsigned integer {} out of range for {}", u, stringify!($t)))
-                                  }
-                              },
-                              JSONNode::Int(n)  => {
-                                  if n >= 0 {
-                                      let u_n = n as u128;
-                                      if u_n <= (<$t>::MAX as u128) {
-                                          Ok(u_n as $t)
-                                      } else {
-                                          Err(format!("Integer {} (as u128) out of range for {}", n, stringify!($t)))
-                                      }
-                                  } else {
-                                      Err(format!("Negative integer {} cannot be converted to {}", n, stringify!($t)))
-                                  }
-                              },
-                              other => Err(format!("Expected JSONNode::UInt or non-negative JSONNode::Int for {}, got {:?}", stringify!($t), other)),
-                          }
-                      }
-                  }
-              )*
+          let fn_vis = &item_fn.vis;
+          let fn_sig = &item_fn.sig;
+          let fn_block = &item_fn.block;
+          let fn_attrs = &item_fn.attrs;
+
+          let result = quote! {
+              #(#fn_attrs)*
+              #fn_vis #fn_sig {
+                  let __profiler_name = #timer_name_expr;
+                  let _guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
+                  #fn_block
+              }
           };
+
+          result.into()
       }
 
-      macro_rules! impl_json_for_float {
-          ($($t:ty),*) => {
-              $(
-                  impl JSONConvertible for $t {
-                      fn to_json(&self) -> JSONNode { JSONNode::Float(*self as f64) }
-                      fn from_json(node: JSONNode) -> Result<Self, String> {
-                          match node {
-                              JSONNode::Float(f) => Ok(f as $t),
-                              JSONNode::Int(n)   => Ok(n as $t), // Standard Rust cast behavior, potential precision loss for large i128
-                              JSONNode::UInt(u)  => Ok(u as $t), // Standard Rust cast behavior, potential precision loss for large u128
-                              other => Err(format!("Expected JSONNode::Float, ::Int, or ::UInt for {}, got {:?}", stringify!($t), other)),
-                          }
-                      }
-                  }
-              )*
+      enum TimeitArgs {
+          Named { name: Expr, expr: Expr },
+          Unnamed { expr: Expr },
+      }
+
+      impl Parse for TimeitArgs {
+          fn parse(input: ParseStream) -> syn::Result<Self> {
+              let first_expr = input.parse::<Expr>()?;
+              if input.peek(Token![,]) {
+                  let _: Token![,] = input.parse()?;
+                  let expr = input.parse::<Expr>()?;
+                  Ok(TimeitArgs::Named {
+                      name: first_expr,
+                      expr,
+                  })
+              } else {
+                  Ok(TimeitArgs::Unnamed { expr: first_expr })
+              }
+          }
+      }
+
+      #[proc_macro]
+      pub fn timeit(input: TokenStream) -> TokenStream {
+          let args = parse_macro_input!(input as TimeitArgs);
+
+          let (name_code, expr) = match args {
+              TimeitArgs::Named { name, expr } => (quote! { (#name).into() }, expr),
+              TimeitArgs::Unnamed { expr } => {
+                  let expr_str = quote! { #expr }.to_string();
+                  (quote! { String::from(#expr_str) }, expr)
+              }
           };
+
+          let result = quote! {{
+              let __profiler_name = #name_code;
+              let _guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
+              #expr
+          }};
+
+          result.into()
+      }
+    src/profiler.rs: |
+      use std::collections::HashMap;
+      use std::sync::{Mutex, OnceLock};
+      use std::time::{Duration, Instant};
+
+      /// The measured overhead of a single timing block, used for correction.
+      const PROFILER_CORRECTION: Duration = Duration::from_nanos(1300);
+
+      /// A node in the profiler's call tree.
+      #[derive(Default, Clone)]
+      pub struct ProfileNode {
+          /// Number of times this block was entered.
+          pub hits: u64,
+          /// Time spent in this block, excluding children.
+          pub own_time: Duration,
+          /// Time spent in this block, including children.
+          pub total_time: Duration,
+          /// Children nodes in the call tree.
+          pub children: HashMap<String, ProfileNode>,
       }
 
-      // Signed integers
-      impl_json_for_signed!(i8, i16, i32, i64, isize, i128);
-      // Unsigned integers
-      impl_json_for_unsigned!(u8, u16, u32, u64, usize, u128);
-      // Floating-point types
-      impl_json_for_float!(f32, f64);
+      /// Holds all profiling data.
+      #[derive(Default)]
+      pub struct ProfilerData {
+          /// The root of the call tree. Its children are the top-level timed blocks.
+          call_tree: ProfileNode,
+          /// A stack to keep track of the current path in the call tree.
+          /// Each element is (name, start_time_for_total, start_time_for_own, sub_calls_count)
+          timing_stack: Vec<(String, Instant, Instant, u64)>,
+          /// Separate hits counter for the `hit!` macro.
+          hits: HashMap<String, u64>,
+      }
 
+      // Global, thread-safe profiler data instance.
+      static PROFILER: OnceLock<Mutex<ProfilerData>> = OnceLock::new();
 
-      impl JSONConvertible for String {
-          fn to_json(&self) -> JSONNode { JSONNode::String(self.clone()) }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::String(s) => Ok(s),
-                  _ => Err("Expected JSONNode::String for String".to_string()),
+      fn profiler() -> &'static Mutex<ProfilerData> {
+          PROFILER.get_or_init(|| Mutex::new(ProfilerData::default()))
+      }
+
+      /// Records a single hit for a named event (for use with `hit!` macro).
+      pub fn hit(name: &str) {
+          let mut data = profiler().lock().unwrap();
+          *data.hits.entry(name.to_string()).or_insert(0) += 1;
+      }
+
+      /// Resets all profiling data (hits and timings).
+      pub fn reset() {
+          let mut data = profiler().lock().unwrap();
+          data.call_tree = ProfileNode::default();
+          data.timing_stack.clear();
+          data.hits.clear();
+      }
+
+      /// Formats a `Duration` into a human-readable string with appropriate units (s, ms, µs, ns).
+      fn format_duration(duration: Duration) -> String {
+          let total_nanos = duration.as_nanos();
+          if total_nanos >= 1_000_000_000 {
+              format!("{:.3}s", duration.as_secs_f64())
+          } else if total_nanos >= 1_000_000 {
+              format!("{:.3}ms", duration.as_micros() as f64 / 1000.0)
+          } else if total_nanos >= 1_000 {
+              format!("{:.3}µs", duration.as_nanos() as f64 / 1000.0)
+          } else {
+              format!("{}ns", total_nanos)
+          }
+      }
+
+      fn print_node_recursive(
+          node: &ProfileNode,
+          name: &str,
+          indent_level: usize,
+          parent_total_time: Duration,
+      ) {
+          let indent = "  ".repeat(indent_level);
+          let name_with_indent = format!("{}{}", indent, name);
+
+          let (total_per_hit, own_per_hit) = if node.hits > 0 {
+              (
+                  node.total_time.mul_f64(1.0 / node.hits as f64),
+                  node.own_time.mul_f64(1.0 / node.hits as f64),
+              )
+          } else {
+              (Duration::from_secs(0), Duration::from_secs(0))
+          };
+
+          let percentage_of_parent = if !parent_total_time.is_zero() {
+              (node.total_time.as_secs_f64() / parent_total_time.as_secs_f64()) * 100.0
+          } else {
+              0.0
+          };
+
+          let percentage_own = if !node.total_time.is_zero() {
+              (node.own_time.as_secs_f64() / node.total_time.as_secs_f64()) * 100.0
+          } else {
+              0.0
+          };
+
+          let total_str = format_duration(node.total_time);
+          let own_str = format_duration(node.own_time);
+          let total_per_hit_str = format_duration(total_per_hit);
+          let own_per_hit_str = format_duration(own_per_hit);
+          let percentage_of_parent_str = format!("{:.1}%", percentage_of_parent);
+          let percentage_own_str = format!("{:.1}%", percentage_own);
+
+          println!(
+              "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10} {:>15}  {}",
+              node.hits,
+              total_str,
+              total_per_hit_str,
+              own_str,
+              own_per_hit_str,
+              percentage_own_str,
+              percentage_of_parent_str,
+              name_with_indent
+          );
+
+          let mut sorted_children: Vec<_> = node.children.iter().collect();
+          sorted_children.sort_by_key(|(name, _)| *name);
+
+          for (child_name, child_node) in sorted_children {
+              print_node_recursive(child_node, child_name, indent_level + 1, node.total_time);
+          }
+      }
+
+      /// Prints a summary of the collected profiling data to stdout.
+      pub fn print_summary() {
+          let data = profiler().lock().unwrap();
+          println!("--- Profiler Summary ---");
+
+          let no_timing_data = data.call_tree.children.is_empty();
+          let no_hit_data = data.hits.is_empty();
+
+          if no_timing_data && no_hit_data {
+              println!("No data collected.");
+              println!("--- End Profiler Summary ---");
+              return;
+          }
+
+          if !no_timing_data {
+              println!("\n[Hierarchical Timings]");
+              println!(
+                  "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10} {:>15}  {}",
+                  "Hits",
+                  "Total Time",
+                  "Total/Hit",
+                  "Own Time",
+                  "Own/Hit",
+                  "% Own",
+                  "% of Parent",
+                  "Name"
+              );
+
+              let root_total_time: Duration = data
+                  .call_tree
+                  .children
+                  .values()
+                  .map(|node| node.total_time)
+                  .sum();
+
+              let mut sorted_children: Vec<_> = data.call_tree.children.iter().collect();
+              sorted_children.sort_by_key(|(name, _)| *name);
+
+              for (name, node) in sorted_children {
+                  print_node_recursive(node, name, 0, root_total_time);
+              }
+          }
+
+          if !no_hit_data {
+              println!("\n[Hits]");
+              let mut sorted_hits: Vec<_> = data.hits.iter().collect();
+              sorted_hits.sort_by_key(|k| k.0);
+              for (name, count) in sorted_hits {
+                  println!("  {:>10}x: {}", count, name);
+              }
+          }
+
+          println!("\n--- End Profiler Summary ---");
+      }
+
+      fn flatten_tree_recursive(
+          nodes: &HashMap<String, ProfileNode>,
+          flat_map: &mut HashMap<String, ProfileNode>,
+      ) {
+          for (name, node) in nodes {
+              let entry = flat_map.entry(name.clone()).or_default();
+              entry.hits += node.hits;
+              entry.own_time += node.own_time;
+              entry.total_time += node.total_time;
+
+              if !node.children.is_empty() {
+                  flatten_tree_recursive(&node.children, flat_map);
               }
           }
       }
 
-      impl<'a> JSONConvertible for &'a str {
-          fn to_json(&self) -> JSONNode { JSONNode::String(self.to_string()) }
-          fn from_json(_node: JSONNode) -> Result<Self, String> {
-              Err("Cannot deserialize into &str, deserialize into String instead".to_string())
-          }
-      }
+      /// Prints a summary of the collected profiling data as a flat list, merging all calls to the same function.
+      pub fn print_summary_flat() {
+          let data = profiler().lock().unwrap();
+          println!("--- Profiler Summary (Flat) ---");
 
-      // --- Implementations for Option ---
-      impl<T: JSONConvertible> JSONConvertible for Option<T> {
-          fn to_json(&self) -> JSONNode {
-              match self {
-                  Some(val) => val.to_json(),
-                  None => JSONNode::Null,
-              }
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Null => Ok(None),
-                  _ => T::from_json(node).map(Some),
-              }
-          }
-      }
+          let no_timing_data = data.call_tree.children.is_empty();
+          let no_hit_data = data.hits.is_empty();
 
-      // --- Implementations for Collections ---
-
-      // Generic Vec<T>
-      impl<T: JSONConvertible> JSONConvertible for Vec<T> {
-          fn to_json(&self) -> JSONNode {
-              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
-                  _ => Err("Expected JSONNode::Array for Vec<T>".to_string()),
-              }
-          }
-      }
-
-      // Generic array
-      impl<T: JSONConvertible, const N: usize> JSONConvertible for [T; N] {
-          fn to_json(&self) -> JSONNode {
-              // Convert array elements to JSONNode and wrap in a JSON array
-              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
+          if no_timing_data && no_hit_data {
+              println!("No data collected.");
+              println!("--- End Profiler Summary (Flat) ---");
+              return;
           }
 
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => {
-                      // First convert each JSONNode into T, collecting into a Vec<T>
-                      let vec: Vec<T> = arr
-                          .into_iter()
-                          .map(T::from_json)
-                          .collect::<Result<_, _>>()?;
-                      // Then try to convert Vec<T> into [T; N]; error if length mismatch
-                      vec.try_into()
-                          .map_err(|v: Vec<T>| {
-                              format!(
-                                  "Expected array of length {} for [T; N], got length {}",
-                                  N,
-                                  v.len()
-                              )
-                          })
-                  }
-                  _ => Err(format!("Expected JSONNode::Array for [T; {}]", N)),
-              }
-          }
-      }
+          if !no_timing_data {
+              let mut flat_map: HashMap<String, ProfileNode> = HashMap::new();
+              flatten_tree_recursive(&data.call_tree.children, &mut flat_map);
 
+              println!("\n[Flat Timings]");
+              println!(
+                  "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10}  {}",
+                  "Hits",
+                  "Total Time",
+                  "Total/Hit",
+                  "Own Time",
+                  "Own/Hit",
+                  "% Own",
+                  "Name"
+              );
 
-      impl<T: JSONConvertible + Ord> JSONConvertible for BTreeSet<T> {
-          fn to_json(&self) -> JSONNode {
-              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
-                  _ => Err("Expected JSONNode::Array for BTreeSet<T>".to_string()),
-              }
-          }
-      }
+              let mut sorted_list: Vec<_> = flat_map.iter().collect();
+              sorted_list.sort_by(|a, b| b.1.total_time.cmp(&a.1.total_time));
 
-      impl<T: JSONConvertible + Eq + Hash + Ord> JSONConvertible for HashSet<T> {
-          fn to_json(&self) -> JSONNode {
-              let mut vec: Vec<_> = self.iter().collect();
-              vec.sort(); // Sort for deterministic output
-              JSONNode::Array(vec.iter().map(|item| item.to_json()).collect())
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
-                  _ => Err("Expected JSONNode::Array for HashSet<T>".to_string()),
-              }
-          }
-      }
-
-      impl<K, V> JSONConvertible for BTreeMap<K, V>
-      where
-          K: JSONConvertible + Ord, // Keys in BTreeMap must be Ord
-          V: JSONConvertible,
-      {
-          fn to_json(&self) -> JSONNode {
-              // BTreeMap is already sorted by key, so iter() gives deterministic order
-              let pairs = self.iter().map(|(k, v)| {
-                  JSONNode::Array(vec![k.to_json(), v.to_json()])
-              }).collect();
-              JSONNode::Array(pairs)
-          }
-
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => {
-                      let mut map = BTreeMap::new();
-                      for pair_node in arr {
-                          match pair_node {
-                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
-                                  let v_node = pair_vec.pop().unwrap();
-                                  let k_node = pair_vec.pop().unwrap();
-                                  map.insert(K::from_json(k_node)?, V::from_json(v_node)?);
-                              }
-                              _ => return Err("Expected 2-element array for BTreeMap entry".to_string()),
-                          }
-                      }
-                      Ok(map)
-                  }
-                  _ => Err("Expected JSONNode::Array for BTreeMap<K, V>".to_string()),
-              }
-          }
-      }
-
-      impl<K, V> JSONConvertible for HashMap<K, V>
-      where
-          K: JSONConvertible + Eq + Hash + Ord, // Ord needed for sorting for deterministic JSON
-          V: JSONConvertible,
-      {
-          fn to_json(&self) -> JSONNode {
-              let mut sorted_pairs: Vec<_> = self.iter().collect();
-              // Sort by key for deterministic JSON output
-              sorted_pairs.sort_by_key(|(k, _)| *k); // Requires K: Ord
-
-              let pairs = sorted_pairs.into_iter().map(|(k, v)| {
-                  JSONNode::Array(vec![k.to_json(), v.to_json()])
-              }).collect();
-              JSONNode::Array(pairs)
-          }
-
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => {
-                      let mut map = HashMap::new();
-                      for pair_node in arr {
-                          match pair_node {
-                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
-                                  let v_node = pair_vec.pop().unwrap();
-                                  let k_node = pair_vec.pop().unwrap();
-                                  map.insert(K::from_json(k_node)?, V::from_json(v_node)?);
-                              }
-                              _ => return Err("Expected 2-element array for HashMap entry".to_string()),
-                          }
-                      }
-                      Ok(map)
-                  }
-                  _ => Err("Expected JSONNode::Array for HashMap<K, V>".to_string()),
-              }
-          }
-      }
-
-      impl<L, R> JSONConvertible for BiBTreeMap<L, R>
-      where
-          L: JSONConvertible + Ord + Eq, // BiBTreeMap requires Ord + Eq for both left and right
-          R: JSONConvertible + Ord + Eq,
-      {
-          fn to_json(&self) -> JSONNode {
-              // BiBTreeMap iter() is sorted by the left value (L)
-              let pairs = self.iter().map(|(l, r)| {
-                  JSONNode::Array(vec![l.to_json(), r.to_json()])
-              }).collect();
-              JSONNode::Array(pairs)
-          }
-
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => {
-                      let mut map = BiBTreeMap::new();
-                      for pair_node in arr {
-                          match pair_node {
-                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
-                                  let r_node = pair_vec.pop().unwrap();
-                                  let l_node = pair_vec.pop().unwrap();
-                                  map.insert(L::from_json(l_node)?, R::from_json(r_node)?);
-                              }
-                              _ => return Err("Expected 2-element array for BiBTreeMap entry".to_string()),
-                          }
-                      }
-                      Ok(map)
-                  }
-                  _ => Err("Expected JSONNode::Array for BiBTreeMap<L, R>".to_string()),
-              }
-          }
-      }
-
-      // --- Tests (optional, but good for verifying) ---
-      #[cfg(test)]
-      mod tests {
-          use super::*; // Imports JSONNode, JSONConvertible, MyStruct, etc.
-
-          // Example struct using the derive
-          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
-          struct MyStruct {
-              field1: i32,
-              field2: String,
-              optional_field: Option::<bool>,
-              list_of_numbers: Vec::<u32>,
-              byte_buffer: Vec::<u8>,
-          }
-
-          // Example generic struct using the derive
-          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
-          struct GenericStruct<T: JSONConvertible, U: JSONConvertible> {
-              item_t: T,
-              item_u: U,
-              description: String,
-          }
-
-          // Example unit struct using the derive
-          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
-          struct MyUnitStruct;
-
-          #[test]
-          fn test_my_struct_serialization_deserialization() {
-              let original = MyStruct {
-                  field1: 42,
-                  field2: "hello".to_string(),
-                  optional_field: Some(true),
-                  list_of_numbers: vec![1, 2, 3],
-                  byte_buffer: vec![10, 20, 30],
-              };
-
-              let json_node = original.to_json();
-
-              // Expected JSON structure (BTreeMap for object means fields are sorted by key)
-              // {
-              //   "byte_buffer": [UInt(10), UInt(20), UInt(30)],
-              //   "field1": Int(42),
-              //   "field2": "hello",
-              //   "list_of_numbers": [UInt(1), UInt(2), UInt(3)],
-              //   "optional_field": true
-              // }
-
-              if let JSONNode::Object(obj) = &json_node {
-                  assert_eq!(obj.get("field1"), Some(&JSONNode::Int(42)));
-                  assert_eq!(obj.get("field2"), Some(&JSONNode::String("hello".to_string())));
-                  assert_eq!(obj.get("optional_field"), Some(&JSONNode::Bool(true)));
-                  if let Some(JSONNode::Array(arr)) = obj.get("list_of_numbers") {
-                       assert_eq!(arr, &vec![JSONNode::UInt(1), JSONNode::UInt(2), JSONNode::UInt(3)]);
+              for (name, node) in sorted_list {
+                  let (total_per_hit, own_per_hit) = if node.hits > 0 {
+                      (
+                          node.total_time.mul_f64(1.0 / node.hits as f64),
+                          node.own_time.mul_f64(1.0 / node.hits as f64),
+                      )
                   } else {
-                      panic!("list_of_numbers not found or not an array");
-                  }
-                  if let Some(JSONNode::Array(arr)) = obj.get("byte_buffer") {
-                       assert_eq!(arr, &vec![JSONNode::UInt(10), JSONNode::UInt(20), JSONNode::UInt(30)]);
+                      (Duration::from_secs(0), Duration::from_secs(0))
+                  };
+
+                  let percentage_own = if !node.total_time.is_zero() {
+                      (node.own_time.as_secs_f64() / node.total_time.as_secs_f64()) * 100.0
                   } else {
-                      panic!("byte_buffer not found or not an array");
-                  }
-              } else {
-                  panic!("Expected JSONNode::Object, got {:?}", json_node);
+                      0.0
+                  };
+
+                  let total_str = format_duration(node.total_time);
+                  let own_str = format_duration(node.own_time);
+                  let total_per_hit_str = format_duration(total_per_hit);
+                  let own_per_hit_str = format_duration(own_per_hit);
+                  let percentage_own_str = format!("{:.1}%", percentage_own);
+
+                  println!(
+                      "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10}  {}",
+                      node.hits, total_str, total_per_hit_str, own_str, own_per_hit_str,
+                      percentage_own_str, name
+                  );
+              }
+          }
+
+          if !no_hit_data {
+              println!("\n[Hits]");
+              let mut sorted_hits: Vec<_> = data.hits.iter().collect();
+              sorted_hits.sort_by_key(|k| k.0);
+              for (name, count) in sorted_hits {
+                  println!("  {:>10}x: {}", count, name);
+              }
+          }
+
+          println!("\n--- End Profiler Summary (Flat) ---");
+      }
+
+      /// Returns a clone of the hits data from `hit!` macro.
+      pub fn get_hits() -> HashMap<String, u64> {
+          profiler().lock().unwrap().hits.clone()
+      }
+
+      /// Returns a clone of the call tree.
+      pub fn get_call_tree() -> ProfileNode {
+          profiler().lock().unwrap().call_tree.clone()
+      }
+
+      // Internal functions for timing blocks
+      fn time_block_start(name: String) {
+          let mut data = profiler().lock().unwrap();
+          let now = Instant::now();
+
+          // Increment sub-call counter for the parent.
+          if let Some(parent) = data.timing_stack.last_mut() {
+              parent.3 += 1;
+          }
+
+          // Get parent's own time start if it exists. This immutable borrow ends immediately.
+          let parent_own_time_start_opt = data.timing_stack.last().map(|(_, _, t, _)| *t);
+
+          // Collect the path to the parent node to avoid conflicting borrows.
+          let path: Vec<String> = data.timing_stack.iter().map(|(s, _, _, _)| s.clone()).collect();
+
+          // Now, get a mutable reference to the parent node and traverse.
+          let mut current_node = &mut data.call_tree;
+          for node_name in &path {
+              current_node = current_node.children.get_mut(node_name).unwrap();
+          }
+
+          // If there is a parent, pause its own-time clock.
+          if let Some(parent_own_time_start) = parent_own_time_start_opt {
+              let own_time_lapsed = now.duration_since(parent_own_time_start);
+              current_node.own_time += own_time_lapsed;
+          }
+
+          // `current_node` is now the parent. Get or insert the new node and increment its hit count.
+          let new_node = current_node.children.entry(name.clone()).or_default();
+          new_node.hits += 1;
+
+          // Push the new timer onto the stack.
+          data.timing_stack.push((name, now, now, 0));
+      }
+
+      fn time_block_end() {
+          let mut data = profiler().lock().unwrap();
+          let now = Instant::now();
+
+          // Pop the current timer from the stack.
+          if let Some((name, total_start_time, own_start_time, sub_calls)) = data.timing_stack.pop() {
+              let total_duration = now.duration_since(total_start_time);
+              let own_duration = now.duration_since(own_start_time);
+
+              // Total time correction: 1 for this block, +1 for each direct and indirect sub-call.
+              let total_correction = PROFILER_CORRECTION.saturating_mul((sub_calls + 1) as u32);
+
+              let corrected_total_duration = total_duration.saturating_sub(total_correction);
+              // Own time is only corrected for its own measurement overhead.
+              let corrected_own_duration = own_duration.saturating_sub(PROFILER_CORRECTION);
+
+              // The `timing_stack` has been popped, so it now represents the parent path.
+              // Collect the path to avoid conflicting borrows.
+              let parent_path: Vec<String> =
+                  data.timing_stack.iter().map(|(s, _, _, _)| s.clone()).collect();
+
+              // Get a mutable reference to the parent of the node that just ended.
+              let mut parent_node = &mut data.call_tree;
+              for node_name in &parent_path {
+                  parent_node = parent_node.children.get_mut(node_name).unwrap();
               }
 
-              let deserialized = MyStruct::from_json(json_node).expect("Deserialization failed");
-              assert_eq!(original, deserialized);
+              // Get the node that ended and update its timings.
+              let ended_node = parent_node.children.get_mut(&name).unwrap();
+              ended_node.total_time += corrected_total_duration;
+              ended_node.own_time += corrected_own_duration;
           }
 
-          #[test]
-          fn test_my_struct_optional_none() {
-              let original = MyStruct {
-                  field1: 1,
-                  field2: "world".to_string(),
-                  optional_field: None,
-                  list_of_numbers: vec![],
-                  byte_buffer: vec![],
-              };
-              let json_node = original.to_json();
-              // { "byte_buffer": [], "field1": Int(1), "field2": "world", "list_of_numbers": [], "optional_field": null }
-              if let JSONNode::Object(obj) = &json_node {
-                   assert_eq!(obj.get("optional_field"), Some(&JSONNode::Null));
-                   assert_eq!(obj.get("field1"), Some(&JSONNode::Int(1)));
-              } else {
-                  panic!("Expected JSONNode::Object");
-              }
-              let deserialized = MyStruct::from_json(json_node).expect("Deserialization failed");
-              assert_eq!(original, deserialized);
+          // Resume the new parent timer by updating its own-time start time.
+          if let Some(parent) = data.timing_stack.last_mut() {
+              parent.2 = now; // parent.2 is own_time_start
           }
+      }
 
-          #[test]
-          fn test_generic_struct_serialization() {
-              let original = GenericStruct {
-                  item_t: 123i32,
-                  item_u: "test_string".to_string(),
-                  description: "A generic item".to_string(),
-              };
-              let json_node = original.to_json();
-              // {
-              //   "description": "A generic item",
-              //   "item_t": Int(123),
-              //   "item_u": "test_string"
-              // }
-              if let JSONNode::Object(obj) = &json_node {
-                  assert_eq!(obj.get("item_t"), Some(&JSONNode::Int(123)));
-              } else {
-                  panic!("Expected JSONNode::Object");
-              }
-              let deserialized = GenericStruct::<i32, String>::from_json(json_node).expect("Deserialization failed");
-              assert_eq!(original, deserialized);
+      /// A guard object for timing a block of code using RAII.
+      /// Its creation marks the start of the block, and its destruction (when it goes out of scope)
+      /// marks the end. This is intended for use by the `time!` macro.
+      #[must_use]
+      pub struct TimedBlockGuard;
+
+      impl TimedBlockGuard {
+          /// Creates a new guard, starting a timer for the given name.
+          pub fn new(name: String) -> Self {
+              time_block_start(name);
+              TimedBlockGuard
           }
+      }
 
-          #[test]
-          fn test_generic_struct_with_custom_type() {
-              let my_s = MyStruct {
-                  field1: 1, field2: "inner".to_string(), optional_field: None, list_of_numbers: vec![], byte_buffer: vec![]
-              };
-              let original = GenericStruct {
-                  item_t: my_s.clone(),
-                  item_u: MyUnitStruct,
-                  description: "Struct with custom types".to_string(),
-              };
-              let json_node = original.to_json();
-              let deserialized = GenericStruct::<MyStruct, MyUnitStruct>::from_json(json_node).expect("Deserialization failed");
-              assert_eq!(original, deserialized);
+      impl Drop for TimedBlockGuard {
+          fn drop(&mut self) {
+              time_block_end();
           }
+      }
 
-          #[test]
-          fn test_unit_struct_serialization() {
-              let original = MyUnitStruct;
-              let json_node = original.to_json();
-              assert_eq!(json_node, JSONNode::Object(BTreeMap::new())); // Derive macro makes unit structs empty objects
-              let deserialized = MyUnitStruct::from_json(json_node).expect("Deserialization failed");
-              assert_eq!(original, deserialized);
-          }
+      /// Macro to time a block of code or an expression.
+      ///
+      /// It measures the "own time" of the block, excluding time spent in nested
+      /// `time!` blocks. Timing a block also increments its "hit" count.
+      ///
+      /// # Examples
+      ///
+      /// ```ignore
+      /// use sep1::profiler::{time, print_summary, reset};
+      ///
+      /// fn my_function() {
+      ///     std::thread::sleep(std::time::Duration::from_millis(50));
+      /// }
+      ///
+      /// time!("total", {
+      ///     let result = time!("calculation", 1 + 1);
+      ///     time!("my_function_call", my_function());
+      /// });
+      ///
+      /// print_summary();
+      /// reset();
+      /// ```
+      #[macro_export]
+      macro_rules! time {
+          ($name:expr, $block:expr) => {{
+              let __profiler_name = ($name).into();
+              let _guard = $crate::profiler::TimedBlockGuard::new(__profiler_name);
+              $block
+          }};
+      }
 
-          #[test]
-          fn test_btreemap_serialization() {
-              let mut map = BTreeMap::new();
-              map.insert("b_key".to_string(), 20i32);
-              map.insert("a_key".to_string(), 10i32);
-
-              let json_node = map.to_json();
-              // Expected: [["a_key", Int(10)], ["b_key", Int(20)]] (sorted by key)
-              match json_node {
-                  JSONNode::Array(pairs) => {
-                      assert_eq!(pairs.len(), 2);
-                      // Check first pair
-                      match &pairs[0] {
-                          JSONNode::Array(pair1) => {
-                              assert_eq!(pair1[0], JSONNode::String("a_key".to_string()));
-                              assert_eq!(pair1[1], JSONNode::Int(10));
-                          }
-                          _ => panic!("Expected array for pair"),
-                      }
-                      // Check second pair
-                      match &pairs[1] {
-                          JSONNode::Array(pair2) => {
-                              assert_eq!(pair2[0], JSONNode::String("b_key".to_string()));
-                              assert_eq!(pair2[1], JSONNode::Int(20));
-                          }
-                          _ => panic!("Expected array for pair"),
-                      }
-                  }
-                  _ => panic!("Expected JSONNode::Array for BTreeMap"),
-              }
-
-              let deserialized: BTreeMap<String, i32> = BTreeMap::from_json(map.to_json()).unwrap();
-              assert_eq!(map, deserialized);
-          }
-
-          #[test]
-          fn test_vec_u8_specialization() {
-              let data: Vec<u8> = vec![1, 2, 255];
-              let json_node = data.to_json();
-              // Expected: [UInt(1), UInt(2), UInt(255)]
-              match json_node {
-                  JSONNode::Array(ref nums) => {
-                      assert_eq!(nums.len(), 3);
-                      assert_eq!(nums[0], JSONNode::UInt(1));
-                      assert_eq!(nums[1], JSONNode::UInt(2));
-                      assert_eq!(nums[2], JSONNode::UInt(255));
-                  }
-                  _ => panic!("Expected JSONNode::Array for Vec<u8>"),
-              }
-              let deserialized: Vec<u8> = Vec::from_json(json_node).unwrap();
-              assert_eq!(data, deserialized);
-
-              // Test invalid u8 from various JSONNode number types
-              let invalid_json_uint_too_large = JSONNode::Array(vec![JSONNode::UInt(256)]);
-              assert!(Vec::<u8>::from_json(invalid_json_uint_too_large).is_err());
-
-              let invalid_json_int_too_large = JSONNode::Array(vec![JSONNode::Int(256)]);
-              assert!(Vec::<u8>::from_json(invalid_json_int_too_large).is_err());
-
-              let invalid_json_int_neg = JSONNode::Array(vec![JSONNode::Int(-1)]);
-              assert!(Vec::<u8>::from_json(invalid_json_int_neg).is_err());
-
-              let invalid_json_float = JSONNode::Array(vec![JSONNode::Float(10.5)]);
-              assert!(Vec::<u8>::from_json(invalid_json_float).is_err()); // Floats not convertible to u8 by default
-
-              // Test valid u8 from Int
-              let valid_json_int = JSONNode::Array(vec![JSONNode::Int(128)]);
-              let deserialized_from_int: Vec<u8> = Vec::from_json(valid_json_int).unwrap();
-              assert_eq!(deserialized_from_int, vec![128u8]);
-          }
-
-          #[test]
-          fn test_large_numbers() {
-              let large_u128 = u128::MAX;
-              let json_u128 = large_u128.to_json();
-              assert_eq!(json_u128, JSONNode::UInt(u128::MAX));
-              let deserialized_u128 = u128::from_json(json_u128).unwrap();
-              assert_eq!(large_u128, deserialized_u128);
-
-              let large_i128 = i128::MIN;
-              let json_i128 = large_i128.to_json();
-              assert_eq!(json_i128, JSONNode::Int(i128::MIN));
-              let deserialized_i128 = i128::from_json(json_i128).unwrap();
-              assert_eq!(large_i128, deserialized_i128);
-
-              let float_val = 123.456f64;
-              let json_float = float_val.to_json();
-              assert_eq!(json_float, JSONNode::Float(123.456f64));
-              let deserialized_float = f64::from_json(json_float).unwrap();
-              assert_eq!(float_val, deserialized_float);
-
-              // Test conversion from Int to Float
-              let int_node = JSONNode::Int(123);
-              let float_from_int = f64::from_json(int_node).unwrap();
-              assert_eq!(float_from_int, 123.0f64);
-
-              // Test conversion from UInt to Float
-              let uint_node = JSONNode::UInt(456);
-              let float_from_uint = f64::from_json(uint_node).unwrap();
-              assert_eq!(float_from_uint, 456.0f64);
-
-              // Test that integer types do not deserialize from Float
-              let float_node_exact_int = JSONNode::Float(123.0);
-              assert!(i32::from_json(float_node_exact_int.clone()).is_err());
-              assert!(u32::from_json(float_node_exact_int.clone()).is_err());
-
-              let float_node_inexact_int = JSONNode::Float(123.7);
-              assert!(i32::from_json(float_node_inexact_int.clone()).is_err());
-              assert!(u32::from_json(float_node_inexact_int.clone()).is_err());
-
-              // Test range errors for integer types
-              assert!(i8::from_json(JSONNode::Int(128)).is_err()); // 128 is out of range for i8
-              assert!(i8::from_json(JSONNode::UInt(128)).is_err());// 128 is out of range for i8
-              assert!(u8::from_json(JSONNode::Int(256)).is_err()); // 256 is out of range for u8
-              assert!(u8::from_json(JSONNode::UInt(256)).is_err());// 256 is out of range for u8
-              assert!(u8::from_json(JSONNode::Int(-1)).is_err());  // -1 is out of range for u8
-          }
-
-          #[test]
-          fn test_json_string_conversion() {
-              let original = MyStruct {
-                  field1: 42,
-                  field2: "hello \"world\" \\ / \\b \\f \n \r \t".to_string(),
-                  optional_field: Some(true),
-                  list_of_numbers: vec![1, 2, 3],
-                  byte_buffer: vec![10, 20, 30],
-              };
-
-              let json_node_via_trait = original.to_json();
-              let json_string = json_node_via_trait.to_json_string();
-
-              // Expected string from serde_json (keys will be sorted due to BTreeMap in JSONNode::Object
-              // and SerdeMap in serde_json::Value::Object if built from a sorted iterator,
-              // or if serde_json::to_string sorts them by default for `Map`).
-              // serde_json sorts object keys by default when serializing.
-              let expected_json_string = r#"{"byte_buffer":[10,20,30],"field1":42,"field2":"hello \"world\" \\ / \b \f \n \r \t","list_of_numbers":[1,2,3],"optional_field":true}"#;
-
-              // We can parse the expected string and our generated string to SerdeValue and compare them
-              // to avoid issues with exact string formatting (e.g. spacing if pretty print was used).
-              let serde_val_generated: SerdeValue = serde_json::from_str(&json_string).unwrap();
-              let serde_val_expected: SerdeValue = serde_json::from_str(expected_json_string).unwrap();
-
-              assert_eq!(serde_val_generated, serde_val_expected);
-
-              // Test deserialization from string
-              let parsed_node = JSONNode::from_json_string(&json_string).expect("Failed to parse JSON string back to JSONNode");
-              assert_eq!(json_node_via_trait, parsed_node);
-
-              let deserialized_struct = MyStruct::from_json(parsed_node).expect("Deserialization from parsed_node failed");
-              assert_eq!(original, deserialized_struct);
-          }
-
-          #[test]
-          fn test_non_finite_float_serialization() {
-              let node_nan = JSONNode::Float(f64::NAN);
-              assert_eq!(node_nan.to_json_string(), "null");
-
-              let node_inf = JSONNode::Float(f64::INFINITY);
-              assert_eq!(node_inf.to_json_string(), "null");
-
-              let node_neg_inf = JSONNode::Float(f64::NEG_INFINITY);
-              assert_eq!(node_neg_inf.to_json_string(), "null");
-
-              // Test deserialization of null back to float (will become 0.0 or error based on from_serde_value)
-              // Current from_serde_value for SerdeValue::Null will become JSONNode::Null.
-              // If you want null in JSON to become a specific float (e.g. 0.0 or NaN),
-              // you'd adjust JSONConvertible for Option<f64> or f64 itself.
-              // Here, we are testing JSONNode::from_json_string directly.
-              let parsed_nan_node = JSONNode::from_json_string("null").unwrap();
-              assert_eq!(parsed_nan_node, JSONNode::Null); // serde_json parses "null" to SerdeValue::Null
-                                                           // then from_serde_value converts SerdeValue::Null to JSONNode::Null
-          }
+      /// Macro to record a single hit for a named event.
+      ///
+      /// # Example
+      ///
+      /// ```ignore
+      /// use sep1::profiler::{hit, print_summary};
+      ///
+      /// if true {
+      ///     hit!("some_condition was true");
+      /// }
+      ///
+      /// print_summary();
+      /// ```
+      #[macro_export]
+      macro_rules! hit {
+          ($name:expr) => {
+              $crate::profiler::hit($name)
+          };
       }
   diffs_applied_this_send: true
 system:
@@ -1573,7 +1030,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - copy-one/paste
+    - o4-mini
   code_completion_model:
     - gemini/gemini-2.5-flash
   commit_message_model:
@@ -1583,1009 +1040,836 @@ system:
   apply_mode: git-llm
 messages:
   - user: |-
-      ```rust 'src/json_serialization.rs'
-      use std::collections::{BTreeMap, HashMap, BTreeSet, HashSet};
-      use std::hash::Hash;
-      use std::marker::Sized;
-      use bimap::BiBTreeMap;
+      ```rust 'profiler_macro/src/lib.rs'
+      use proc_macro::TokenStream;
+      use quote::quote;
+      use syn::{
+          parse::{Parse, ParseStream},
+          parse_macro_input, Expr, ItemFn, LitStr, Token,
+      };
 
-      // Import the derive macro
-      use json_convertible_derive::JSONConvertible;
+      #[proc_macro_attribute]
+      pub fn time_it(attr: TokenStream, item: TokenStream) -> TokenStream {
+          let item_fn = parse_macro_input!(item as ItemFn);
 
-      // Add these lines for serde_json
-      use serde_json::Value as SerdeValue;
-      use serde_json::Map as SerdeMap; // BTreeMap<String, SerdeValue> is SerdeMap
-      use std::convert::TryInto;
-
-      // --- JSONNode Enum ---
-      #[derive(Debug, Clone, PartialEq)]
-      pub enum JSONNode {
-          Null,
-          Bool(bool),
-          Int(i128),
-          UInt(u128),
-          Float(f64),
-          String(String),
-          Array(Vec<JSONNode>),
-          Object(BTreeMap<String, JSONNode>), // BTreeMap for sorted keys
-      }
-
-      impl JSONNode {
-          // New method to convert JSONNode to serde_json::Value
-          fn to_serde_value(&self) -> SerdeValue {
-              match self {
-                  JSONNode::Null => SerdeValue::Null,
-                  JSONNode::Bool(b) => SerdeValue::Bool(*b),
-                  JSONNode::Int(i) => SerdeValue::Number(serde_json::Number::from_i128(*i).expect(format!("Int {} out of range for serde_json::Value", i).as_str())),
-                  JSONNode::UInt(u) => SerdeValue::Number(serde_json::Number::from_u128(*u).expect(format!("UInt {} out of range for serde_json::Value", u).as_str())),
-                  JSONNode::Float(f) => {
-                      // serde_json::Number::from_f64 returns None for NaN/Infinity
-                      // We'll convert such cases to SerdeValue::Null, a common practice.
-                      serde_json::Number::from_f64(*f)
-                          .map(SerdeValue::Number)
-                          .unwrap_or(SerdeValue::Null)
-                  }
-                  JSONNode::String(s) => SerdeValue::String(s.clone()),
-                  JSONNode::Array(arr) => {
-                      SerdeValue::Array(arr.iter().map(|node| node.to_serde_value()).collect())
-                  }
-                  JSONNode::Object(obj) => {
-                      let mut map = SerdeMap::new();
-                      for (k, v) in obj {
-                          map.insert(k.clone(), v.to_serde_value());
-                      }
-                      SerdeValue::Object(map)
-                  }
-              }
-          }
-
-          // New method to convert serde_json::Value to JSONNode
-          fn from_serde_value(s_val: SerdeValue) -> Result<Self, String> {
-              match s_val {
-                  SerdeValue::Null => Ok(JSONNode::Null),
-                  SerdeValue::Bool(b) => Ok(JSONNode::Bool(b)),
-                  SerdeValue::Number(n) => {
-                      if let Some(i) = n.as_i64() {
-                          Ok(JSONNode::Int(i as i128))
-                      } else if let Some(u) = n.as_u64() {
-                          Ok(JSONNode::UInt(u as u128))
-                      } else if let Some(f) = n.as_f64() {
-                          Ok(JSONNode::Float(f))
-                      } else {
-                          Err(format!("Unsupported number type in serde_json::Value: {}", n))
-                      }
-                  }
-                  SerdeValue::String(s) => Ok(JSONNode::String(s)),
-                  SerdeValue::Array(arr) => {
-                      let mut nodes = Vec::with_capacity(arr.len());
-                      for val in arr {
-                          nodes.push(Self::from_serde_value(val)?);
-                      }
-                      Ok(JSONNode::Array(nodes))
-                  }
-                  SerdeValue::Object(obj_map) => {
-                      let mut btree_map = BTreeMap::new();
-                      for (k, v) in obj_map {
-                          btree_map.insert(k, Self::from_serde_value(v)?);
-                      }
-                      Ok(JSONNode::Object(btree_map))
-                  }
-              }
-          }
-
-          // Update to_json_string to use serde_json
-          pub fn to_json_string(&self) -> String {
-              let serde_value = self.to_serde_value();
-              // serde_json::to_string can fail, though less likely for SerdeValue -> String
-              // For simplicity here, unwrap, but consider error handling for production
-              serde_json::to_string(&serde_value).unwrap_or_else(|e| {
-                  // Fallback or panic for critical error
-                  eprintln!("Critical error: Failed to serialize SerdeValue to string: {}", e);
-                  // A minimal JSON representation of an error or "null"
-                  "{\"error\":\"serialization_failed\"}".to_string()
-              })
-          }
-
-          // Update from_json_string to use serde_json
-          pub fn from_json_string(s: &str) -> Result<JSONNode, String> {
-              let serde_value: SerdeValue = serde_json::from_str(s)
-                  .map_err(|e| format!("Failed to parse JSON string with serde_json: {}", e))?;
-              Self::from_serde_value(serde_value)
-          }
-
-          pub fn into_object(self) -> Result<BTreeMap<String, JSONNode>, String> {
-              match self {
-                  JSONNode::Object(obj) => Ok(obj),
-                  _ => Err("Expected JSONNode::Object".to_string()),
-              }
-          }
-      }
-
-      // --- JSONConvertible Trait ---
-      pub trait JSONConvertible: Sized {
-          fn to_json(&self) -> JSONNode;
-          fn from_json(node: JSONNode) -> Result<Self, String>;
-      }
-
-      impl<T> Into<T> for JSONNode
-      where
-          T: JSONConvertible,
-      {
-          fn into(self) -> T {
-              T::from_json(self).expect("Failed to convert JSONNode to type")
-          }
-      }
-
-      impl<T> TryInto<T> for JSONNode
-      where
-          T: JSONConvertible,
-      {
-          type Error = String;
-
-          fn try_into(self) -> Result<T, Self::Error> {
-              T::from_json(self)
-          }
-      }
-
-      // --- Implementations for Primitives ---
-
-      impl JSONConvertible for () {
-          fn to_json(&self) -> JSONNode { JSONNode::Null }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Null => Ok(()),
-                  _ => Err("Expected JSONNode::Null for unit type".to_string()),
-              }
-          }
-      }
-
-      impl JSONConvertible for bool {
-          fn to_json(&self) -> JSONNode { JSONNode::Bool(*self) }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Bool(b) => Ok(b),
-                  _ => Err("Expected JSONNode::Bool for bool".to_string()),
-              }
-          }
-      }
-
-      // --- Implementations for numeric primitives without precision loss ---
-      macro_rules! impl_json_for_signed {
-          ($($t:ty),*) => {
-              $(
-                  impl JSONConvertible for $t {
-                      fn to_json(&self) -> JSONNode { JSONNode::Int(*self as i128) }
-                      fn from_json(node: JSONNode) -> Result<Self, String> {
-                          match node {
-                              JSONNode::Int(n)   => {
-                                  if n >= (<$t>::MIN as i128) && n <= (<$t>::MAX as i128) {
-                                      Ok(n as $t)
-                                  } else {
-                                      Err(format!("Integer {} out of range for {}", n, stringify!($t)))
-                                  }
-                              },
-                              JSONNode::UInt(u)  => {
-                                  // Check if u fits into the positive range of $t
-                                  if u <= (<$t>::MAX as u128) {
-                                      Ok(u as $t)
-                                  } else {
-                                      Err(format!("Unsigned integer {} too large for {}", u, stringify!($t)))
-                                  }
-                              },
-                              other => Err(format!("Expected JSONNode::Int or JSONNode::UInt for {}, got {:?}", stringify!($t), other)),
-                          }
-                      }
-                  }
-              )*
+          let timer_name_expr = if attr.is_empty() {
+              let fn_name = item_fn.sig.ident.to_string();
+              quote! { format!("{}::{}", module_path!(), #fn_name) }
+          } else {
+              let attr_str = parse_macro_input!(attr as LitStr);
+              let name = attr_str.value();
+              quote! { String::from(#name) }
           };
-      }
 
-      macro_rules! impl_json_for_unsigned {
-          ($($t:ty),*) => {
-              $(
-                  impl JSONConvertible for $t {
-                      fn to_json(&self) -> JSONNode { JSONNode::UInt(*self as u128) }
-                      fn from_json(node: JSONNode) -> Result<Self, String> {
-                          match node {
-                              JSONNode::UInt(u) => {
-                                  if u <= (<$t>::MAX as u128) {
-                                      Ok(u as $t)
-                                  } else {
-                                      Err(format!("Unsigned integer {} out of range for {}", u, stringify!($t)))
-                                  }
-                              },
-                              JSONNode::Int(n)  => {
-                                  if n >= 0 {
-                                      let u_n = n as u128;
-                                      if u_n <= (<$t>::MAX as u128) {
-                                          Ok(u_n as $t)
-                                      } else {
-                                          Err(format!("Integer {} (as u128) out of range for {}", n, stringify!($t)))
-                                      }
-                                  } else {
-                                      Err(format!("Negative integer {} cannot be converted to {}", n, stringify!($t)))
-                                  }
-                              },
-                              other => Err(format!("Expected JSONNode::UInt or non-negative JSONNode::Int for {}, got {:?}", stringify!($t), other)),
-                          }
-                      }
-                  }
-              )*
+          let fn_vis = &item_fn.vis;
+          let fn_sig = &item_fn.sig;
+          let fn_block = &item_fn.block;
+          let fn_attrs = &item_fn.attrs;
+
+          let result = quote! {
+              #(#fn_attrs)*
+              #fn_vis #fn_sig {
+                  let __profiler_name = #timer_name_expr;
+                  let _guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
+                  #fn_block
+              }
           };
+
+          result.into()
       }
 
-      macro_rules! impl_json_for_float {
-          ($($t:ty),*) => {
-              $(
-                  impl JSONConvertible for $t {
-                      fn to_json(&self) -> JSONNode { JSONNode::Float(*self as f64) }
-                      fn from_json(node: JSONNode) -> Result<Self, String> {
-                          match node {
-                              JSONNode::Float(f) => Ok(f as $t),
-                              JSONNode::Int(n)   => Ok(n as $t), // Standard Rust cast behavior, potential precision loss for large i128
-                              JSONNode::UInt(u)  => Ok(u as $t), // Standard Rust cast behavior, potential precision loss for large u128
-                              other => Err(format!("Expected JSONNode::Float, ::Int, or ::UInt for {}, got {:?}", stringify!($t), other)),
-                          }
-                      }
-                  }
-              )*
+      enum TimeitArgs {
+          Named { name: Expr, expr: Expr },
+          Unnamed { expr: Expr },
+      }
+
+      impl Parse for TimeitArgs {
+          fn parse(input: ParseStream) -> syn::Result<Self> {
+              let first_expr = input.parse::<Expr>()?;
+              if input.peek(Token![,]) {
+                  let _: Token![,] = input.parse()?;
+                  let expr = input.parse::<Expr>()?;
+                  Ok(TimeitArgs::Named {
+                      name: first_expr,
+                      expr,
+                  })
+              } else {
+                  Ok(TimeitArgs::Unnamed { expr: first_expr })
+              }
+          }
+      }
+
+      #[proc_macro]
+      pub fn timeit(input: TokenStream) -> TokenStream {
+          let args = parse_macro_input!(input as TimeitArgs);
+
+          let (name_code, expr) = match args {
+              TimeitArgs::Named { name, expr } => (quote! { (#name).into() }, expr),
+              TimeitArgs::Unnamed { expr } => {
+                  let expr_str = quote! { #expr }.to_string();
+                  (quote! { String::from(#expr_str) }, expr)
+              }
           };
-      }
 
-      // Signed integers
-      impl_json_for_signed!(i8, i16, i32, i64, isize, i128);
-      // Unsigned integers
-      impl_json_for_unsigned!(u8, u16, u32, u64, usize, u128);
-      // Floating-point types
-      impl_json_for_float!(f32, f64);
+          let result = quote! {{
+              let __profiler_name = #name_code;
+              let _guard = crate::profiler::TimedBlockGuard::new(__profiler_name);
+              #expr
+          }};
 
-
-      impl JSONConvertible for String {
-          fn to_json(&self) -> JSONNode { JSONNode::String(self.clone()) }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::String(s) => Ok(s),
-                  _ => Err("Expected JSONNode::String for String".to_string()),
-              }
-          }
-      }
-
-      impl<'a> JSONConvertible for &'a str {
-          fn to_json(&self) -> JSONNode { JSONNode::String(self.to_string()) }
-          fn from_json(_node: JSONNode) -> Result<Self, String> {
-              Err("Cannot deserialize into &str, deserialize into String instead".to_string())
-          }
-      }
-
-      // --- Implementations for Option ---
-      impl<T: JSONConvertible> JSONConvertible for Option<T> {
-          fn to_json(&self) -> JSONNode {
-              match self {
-                  Some(val) => val.to_json(),
-                  None => JSONNode::Null,
-              }
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Null => Ok(None),
-                  _ => T::from_json(node).map(Some),
-              }
-          }
-      }
-
-      // --- Implementations for Collections ---
-
-      // Generic Vec<T>
-      impl<T: JSONConvertible> JSONConvertible for Vec<T> {
-          fn to_json(&self) -> JSONNode {
-              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
-                  _ => Err("Expected JSONNode::Array for Vec<T>".to_string()),
-              }
-          }
-      }
-
-      // Generic array
-      impl<T: JSONConvertible, const N: usize> JSONConvertible for [T; N] {
-          fn to_json(&self) -> JSONNode {
-              // Convert array elements to JSONNode and wrap in a JSON array
-              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
-          }
-
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => {
-                      // First convert each JSONNode into T, collecting into a Vec<T>
-                      let vec: Vec<T> = arr
-                          .into_iter()
-                          .map(T::from_json)
-                          .collect::<Result<_, _>>()?;
-                      // Then try to convert Vec<T> into [T; N]; error if length mismatch
-                      vec.try_into()
-                          .map_err(|v: Vec<T>| {
-                              format!(
-                                  "Expected array of length {} for [T; N], got length {}",
-                                  N,
-                                  v.len()
-                              )
-                          })
-                  }
-                  _ => Err(format!("Expected JSONNode::Array for [T; {}]", N)),
-              }
-          }
-      }
-
-
-      impl<T: JSONConvertible + Ord> JSONConvertible for BTreeSet<T> {
-          fn to_json(&self) -> JSONNode {
-              JSONNode::Array(self.iter().map(|item| item.to_json()).collect())
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
-                  _ => Err("Expected JSONNode::Array for BTreeSet<T>".to_string()),
-              }
-          }
-      }
-
-      impl<T: JSONConvertible + Eq + Hash + Ord> JSONConvertible for HashSet<T> {
-          fn to_json(&self) -> JSONNode {
-              let mut vec: Vec<_> = self.iter().collect();
-              vec.sort(); // Sort for deterministic output
-              JSONNode::Array(vec.iter().map(|item| item.to_json()).collect())
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => arr.into_iter().map(T::from_json).collect(),
-                  _ => Err("Expected JSONNode::Array for HashSet<T>".to_string()),
-              }
-          }
-      }
-
-      impl<K, V> JSONConvertible for BTreeMap<K, V>
-      where
-          K: JSONConvertible + Ord, // Keys in BTreeMap must be Ord
-          V: JSONConvertible,
-      {
-          fn to_json(&self) -> JSONNode {
-              // BTreeMap is already sorted by key, so iter() gives deterministic order
-              let pairs = self.iter().map(|(k, v)| {
-                  JSONNode::Array(vec![k.to_json(), v.to_json()])
-              }).collect();
-              JSONNode::Array(pairs)
-          }
-
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => {
-                      let mut map = BTreeMap::new();
-                      for pair_node in arr {
-                          match pair_node {
-                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
-                                  let v_node = pair_vec.pop().unwrap();
-                                  let k_node = pair_vec.pop().unwrap();
-                                  map.insert(K::from_json(k_node)?, V::from_json(v_node)?);
-                              }
-                              _ => return Err("Expected 2-element array for BTreeMap entry".to_string()),
-                          }
-                      }
-                      Ok(map)
-                  }
-                  _ => Err("Expected JSONNode::Array for BTreeMap<K, V>".to_string()),
-              }
-          }
-      }
-
-      impl<K, V> JSONConvertible for HashMap<K, V>
-      where
-          K: JSONConvertible + Eq + Hash + Ord, // Ord needed for sorting for deterministic JSON
-          V: JSONConvertible,
-      {
-          fn to_json(&self) -> JSONNode {
-              let mut sorted_pairs: Vec<_> = self.iter().collect();
-              // Sort by key for deterministic JSON output
-              sorted_pairs.sort_by_key(|(k, _)| *k); // Requires K: Ord
-
-              let pairs = sorted_pairs.into_iter().map(|(k, v)| {
-                  JSONNode::Array(vec![k.to_json(), v.to_json()])
-              }).collect();
-              JSONNode::Array(pairs)
-          }
-
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => {
-                      let mut map = HashMap::new();
-                      for pair_node in arr {
-                          match pair_node {
-                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
-                                  let v_node = pair_vec.pop().unwrap();
-                                  let k_node = pair_vec.pop().unwrap();
-                                  map.insert(K::from_json(k_node)?, V::from_json(v_node)?);
-                              }
-                              _ => return Err("Expected 2-element array for HashMap entry".to_string()),
-                          }
-                      }
-                      Ok(map)
-                  }
-                  _ => Err("Expected JSONNode::Array for HashMap<K, V>".to_string()),
-              }
-          }
-      }
-
-      impl<L, R> JSONConvertible for BiBTreeMap<L, R>
-      where
-          L: JSONConvertible + Ord + Eq, // BiBTreeMap requires Ord + Eq for both left and right
-          R: JSONConvertible + Ord + Eq,
-      {
-          fn to_json(&self) -> JSONNode {
-              // BiBTreeMap iter() is sorted by the left value (L)
-              let pairs = self.iter().map(|(l, r)| {
-                  JSONNode::Array(vec![l.to_json(), r.to_json()])
-              }).collect();
-              JSONNode::Array(pairs)
-          }
-
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Array(arr) => {
-                      let mut map = BiBTreeMap::new();
-                      for pair_node in arr {
-                          match pair_node {
-                              JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
-                                  let r_node = pair_vec.pop().unwrap();
-                                  let l_node = pair_vec.pop().unwrap();
-                                  map.insert(L::from_json(l_node)?, R::from_json(r_node)?);
-                              }
-                              _ => return Err("Expected 2-element array for BiBTreeMap entry".to_string()),
-                          }
-                      }
-                      Ok(map)
-                  }
-                  _ => Err("Expected JSONNode::Array for BiBTreeMap<L, R>".to_string()),
-              }
-          }
-      }
-
-      // --- Tests (optional, but good for verifying) ---
-      #[cfg(test)]
-      mod tests {
-          use super::*; // Imports JSONNode, JSONConvertible, MyStruct, etc.
-
-          // Example struct using the derive
-          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
-          struct MyStruct {
-              field1: i32,
-              field2: String,
-              optional_field: Option::<bool>,
-              list_of_numbers: Vec::<u32>,
-              byte_buffer: Vec::<u8>,
-          }
-
-          // Example generic struct using the derive
-          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
-          struct GenericStruct<T: JSONConvertible, U: JSONConvertible> {
-              item_t: T,
-              item_u: U,
-              description: String,
-          }
-
-          // Example unit struct using the derive
-          #[derive(Debug, Clone, PartialEq, JSONConvertible)]
-          struct MyUnitStruct;
-
-          #[test]
-          fn test_my_struct_serialization_deserialization() {
-              let original = MyStruct {
-                  field1: 42,
-                  field2: "hello".to_string(),
-                  optional_field: Some(true),
-                  list_of_numbers: vec![1, 2, 3],
-                  byte_buffer: vec![10, 20, 30],
-              };
-
-              let json_node = original.to_json();
-
-              // Expected JSON structure (BTreeMap for object means fields are sorted by key)
-              // {
-              //   "byte_buffer": [UInt(10), UInt(20), UInt(30)],
-              //   "field1": Int(42),
-              //   "field2": "hello",
-              //   "list_of_numbers": [UInt(1), UInt(2), UInt(3)],
-              //   "optional_field": true
-              // }
-
-              if let JSONNode::Object(obj) = &json_node {
-                  assert_eq!(obj.get("field1"), Some(&JSONNode::Int(42)));
-                  assert_eq!(obj.get("field2"), Some(&JSONNode::String("hello".to_string())));
-                  assert_eq!(obj.get("optional_field"), Some(&JSONNode::Bool(true)));
-                  if let Some(JSONNode::Array(arr)) = obj.get("list_of_numbers") {
-                       assert_eq!(arr, &vec![JSONNode::UInt(1), JSONNode::UInt(2), JSONNode::UInt(3)]);
-                  } else {
-                      panic!("list_of_numbers not found or not an array");
-                  }
-                  if let Some(JSONNode::Array(arr)) = obj.get("byte_buffer") {
-                       assert_eq!(arr, &vec![JSONNode::UInt(10), JSONNode::UInt(20), JSONNode::UInt(30)]);
-                  } else {
-                      panic!("byte_buffer not found or not an array");
-                  }
-              } else {
-                  panic!("Expected JSONNode::Object, got {:?}", json_node);
-              }
-
-              let deserialized = MyStruct::from_json(json_node).expect("Deserialization failed");
-              assert_eq!(original, deserialized);
-          }
-
-          #[test]
-          fn test_my_struct_optional_none() {
-              let original = MyStruct {
-                  field1: 1,
-                  field2: "world".to_string(),
-                  optional_field: None,
-                  list_of_numbers: vec![],
-                  byte_buffer: vec![],
-              };
-              let json_node = original.to_json();
-              // { "byte_buffer": [], "field1": Int(1), "field2": "world", "list_of_numbers": [], "optional_field": null }
-              if let JSONNode::Object(obj) = &json_node {
-                   assert_eq!(obj.get("optional_field"), Some(&JSONNode::Null));
-                   assert_eq!(obj.get("field1"), Some(&JSONNode::Int(1)));
-              } else {
-                  panic!("Expected JSONNode::Object");
-              }
-              let deserialized = MyStruct::from_json(json_node).expect("Deserialization failed");
-              assert_eq!(original, deserialized);
-          }
-
-          #[test]
-          fn test_generic_struct_serialization() {
-              let original = GenericStruct {
-                  item_t: 123i32,
-                  item_u: "test_string".to_string(),
-                  description: "A generic item".to_string(),
-              };
-              let json_node = original.to_json();
-              // {
-              //   "description": "A generic item",
-              //   "item_t": Int(123),
-              //   "item_u": "test_string"
-              // }
-              if let JSONNode::Object(obj) = &json_node {
-                  assert_eq!(obj.get("item_t"), Some(&JSONNode::Int(123)));
-              } else {
-                  panic!("Expected JSONNode::Object");
-              }
-              let deserialized = GenericStruct::<i32, String>::from_json(json_node).expect("Deserialization failed");
-              assert_eq!(original, deserialized);
-          }
-
-          #[test]
-          fn test_generic_struct_with_custom_type() {
-              let my_s = MyStruct {
-                  field1: 1, field2: "inner".to_string(), optional_field: None, list_of_numbers: vec![], byte_buffer: vec![]
-              };
-              let original = GenericStruct {
-                  item_t: my_s.clone(),
-                  item_u: MyUnitStruct,
-                  description: "Struct with custom types".to_string(),
-              };
-              let json_node = original.to_json();
-              let deserialized = GenericStruct::<MyStruct, MyUnitStruct>::from_json(json_node).expect("Deserialization failed");
-              assert_eq!(original, deserialized);
-          }
-
-          #[test]
-          fn test_unit_struct_serialization() {
-              let original = MyUnitStruct;
-              let json_node = original.to_json();
-              assert_eq!(json_node, JSONNode::Object(BTreeMap::new())); // Derive macro makes unit structs empty objects
-              let deserialized = MyUnitStruct::from_json(json_node).expect("Deserialization failed");
-              assert_eq!(original, deserialized);
-          }
-
-          #[test]
-          fn test_btreemap_serialization() {
-              let mut map = BTreeMap::new();
-              map.insert("b_key".to_string(), 20i32);
-              map.insert("a_key".to_string(), 10i32);
-
-              let json_node = map.to_json();
-              // Expected: [["a_key", Int(10)], ["b_key", Int(20)]] (sorted by key)
-              match json_node {
-                  JSONNode::Array(pairs) => {
-                      assert_eq!(pairs.len(), 2);
-                      // Check first pair
-                      match &pairs[0] {
-                          JSONNode::Array(pair1) => {
-                              assert_eq!(pair1[0], JSONNode::String("a_key".to_string()));
-                              assert_eq!(pair1[1], JSONNode::Int(10));
-                          }
-                          _ => panic!("Expected array for pair"),
-                      }
-                      // Check second pair
-                      match &pairs[1] {
-                          JSONNode::Array(pair2) => {
-                              assert_eq!(pair2[0], JSONNode::String("b_key".to_string()));
-                              assert_eq!(pair2[1], JSONNode::Int(20));
-                          }
-                          _ => panic!("Expected array for pair"),
-                      }
-                  }
-                  _ => panic!("Expected JSONNode::Array for BTreeMap"),
-              }
-
-              let deserialized: BTreeMap<String, i32> = BTreeMap::from_json(map.to_json()).unwrap();
-              assert_eq!(map, deserialized);
-          }
-
-          #[test]
-          fn test_vec_u8_specialization() {
-              let data: Vec<u8> = vec![1, 2, 255];
-              let json_node = data.to_json();
-              // Expected: [UInt(1), UInt(2), UInt(255)]
-              match json_node {
-                  JSONNode::Array(ref nums) => {
-                      assert_eq!(nums.len(), 3);
-                      assert_eq!(nums[0], JSONNode::UInt(1));
-                      assert_eq!(nums[1], JSONNode::UInt(2));
-                      assert_eq!(nums[2], JSONNode::UInt(255));
-                  }
-                  _ => panic!("Expected JSONNode::Array for Vec<u8>"),
-              }
-              let deserialized: Vec<u8> = Vec::from_json(json_node).unwrap();
-              assert_eq!(data, deserialized);
-
-              // Test invalid u8 from various JSONNode number types
-              let invalid_json_uint_too_large = JSONNode::Array(vec![JSONNode::UInt(256)]);
-              assert!(Vec::<u8>::from_json(invalid_json_uint_too_large).is_err());
-
-              let invalid_json_int_too_large = JSONNode::Array(vec![JSONNode::Int(256)]);
-              assert!(Vec::<u8>::from_json(invalid_json_int_too_large).is_err());
-
-              let invalid_json_int_neg = JSONNode::Array(vec![JSONNode::Int(-1)]);
-              assert!(Vec::<u8>::from_json(invalid_json_int_neg).is_err());
-
-              let invalid_json_float = JSONNode::Array(vec![JSONNode::Float(10.5)]);
-              assert!(Vec::<u8>::from_json(invalid_json_float).is_err()); // Floats not convertible to u8 by default
-
-              // Test valid u8 from Int
-              let valid_json_int = JSONNode::Array(vec![JSONNode::Int(128)]);
-              let deserialized_from_int: Vec<u8> = Vec::from_json(valid_json_int).unwrap();
-              assert_eq!(deserialized_from_int, vec![128u8]);
-          }
-
-          #[test]
-          fn test_large_numbers() {
-              let large_u128 = u128::MAX;
-              let json_u128 = large_u128.to_json();
-              assert_eq!(json_u128, JSONNode::UInt(u128::MAX));
-              let deserialized_u128 = u128::from_json(json_u128).unwrap();
-              assert_eq!(large_u128, deserialized_u128);
-
-              let large_i128 = i128::MIN;
-              let json_i128 = large_i128.to_json();
-              assert_eq!(json_i128, JSONNode::Int(i128::MIN));
-              let deserialized_i128 = i128::from_json(json_i128).unwrap();
-              assert_eq!(large_i128, deserialized_i128);
-
-              let float_val = 123.456f64;
-              let json_float = float_val.to_json();
-              assert_eq!(json_float, JSONNode::Float(123.456f64));
-              let deserialized_float = f64::from_json(json_float).unwrap();
-              assert_eq!(float_val, deserialized_float);
-
-              // Test conversion from Int to Float
-              let int_node = JSONNode::Int(123);
-              let float_from_int = f64::from_json(int_node).unwrap();
-              assert_eq!(float_from_int, 123.0f64);
-
-              // Test conversion from UInt to Float
-              let uint_node = JSONNode::UInt(456);
-              let float_from_uint = f64::from_json(uint_node).unwrap();
-              assert_eq!(float_from_uint, 456.0f64);
-
-              // Test that integer types do not deserialize from Float
-              let float_node_exact_int = JSONNode::Float(123.0);
-              assert!(i32::from_json(float_node_exact_int.clone()).is_err());
-              assert!(u32::from_json(float_node_exact_int.clone()).is_err());
-
-              let float_node_inexact_int = JSONNode::Float(123.7);
-              assert!(i32::from_json(float_node_inexact_int.clone()).is_err());
-              assert!(u32::from_json(float_node_inexact_int.clone()).is_err());
-
-              // Test range errors for integer types
-              assert!(i8::from_json(JSONNode::Int(128)).is_err()); // 128 is out of range for i8
-              assert!(i8::from_json(JSONNode::UInt(128)).is_err());// 128 is out of range for i8
-              assert!(u8::from_json(JSONNode::Int(256)).is_err()); // 256 is out of range for u8
-              assert!(u8::from_json(JSONNode::UInt(256)).is_err());// 256 is out of range for u8
-              assert!(u8::from_json(JSONNode::Int(-1)).is_err());  // -1 is out of range for u8
-          }
-
-          #[test]
-          fn test_json_string_conversion() {
-              let original = MyStruct {
-                  field1: 42,
-                  field2: "hello \"world\" \\ / \\b \\f \n \r \t".to_string(),
-                  optional_field: Some(true),
-                  list_of_numbers: vec![1, 2, 3],
-                  byte_buffer: vec![10, 20, 30],
-              };
-
-              let json_node_via_trait = original.to_json();
-              let json_string = json_node_via_trait.to_json_string();
-
-              // Expected string from serde_json (keys will be sorted due to BTreeMap in JSONNode::Object
-              // and SerdeMap in serde_json::Value::Object if built from a sorted iterator,
-              // or if serde_json::to_string sorts them by default for `Map`).
-              // serde_json sorts object keys by default when serializing.
-              let expected_json_string = r#"{"byte_buffer":[10,20,30],"field1":42,"field2":"hello \"world\" \\ / \b \f \n \r \t","list_of_numbers":[1,2,3],"optional_field":true}"#;
-
-              // We can parse the expected string and our generated string to SerdeValue and compare them
-              // to avoid issues with exact string formatting (e.g. spacing if pretty print was used).
-              let serde_val_generated: SerdeValue = serde_json::from_str(&json_string).unwrap();
-              let serde_val_expected: SerdeValue = serde_json::from_str(expected_json_string).unwrap();
-
-              assert_eq!(serde_val_generated, serde_val_expected);
-
-              // Test deserialization from string
-              let parsed_node = JSONNode::from_json_string(&json_string).expect("Failed to parse JSON string back to JSONNode");
-              assert_eq!(json_node_via_trait, parsed_node);
-
-              let deserialized_struct = MyStruct::from_json(parsed_node).expect("Deserialization from parsed_node failed");
-              assert_eq!(original, deserialized_struct);
-          }
-
-          #[test]
-          fn test_non_finite_float_serialization() {
-              let node_nan = JSONNode::Float(f64::NAN);
-              assert_eq!(node_nan.to_json_string(), "null");
-
-              let node_inf = JSONNode::Float(f64::INFINITY);
-              assert_eq!(node_inf.to_json_string(), "null");
-
-              let node_neg_inf = JSONNode::Float(f64::NEG_INFINITY);
-              assert_eq!(node_neg_inf.to_json_string(), "null");
-
-              // Test deserialization of null back to float (will become 0.0 or error based on from_serde_value)
-              // Current from_serde_value for SerdeValue::Null will become JSONNode::Null.
-              // If you want null in JSON to become a specific float (e.g. 0.0 or NaN),
-              // you'd adjust JSONConvertible for Option<f64> or f64 itself.
-              // Here, we are testing JSONNode::from_json_string directly.
-              let parsed_nan_node = JSONNode::from_json_string("null").unwrap();
-              assert_eq!(parsed_nan_node, JSONNode::Null); // serde_json parses "null" to SerdeValue::Null
-                                                           // then from_serde_value converts SerdeValue::Null to JSONNode::Null
-          }
+          result.into()
       }
 
       ```
     metadata:
-      filename: src/json_serialization.rs
+      filename: profiler_macro/src/lib.rs
   - user: |-
-      ```
-      error[E0119]: conflicting implementations of trait `Into<_>` for type `json_serialization::JSONNode`
-         --> src/json_serialization.rs:124:1
-          |
-      124 | / impl<T> Into<T> for JSONNode
-      125 | | where
-      126 | |     T: JSONConvertible,
-          | |_______________________^
-          |
-          = note: conflicting implementation in crate `core`:
-                  - impl<T, U> Into<U> for T
-                    where U: From<T>;
+      ```rust 'src/profiler.rs'
+      use std::collections::HashMap;
+      use std::sync::{Mutex, OnceLock};
+      use std::time::{Duration, Instant};
 
+      /// The measured overhead of a single timing block, used for correction.
+      const PROFILER_CORRECTION: Duration = Duration::from_nanos(1300);
 
-      error[E0119]: conflicting implementations of trait `TryInto<_>` for type `json_serialization::JSONNode`
-         --> src/json_serialization.rs:133:1
-          |
-      133 | / impl<T> TryInto<T> for JSONNode
-      134 | | where
-      135 | |     T: JSONConvertible,
-          | |_______________________^
-          |
-          = note: conflicting implementation in crate `core`:
-                  - impl<T, U> TryInto<U> for T
-                    where U: TryFrom<T>;
+      /// A node in the profiler's call tree.
+      #[derive(Default, Clone)]
+      pub struct ProfileNode {
+          /// Number of times this block was entered.
+          pub hits: u64,
+          /// Time spent in this block, excluding children.
+          pub own_time: Duration,
+          /// Time spent in this block, including children.
+          pub total_time: Duration,
+          /// Children nodes in the call tree.
+          pub children: HashMap<String, ProfileNode>,
+      }
+
+      /// Holds all profiling data.
+      #[derive(Default)]
+      pub struct ProfilerData {
+          /// The root of the call tree. Its children are the top-level timed blocks.
+          call_tree: ProfileNode,
+          /// A stack to keep track of the current path in the call tree.
+          /// Each element is (name, start_time_for_total, start_time_for_own, sub_calls_count)
+          timing_stack: Vec<(String, Instant, Instant, u64)>,
+          /// Separate hits counter for the `hit!` macro.
+          hits: HashMap<String, u64>,
+      }
+
+      // Global, thread-safe profiler data instance.
+      static PROFILER: OnceLock<Mutex<ProfilerData>> = OnceLock::new();
+
+      fn profiler() -> &'static Mutex<ProfilerData> {
+          PROFILER.get_or_init(|| Mutex::new(ProfilerData::default()))
+      }
+
+      /// Records a single hit for a named event (for use with `hit!` macro).
+      pub fn hit(name: &str) {
+          let mut data = profiler().lock().unwrap();
+          *data.hits.entry(name.to_string()).or_insert(0) += 1;
+      }
+
+      /// Resets all profiling data (hits and timings).
+      pub fn reset() {
+          let mut data = profiler().lock().unwrap();
+          data.call_tree = ProfileNode::default();
+          data.timing_stack.clear();
+          data.hits.clear();
+      }
+
+      /// Formats a `Duration` into a human-readable string with appropriate units (s, ms, µs, ns).
+      fn format_duration(duration: Duration) -> String {
+          let total_nanos = duration.as_nanos();
+          if total_nanos >= 1_000_000_000 {
+              format!("{:.3}s", duration.as_secs_f64())
+          } else if total_nanos >= 1_000_000 {
+              format!("{:.3}ms", duration.as_micros() as f64 / 1000.0)
+          } else if total_nanos >= 1_000 {
+              format!("{:.3}µs", duration.as_nanos() as f64 / 1000.0)
+          } else {
+              format!("{}ns", total_nanos)
+          }
+      }
+
+      fn print_node_recursive(
+          node: &ProfileNode,
+          name: &str,
+          indent_level: usize,
+          parent_total_time: Duration,
+      ) {
+          let indent = "  ".repeat(indent_level);
+          let name_with_indent = format!("{}{}", indent, name);
+
+          let (total_per_hit, own_per_hit) = if node.hits > 0 {
+              (
+                  node.total_time.mul_f64(1.0 / node.hits as f64),
+                  node.own_time.mul_f64(1.0 / node.hits as f64),
+              )
+          } else {
+              (Duration::from_secs(0), Duration::from_secs(0))
+          };
+
+          let percentage_of_parent = if !parent_total_time.is_zero() {
+              (node.total_time.as_secs_f64() / parent_total_time.as_secs_f64()) * 100.0
+          } else {
+              0.0
+          };
+
+          let percentage_own = if !node.total_time.is_zero() {
+              (node.own_time.as_secs_f64() / node.total_time.as_secs_f64()) * 100.0
+          } else {
+              0.0
+          };
+
+          let total_str = format_duration(node.total_time);
+          let own_str = format_duration(node.own_time);
+          let total_per_hit_str = format_duration(total_per_hit);
+          let own_per_hit_str = format_duration(own_per_hit);
+          let percentage_of_parent_str = format!("{:.1}%", percentage_of_parent);
+          let percentage_own_str = format!("{:.1}%", percentage_own);
+
+          println!(
+              "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10} {:>15}  {}",
+              node.hits,
+              total_str,
+              total_per_hit_str,
+              own_str,
+              own_per_hit_str,
+              percentage_own_str,
+              percentage_of_parent_str,
+              name_with_indent
+          );
+
+          let mut sorted_children: Vec<_> = node.children.iter().collect();
+          sorted_children.sort_by_key(|(name, _)| *name);
+
+          for (child_name, child_node) in sorted_children {
+              print_node_recursive(child_node, child_name, indent_level + 1, node.total_time);
+          }
+      }
+
+      /// Prints a summary of the collected profiling data to stdout.
+      pub fn print_summary() {
+          let data = profiler().lock().unwrap();
+          println!("--- Profiler Summary ---");
+
+          let no_timing_data = data.call_tree.children.is_empty();
+          let no_hit_data = data.hits.is_empty();
+
+          if no_timing_data && no_hit_data {
+              println!("No data collected.");
+              println!("--- End Profiler Summary ---");
+              return;
+          }
+
+          if !no_timing_data {
+              println!("\n[Hierarchical Timings]");
+              println!(
+                  "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10} {:>15}  {}",
+                  "Hits",
+                  "Total Time",
+                  "Total/Hit",
+                  "Own Time",
+                  "Own/Hit",
+                  "% Own",
+                  "% of Parent",
+                  "Name"
+              );
+
+              let root_total_time: Duration = data
+                  .call_tree
+                  .children
+                  .values()
+                  .map(|node| node.total_time)
+                  .sum();
+
+              let mut sorted_children: Vec<_> = data.call_tree.children.iter().collect();
+              sorted_children.sort_by_key(|(name, _)| *name);
+
+              for (name, node) in sorted_children {
+                  print_node_recursive(node, name, 0, root_total_time);
+              }
+          }
+
+          if !no_hit_data {
+              println!("\n[Hits]");
+              let mut sorted_hits: Vec<_> = data.hits.iter().collect();
+              sorted_hits.sort_by_key(|k| k.0);
+              for (name, count) in sorted_hits {
+                  println!("  {:>10}x: {}", count, name);
+              }
+          }
+
+          println!("\n--- End Profiler Summary ---");
+      }
+
+      fn flatten_tree_recursive(
+          nodes: &HashMap<String, ProfileNode>,
+          flat_map: &mut HashMap<String, ProfileNode>,
+      ) {
+          for (name, node) in nodes {
+              let entry = flat_map.entry(name.clone()).or_default();
+              entry.hits += node.hits;
+              entry.own_time += node.own_time;
+              entry.total_time += node.total_time;
+
+              if !node.children.is_empty() {
+                  flatten_tree_recursive(&node.children, flat_map);
+              }
+          }
+      }
+
+      /// Prints a summary of the collected profiling data as a flat list, merging all calls to the same function.
+      pub fn print_summary_flat() {
+          let data = profiler().lock().unwrap();
+          println!("--- Profiler Summary (Flat) ---");
+
+          let no_timing_data = data.call_tree.children.is_empty();
+          let no_hit_data = data.hits.is_empty();
+
+          if no_timing_data && no_hit_data {
+              println!("No data collected.");
+              println!("--- End Profiler Summary (Flat) ---");
+              return;
+          }
+
+          if !no_timing_data {
+              let mut flat_map: HashMap<String, ProfileNode> = HashMap::new();
+              flatten_tree_recursive(&data.call_tree.children, &mut flat_map);
+
+              println!("\n[Flat Timings]");
+              println!(
+                  "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10}  {}",
+                  "Hits",
+                  "Total Time",
+                  "Total/Hit",
+                  "Own Time",
+                  "Own/Hit",
+                  "% Own",
+                  "Name"
+              );
+
+              let mut sorted_list: Vec<_> = flat_map.iter().collect();
+              sorted_list.sort_by(|a, b| b.1.total_time.cmp(&a.1.total_time));
+
+              for (name, node) in sorted_list {
+                  let (total_per_hit, own_per_hit) = if node.hits > 0 {
+                      (
+                          node.total_time.mul_f64(1.0 / node.hits as f64),
+                          node.own_time.mul_f64(1.0 / node.hits as f64),
+                      )
+                  } else {
+                      (Duration::from_secs(0), Duration::from_secs(0))
+                  };
+
+                  let percentage_own = if !node.total_time.is_zero() {
+                      (node.own_time.as_secs_f64() / node.total_time.as_secs_f64()) * 100.0
+                  } else {
+                      0.0
+                  };
+
+                  let total_str = format_duration(node.total_time);
+                  let own_str = format_duration(node.own_time);
+                  let total_per_hit_str = format_duration(total_per_hit);
+                  let own_per_hit_str = format_duration(own_per_hit);
+                  let percentage_own_str = format!("{:.1}%", percentage_own);
+
+                  println!(
+                      "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10}  {}",
+                      node.hits, total_str, total_per_hit_str, own_str, own_per_hit_str,
+                      percentage_own_str, name
+                  );
+              }
+          }
+
+          if !no_hit_data {
+              println!("\n[Hits]");
+              let mut sorted_hits: Vec<_> = data.hits.iter().collect();
+              sorted_hits.sort_by_key(|k| k.0);
+              for (name, count) in sorted_hits {
+                  println!("  {:>10}x: {}", count, name);
+              }
+          }
+
+          println!("\n--- End Profiler Summary (Flat) ---");
+      }
+
+      /// Returns a clone of the hits data from `hit!` macro.
+      pub fn get_hits() -> HashMap<String, u64> {
+          profiler().lock().unwrap().hits.clone()
+      }
+
+      /// Returns a clone of the call tree.
+      pub fn get_call_tree() -> ProfileNode {
+          profiler().lock().unwrap().call_tree.clone()
+      }
+
+      // Internal functions for timing blocks
+      fn time_block_start(name: String) {
+          let mut data = profiler().lock().unwrap();
+          let now = Instant::now();
+
+          // Increment sub-call counter for the parent.
+          if let Some(parent) = data.timing_stack.last_mut() {
+              parent.3 += 1;
+          }
+
+          // Get parent's own time start if it exists. This immutable borrow ends immediately.
+          let parent_own_time_start_opt = data.timing_stack.last().map(|(_, _, t, _)| *t);
+
+          // Collect the path to the parent node to avoid conflicting borrows.
+          let path: Vec<String> = data.timing_stack.iter().map(|(s, _, _, _)| s.clone()).collect();
+
+          // Now, get a mutable reference to the parent node and traverse.
+          let mut current_node = &mut data.call_tree;
+          for node_name in &path {
+              current_node = current_node.children.get_mut(node_name).unwrap();
+          }
+
+          // If there is a parent, pause its own-time clock.
+          if let Some(parent_own_time_start) = parent_own_time_start_opt {
+              let own_time_lapsed = now.duration_since(parent_own_time_start);
+              current_node.own_time += own_time_lapsed;
+          }
+
+          // `current_node` is now the parent. Get or insert the new node and increment its hit count.
+          let new_node = current_node.children.entry(name.clone()).or_default();
+          new_node.hits += 1;
+
+          // Push the new timer onto the stack.
+          data.timing_stack.push((name, now, now, 0));
+      }
+
+      fn time_block_end() {
+          let mut data = profiler().lock().unwrap();
+          let now = Instant::now();
+
+          // Pop the current timer from the stack.
+          if let Some((name, total_start_time, own_start_time, sub_calls)) = data.timing_stack.pop() {
+              let total_duration = now.duration_since(total_start_time);
+              let own_duration = now.duration_since(own_start_time);
+
+              // Total time correction: 1 for this block, +1 for each direct and indirect sub-call.
+              let total_correction = PROFILER_CORRECTION.saturating_mul((sub_calls + 1) as u32);
+
+              let corrected_total_duration = total_duration.saturating_sub(total_correction);
+              // Own time is only corrected for its own measurement overhead.
+              let corrected_own_duration = own_duration.saturating_sub(PROFILER_CORRECTION);
+
+              // The `timing_stack` has been popped, so it now represents the parent path.
+              // Collect the path to avoid conflicting borrows.
+              let parent_path: Vec<String> =
+                  data.timing_stack.iter().map(|(s, _, _, _)| s.clone()).collect();
+
+              // Get a mutable reference to the parent of the node that just ended.
+              let mut parent_node = &mut data.call_tree;
+              for node_name in &parent_path {
+                  parent_node = parent_node.children.get_mut(node_name).unwrap();
+              }
+
+              // Get the node that ended and update its timings.
+              let ended_node = parent_node.children.get_mut(&name).unwrap();
+              ended_node.total_time += corrected_total_duration;
+              ended_node.own_time += corrected_own_duration;
+          }
+
+          // Resume the new parent timer by updating its own-time start time.
+          if let Some(parent) = data.timing_stack.last_mut() {
+              parent.2 = now; // parent.2 is own_time_start
+          }
+      }
+
+      /// A guard object for timing a block of code using RAII.
+      /// Its creation marks the start of the block, and its destruction (when it goes out of scope)
+      /// marks the end. This is intended for use by the `time!` macro.
+      #[must_use]
+      pub struct TimedBlockGuard;
+
+      impl TimedBlockGuard {
+          /// Creates a new guard, starting a timer for the given name.
+          pub fn new(name: String) -> Self {
+              time_block_start(name);
+              TimedBlockGuard
+          }
+      }
+
+      impl Drop for TimedBlockGuard {
+          fn drop(&mut self) {
+              time_block_end();
+          }
+      }
+
+      /// Macro to time a block of code or an expression.
+      ///
+      /// It measures the "own time" of the block, excluding time spent in nested
+      /// `time!` blocks. Timing a block also increments its "hit" count.
+      ///
+      /// # Examples
+      ///
+      /// ```ignore
+      /// use sep1::profiler::{time, print_summary, reset};
+      ///
+      /// fn my_function() {
+      ///     std::thread::sleep(std::time::Duration::from_millis(50));
+      /// }
+      ///
+      /// time!("total", {
+      ///     let result = time!("calculation", 1 + 1);
+      ///     time!("my_function_call", my_function());
+      /// });
+      ///
+      /// print_summary();
+      /// reset();
+      /// ```
+      #[macro_export]
+      macro_rules! time {
+          ($name:expr, $block:expr) => {{
+              let __profiler_name = ($name).into();
+              let _guard = $crate::profiler::TimedBlockGuard::new(__profiler_name);
+              $block
+          }};
+      }
+
+      /// Macro to record a single hit for a named event.
+      ///
+      /// # Example
+      ///
+      /// ```ignore
+      /// use sep1::profiler::{hit, print_summary};
+      ///
+      /// if true {
+      ///     hit!("some_condition was true");
+      /// }
+      ///
+      /// print_summary();
+      /// ```
+      #[macro_export]
+      macro_rules! hit {
+          ($name:expr) => {
+              $crate::profiler::hit($name)
+          };
+      }
+
       ```
-      What's the best way to fix these?
+    metadata:
+      filename: src/profiler.rs
+  - user: Profiling has its own overhead. Sometimes I want to run the program without
+      any profiling. Modify this so it's possible to disable all profiling using a
+      constant flag.
     metadata:
   - assistant: |-
-      The issue is that you're implementing `Into` and `TryInto` directly, but the standard library already provides blanket implementations for these traits. Instead, you should implement `From` and `TryFrom`, which will automatically give you `Into` and `TryInto` through the standard library's blanket implementations.
-
-      Here's the fix:
-
       ```diff
-      diff --git a/src/json_serialization.rs b/src/json_serialization.rs
-      index 1234567..abcdefg 100644
-      --- a/src/json_serialization.rs
-      +++ b/src/json_serialization.rs
-      @@ -121,20 +121,20 @@ pub trait JSONConvertible: Sized {
-           fn from_json(node: JSONNode) -> Result<Self, String>;
-       }
+      diff --git a/src/profiler.rs b/src/profiler.rs
+      index e69de29..abcdef0 100644
+      --- a/src/profiler.rs
+      +++ b/src/profiler.rs
+      @@
+       use std::time::{Duration, Instant};
        
-      -impl<T> Into<T> for JSONNode
-      +impl<T> From<JSONNode> for T
-       where
-           T: JSONConvertible,
-       {
-      -    fn into(self) -> T {
-      -        T::from_json(self).expect("Failed to convert JSONNode to type")
-      +    fn from(node: JSONNode) -> T {
-      +        T::from_json(node).expect("Failed to convert JSONNode to type")
-           }
-       }
-       
-      -impl<T> TryInto<T> for JSONNode
-      +impl<T> TryFrom<JSONNode> for T
-       where
-           T: JSONConvertible,
-       {
-           type Error = String;
-       
-      -    fn try_into(self) -> Result<T, Self::Error> {
-      -        T::from_json(self)
-      +    fn try_from(node: JSONNode) -> Result<T, Self::Error> {
-      +        T::from_json(node)
-           }
-       }
-      ```
-
-      This approach works because:
-
-      1. The standard library provides: `impl<T, U> Into<U> for T where U: From<T>`
-      2. The standard library provides: `impl<T, U> TryInto<U> for T where U: TryFrom<T>`
-
-      So by implementing `From<JSONNode>` and `TryFrom<JSONNode>` for types that implement `JSONConvertible`, you automatically get the `Into` and `TryInto` implementations for free, without conflicts.
-
-      This means you can still use the same syntax:
-      - `json_node.into()` (calls the auto-generated `Into` implementation)
-      - `json_node.try_into()` (calls the auto-generated `TryInto` implementation)
-
-      But now it won't conflict with the standard library's blanket implementations.
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/json_serialization.rs
-      Applying patch to 'src/json_serialization.rs' using custom patcher...
-      Successfully applied patch and wrote to src/json_serialization.rs.
-    metadata:
-  - user: |-
-      Diff of src/json_serialization.rs since previous turn:
-      ```diff
-      --- original version of src/json_serialization.rs+++ current version of src/json_serialization.rs@@ -121,23 +121,23 @@     fn from_json(node: JSONNode) -> Result<Self, String>;
-       }
-       
-      -impl<T> Into<T> for JSONNode
-      +impl<T> From<JSONNode> for T
-       where
-           T: JSONConvertible,
-       {
-      -    fn into(self) -> T {
-      -        T::from_json(self).expect("Failed to convert JSONNode to type")
-      -    }
+      +/// Set this to `false` to completely disable profiling at runtime.
+      +pub const PROFILING_ENABLED: bool = true;
+      +
+       /// Records a single hit for a named event (for use with `hit!` macro).
+      -pub fn hit(name: &str) {
+      -    let mut data = profiler().lock().unwrap();
+      -    *data.hits.entry(name.to_string()).or_insert(0) += 1;
       -}
-      -
-      -impl<T> TryInto<T> for JSONNode
-      +    fn from(node: JSONNode) -> T {
-      +        T::from_json(node).expect("Failed to convert JSONNode to type")
+      +pub fn hit(name: &str) {
+      +    if PROFILING_ENABLED {
+      +        let mut data = profiler().lock().unwrap();
+      +        *data.hits.entry(name.to_string()).or_insert(0) += 1;
       +    }
       +}
-      +
-      +impl<T> TryFrom<JSONNode> for T
-       where
-           T: JSONConvertible,
-       {
-           type Error = String;
+      @@
+      -#[must_use]
+      -pub struct TimedBlockGuard;
+      +/// A guard object for timing a block of code using RAII.
+      /// Its creation marks the start of the block, and its destruction marks the end.
+      /// When profiling is disabled, this is a no-op.
+      +#[must_use]
+      +pub struct TimedBlockGuard {
+      +    enabled: bool,
+      +}
        
-      -    fn try_into(self) -> Result<T, Self::Error> {
-      -        T::from_json(self)
-      +    fn try_from(node: JSONNode) -> Result<T, Self::Error> {
-      +        T::from_json(node)
-           }
-       }
+      -impl TimedBlockGuard {
+      -    /// Creates a new guard, starting a timer for the given name.
+      -    pub fn new(name: String) -> Self {
+      -        time_block_start(name);
+      -        TimedBlockGuard
+      -    }
+      -}
+      +impl TimedBlockGuard {
+      +    /// Creates a new guard, starting a timer for the given name.
+      +    /// If profiling is disabled, returns a no-op guard.
+      +    pub fn new(name: String) -> Self {
+      +        if PROFILING_ENABLED {
+      +            time_block_start(name);
+      +            TimedBlockGuard { enabled: true }
+      +        } else {
+      +            TimedBlockGuard { enabled: false }
+      +        }
+      +    }
+      +}
        
-
+      -impl Drop for TimedBlockGuard {
+      -    fn drop(&mut self) {
+      -        time_block_end();
+      -    }
+      -}
+      +impl Drop for TimedBlockGuard {
+      +    fn drop(&mut self) {
+      +        if self.enabled {
+      +            time_block_end();
+      +        }
+      +    }
+      +}
       ```
     metadata:
   - user: |-
-      error[E0210]: type parameter `T` must be covered by another type when it appears before the first local type (`json_serialization::JSONNode`)
-         --> src/json_serialization.rs:124:6
-          |
-      124 | impl<T> From<JSONNode> for T
-          |      ^ type parameter `T` must be covered by another type when it appears before the first local type (`json_serialization::JSONNode`)
-          |
-          = note: implementing a foreign trait is only possible if at least one of the types for which it is implemented is local, and no uncovered type parameters appear before that first local type
-          = note: in this case, 'before' refers to the following order: `impl<..> ForeignTrait<T1, ..., Tn> for T0`, where `T0` is the first and `Tn` is the last
-
-      error[E0210]: type parameter `T` must be covered by another type when it appears before the first local type (`json_serialization::JSONNode`)
-         --> src/json_serialization.rs:133:6
-          |
-      133 | impl<T> TryFrom<JSONNode> for T
-          |      ^ type parameter `T` must be covered by another type when it appears before the first local type (`json_serialization::JSONNode`)
-          |
-          = note: implementing a foreign trait is only possible if at least one of the types for which it is implemented is local, and no uncovered type parameters appear before that first local type
-          = note: in this case, 'before' refers to the following order: `impl<..> ForeignTrait<T1, ..., Tn> for T0`, where `T0` is the first and `Tn` is the last
-    metadata:
-  - assistant: |-
-      You're hitting Rust's orphan rule. The issue is that you can't implement a foreign trait (`From`/`TryFrom`) for a generic type parameter `T` because it could conflict with other implementations.
-
-      The best solution is to remove these generic implementations and instead add convenience methods directly to `JSONNode`. Here's the fix:
-
-      ```diff
-      diff --git a/src/json_serialization.rs b/src/json_serialization.rs
-      index 1234567..abcdefg 100644
-      --- a/src/json_serialization.rs
-      +++ b/src/json_serialization.rs
-      @@ -121,20 +121,6 @@ pub trait JSONConvertible: Sized {
-           fn from_json(node: JSONNode) -> Result<Self, String>;
-       }
-       
-      -impl<T> From<JSONNode> for T
-      -where
-      -    T: JSONConvertible,
-      -{
-      -    fn from(node: JSONNode) -> T {
-      -        T::from_json(node).expect("Failed to convert JSONNode to type")
-      -    }
-      -}
-      -
-      -impl<T> TryFrom<JSONNode> for T
-      -where
-      -    T: JSONConvertible,
-      -{
-      -    type Error = String;
-      -
-      -    fn try_from(node: JSONNode) -> Result<T, Self::Error> {
-      -        T::from_json(node)
-      -    }
-      -}
-      -
-       // --- Implementations for Primitives ---
-       
-       impl JSONConvertible for () {
-      @@ -95,6 +81,16 @@ impl JSONNode {
-           pub fn into_object(self) -> Result<BTreeMap<String, JSONNode>, String> {
-               match self {
-                   JSONNode::Object(obj) => Ok(obj),
-                   _ => Err("Expected JSONNode::Object".to_string()),
-               }
-           }
-      +
-      +    /// Convenience method to convert JSONNode to a specific type
-      +    pub fn into_type<T: JSONConvertible>(self) -> T {
-      +        T::from_json(self).expect("Failed to convert JSONNode to type")
-      +    }
-      +
-      +    /// Convenience method to try converting JSONNode to a specific type
-      +    pub fn try_into_type<T: JSONConvertible>(self) -> Result<T, String> {
-      +        T::from_json(self)
-      +    }
-       }
-      ```
-
-      Now users can call:
-      - `json_node.into_type::<MyStruct>()` instead of `json_node.into()`
-      - `json_node.try_into_type::<MyStruct>()` instead of `json_node.try_into()`
-
-      Or they can use the trait methods directly:
-      - `MyStruct::from_json(json_node)`
-
-      This approach avoids the orphan rule issue while still providing convenient conversion methods.
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
+      Git apply attempt failed (git-llm mode):
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/json_serialization.rs
-      Applying patch to 'src/json_serialization.rs' using custom patcher...
-      Successfully applied patch and wrote to src/json_serialization.rs.
+      Identified target file: src/profiler.rs
+      Applying patch to 'src/profiler.rs' using custom patcher...
+      Error applying patch to src/profiler.rs:
+      Hunk #1 (header: @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      use std::time::{Duration, Instant};
+
+      /// Records a single hit for a named event (for use with `hit!` macro).
+      pub fn hit(name: &str) {
+          let mut data = profiler().lock().unwrap();
+          *data.hits.entry(name.to_string()).or_insert(0) += 1;
+      }
+      --- Expected Context (from patch, after normalization): ---
+      use std::time::{Duration, Instant};
+
+
+      pub fn hit(name: &str) {
+      let mut data = profiler().lock().unwrap();
+      *data.hits.entry(name.to_string()).or_insert(0) += 1;
+      }
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 38 with ratio 0.86 (6/7 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      - use std::time::{Duration, Instant};
+      + }
+        
+        
+        pub fn hit(name: &str) {
+        let mut data = profiler().lock().unwrap();
+        *data.hits.entry(name.to_string()).or_insert(0) += 1;
+        }
+      Problematic diff content:
+      ---
+      diff --git a/src/profiler.rs b/src/profiler.rs
+      index e69de29..abcdef0 100644
+      --- a/src/profiler.rs
+      +++ b/src/profiler.rs
+      @@
+       use std::time::{Duration, Instant};
+       
+      +/// Set this to `false` to completely disable profiling at runtime.
+      +pub const PROFILING_ENABLED: bool = true;
+      +
+       /// Records a single hit for a named event (for use with `hit!` macro).
+      -pub fn hit(name: &str) {
+      -    let mut data = profiler().lock().unwrap();
+      -    *data.hits.entry(name.to_string()).or_insert(0) += 1;
+      -}
+      +pub fn hit(name: &str) {
+      +    if PROFILING_ENABLED {
+      +        let mut data = profiler().lock().unwrap();
+      +        *data.hits.entry(name.to_string()).or_insert(0) += 1;
+      +    }
+      +}
+      @@
+      -#[must_use]
+      -pub struct TimedBlockGuard;
+      +/// A guard object for timing a block of code using RAII.
+      /// Its creation marks the start of the block, and its destruction marks the end.
+      /// When profiling is disabled, this is a no-op.
+      +#[must_use]
+      +pub struct TimedBlockGuard {
+      +    enabled: bool,
+      +}
+       
+      -impl TimedBlockGuard {
+      -    /// Creates a new guard, starting a timer for the given name.
+      -    pub fn new(name: String) -> Self {
+      -        time_block_start(name);
+      -        TimedBlockGuard
+      -    }
+      -}
+      +impl TimedBlockGuard {
+      +    /// Creates a new guard, starting a timer for the given name.
+      +    /// If profiling is disabled, returns a no-op guard.
+      +    pub fn new(name: String) -> Self {
+      +        if PROFILING_ENABLED {
+      +            time_block_start(name);
+      +            TimedBlockGuard { enabled: true }
+      +        } else {
+      +            TimedBlockGuard { enabled: false }
+      +        }
+      +    }
+      +}
+       
+      -impl Drop for TimedBlockGuard {
+      -    fn drop(&mut self) {
+      -        time_block_end();
+      -    }
+      -}
+      +impl Drop for TimedBlockGuard {
+      +    fn drop(&mut self) {
+      +        if self.enabled {
+      +            time_block_end();
+      +        }
+      +    }
+      +}
+      ---
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Git apply failed. Fallback to LLM apply:
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/profiler.rs
+      Applying patch to 'src/profiler.rs' using custom patcher...
+      Error applying patch to src/profiler.rs:
+      Hunk #1 (header: @@) failed: context not found.
+      Context matching performed by:
+        1. Removing trailing newline.
+        2. Removing inline comments (# or // preceded by space or at line start).
+        3. Stripping leading/trailing whitespace.
+
+      --- Expected Context (from patch, before normalization): ---
+      use std::time::{Duration, Instant};
+
+      /// Records a single hit for a named event (for use with `hit!` macro).
+      pub fn hit(name: &str) {
+          let mut data = profiler().lock().unwrap();
+          *data.hits.entry(name.to_string()).or_insert(0) += 1;
+      }
+      --- Expected Context (from patch, after normalization): ---
+      use std::time::{Duration, Instant};
+
+
+      pub fn hit(name: &str) {
+      let mut data = profiler().lock().unwrap();
+      *data.hits.entry(name.to_string()).or_insert(0) += 1;
+      }
+      --- End Expected Context ---
+
+      --- Actual Content Analysis ---
+      Closest match found at line 38 with ratio 0.86 (6/7 lines partially matched, compared after normalization):
+      --- Diff (Normalized Expected vs Normalized Best Match Slice): ---
+      - use std::time::{Duration, Instant};
+      + }
+        
+        
+        pub fn hit(name: &str) {
+        let mut data = profiler().lock().unwrap();
+        *data.hits.entry(name.to_string()).or_insert(0) += 1;
+        }
+      Problematic diff content:
+      ---
+      diff --git a/src/profiler.rs b/src/profiler.rs
+      index e69de29..abcdef0 100644
+      --- a/src/profiler.rs
+      +++ b/src/profiler.rs
+      @@
+       use std::time::{Duration, Instant};
+       
+      +/// Set this to `false` to completely disable profiling at runtime.
+      +pub const PROFILING_ENABLED: bool = true;
+      +
+       /// Records a single hit for a named event (for use with `hit!` macro).
+      -pub fn hit(name: &str) {
+      -    let mut data = profiler().lock().unwrap();
+      -    *data.hits.entry(name.to_string()).or_insert(0) += 1;
+      -}
+      +pub fn hit(name: &str) {
+      +    if PROFILING_ENABLED {
+      +        let mut data = profiler().lock().unwrap();
+      +        *data.hits.entry(name.to_string()).or_insert(0) += 1;
+      +    }
+      +}
+      @@
+      -#[must_use]
+      -pub struct TimedBlockGuard;
+      +/// A guard object for timing a block of code using RAII.
+      /// Its creation marks the start of the block, and its destruction marks the end.
+      /// When profiling is disabled, this is a no-op.
+      +#[must_use]
+      +pub struct TimedBlockGuard {
+      +    enabled: bool,
+      +}
+       
+      -impl TimedBlockGuard {
+      -    /// Creates a new guard, starting a timer for the given name.
+      -    pub fn new(name: String) -> Self {
+      -        time_block_start(name);
+      -        TimedBlockGuard
+      -    }
+      -}
+      +impl TimedBlockGuard {
+      +    /// Creates a new guard, starting a timer for the given name.
+      +    /// If profiling is disabled, returns a no-op guard.
+      +    pub fn new(name: String) -> Self {
+      +        if PROFILING_ENABLED {
+      +            time_block_start(name);
+      +            TimedBlockGuard { enabled: true }
+      +        } else {
+      +            TimedBlockGuard { enabled: false }
+      +        }
+      +    }
+      +}
+       
+      -impl Drop for TimedBlockGuard {
+      -    fn drop(&mut self) {
+      -        time_block_end();
+      -    }
+      -}
+      +impl Drop for TimedBlockGuard {
+      +    fn drop(&mut self) {
+      +        if self.enabled {
+      +            time_block_end();
+      +        }
+      +    }
+      +}
+      ---
+
+
+      LLM apply output:
+      Using model 'gemini/gemini-2.5-flash' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/profiler.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/profiler.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/profiler.rs
     metadata:
 ...

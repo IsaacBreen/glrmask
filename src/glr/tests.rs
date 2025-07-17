@@ -898,10 +898,10 @@ fn test_explain_stack() {
     let start_state = parser.start_state_id;
     let b_token_id = *parser.terminal_map.get_by_left(&terminal("b")).unwrap();
     
-    let start_row = &parser.stage_8_table[&start_state];
+    let start_row = &parser.stage_7_table[&start_state];
     let shift_action = &start_row.shifts_and_reduces[&b_token_id];
     let state_after_b = match shift_action {
-        crate::glr::table::Stage8ShiftsAndReduces::Shift(id) => *id,
+        crate::glr::table::Stage7ShiftsAndReduces::Shift(id) => *id,
         _ => panic!("Expected shift on 'b' from start state"),
     };
 
