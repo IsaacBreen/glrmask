@@ -150,8 +150,6 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let terminal_map: BiBTreeMap<Terminal, TerminalID> = token_name_map.iter().map(|(name, id)| (name.clone(), TerminalID(*id))).collect();
     let parser = generate_glr_parser(&productions, 0, None);
-    let stats = get_stats(&parser);
-    println!("Parser stats: {}", stats);
 
     // Ensure that "def" is a valid initial LLM token
     let max_llm_token_id = token_name_map.iter().map(|(_, id)| *id).max().unwrap_or(0);
@@ -292,6 +290,10 @@ fn test_js_constraint_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>
     println!("Compiling GrammarDefinition into CompiledGrammar...");
     // The definition is cloned here because it's moved into CompiledGrammar::from_definition
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition.clone()));
+
+    let stats = get_stats(&compiled_grammar.glr_parser);
+    println!("Parser stats: {}", stats);
+
     println!("Successfully compiled GrammarDefinition into CompiledGrammar.");
     println!("{}", compiled_grammar);
     // --- New test section for grammar terminal sequences ---
