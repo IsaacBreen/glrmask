@@ -526,7 +526,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
                 if reduces_by_len_and_nt.is_empty() {
                     panic!("Action without shift or reduce for terminal {:?}", terminal);
                 } else if reduces_by_len_and_nt.len() == 1 {
-                    let (len, mut nts) = reduces_by_len_and_nt.into_iter().next().unwrap();
+                    let (len, nts) = reduces_by_len_and_nt.into_iter().next().unwrap();
                     if nts.len() == 1 {
                         // Single reduce action (possibly with multiple productions for same NT/len)
                         let (nonterminal_id, production_ids) = nts.into_iter().next().unwrap();
