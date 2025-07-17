@@ -534,6 +534,7 @@ impl GrammarDefinition {
                         u8set.insert(c as u8);
                     }
                 }
+                println!("Converted char class '{}' to U8Set: {:?}", class_def, Expr::U8Class(if negated { u8set.complement() } else { u8set }));
                 Ok(Expr::U8Class(if negated { u8set.complement() } else { u8set }))
             }
             GrammarExpr::Ref(name) => {
