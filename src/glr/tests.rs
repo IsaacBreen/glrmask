@@ -2,6 +2,7 @@ use crate::glr::grammar::{nt, prod, t, terminal, NonTerminal, Production, Symbol
 use crate::glr::parser::{GLRParser, GLRParserState};
 use crate::glr::table::{generate_glr_parser, TerminalID};
 use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, filter_productions_by_reachability, simplify_grammar, resolve_right_recursion}; // Import the analyze module
+use crate::glr::stats;
 use bimap::BiBTreeMap;
 use std::collections::BTreeSet;
 use crate::interface::display_productions;
@@ -789,7 +790,7 @@ fn test_resolve_right_recursion() {
         prod("S_prime", vec![nt("S_prime"), t("a")]),
         prod("S_prime", vec![]),
     ];
-    resolve_right_recursion(&mut prods1, |name| format!("{}_prime", name));
+    analyze::resolve_direct_right_recursion(&mut prods1, |name| format!("{}_prime", name));
     assert!(compare_prods(&prods1, &expected1), "Test 1 failed. Got: {:?}", prods1);
 
     // --- Test Case 2: No Right-Recursion (should not change) ---
@@ -798,7 +799,7 @@ fn test_resolve_right_recursion() {
         prod("S", vec![t("b")]),
     ];
     let expected2 = prods2.clone();
-    resolve_right_recursion(&mut prods2, |name| format!("{}_prime", name));
+    analyze::resolve_direct_right_recursion(&mut prods2, |name| format!("{}_prime", name));
     assert!(compare_prods(&prods2, &expected2), "Test 2 failed. Got: {:?}", prods2);
 
     // --- Test Case 3: Indirect Right-Recursion ---
@@ -823,7 +824,7 @@ fn test_resolve_right_recursion() {
         prod("B_prime", vec![nt("B_prime"), t("b"), t("a")]),
         prod("B_prime", vec![]),
     ];
-    resolve_right_recursion(&mut prods3, |name| format!("{}_prime", name));
+    analyze::resolve_direct_right_recursion(&mut prods3, |name| format!("{}_prime", name));
     assert!(compare_prods(&prods3, &expected3), "Test 3 failed. Got: {:?}", prods3);
 
     // --- Test Case 4: Hidden Direct Right-Recursion ---
@@ -838,7 +839,7 @@ fn test_resolve_right_recursion() {
         prod("S_prime", vec![]),
         prod("N", vec![]),
     ];
-    resolve_right_recursion(&mut prods4, |name| format!("{}_prime", name));
+    analyze::resolve_direct_right_recursion(&mut prods4, |name| format!("{}_prime", name));
     assert!(compare_prods(&prods4, &expected4), "Test 4 failed. Got: {:?}", prods4);
 
     // --- Test Case 5: Multiple Non-Recursive Choices ---
@@ -853,7 +854,7 @@ fn test_resolve_right_recursion() {
         prod("S_prime", vec![nt("S_prime"), t("a")]),
         prod("S_prime", vec![]),
     ];
-    resolve_right_recursion(&mut prods5, |name| format!("{}_prime", name));
+    analyze::resolve_direct_right_recursion(&mut prods5, |name| format!("{}_prime", name));
     assert!(compare_prods(&prods5, &expected5), "Test 5 failed. Got: {:?}", prods5);
 
     // --- Test Case 6: Multiple Recursive Choices ---
@@ -868,7 +869,7 @@ fn test_resolve_right_recursion() {
         prod("S_prime", vec![nt("S_prime"), t("b")]),
         prod("S_prime", vec![]),
     ];
-    resolve_right_recursion(&mut prods6, |name| format!("{}_prime", name));
+    analyze::resolve_direct_right_recursion(&mut prods6, |name| format!("{}_prime", name));
     assert!(compare_prods(&prods6, &expected6), "Test 6 failed. Got: {:?}", prods6);
 
     // --- Test Case 7: Both Left and Right Recursive ---
@@ -883,7 +884,7 @@ fn test_resolve_right_recursion() {
         prod("S_prime", vec![nt("S_prime"), nt("S")]),
         prod("S_prime", vec![]),
     ];
-    resolve_right_recursion(&mut prods7, |name| format!("{}_prime", name));
+    analyze::resolve_direct_right_recursion(&mut prods7, |name| format!("{}_prime", name));
     assert!(compare_prods(&prods7, &expected7), "Test 7 failed. Got: {:?}", prods7);
 }
 
@@ -926,6 +927,43 @@ fn test_explain_stack() {
     assert!(explanation.contains("On 'a': Reduce by rule #2 (A -> 'b')"));
     assert!(explanation.contains("On '$': Reduce by rule #2 (A -> 'b')"));
 }
+
+#[test]
+fn test_parser_stats_conflicts() {
+    // --- Test Reduce/Reduce Conflict ---
+    // Grammar: S -> A | B, A -> x, B -> x
+    // This has a reduce/reduce conflict on 'x'.
+    let rr_productions = vec![
+        prod("S'", vec![nt("S"), t("$")]),
+        prod("S", vec![nt("A")]),
+        prod("S", vec![nt("B")]),
+        prod("A", vec![t("x")]),
+        prod("B", vec![t("x")]),
+    ];
+    let rr_parser = generate_glr_parser(&rr_productions, 0, None);
+    let rr_stats = stats::get_stats(&rr_parser);
+
+    println!("Reduce/Reduce Conflict Parser Stats:\n{}", rr_stats);
+    assert_eq!(rr_stats.num_shift_reduce_conflicts, 0);
+    assert_eq!(rr_stats.num_reduce_reduce_conflicts, 1, "Expected one R/R conflict");
+
+    // --- Test Shift/Reduce Conflict ---
+    // Grammar: Stmt -> if E then S | if E then S else S | other
+    // This has a shift/reduce conflict on 'else'.
+    let sr_productions = vec![
+        prod("S'", vec![nt("Stmt"), t("$")]),
+        prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt")]),
+        prod("Stmt", vec![t("if"), nt("Expr"), t("then"), nt("Stmt"), t("else"), nt("Stmt")]),
+        prod("Stmt", vec![t("other")]),
+        prod("Expr", vec![t("id")]),
+    ];
+    let sr_parser = generate_glr_parser(&sr_productions, 0, None);
+    let sr_stats = stats::get_stats(&sr_parser);
+
+    println!("Shift/Reduce Conflict Parser Stats:\n{}", sr_stats);
+    assert_eq!(sr_stats.num_shift_reduce_conflicts, 1, "Expected one S/R conflict");
+    assert_eq!(sr_stats.num_reduce_reduce_conflicts, 0);
+}
 // --- Notes on Limitations Not Easily Tested Here ---
 // 1. Semantic Ambiguity: These tests use T=(), so while the parser finds *a* parse (or confirms
 //    parsability) for ambiguous grammars, they don't demonstrate *how* multiple semantic
@@ -938,4 +976,3 @@ fn test_explain_stack() {
 // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
 //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
 //    or non-productive non-terminals), which could be considered a limitation of the validation step.
-
