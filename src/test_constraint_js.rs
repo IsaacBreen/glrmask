@@ -35,6 +35,7 @@ use std::panic::{self, AssertUnwindSafe}; // Added for panic catching
 use std::collections::HashMap;
 use serde::__private::ser::constrain;
 use crate::datastructures::gss::{gather_gss_stats, GSSNode, reset_llm_tokens, sample_path};
+use crate::glr::stats::get_stats;
 // For the symbol removal helper
 
 
@@ -149,6 +150,8 @@ fn test_precompute_with_gpt2_vocab() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let terminal_map: BiBTreeMap<Terminal, TerminalID> = token_name_map.iter().map(|(name, id)| (name.clone(), TerminalID(*id))).collect();
     let parser = generate_glr_parser(&productions, 0, None);
+    let stats = get_stats(&parser);
+    println!("Parser stats: {}", stats);
 
     // Ensure that "def" is a valid initial LLM token
     let max_llm_token_id = token_name_map.iter().map(|(_, id)| *id).max().unwrap_or(0);
