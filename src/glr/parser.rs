@@ -811,6 +811,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             } else {
                 match find_longest_path(&self.active_state.stack) {
                     Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
+                                       stats.unique_nodes,
                                        p.len(),
                                        p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
                                             .map(|id| id.to_string())
