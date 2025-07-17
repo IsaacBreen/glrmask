@@ -640,23 +640,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 crate::debug!(4, "Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
                                 let stack_for_push = peek.to_arc_node();
                                 let new_content = ParseStateEdgeContent { state_id: *to };
+                                crate::debug!(6, "Pushing to next state: {}", print_gss_forest(&[stack_for_push.clone()], None, 30, &self.parser.terminal_map, None, None));
                                 let new_parse_state = self.push_state(&stack_for_push, new_content);
-
-                                // Check if the destination state has a default reduce action.
-                                let new_row = &self.parser.stage_7_table[to];
-                                if let Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, .. } = &new_row.shifts_and_reduces {
-                                    // If so, perform the reduction immediately and add to the current step's todo list.
-                                    crate::debug!(4, "Chained default reduce after shift to state {}", to.0);
-                                    for new_peek in new_parse_state.stack.peek_iter() {
-                                        let s_new_arc = self.reduce_and_goto(&new_peek, *nonterminal_id, *len);
-                                        if !s_new_arc.is_empty() {
-                                            todo.push(ParseState { stack: s_new_arc });
-                                        }
-                                    }
-                                } else {
-                                    // Otherwise, add the new state to `next` for the next token.
-                                    next.merge(new_parse_state);
-                                }
+                                crate::debug!(6, "Next state before shift: {}", print_gss_forest(&[next.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
+                                crate::debug!(6, "Merging next state with new parse state: {}", print_gss_forest(&[new_parse_state.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
+                                next.merge(new_parse_state);
+                                crate::debug!(6, "Next state after shift: {}", print_gss_forest(&[next.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
                                 })
                             }
 
@@ -688,25 +677,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 timeit!("GLRParserState::step::split", {
                                 crate::debug!(4, "Split from state {} via token {}", peek.edge_value().state_id.0, token_id.0);
                                 if let Some(to) = shift {
+                                    timeit!("GLRParserState::step::split::shift", {
+                                    crate::debug!(4, " Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
                                     let stack_for_push = peek.to_arc_node();
                                     let new_content = ParseStateEdgeContent { state_id: *to };
                                     let new_parse_state = self.push_state(&stack_for_push, new_content);
-
-                                    // Check if the destination state has a default reduce action.
-                                    let new_row = &self.parser.stage_7_table[to];
-                                    if let Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, .. } = &new_row.shifts_and_reduces {
-                                        // If so, perform the reduction immediately and add to the current step's todo list.
-                                        crate::debug!(4, "Chained default reduce after shift-in-split to state {}", to.0);
-                                        for new_peek in new_parse_state.stack.peek_iter() {
-                                            let s_new_arc = self.reduce_and_goto(&new_peek, *nonterminal_id, *len);
-                                            if !s_new_arc.is_empty() {
-                                                todo.push(ParseState { stack: s_new_arc });
-                                            }
-                                        }
-                                    } else {
-                                        // Otherwise, add the new state to `next` for the next token.
-                                        next.merge(new_parse_state);
-                                    }
+                                    next.merge(new_parse_state);
+                                    })
                                 }
                                 for (len, nts) in reduces {
                                     let nts_mapped = nts.iter()
