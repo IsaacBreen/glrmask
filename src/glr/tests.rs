@@ -427,7 +427,9 @@ fn test_ambiguous_arithmetic() {
 
 #[test]
 fn test_reduce_reduce_conflict() {
-    // Grammar: S -> A | B, A -> x, B -> x
+    // Grammar: S -> A | B
+    //          A -> x
+    //          B -> x
     // Input: x
     // This grammar has a reduce/reduce conflict on 'x'. // This is fine, it's a comment
     // GLR should handle this by performing both reductions.
@@ -898,11 +900,10 @@ fn test_explain_stack() {
     let b_token_id = *parser.terminal_map.get_by_left(&terminal("b")).unwrap();
     
     let start_row = &parser.stage_7_table[&start_state];
-    let shift_action = &start_row.phase2_shifts_and_reduces[&b_token_id];
-    // let shift_action = match &start_row.shifts_and_reduces {
-    //     crate::glr::table::Stage7ShiftsAndReduces::Lookahead(actions) => &actions[&b_token_id],
-    //     _ => panic!("Expected lookahead actions in start state"),
-    // };
+    let shift_action = match &start_row.shifts_and_reduces {
+        crate::glr::table::Stage7ShiftsAndReduces::Lookahead(actions) => &actions[&b_token_id],
+        _ => panic!("Expected lookahead actions in start state"),
+    };
 
     let state_after_b = match shift_action {
         crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(id) => *id,
@@ -980,4 +981,3 @@ fn test_parser_stats_conflicts() {
 // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
 //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
 //    or non-productive non-terminals), which could be considered a limitation of the validation step.
-
