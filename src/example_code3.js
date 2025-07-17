@@ -52,6 +52,9 @@ const myObject = {
     "key-with-hyphen": 123,
     unquotedKey: true,
     123: "numeric key", // Numeric keys
+    // method() {
+    //     return "I am a method";
+    // },
     // Computed property name
     [mySymbol]: "symbol key value",
     // Trailing comma
