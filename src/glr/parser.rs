@@ -646,7 +646,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         } else {
                             format!("[{}]", productions_strs.join(", "))
                         };
-                        timeit!(format!("GLRParserState::step::reduce ({} -> {}) (productions: {:?})", nonterminal.0, len, productions_str), {
+                        timeit!(format!("GLRParserState::step::reduce ({} -> {}) (state: {}) (productions: {:?})", nonterminal.0, len, peek.edge_value().state_id.0, productions_str), {
                         crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", peek.edge_value().state_id.0, token_id.0, nonterminal.0, len);
                         let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                         if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
