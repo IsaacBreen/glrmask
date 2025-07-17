@@ -380,8 +380,10 @@ impl GLRParser {
                             }
                         }
                     }
-                    Stage7ShiftsAndReduces::DefaultReduce { .. } => {
-                        writeln!(&mut result, "    - Default Reduce").unwrap();
+                    Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, production_ids } => {
+                        let nt_name = self.non_terminal_map.get_by_right(nonterminal_id).unwrap();
+                        let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
+                        writeln!(f, "    - Default Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
                     }
                 }
 
@@ -503,8 +505,10 @@ impl Display for GLRParser {
                         }
                     }
                 }
-                Stage7ShiftsAndReduces::DefaultReduce { .. } => {
-                    writeln!(f, "      - Default Reduce")?;
+                Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, production_ids } => {
+                    let nt_name = non_terminal_map.get_by_right(nonterminal_id).unwrap();
+                    let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
+                    writeln!(f, "      - Default Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?;
                 }
             }
 
@@ -709,8 +713,27 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             },
                         }
                     }
-                    Stage7ShiftsAndReduces::DefaultReduce { .. } => {
-                        todo!();
+                    Stage7ShiftsAndReduces::DefaultReduce {
+                        nonterminal_id: nt,
+                        len,
+                        production_ids,
+                    } => {
+                        let nonterminal = self.parser.non_terminal_map.get_by_right(nt).unwrap();
+                        let productions_strs: Vec<String> = production_ids.iter()
+                            .map(|pid| format!("#{} ({})", pid.0, self.parser.productions[pid.0].to_string()))
+                            .collect();
+                        let productions_str = if productions_strs.len() == 1 {
+                            productions_strs[0].clone()
+                        } else {
+                            format!("[{}]", productions_strs.join(", "))
+                        };
+                        timeit!(format!("GLRParserState::step::default_reduce ({} -> {}) (state: {}) (productions: {:?})", nonterminal.0, len, peek.edge_value().state_id.0, productions_str), {
+                        crate::debug!(4, "Default Reduce from state {} to nonterminal {} of length {}", peek.edge_value().state_id.0, nonterminal.0, len);
+                        let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+                        if !s_new_arc.is_empty() {
+                           todo.push(ParseState { stack: s_new_arc });
+                        }
+                        })
                     }
                 }
             }
@@ -788,7 +811,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
             } else {
                 match find_longest_path(&self.active_state.stack) {
                     Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
-                                       stats.unique_nodes,
                                        p.len(),
                                        p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
                                             .map(|id| id.to_string())
