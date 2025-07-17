@@ -380,10 +380,8 @@ impl GLRParser {
                             }
                         }
                     }
-                    Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, production_ids } => {
-                        let nt = self.non_terminal_map.get_by_right(nonterminal_id).unwrap();
-                        let pids: Vec<String> = production_ids.iter().map(|p| format!("#{}", p.0)).collect();
-                        writeln!(&mut result, "    - Default Reduce by rules {} (len {}, NT {})", pids.join(", "), len, nt.0).unwrap();
+                    Stage7ShiftsAndReduces::DefaultReduce { .. } => {
+                        writeln!(&mut result, "    - Default Reduce").unwrap();
                     }
                 }
 
@@ -505,10 +503,8 @@ impl Display for GLRParser {
                         }
                     }
                 }
-                Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, production_ids } => {
-                    let nt = non_terminal_map.get_by_right(nonterminal_id).unwrap();
-                    let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-                    writeln!(f, "      - Default Reduce {} (len {}) via rules [{}]", nt.0, len, pids.join(", "))?;
+                Stage7ShiftsAndReduces::DefaultReduce { .. } => {
+                    writeln!(f, "      - Default Reduce")?;
                 }
             }
 
@@ -632,223 +628,89 @@ impl<'a> GLRParserState<'a> { // No longer generic
             crate::debug!(6, "Processing state: {}", print_gss_forest(&[state.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
             for peek in state.stack.peek_iter() {
                 let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
+                match &row.shifts_and_reduces {
+                    Stage7ShiftsAndReduces::Lookahead(actions) => {
+                        match actions.get(&token_id) {
+                            Some(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
+                                timeit!("GLRParserState::step::shift", {
+                                crate::debug!(4, "Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
+                                let stack_for_push = peek.to_arc_node();
+                                let new_content = ParseStateEdgeContent { state_id: *to };
+                                crate::debug!(6, "Pushing to next state: {}", print_gss_forest(&[stack_for_push.clone()], None, 30, &self.parser.terminal_map, None, None));
+                                let new_parse_state = self.push_state(&stack_for_push, new_content);
+                                crate::debug!(6, "Next state before shift: {}", print_gss_forest(&[next.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
+                                crate::debug!(6, "Merging next state with new parse state: {}", print_gss_forest(&[new_parse_state.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
+                                next.merge(new_parse_state);
+                                crate::debug!(6, "Next state after shift: {}", print_gss_forest(&[next.stack.clone()], None, 30, &self.parser.terminal_map, None, None));
+                                })
+                            }
 
-                let specific_action = if let Stage7ShiftsAndReduces::Lookahead(actions) = &row.shifts_and_reduces {
-                    actions.get(&token_id)
-                } else {
-                    None
-                };
-
-                if let Some(action) = specific_action {
-                    match action {
-                        Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
-                            timeit!("GLRParserState::step::shift", {
-                            crate::debug!(4, "Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
-                            let stack_for_push = peek.to_arc_node();
-                            let new_content = ParseStateEdgeContent { state_id: *to };
-                            let new_parse_state = self.push_state(&stack_for_push, new_content);
-                            next.merge(new_parse_state);
-                            })
-                        }
-                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len, production_ids } => {
-                            let nonterminal = self.parser.non_terminal_map.get_by_right(nt).unwrap();
-                            let productions_strs: Vec<String> = production_ids.iter().map(|pid| format!("#{} ({})", pid.0, self.parser.productions[pid.0].to_string())).collect();
-                            let productions_str = if productions_strs.len() == 1 { productions_strs[0].clone() } else { format!("[{}]", productions_strs.join(", ")) };
-                            timeit!(format!("GLRParserState::step::reduce ({} -> {}) (state: {}) (productions: {:?})", nonterminal.0, len, peek.edge_value().state_id.0, productions_str), {
+                            Some(Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                                     nonterminal_id: nt,
+                                     len,
+                                    production_ids,
+                                 }) => {
+                                let nonterminal = self.parser.non_terminal_map.get_by_right(nt).unwrap();
+                                // timeit!("GLRParserState::step::reduce", {
+                                let productions_strs: Vec<String> = production_ids.iter()
+                                    .map(|pid| format!("#{} ({})", pid.0, self.parser.productions[pid.0].to_string()))
+                                    .collect();
+                                let productions_str = if productions_strs.len() == 1 {
+                                    productions_strs[0].clone()
+                                } else {
+                                    format!("[{}]", productions_strs.join(", "))
+                                };
+                                timeit!(format!("GLRParserState::step::reduce ({} -> {}) (state: {}) (productions: {:?})", nonterminal.0, len, peek.edge_value().state_id.0, productions_str), {
                                 crate::debug!(4, "Reduce from state {} via token {} to nonterminal {} of length {}", peek.edge_value().state_id.0, token_id.0, nonterminal.0, len);
                                 let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                                if !s_new_arc.is_empty() {
-                                    todo.push(ParseState { stack: s_new_arc });
+                                if !s_new_arc.is_empty() { // Only add to todo if the reduction leads to valid states
+                                   todo.push(ParseState { stack: s_new_arc });
                                 }
-                            })
-                        }
-                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                            timeit!("GLRParserState::step::split", {
+                                })
+                            }
+
+                            Some(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
+                                timeit!("GLRParserState::step::split", {
                                 crate::debug!(4, "Split from state {} via token {}", peek.edge_value().state_id.0, token_id.0);
                                 if let Some(to) = shift {
                                     timeit!("GLRParserState::step::split::shift", {
-                                        crate::debug!(4, " Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
-                                        let stack_for_push = peek.to_arc_node();
-                                        let new_content = ParseStateEdgeContent { state_id: *to };
-                                        let new_parse_state = self.push_state(&stack_for_push, new_content);
-                                        next.merge(new_parse_state);
+                                    crate::debug!(4, " Shift from state {} via token {} to state {}", peek.edge_value().state_id.0, token_id.0, to.0);
+                                    let stack_for_push = peek.to_arc_node();
+                                    let new_content = ParseStateEdgeContent { state_id: *to };
+                                    let new_parse_state = self.push_state(&stack_for_push, new_content);
+                                    next.merge(new_parse_state);
                                     })
                                 }
                                 for (len, nts) in reduces {
-                                    let nts_mapped = nts.iter().map(|(nt, pids)| (self.parser.non_terminal_map.get_by_right(nt).unwrap().clone().0, pids.iter().map(|pid| pid.0).collect::<BTreeSet<_>>())).collect::<BTreeMap<_, _>>();
+                                    let nts_mapped = nts.iter()
+                                        .map(|(nt, pids)| (self.parser.non_terminal_map.get_by_right(nt).unwrap().clone().0, pids.iter()
+                                            .map(|pid| pid.0)
+                                            .collect::<BTreeSet<_>>()))
+                                        .collect::<BTreeMap<_, _>>();
+                                    // timeit!("GLRParserState::step::split::reduce", {
                                     timeit!(format!("GLRParserState::step::split::reduce ({:?} -> {})", nts_mapped, len), {
-                                        crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", peek.edge_value().state_id.0, token_id.0, nts_mapped);
-                                        for (nt, _prod_ids) in nts {
-                                            crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
-                                            let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
-                                            if !s_new_arc.is_empty() {
-                                                todo.push(ParseState { stack: s_new_arc });
-                                            }
+                                    crate::debug!(4, " Reduce from state {} via token {} to nonterminals {:?}", peek.edge_value().state_id.0, token_id.0, nts_mapped);
+                                    for (nt, _prod_ids) in nts {
+                                        crate::debug!(4, "  Reducing via nonterminal {} of length {}", nt.0, len);
+                                        let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
+                                        if !s_new_arc.is_empty() {
+                                            todo.push(ParseState { stack: s_new_arc });
                                         }
+                                    }
                                     })
                                 }
-                            })
+                                })
+                            }
+
+                            None => {
+                                crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, peek.edge_value().state_id.0);
+                                // Reconstruct the ParseState for this specific path and add to not_found.
+                                // not_found.merge(ParseState { stack: peek.to_arc_node() });
+                            },
                         }
                     }
-                } else if let Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, production_ids } = &row.shifts_and_reduces {
-                    // This branch is taken if the state is a DefaultReduce state.
-                    let nonterminal = self.parser.non_terminal_map.get_by_right(nonterminal_id).unwrap();
-                    let productions_strs: Vec<String> = production_ids.iter().map(|pid| format!("#{} ({})", pid.0, self.parser.productions[pid.0].to_string())).collect();
-                    let productions_str = if productions_strs.len() == 1 { productions_strs[0].clone() } else { format!("[{}]", productions_strs.join(", ")) };
-                    timeit!(format!("GLRParserState::step::default_reduce ({} -> {}) (state: {}) (productions: {:?})", nonterminal.0, len, peek.edge_value().state_id.0, productions_str), {
-                        crate::debug!(4, "Default Reduce from state {} to nonterminal {} of length {}", peek.edge_value().state_id.0, nonterminal.0, len);
-                        let s_new_arc = self.reduce_and_goto(&peek, *nonterminal_id, *len);
-                        if !s_new_arc.is_empty() {
-                            todo.push(ParseState { stack: s_new_arc });
-                        }
-                    })
-                } else {
-                    // This branch is taken if the state is a Lookahead state but has no action for the current token.
-                    crate::debug!(4, "No action found for token {:?} in state {}", token_id.0, peek.edge_value().state_id.0);
-                }
-            }
-        }
-
-        self.active_state = next;
-        // self.action_not_found_states = not_found; // Retain for potential inspection, though current design drops them.
-
-        // Simplify the active GSS forest at the end of the step
-        if !self.active_state.stack.is_empty() {
-            // Arc::make_mut(&mut self.active_state.stack).simplify();
-        }
-
-        if !self.active_state.stack.is_empty() {
-            self.log_gss("Step-end", token_id);
-        }
-        // self.action_not_found_states = ParseState::new(llm_vocab.clone()); // Reset if not needed beyond the step
-
-        crate::debug!(4, "----------------------------------------------------------------");
-        // })
-    }
-
-    pub fn parse(&mut self, input: &[TerminalID]) {
-        self.parse_part(input);
-    }
-
-    pub fn parse_part(&mut self, input: &[TerminalID]) {
-        for &token_id in input {
-            self.step(token_id);
-        }
-    }
-
-    pub fn and_step(mut self, token_id: TerminalID) -> Self {
-        self.step(token_id);
-        self
-    }
-
-    pub fn and_parse(mut self, input: &[TerminalID]) -> Self {
-        self.parse(input);
-        self
-    }
-
-    pub fn merge_active_states(&mut self) {
-        // No longer strictly necessary due to BTreeMap merge-on-insert, but GSS merge is explicit.
-        // This method could be used if multiple GLRParserStates are combined.
-    }
-
-    pub fn merge_with(&mut self, other: GLRParserState) { // No longer generic
-        assert!(std::ptr::eq(self.parser, other.parser));
-        self.active_state.merge(other.active_state);
-        self.action_not_found_states.merge(other.action_not_found_states);
-        self.cycled_states.merge(other.cycled_states);
-    }
-
-    pub fn is_ok(&self) -> bool {
-        !self.active_state.stack.is_empty() && self.active_state.stack.full_union_acc().is_alive()
-    }
-
-    // #[time_it("GLRParserState::log_gss")]
-    pub(crate) fn log_gss(&self, phase: &str, token: TerminalID) {
-        // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
-        // return;
-        const MAX: usize = 30;
-        const PANIC_THRESHOLD: usize = 10000;
-
-        let roots: Vec<_> = vec![self.active_state.stack.clone()];
-        let stats = gather_gss_stats(&roots.iter().map(|r| r.as_ref()).collect::<Vec<_>>());
-        crate::debug!(4, "{} - token {} ({:?}) - nodes: {:?}",
-                      phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| t), stats);
-
-        let make_msg = |print_full_forest, max_nodes_to_print| {
-            if print_full_forest {
-                format!("GSS ({} nodes):\n{}", stats.unique_nodes,
-                        print_gss_forest(&roots, None, max_nodes_to_print, &self.parser.terminal_map, None, None))
-            } else {
-                match find_longest_path(&self.active_state.stack) {
-                    Some(p) => format!("GSS too big ({} nodes). Longest path ({}): {}",
-                                       stats.unique_nodes,
-                                       p.len(),
-                                       p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
-                                            .map(|id| id.to_string())
-                                            .collect::<Vec<_>>()
-                                            .join(" → ")),
-                    None => format!("GSS too big ({} nodes) – path not found", stats.unique_nodes),
-                }
-            }
-        };
-
-        if stats.unique_nodes > PANIC_THRESHOLD {
-            let msg = make_msg(true, usize::MAX);
-            panic!("GSS too big ({} nodes). {}", stats.unique_nodes, msg);
-        }
-
-        debug!(5, "{}", make_msg(stats.unique_nodes <= MAX, MAX));
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ParseStateKey {
-    stack_state_id: StateID,
-}
-
-impl ParseState { // No longer generic
-    pub fn merge(&mut self, other: ParseState) {
-        Arc::make_mut(&mut self.stack).merge(&other.stack);
-    }
-}
-
-pub trait InsertWith<K, V> {
-    fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F);
-}
-
-impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
-    fn insert_with<F: FnOnce(&mut V, V)>(&mut self, k: K, v: V, combine: F) {
-        match self.entry(k) {
-            std::collections::btree_map::Entry::Occupied(mut occupied) => {
-                let value = occupied.get_mut();
-                combine(value, v);
-            }
-            std::collections::btree_map::Entry::Vacant(vacant) => {
-                vacant.insert(v);
-            }
-        }
-    }
-}
-                        let nonterminal = self.parser.non_terminal_map.get_by_right(nonterminal_id).unwrap();
-                        let productions_strs: Vec<String> = production_ids.iter()
-                            .map(|pid| format!("#{} ({})", pid.0, self.parser.productions[pid.0].to_string()))
-                            .collect();
-                        let productions_str = if productions_strs.len() == 1 {
-                            productions_strs[0].clone()
-                        } else {
-                            format!("[{}]", productions_strs.join(", "))
-                        };
-                        timeit!(format!("GLRParserState::step::default_reduce ({} -> {}) (state: {}) (productions: {:?})", nonterminal.0, len, peek.edge_value().state_id.0, productions_str), {
-                            crate::debug!(
-                                4,
-                                "Default Reduce from state {} to nonterminal {} of length {}",
-                                peek.edge_value().state_id.0, nonterminal.0, len
-                            );
-                            let s_new_arc = self.reduce_and_goto(&peek, *nonterminal_id, *len);
-                            if !s_new_arc.is_empty() {
-                                todo.push(ParseState { stack: s_new_arc });
-                            }
-                        })
+                    Stage7ShiftsAndReduces::DefaultReduce { .. } => {
+                        todo!();
                     }
                 }
             }

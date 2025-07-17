@@ -565,36 +565,6 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
     (stage_7_table, item_set_map, start_state_id)
 }
 
-/// Optimizes the parse table by replacing states that only have a single, identical reduce action
-/// for all lookaheads with a more compact `DefaultReduce` action.
-fn optimize_with_default_reductions(table: &mut Stage7Table) {
-    for (state_id, row) in table.iter_mut() {
-        if let Stage7ShiftsAndReduces::Lookahead(actions) = &row.shifts_and_reduces {
-            if actions.is_empty() {
-                continue;
-            }
-
-            // Get the first action to compare against others.
-            let first_action = actions.values().next().unwrap();
-
-
-            // Check if it's a pure Reduce action.
-            if let Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } = first_action {
-                // If it is a pure Reduce action, check if all other actions in this state are identical.
-                if actions.values().all(|a| a == first_action) {
-                    // All conditions met, replace with DefaultReduce.
-                    crate::debug!(3, "Optimizing state {:?} to DefaultReduce", state_id);
-                    row.shifts_and_reduces = Stage7ShiftsAndReduces::DefaultReduce {
-                        nonterminal_id: *nonterminal_id,
-                        len: *len,
-                        production_ids: production_ids.clone(),
-                    };
-                }
-            }
-        }
-    }
-}
-
 pub fn generate_glr_parser_with_maps(productions: &[Production], start_production_id: usize, terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> GLRParser {
     let original_productions = productions.to_vec();
 
@@ -644,12 +614,8 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], start_productio
     let stage_6_table = stage_6(stage_5_table);
     crate::debug!(6, &stage_6_table);
     crate::debug!(2, "Stage 7");
-    let (mut stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
+    let (stage_7_table, item_set_map, start_state_id) = stage_7(stage_6_table, &productions, start_production_id, &terminal_map, &non_terminal_map);
     crate::debug!(6, &stage_7_table);
-
-    crate::debug!(2, "Optimizing with default reductions");
-    optimize_with_default_reductions(&mut stage_7_table);
-
     crate::debug!(2, "Done generating GLR parser");
 
     GLRParser::new(stage_7_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, actions, ignore_terminal_id)
