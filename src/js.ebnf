@@ -170,7 +170,7 @@ literal ::=
   | NUMERIC_LITERAL
   | STRING_LITERAL
   | REGULAR_EXPRESSION_LITERAL
-  | TEMPLATE_LITERAL
+  | template_literal
   ;
 
 NULL_LITERAL ::= 'null' ;
@@ -194,9 +194,9 @@ REGULAR_EXPRESSION_LITERAL ::= '/' REGEX_BODY '/' REGEX_FLAGS? ;
 REGEX_BODY ::= ( [^/\n\r\\] | '\\' . )+ ; // Any char except /, newline, or backslash, or any escaped char.
 REGEX_FLAGS ::= IDENTIFIER_PART+ ;
 
-TEMPLATE_LITERAL ::= '`' ( TEMPLATE_CHAR | TEMPLATE_SUBSTITUTION )* '`' ;
+template_literal ::= '`' ( TEMPLATE_CHAR | template_substitution )* '`' ;
 TEMPLATE_CHAR ::= [^`\\] | '\\' . ; // Any char except backtick or backslash, or any escaped char.
-TEMPLATE_SUBSTITUTION ::= '${' expression '}' ;
+template_substitution ::= '${' expression '}' ;
 
 // Identifiers
 IDENTIFIER ::= IDENTIFIER_START IDENTIFIER_PART* ;
