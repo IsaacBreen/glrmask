@@ -4,7 +4,8 @@
 program ::= statement_list? ;
 
 // Lexical Grammar: Whitespace and Comments
-IGNORE ::= WS | COMMENT ;
+IGNORE ::= '//' ( [^\n\r] )* [\n\r] ;
+//IGNORE ::= WS | COMMENT ;
 WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
 COMMENT ::= SINGLE_LINE_COMMENT | MULTI_LINE_COMMENT ;
 SINGLE_LINE_COMMENT ::= '//' ( [^\n\r] )* [\n\r] ; // Non-greedy match
