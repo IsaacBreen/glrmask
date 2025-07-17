@@ -734,7 +734,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         } else {
                             format!("[{}]", productions_strs.join(", "))
                         };
-                        timeit!(format!("GLRParserState::step::default_reduce ({} -> {}) (state: {}) (productions: {:?})", nonterminal.0, len, peek.edge_value().state_id.0, productions_str), {
+                        timeit!(format!("GLRParserState::step::phase1::default_reduce ({} -> {}) (state: {}) (productions: {:?})", nonterminal.0, len, peek.edge_value().state_id.0, productions_str), {
                         crate::debug!(4, "Default Reduce from state {} to nonterminal {} of length {}", peek.edge_value().state_id.0, nonterminal.0, len);
                         let s_new_arc = self.reduce_and_goto(&peek, *nt, *len);
                         if !s_new_arc.is_empty() {
@@ -753,11 +753,23 @@ impl<'a> GLRParserState<'a> { // No longer generic
         while let Some(state) = post_shift_todo.pop_front() {
             for peek in state.stack.peek_iter() {
                 let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
-                if let Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, .. } = &row.shifts_and_reduces {
+                if let Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, production_ids } = &row.shifts_and_reduces {
+                    let nonterminal = self.parser.non_terminal_map.get_by_right(nonterminal_id).unwrap();
+                    let productions_strs: Vec<String> = production_ids.iter()
+                        .map(|pid| format!("#{} ({})", pid.0, self.parser.productions[pid.0].to_string()))
+                        .collect();
+                    let productions_str = if productions_strs.len() == 1 {
+                        productions_strs[0].clone()
+                    } else {
+                        format!("[{}]", productions_strs.join(", "))
+                    };
+                    timeit!(format!("GLRParserState::step::phase2::default_reduce ({} -> {}) (state: {}) (productions: {:?})", nonterminal.0, len, peek.edge_value().state_id.0, productions_str), {
+                    crate::debug!(4, "Default Reduce from state {} to nonterminal {} of length {}", peek.edge_value().state_id.0, nonterminal.0, len);
                     let new_stack = self.reduce_and_goto(&peek, *nonterminal_id, *len);
                     if !new_stack.is_empty() {
                         post_shift_todo.push_back(ParseState { stack: new_stack });
                     }
+                    });
                 } else {
                     // If no default reduction was applicable in this parse state, it is a final state for this token: merge it into `next`.
                     crate::debug!(4, "No default reduction applicable for state {} after shift", peek.edge_value().state_id.0);
