@@ -577,7 +577,6 @@ fn optimize_with_default_reductions(table: &mut Stage7Table) {
             // Get the first action to compare against others.
             let first_action = actions.values().next().unwrap();
 
-
             // Check if it's a pure Reduce action.
             if let Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } = first_action {
                 // If it is a pure Reduce action, check if all other actions in this state are identical ( except for production IDs, which we accumulate).
