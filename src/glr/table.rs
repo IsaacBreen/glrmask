@@ -559,7 +559,8 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
         production: productions[start_production_id].clone(),
         dot_position: 0,
     };
-    let start_state_id = *item_set_map.get_by_left(&BTreeSet::from([start_item])).unwrap();
+    let start_item_set = BTreeSet::from([start_item]);
+    let start_state_id = *item_set_map.get_by_left(&start_item_set).unwrap();
 
     (stage_7_table, item_set_map, start_state_id)
 }
