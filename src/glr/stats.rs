@@ -1,5 +1,5 @@
 use crate::glr::parser::GLRParser;
-use crate::glr::table::{Stage7ShiftsAndReduces, Stage7ShiftsAndReducesLookaheadValue, StateID};
+use crate::glr::table::{Stage7ShiftsAndReducesLookaheadValue, StateID};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -101,39 +101,32 @@ pub fn get_stats(parser: &GLRParser) -> GLRStats {
         let mut current_state_stats = StateStats::default();
         current_state_stats.num_gotos = row.gotos.len();
 
-        match &row.shifts_and_reduces {
-            Stage7ShiftsAndReduces::Lookahead(actions) => {
-                current_state_stats.total_actions = actions.len();
-                for (_, action) in actions {
-                    // Update unique actions count
-                    *current_state_stats.unique_actions.entry(action.clone()).or_insert(0) += 1;
+        let actions = &row.phase2_shifts_and_reduces;
+        current_state_stats.total_actions = actions.len();
+        for (_, action) in actions {
+            // Update unique actions count
+            *current_state_stats.unique_actions.entry(action.clone()).or_insert(0) += 1;
 
-                    match action {
-                        Stage7ShiftsAndReducesLookaheadValue::Shift(_) => {
-                            current_state_stats.num_shifts += 1;
-                        }
-                        Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
-                            current_state_stats.num_reduces += 1;
-                            if production_ids.len() > 1 {
-                                num_reduce_reduce_conflicts += 1;
-                            }
-                        }
-                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                            current_state_stats.num_splits += 1;
-                            if shift.is_some() {
-                                num_shift_reduce_conflicts += 1;
-                            }
-                            let total_reduce_productions = reduces.values().flat_map(|nts| nts.values()).map(|pids| pids.len()).sum::<usize>();
-                            if total_reduce_productions > 1 {
-                                num_reduce_reduce_conflicts += 1;
-                            }
-                        }
+            match action {
+                Stage7ShiftsAndReducesLookaheadValue::Shift(_) => {
+                    current_state_stats.num_shifts += 1;
+                }
+                Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
+                    current_state_stats.num_reduces += 1;
+                    if production_ids.len() > 1 {
+                        num_reduce_reduce_conflicts += 1;
                     }
                 }
-            }
-            Stage7ShiftsAndReduces::DefaultReduce { .. } => {
-                current_state_stats.total_actions = 1;
-                current_state_stats.num_reduces += 1;
+                Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                    current_state_stats.num_splits += 1;
+                    if shift.is_some() {
+                        num_shift_reduce_conflicts += 1;
+                    }
+                    let total_reduce_productions = reduces.values().flat_map(|nts| nts.values()).map(|pids| pids.len()).sum::<usize>();
+                    if total_reduce_productions > 1 {
+                        num_reduce_reduce_conflicts += 1;
+                    }
+                }
             }
         }
         all_state_stats.insert(*state_id, current_state_stats);
