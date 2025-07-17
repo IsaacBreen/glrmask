@@ -586,7 +586,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], start_product
 
         let mut gotos = BTreeMap::new();
         for (nonterminal, next_item_set) in row.gotos {
-            let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).unwrap();
+            let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(format!("{:?} not found in non_terminal_map {:?}", nonterminal, non_terminal_map.left_values().map(|t| t.0.clone()).collect::<Vec<String>>()).as_str());
             let goto = item_set_map.get_by_left(&next_item_set).map_or(Goto::Accept, |&id| Goto::State(id));
             if goto == Goto::Accept { assert!(next_item_set.is_empty()); }
             gotos.insert(non_terminal_id, goto);
