@@ -577,10 +577,11 @@ fn optimize_with_default_reductions(table: &mut Stage7Table) {
             // Get the first action to compare against others.
             let first_action = actions.values().next().unwrap();
 
-            // Check if all actions in this state are identical.
-            if actions.values().all(|a| a == first_action) {
-                // If they are all the same, check if it's a pure Reduce action.
-                if let Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } = first_action {
+
+            // Check if it's a pure Reduce action.
+            if let Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } = first_action {
+                // If it is a pure Reduce action, check if all other actions in this state are identical.
+                if actions.values().all(|a| a == first_action) {
                     // All conditions met, replace with DefaultReduce.
                     crate::debug!(3, "Optimizing state {:?} to DefaultReduce", state_id);
                     row.shifts_and_reduces = Stage7ShiftsAndReduces::DefaultReduce {
