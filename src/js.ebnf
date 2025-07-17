@@ -1,9 +1,10 @@
 // Instruct the parser to ignore Whitespace and Comments between tokens.
-!ignore ( WS | COMMENT );
+!ignore IGNORE;
 
 program ::= statement_list? ;
 
 // Lexical Grammar: Whitespace and Comments
+IGNORE ::= WS | COMMENT ;
 WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
 COMMENT ::= SINGLE_LINE_COMMENT | MULTI_LINE_COMMENT ;
 SINGLE_LINE_COMMENT ::= '//' ( [^\n\r] )* ;
