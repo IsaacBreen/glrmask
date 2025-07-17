@@ -580,8 +580,22 @@ fn optimize_with_default_reductions(table: &mut Stage7Table) {
 
             // Check if it's a pure Reduce action.
             if let Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } = first_action {
-                // If it is a pure Reduce action, check if all other actions in this state are identical (.
-                if actions.values().all(|a| a == first_action) {
+                // If it is a pure Reduce action, check if all other actions in this state are identical ( except for production IDs, which we accumulate).
+                let mut all_production_ids = production_ids.clone();
+                let mut all_same = true;
+                for (terminal_id, action) in actions {
+                    if let Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nonterminal_id, len: action_len, production_ids: action_production_ids } = action {
+                        if action_nonterminal_id != nonterminal_id || action_len != len {
+                            all_same = false;
+                            break;
+                        }
+                        all_production_ids.extend(action_production_ids.iter().cloned());
+                    } else {
+                        all_same = false;
+                        break;
+                    }
+                }
+                if all_same {
                     // All conditions met, replace with DefaultReduce.
                     crate::debug!(3, "Optimizing state {:?} to DefaultReduce", state_id);
                     row.shifts_and_reduces = Stage7ShiftsAndReduces::DefaultReduce {
