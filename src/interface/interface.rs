@@ -503,6 +503,7 @@ impl GrammarDefinition {
             GrammarExpr::AnyChar => Ok(Expr::U8Class(U8Set::all())),
             GrammarExpr::Literal(bytes) => Ok(Expr::U8Seq(bytes.clone())),
             GrammarExpr::CharClass(class_def) => {
+                println!("class_def: {}", class_def);
                 let content = &class_def[1..class_def.len() - 1];
                 let (negated, content) = if content.starts_with('^') {
                     (true, &content[1..])
