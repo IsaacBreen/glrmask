@@ -383,7 +383,7 @@ impl GLRParser {
                     Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, production_ids } => {
                         let nt_name = self.non_terminal_map.get_by_right(nonterminal_id).unwrap();
                         let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
-                        writeln!(&mut result, "    - Default Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", "))?.to_string();
+                        writeln!(&mut result, "    - Default Reduce {} (len {}) via rules [{}]", nt_name.0, len, pids.join(", ")).unwrap();
                     }
                 }
 
