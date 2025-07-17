@@ -686,7 +686,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     let stack_for_push = peek.to_arc_node();
                                     let new_content = ParseStateEdgeContent { state_id: *to };
                                     let new_parse_state = self.push_state(&stack_for_push, new_content);
-                                    next.merge(new_parse_state);
+                                    // Do *not* merge into `next` yet.  We first have to
+                                    // process any automatic `DefaultReduce` steps that
+                                    // may apply *after* the shift.
+                                    post_shift_todo.push_back(new_parse_state);
                                     })
                                 }
                                 for (len, nts) in reduces {
@@ -748,24 +751,20 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // trigger *immediately* after a shift.
         // ------------------------------------------------------------------
         while let Some(state) = post_shift_todo.pop_front() {
-            let mut performed_default_reduce = false;
-
             for peek in state.stack.peek_iter() {
                 let row = &self.parser.stage_7_table[&peek.edge_value().state_id];
                 if let Stage7ShiftsAndReduces::DefaultReduce { nonterminal_id, len, .. } = &row.shifts_and_reduces {
-                    performed_default_reduce = true;
                     let new_stack = self.reduce_and_goto(&peek, *nonterminal_id, *len);
                     if !new_stack.is_empty() {
                         post_shift_todo.push_back(ParseState { stack: new_stack });
                     }
+                } else {
+                    // If no default reduction was applicable in this parse state, it is a final state for this token: merge it into `next`.
+                    crate::debug!(4, "No default reduction applicable for state {} after shift", peek.edge_value().state_id.0);
+                    let new_stack = peek.to_arc_node();
+                    let new_parse_state = ParseState { stack: new_stack };
+                    next.merge(new_parse_state);
                 }
-            }
-
-            // If no default reduction was applicable for *any* peek in this
-            // parse state, it is a final state for this token: merge it into
-            // `next`.
-            if !performed_default_reduce {
-                next.merge(state);
             }
         }
 
